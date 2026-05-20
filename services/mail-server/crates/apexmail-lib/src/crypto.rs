@@ -1,7 +1,7 @@
 //! Cryptographic utilities — HMAC, hashing, passwords, timing-safe comparison.
 
 use argon2::password_hash::SaltString;
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
@@ -102,7 +102,7 @@ pub fn hash_api_key_argon2(key: &str) -> Result<String, argon2::password_hash::E
         .try_fill_bytes(&mut salt_bytes)
         .map_err(|_| argon2::password_hash::Error::Crypto)?;
     let salt = SaltString::encode_b64(&salt_bytes)?;
-    let argon2 = Argon2::default();
+    let argon2 = argon2_default();
     let hash = argon2.hash_password(key.as_bytes(), salt.as_salt())?;
     Ok(hash.to_string())
 }
@@ -118,7 +118,9 @@ pub fn verify_api_key_hash(
 ) -> Result<bool, argon2::password_hash::Error> {
     if stored_hash.starts_with("$argon2") {
         let parsed = PasswordHash::new(stored_hash)?;
-        Ok(Argon2::default()
+        // RS-H-02: Validate Argon2id parameters meet minimum security requirements.
+        validate_argon2_params(&parsed)?;
+        Ok(argon2_default()
             .verify_password(key.as_bytes(), &parsed)
             .is_ok())
     } else if stored_hash.starts_with("$2") {
@@ -168,22 +170,122 @@ pub fn detect_api_key_hash_version(stored_hash: &str) -> ApiKeyHashVersion {
     }
 }
 
-/// Hash a password using Argon2id.
+/// OWASP-recommended Argon2id parameters for interactive password hashing (as of 2024):
+///   - Algorithm: Argon2id (hybrid, resistant to both GPU and side-channel attacks)
+///   - Memory cost: 19 MiB (m=19456 KiB)
+///   - Time cost: 2 iterations (t=2)
+///   - Parallelism: 1 lane (p=1)
+///   - Salt: 16 bytes (generated from OS random)
+const OWASP_M_COST: u32 = 19456;
+const OWASP_T_COST: u32 = 2;
+const OWASP_P_COST: u32 = 1;
+
+/// Construct an [`Argon2`] context with the OWASP-recommended parameters.
+///
+/// # Panics
+/// Panics only if the parameters are invalid for the platform — this is a
+/// compile-time constant set that should always be valid. A panic indicates
+/// a fundamental issue with the `argon2` crate or the underlying platform.
+fn argon2_default() -> Argon2<'static> {
+    let params = Params::new(OWASP_M_COST, OWASP_T_COST, OWASP_P_COST, None)
+        .expect("OWASP Argon2id params (m=19456, t=2, p=1) must be valid");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+/// Validate that a parsed Argon2id [`PasswordHash`] uses at least the minimum
+/// acceptable parameters.  Called during [`verify_password`] to detect legacy
+/// hashes that were created with weak settings.
+///
+/// RS-H-02: Validates algorithm, memory cost, time cost, and parallelism
+/// against minimum recommended values. Rejects hashes with weak parameters
+/// that could be brute-forced.
+fn validate_argon2_params(hash: &PasswordHash) -> Result<(), argon2::password_hash::Error> {
+    // Verify the algorithm is Argon2id
+    let alg = hash.algorithm.as_str();
+    if alg != "argon2id" {
+        tracing::warn!(algorithm = %alg, "rejected non-argon2id password hash");
+        return Err(argon2::password_hash::Error::Algorithm);
+    }
+
+    // Validate parameters from the PHC string
+    {
+        let params = &hash.params;
+        // Check memory cost (m=) — minimum 19456 KiB (19 MiB, OWASP recommendation)
+        if let Some(m_val) = params.get("m") {
+            if let Ok(m_cost) = m_val.as_str().parse::<u32>() {
+                if m_cost < OWASP_M_COST {
+                    tracing::warn!(
+                        m_cost = m_cost,
+                        minimum = OWASP_M_COST,
+                        "rejected argon2id hash with insufficient memory cost"
+                    );
+                    return Err(argon2::password_hash::Error::Crypto);
+                }
+            }
+        }
+
+        // Check time cost (t=) — minimum 2 iterations
+        if let Some(t_val) = params.get("t") {
+            if let Ok(t_cost) = t_val.as_str().parse::<u32>() {
+                if t_cost < OWASP_T_COST {
+                    tracing::warn!(
+                        t_cost = t_cost,
+                        minimum = OWASP_T_COST,
+                        "rejected argon2id hash with insufficient time cost"
+                    );
+                    return Err(argon2::password_hash::Error::Crypto);
+                }
+            }
+        }
+
+        // Check parallelism (p=) — minimum 1
+        if let Some(p_val) = params.get("p") {
+            if let Ok(p_cost) = p_val.as_str().parse::<u32>() {
+                if p_cost < OWASP_P_COST {
+                    tracing::warn!(
+                        p_cost = p_cost,
+                        minimum = OWASP_P_COST,
+                        "rejected argon2id hash with insufficient parallelism"
+                    );
+                    return Err(argon2::password_hash::Error::Crypto);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Hash a password using Argon2id with OWASP-recommended parameters.
+///
+/// ## Security properties
+/// - Argon2id (hybrid resistant to both GPU and side-channel attacks)
+/// - 19 MiB memory cost (m=19456)
+/// - 2 iterations (t=2)
+/// - 1 parallelism lane (p=1)
+/// - 16-byte random salt
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let mut salt_bytes = [0u8; 16];
     OsRng
         .try_fill_bytes(&mut salt_bytes)
         .map_err(|_| argon2::password_hash::Error::Crypto)?;
     let salt = SaltString::encode_b64(&salt_bytes)?;
-    let argon2 = Argon2::default();
+    let argon2 = argon2_default();
     let hash = argon2.hash_password(password.as_bytes(), salt.as_salt())?;
     Ok(hash.to_string())
 }
 
 /// Verify a password against an Argon2id hash.
+///
+/// ## Parameter validation
+/// Verifies that the stored hash uses the Argon2id algorithm (not argon2i or
+/// argon2d).  Parameter-level checking is enforced at hash-creation time via
+/// [`hash_password`] which uses the OWASP-recommended constants.
 pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::password_hash::Error> {
     let parsed = PasswordHash::new(hash)?;
-    Ok(Argon2::default()
+    // RS-H-02: Validate algorithm is Argon2id.
+    validate_argon2_params(&parsed)?;
+    Ok(argon2_default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
 }

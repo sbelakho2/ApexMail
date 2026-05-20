@@ -16,7 +16,7 @@ BEGIN
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id       UUID NOT NULL,
             ip_address      INET NOT NULL UNIQUE,
-            region          VARCHAR(20) NOT NULL DEFAULT 'fsn1',
+            region          VARCHAR(64) NOT NULL DEFAULT 'fsn1',
             status          VARCHAR(20) NOT NULL DEFAULT 'warming'
                             CHECK (status IN ('warming', 'active', 'cooldown', 'releasing', 'retired')),
             warmup_progress DOUBLE PRECISION NOT NULL DEFAULT 0.0,
@@ -32,7 +32,7 @@ BEGIN
 
 -- Billing
             billing_status  VARCHAR(30) DEFAULT 'included'
-                            CHECK (billing_status IN ('included', 'pending_charge', 'active', 'pending_cancel', 'cancelled')),
+                            CHECK (billing_status IN ('included', 'pending_charge', 'active', 'pending_cancel', 'canceled', 'cancelled')),
             allocated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

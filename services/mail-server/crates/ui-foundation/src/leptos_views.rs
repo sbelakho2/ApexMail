@@ -37,7 +37,7 @@ pub fn web_root_layout(child_html: &str) -> String {
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail</title>\
 <meta name=\"description\" content=\"Modern email infrastructure for developers\">\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\"></head>\
-    <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main></body>\
+    <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main></body>\
 </html>",
         html_classes = WEB_ROOT_HTML_CLASSES,
         body_classes = WEB_ROOT_BODY_CLASSES,
@@ -104,9 +104,9 @@ pub fn web_home_page() -> String {
 <p class=\"mt-4 max-w-2xl text-sm leading-6 text-surface-500\">Open the product console to manage campaigns, domains, analytics, team access, and delivery operations from the same Rust-rendered surface used by the live app.</p>\
 <div class=\"mt-10 flex flex-col gap-3 sm:flex-row\">\
 <a href=\"/campaigns\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm bg-primary px-8 py-3 text-sm font-bold uppercase tracking-tight text-white shadow-premium transition-colors hover:bg-brand-700\">Go to Dashboard</a>\
-<a href=\"/login\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm border border-surface-300 bg-white px-8 py-3 text-sm font-bold uppercase tracking-tight text-surface-950 transition-colors hover:border-surface-950\">Sign In</a>\
+<a href=\"/login\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm border border-surface-300 bg-card px-8 py-3 text-sm font-bold uppercase tracking-tight text-surface-950 transition-colors hover:border-surface-950\">Sign In</a>\
 </div></div>\
-<div class=\"border border-surface-200 bg-white shadow-premium\">\
+<div class=\"border border-surface-200 bg-card shadow-premium\">\
 <div class=\"border-b border-surface-200 px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-[0.24em] text-surface-400\">Workspace Snapshot</p></div>\
 <div class=\"grid divide-y divide-surface-200\">\
 <div class=\"flex items-center justify-between gap-4 px-5 py-5\"><div><p class=\"text-sm font-bold text-surface-950\">Campaign workbench</p><p class=\"mt-1 text-xs text-surface-500\">Drafts, audiences, templates, and scheduling.</p></div><span class=\"text-xs font-bold uppercase tracking-widest text-primary\">Ready</span></div>\
@@ -169,7 +169,7 @@ fn render_debounced_filter_bar(
 ) -> String {
     let search_icon = ui_icon("search", "h-4 w-4");
     format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-white/80 p-6\"><div class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{}\">{}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{}</span><input id=\"{}\" type=\"search\" role=\"combobox\" aria-autocomplete=\"list\" aria-label=\"{}\" value=\"{}\" placeholder=\"{}\" data-debounce-ms=\"300\" data-preserve-query=\"true\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Search updates after a 300ms pause so filters do not fire on every keystroke.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{}<a href=\"{}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></section>",
+        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><div class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{}\">{}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{}</span><input id=\"{}\" type=\"search\" role=\"combobox\" aria-autocomplete=\"list\" aria-label=\"{}\" value=\"{}\" placeholder=\"{}\" data-debounce-ms=\"300\" data-preserve-query=\"true\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Search updates after a 300ms pause so filters do not fire on every keystroke.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{}<a href=\"{}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></section>",
         input_id,
         search_label,
         search_icon,
@@ -226,7 +226,7 @@ fn render_table_loading_state(label: &str, source_label: &str, column_count: usi
         .collect::<Vec<_>>()
         .join("");
     format!(
-        "<section data-view-state=\"loading\" hidden aria-busy=\"true\" class=\"space-y-4\">{}<div class=\"rounded-sm border border-surface-200 bg-white/80 p-6\"><div class=\"relative w-full overflow-x-auto\"><table class=\"w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"[&_tr]:border-b sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody>{}</tbody></table></div></div></section>",
+        "<section data-view-state=\"loading\" hidden aria-busy=\"true\" class=\"space-y-4\">{}<div class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><div class=\"relative w-full overflow-x-auto\"><table class=\"w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"[&_tr]:border-b sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody>{}</tbody></table></div></div></section>",
         AsyncState::Loading {
             label,
             source_label: Some(source_label),
@@ -338,9 +338,9 @@ fn render_campaign_editor_page(
         title = title,
         autosave_badge = autosave_badge,
         name_label = Label { text: "Campaign Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
+        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
         subject_label = Label { text: "Subject Line", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Enter email subject...", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
+        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Enter email subject...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
         audience_label = Label { text: "Audience", variant: "default", size: "default", required: true, optional: false }.render_html(),
         audience_select = audience_select,
         content_label = Label { text: "HTML Content", variant: "default", size: "default", required: false, optional: false }.render_html(),
@@ -394,9 +394,11 @@ pub fn web_dedicated_ips_page() -> String {
 
     format!(
         "{header}\
+{loading}\
 {table}\
 {empty}",
         header = header_html,
+        loading = render_table_loading_state("Loading dedicated IPs", "api", 4),
         table = table.render_html(),
         empty = EmptyState {
             title: "No dedicated IPs",
@@ -414,7 +416,7 @@ pub fn web_dedicated_ips_page() -> String {
 pub fn control_plane_home_page() -> String {
     r#"
 <section class="space-y-6">
-    <section class="rounded-sm border border-surface-200 bg-white shadow-premium overflow-hidden">
+    <section class="rounded-sm border border-surface-200 bg-card shadow-premium overflow-hidden">
         <div class="grid gap-0 lg:grid-cols-[1.25fr_0.75fr]">
             <div class="px-6 py-6 md:px-8 md:py-8">
                 <p class="text-[11px] font-bold uppercase tracking-[0.28em] text-primary">Operator Command Center</p>
@@ -445,8 +447,8 @@ pub fn control_plane_home_page() -> String {
                 <div class="mt-6 flex flex-wrap gap-3">
                     <a href="/sales" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-surface-950 px-5 py-3 text-xs font-bold uppercase tracking-tight text-white transition-colors hover:bg-surface-800">Open Sales Console</a>
                     <a href="/alerts" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-5 py-3 text-xs font-bold uppercase tracking-tight text-white transition-colors hover:bg-brand-700">Open Incident Rail</a>
-                    <a href="/audit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-white px-5 py-3 text-xs font-bold uppercase tracking-tight text-surface-950 transition-colors hover:border-surface-950">Review Trust Evidence</a>
-                    <a href="mailto:security@apexmail.ee" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-white px-5 py-3 text-xs font-bold uppercase tracking-tight text-surface-950 transition-colors hover:border-surface-950">Contact Security</a>
+                    <a href="/audit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold uppercase tracking-tight text-surface-950 transition-colors hover:border-surface-950">Review Trust Evidence</a>
+                    <a href="mailto:security@apexmail.ee" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold uppercase tracking-tight text-surface-950 transition-colors hover:border-surface-950">Contact Security</a>
                 </div>
             </div>
             <aside class="border-t border-surface-200 bg-surface-950 px-6 py-6 text-white lg:border-l lg:border-t-0 md:px-8 md:py-8">
@@ -474,7 +476,7 @@ pub fn control_plane_home_page() -> String {
     </section>
 
     <section class="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-        <article class="rounded-sm border border-surface-200 bg-white shadow-premium">
+        <article class="rounded-sm border border-surface-200 bg-card shadow-premium">
             <div class="border-b border-surface-200 px-5 py-4">
                 <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Operational Lanes</p>
                 <h2 class="mt-1 text-lg font-bold uppercase tracking-tight text-surface-950">Enterprise readiness · Launch choreography</h2>
@@ -503,7 +505,7 @@ pub fn control_plane_home_page() -> String {
             </div>
         </article>
 
-        <article class="rounded-sm border border-surface-200 bg-white shadow-premium">
+        <article class="rounded-sm border border-surface-200 bg-card shadow-premium">
             <div class="border-b border-surface-200 px-5 py-4">
                 <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Command Actions</p>
                 <h2 class="mt-1 text-lg font-bold uppercase tracking-tight text-surface-950">Shortcuts by desk</h2>
@@ -549,6 +551,8 @@ pub fn control_plane_audit_page() -> String {
         right_icon: None,
         error: None,
         disabled: false,
+        autocomplete: None,
+        required: false,
     };
 
     let table = Table {
@@ -588,7 +592,9 @@ pub fn control_plane_audit_page() -> String {
 <div class=\"flex items-center gap-4\">\
 <div class=\"flex-1\">{search}</div>\
 </div>\
-{table}\
+{loading}\
+<section data-view-state=\"ready\">{table}</section>\
+<section data-view-state=\"empty\" hidden>{empty}</section>\
 </div>",
         export_button = Button {
             variant: "outline",
@@ -601,7 +607,9 @@ pub fn control_plane_audit_page() -> String {
         }
         .render_html(),
         search = search_input.render_html(),
+        loading = render_table_loading_state("Loading audit logs", "infrastructure", 5),
         table = table.render_html(),
+        empty = EmptyState { title: "No audit logs recorded", description: Some("Audit log entries will appear as operators and tenants perform actions across the control plane"), icon_markup: None, action_label: None }.render_html(),
     )
 }
 
@@ -728,6 +736,56 @@ pub fn control_plane_sales_page() -> String {
                                 </tr>
                             </tbody>
                         </table>
+                        <!-- SALES-05: Pagination controls -->
+                        <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3 border-t border-white/10">
+                            <div class="flex items-center gap-2 text-xs text-surface-400">
+                                <span>Page <strong class="text-white">1</strong> of <strong class="text-white">9</strong></span>
+                                <span class="text-surface-600">·</span>
+                                <span>184 total leads</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button type="button" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled aria-label="Previous page">&larr; Previous</button>
+                                <button type="button" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed" aria-label="Next page">Next &rarr;</button>
+                            </div>
+                        </div>
+                        <!-- SALES-04: Empty state (hidden by default, shown via JS when leads list is empty) -->
+                        <div class="hidden apex-cp-sales-empty-state flex flex-col items-center justify-center py-16 px-6 text-center">
+                            <svg class="mb-4 h-12 w-12 text-surface-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"/></svg>
+                            <h3 class="text-lg font-semibold text-white">No leads found</h3>
+                            <p class="mt-2 max-w-md text-sm text-surface-400">No leads match your current search or filter criteria. Try adjusting your search terms or clearing filters to see all leads.</p>
+                            <button type="button" class="mt-4 rounded-sm bg-primary/20 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary/30">Clear all filters</button>
+                        </div>
+                        <!-- SALES-04: Loading skeleton (hidden by default, shown via JS during API calls) -->
+                        <div class="hidden apex-cp-sales-loading-skeleton animate-pulse space-y-4 p-6">
+                            <div class="flex items-center gap-4">
+                                <div class="h-4 w-4 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-48 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-24 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-16 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-32 rounded-sm bg-white/10"></div>
+                            </div>
+                            <div class="flex items-center gap-4">
+                                <div class="h-4 w-4 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-40 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-28 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-16 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-36 rounded-sm bg-white/10"></div>
+                            </div>
+                            <div class="flex items-center gap-4">
+                                <div class="h-4 w-4 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-44 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-20 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-16 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-28 rounded-sm bg-white/10"></div>
+                            </div>
+                            <div class="flex items-center gap-4">
+                                <div class="h-4 w-4 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-36 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-24 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-16 rounded-sm bg-white/10"></div>
+                                <div class="h-4 w-32 rounded-sm bg-white/10"></div>
+                            </div>
+                        </div>
                     </div>
                 </section>
 
@@ -905,7 +963,7 @@ fn web_auth_marketing_panel() -> String {
 
     format!(
         "<div class=\"hidden lg:block\">\
-<div class=\"inline-flex items-center gap-2 rounded-sm border border-brand-200/60 bg-white/80 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.2em] text-brand-700 mb-8 shadow-premium-sm\">Console Access</div>\
+<div class=\"inline-flex items-center gap-2 rounded-sm border border-brand-200/60 bg-card/80 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.2em] text-brand-700 mb-8 shadow-premium-sm\">Console Access</div>\
 <h1 class=\"text-5xl font-bold text-surface-950 tracking-tight leading-[1.1]\">Your command center for delivery, trust, and analytics.</h1>\
 <p class=\"mt-6 max-w-[520px] text-[17px] text-surface-600 leading-relaxed\">Monitor every campaign, verify your domains, and spot deliverability risks before they impact your reputation.</p>\
 <div class=\"mt-12 space-y-4\">{bullets}</div></div>",
@@ -917,7 +975,7 @@ fn web_auth_social_footer(agreement_prefix: &str) -> String {
         "<div class=\"px-10 pb-10\">\
 <div class=\"relative mb-8\">\
 <div class=\"absolute inset-0 flex items-center\"><div class=\"w-full border-t border-surface-200\"></div></div>\
-<div class=\"relative flex justify-center text-[10px] uppercase font-bold tracking-widest\"><span class=\"bg-white px-4 text-surface-400\">Or continue with</span></div>\
+<div class=\"relative flex justify-center text-[10px] uppercase font-bold tracking-widest\"><span class=\"bg-white dark:bg-gray-900 px-4 text-surface-400\">Or continue with</span></div>\
 </div>\
 <div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
 <button type=\"button\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3.5 rounded-sm border border-surface-200 hover:bg-surface-50 hover:border-surface-300 transition-all group\">{google}<span class=\"text-sm font-bold text-surface-950\">Google</span></button>\
@@ -942,7 +1000,7 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
 <h1 class=\"text-4xl font-bold text-surface-950 uppercase tracking-tighter\">{title}</h1>\
 <p class=\"text-base text-surface-500 mt-3 font-medium\">{subtitle}</p>\
 </div>\
-<div class=\"bg-white rounded-sm shadow-premium border border-surface-200/80 overflow-hidden\">\
+<div class=\"bg-card rounded-sm shadow-premium border border-surface-200/80 overflow-hidden\">\
 {form_html}{footer_html}\
 </div></div></div></div>{auth_form_script}</main>",
         marketing_panel = web_auth_marketing_panel(),
@@ -1116,11 +1174,11 @@ pub fn web_signup_page(
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"signup-name\">Full name</label>\
-<input id=\"signup-name\" name=\"name\" type=\"text\" required placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground\" />\
+<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground\" />\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"signup-company\">Company</label>\
-<input id=\"signup-company\" name=\"company_name\" type=\"text\" required placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground\" />\
+<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground\" />\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"signup-email\">Email</label>\
@@ -1360,13 +1418,13 @@ pub fn web_dashboard_page() -> String {
 {card_sent}{card_delivered}{card_opened}{card_bounced}\
 </div>\
 <div class=\"grid gap-6 md:grid-cols-2\">\
-<div class=\"apex-panel apex-chart-card rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Send Volume</h3>{chart}</div>\
-<div class=\"apex-panel apex-chart-card rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Delivery Rate</h3>{area}</div>\
+<div class=\"apex-panel apex-chart-card rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Send Volume</h3>{chart}</div>\
+<div class=\"apex-panel apex-chart-card rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Delivery Rate</h3>{area}</div>\
 </div></div>",
-        card_sent = Card { title: "Emails Sent", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_delivered = Card { title: "Delivered", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">99.8% rate</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_opened = Card { title: "Opened", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">42.3% rate</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_bounced = Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">0.2% rate</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_sent = format!("<article aria-label=\"Emails Sent: 0 in the last 30 days\">{}</article>", Card { title: "Emails Sent", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        card_delivered = format!("<article aria-label=\"Delivered: 0 emails with 99.8% rate\">{}</article>", Card { title: "Delivered", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">99.8% rate</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        card_opened = format!("<article aria-label=\"Opened: 0 emails with 42.3% rate\">{}</article>", Card { title: "Opened", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">42.3% rate</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        card_bounced = format!("<article aria-label=\"Bounced: 0 emails with 0.2% rate\">{}</article>", Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">0.2% rate</p>", variant: "default", padding: "default", interactive: false }.render_html()),
         chart = ApexBarChart { title: None, description: None, last_updated_label: None, height: 256, bars: vec![], data_count: 0, layout: "vertical", empty_state_reason: "No data" }.render_html(),
         area = ApexAreaChart { title: None, description: None, last_updated_label: None, height: 256, areas: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
     )
@@ -1501,7 +1559,7 @@ pub fn web_campaigns_page() -> String {
         ],
     };
     let bulk_bar = format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-white/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\">{}<div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">2 campaigns selected</p><p class=\"text-xs text-muted-foreground\">Bulk actions preserve the active search and page state while you triage drafts in batches.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{}{}{}</div></div></section>",
+        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\">{}<div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">2 campaigns selected</p><p class=\"text-xs text-muted-foreground\">Bulk actions preserve the active search and page state while you triage drafts in batches.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{}{}{}</div></div></section>",
         select_all,
         Button { variant: "outline", size: "default", label: "Duplicate", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
         Button { variant: "outline", size: "default", label: "Archive", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
@@ -1560,7 +1618,7 @@ pub fn web_campaign_detail_page() -> String {
     }
     .render_html();
     format!(
-        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><button type=\"button\" data-alert-dialog-target=\"campaign-detail-delete\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</button></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">8.6%</p></div></div><div hidden id=\"campaign-detail-delete\">{}</div></div>",
+        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><button type=\"button\" data-alert-dialog-target=\"campaign-detail-delete\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</button></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">8.6%</p></div></div><div hidden id=\"campaign-detail-delete\">{}</div></div>",
         CAMPAIGNS_RETURN_HREF,
         delete_dialog,
     )
@@ -1738,7 +1796,7 @@ pub fn web_contacts_page() -> String {
         ],
     };
     let bulk_bar = format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-white/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\">{}<div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">2 contacts selected</p><p class=\"text-xs text-muted-foreground\">Batch actions stay visible and keyboard reachable on mobile and desktop.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{}{}{}</div></div></section>",
+        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\">{}<div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">2 contacts selected</p><p class=\"text-xs text-muted-foreground\">Batch actions stay visible and keyboard reachable on mobile and desktop.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{}{}{}</div></div></section>",
         select_all,
         Button { variant: "outline", size: "default", label: "Add to List", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
         Button { variant: "outline", size: "default", label: "Export", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
@@ -1789,9 +1847,9 @@ pub fn web_contacts_new_page() -> String {
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
         email_label = Label { text: "Email", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
+        email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
         name_label = Label { text: "Name", variant: "default", size: "default", required: false, optional: true }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
+        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
         save_button = Button { variant: "default", size: "default", label: "Add Contact", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
     )
 }
@@ -1938,7 +1996,9 @@ pub fn web_lists_new_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         save_button = Button {
@@ -1978,7 +2038,8 @@ pub fn web_templates_page() -> String {
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Templates</h1>\
 <a href=\"/templates/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">New Template</a></div>\
-{table}{empty}</div>",
+{loading}{table}{empty}</div>",
+        loading = render_table_loading_state("Loading templates", "api", 3),
         table = table.render_html(),
         empty = EmptyState { title: "No templates yet", description: Some("Create reusable email templates"), icon_markup: None, action_label: Some("Create Template") }.render_html(),
     )
@@ -1999,9 +2060,9 @@ pub fn web_templates_new_page() -> String {
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
         name_label = Label { text: "Template Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "e.g. Welcome Email", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
+        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "e.g. Welcome Email", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
         subject_label = Label { text: "Default Subject", variant: "default", size: "default", required: false, optional: true }.render_html(),
-        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Subject line...", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
+        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Subject line...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false }.render_html(),
         save_button = Button { variant: "default", size: "default", label: "Save Template", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
     )
 }
@@ -2014,9 +2075,9 @@ pub fn web_reports_page() -> String {
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-3\">\
 {card_delivery}{card_engage}{card_bounce}\
 </div></div>",
-        card_delivery = Card { title: "Delivery Report", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Track email delivery metrics</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_engage = Card { title: "Engagement Report", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Opens, clicks, and conversions</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_bounce = Card { title: "Bounce Report", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Bounce reasons and trends</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_delivery = format!("<article aria-label=\"Delivery Report – Track email delivery metrics\">{}</article>", Card { title: "Delivery Report", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Track email delivery metrics</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        card_engage = format!("<article aria-label=\"Engagement Report – Opens, clicks, and conversions\">{}</article>", Card { title: "Engagement Report", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Opens, clicks, and conversions</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        card_bounce = format!("<article aria-label=\"Bounce Report – Bounce reasons and trends\">{}</article>", Card { title: "Bounce Report", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Bounce reasons and trends</p>", variant: "default", padding: "default", interactive: false }.render_html()),
     )
 }
 
@@ -2032,12 +2093,12 @@ pub fn web_reports_deliverability_page() -> String {
 <div class=\"grid gap-4 md:grid-cols-4\">\
 {inbox}{spam}{bounced}{deferred}\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Deliverability Trend</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Deliverability Trend</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
-        inbox = Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Inbox placement</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        spam = Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Spam folder</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        bounced = Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Hard + soft</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        deferred = Card { title: "Deferred", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Retry queue</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        inbox = format!("<article aria-label=\"Inbox placement: 0%\">{}</article>", Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Inbox placement</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        spam = format!("<article aria-label=\"Spam folder rate: 0%\">{}</article>", Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Spam folder</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        bounced = format!("<article aria-label=\"Bounce rate: 0% hard and soft\">{}</article>", Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Hard + soft</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        deferred = format!("<article aria-label=\"Deferred in retry queue: 0\">{}</article>", Card { title: "Deferred", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Retry queue</p>", variant: "default", padding: "default", interactive: false }.render_html()),
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
     )
 }
@@ -2059,7 +2120,7 @@ pub fn web_inbox_placement_page() -> String {
 <a href=\"/inbox-placement/new\" class=\"inline-flex items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-brand-700 transition-colors\" data-cta=\"new-placement-test\">Run new test</a>\
 </div>\
 <div class=\"grid gap-4 md:grid-cols-4\">{kpi_total}{kpi_inbox}{kpi_spam}{kpi_recent}</div>\
-<div class=\"rounded-sm border bg-white\">\
+<div class=\"rounded-sm border bg-white dark:bg-gray-900\">\
 <div class=\"border-b px-6 py-3 flex items-center justify-between\"><h3 class=\"text-lg font-bold\">Recent tests</h3><span class=\"text-xs text-surface-500\" data-test-list-meta>Loaded on demand</span></div>\
 <div class=\"overflow-x-auto\"><table class=\"min-w-full text-sm\" data-table=\"placement-tests\">\
 <thead class=\"bg-surface-50 text-left text-xs uppercase tracking-wider text-surface-500\">\
@@ -2068,10 +2129,10 @@ pub fn web_inbox_placement_page() -> String {
 <tr data-empty-row><td class=\"px-6 py-12 text-center text-surface-500\" colspan=\"6\">No placement tests yet. <a href=\"/inbox-placement/new\" class=\"text-primary hover:underline\">Run your first test</a>.</td></tr>\
 </tbody></table></div></div>\
 </div>",
-        kpi_total = Card { title: "Total tests", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.total\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_inbox = Card { title: "Avg inbox rate", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_spam = Card { title: "Avg spam rate", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_recent = Card { title: "Last test", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.last_run\">—</p><p class=\"text-sm text-muted-foreground\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.total\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        kpi_inbox = format!("<article aria-label=\"Average inbox rate: — last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        kpi_spam = format!("<article aria-label=\"Average spam rate: — last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        kpi_recent = format!("<article aria-label=\"Last placement test: — most recent run\">{}</article>", Card { title: "Last test", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.last_run\">—</p><p class=\"text-sm text-muted-foreground\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html()),
     )
 }
 
@@ -2139,7 +2200,7 @@ pub fn web_inbox_placement_detail_page() -> String {
 <a href=\"/inbox-placement\" class=\"text-sm text-surface-600 hover:text-surface-900\">← Back</a>\
 </div></div>\
 <div class=\"grid gap-4 md:grid-cols-4\">{kpi_score}{kpi_inbox}{kpi_spam}{kpi_missing}</div>\
-<div class=\"rounded-sm border bg-white\">\
+<div class=\"rounded-sm border bg-white dark:bg-gray-900\">\
 <div class=\"border-b px-6 py-3\"><h3 class=\"text-lg font-bold\">Per-provider breakdown</h3></div>\
 <div class=\"overflow-x-auto\"><table class=\"min-w-full text-sm\" data-table=\"placement-results\">\
 <thead class=\"bg-surface-50 text-left text-xs uppercase tracking-wider text-surface-500\">\
@@ -2147,8 +2208,8 @@ pub fn web_inbox_placement_detail_page() -> String {
 <tbody data-rows-target=\"placement-results\" data-empty-message=\"Awaiting delivery results…\">\
 <tr data-empty-row><td class=\"px-6 py-12 text-center text-surface-500\" colspan=\"6\">Results will appear here as seed accounts receive the message.</td></tr>\
 </tbody></table></div></div>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Inbox rate over time</h3><div class=\"h-64\">{chart}</div></div>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-lg font-bold mb-2\">Recommendations</h3>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Inbox rate over time</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-lg font-bold mb-2\">Recommendations</h3>\
 <ul class=\"space-y-2 text-sm text-surface-700\" data-bind-list=\"placement.recommendations\" data-empty-message=\"No recommendations available yet.\"><li class=\"text-surface-500\">Recommendations will appear once the test completes.</li></ul>\
 </div>\
 </div>",
@@ -2168,7 +2229,7 @@ pub fn web_analytics_page() -> String {
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {card_sent}{card_opens}{card_clicks}{card_unsubs}\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Engagement Over Time</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Engagement Over Time</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
         card_sent = Card { title: "Total Sent", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         card_opens = Card { title: "Unique Opens", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
@@ -2207,7 +2268,9 @@ pub fn web_events_page() -> String {
         "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Events</h1>\
 {search}\
-{table}</div>",
+{loading}\
+<section data-view-state=\"ready\">{table}</section>\
+<section data-view-state=\"empty\" hidden>{empty}</section></div>",
         search = Input {
             input_type: "text",
             variant: "default",
@@ -2217,10 +2280,14 @@ pub fn web_events_page() -> String {
             left_icon: Some(&search_icon),
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: false
         }
         .render_html(),
+        loading = render_table_loading_state("Loading events", "api", 4),
         table = table.render_html(),
+        empty = EmptyState { title: "No events recorded", description: Some("Email events will appear once you start sending campaigns"), icon_markup: None, action_label: None }.render_html(),
     )
 }
 
@@ -2256,7 +2323,8 @@ pub fn web_domains_page() -> String {
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Domains</h1>\
 <a href=\"/domains/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Domain</a></div>\
-{table}{empty}</div>",
+{loading}{table}{empty}</div>",
+        loading = render_table_loading_state("Loading domains", "api", 5),
         table = table.render_html(),
         empty = EmptyState { title: "No domains configured", description: Some("Add a sending domain to start delivering emails"), icon_markup: None, action_label: Some("Add Domain") }.render_html(),
     )
@@ -2288,7 +2356,9 @@ pub fn web_domains_new_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         save_button = Button {
@@ -2309,12 +2379,12 @@ pub fn web_settings_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Settings</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/settings/api-keys\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">API Keys</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage your API keys</p></a>\
-<a href=\"/settings/team\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Team</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage team members and roles</p></a>\
-<a href=\"/settings/billing\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Billing</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage your subscription and payments</p></a>\
-<a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage dedicated sending IPs</p></a>\
-<a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Configure event webhooks</p></a>\
-<a href=\"/settings/profile\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Profile</h3><p class=\"text-sm text-muted-foreground mt-1\">Your account settings</p></a>\
+<a href=\"/settings/api-keys\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">API Keys</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage your API keys</p></a>\
+<a href=\"/settings/team\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Team</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage team members and roles</p></a>\
+<a href=\"/settings/billing\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Billing</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage your subscription and payments</p></a>\
+<a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage dedicated sending IPs</p></a>\
+<a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Configure event webhooks</p></a>\
+<a href=\"/settings/profile\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Profile</h3><p class=\"text-sm text-muted-foreground mt-1\">Your account settings</p></a>\
 </nav></div>".to_string()
 }
 
@@ -2346,7 +2416,8 @@ pub fn web_settings_api_keys_page() -> String {
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">API Keys</h1>\
 <button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button></div>\
-{table}{empty}</div>",
+{loading}{table}{empty}</div>",
+        loading = render_table_loading_state("Loading API keys", "api", 4),
         table = table.render_html(),
         empty = EmptyState { title: "No API keys", description: Some("Create an API key to start sending"), icon_markup: None, action_label: Some("Create API Key") }.render_html(),
     )
@@ -2380,8 +2451,10 @@ pub fn web_settings_team_page() -> String {
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Team</h1>\
 <button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Invite Member</button></div>\
-{table}</div>",
+{loading}{table}{empty}</div>",
+        loading = render_table_loading_state("Loading team members", "api", 4),
         table = table.render_html(),
+        empty = EmptyState { title: "No team members yet", description: Some("Invite team members to collaborate on campaigns"), icon_markup: None, action_label: Some("Invite Member") }.render_html(),
     )
 }
 
@@ -2390,13 +2463,15 @@ pub fn web_settings_billing_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Billing</h1>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\">\
+{loading}\
+<section data-view-state=\"ready\" class=\"space-y-6\">\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-lg font-bold mb-2\">Current Plan</h3>\
 <p class=\"text-sm text-muted-foreground\">Free Tier</p>\
 <p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-muted-foreground\">/month</span></p>\
 <button class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Upgrade Plan</button>\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\">\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-lg font-bold mb-4\">Payment Method</h3>\
 <div class=\"flex items-center gap-4 p-4 rounded-sm bg-surface-50 border border-surface-100\">\
 <div class=\"flex h-10 w-14 flex-shrink-0 items-center justify-center rounded-sm bg-surface-200 text-surface-500\">\
@@ -2406,13 +2481,33 @@ pub fn web_settings_billing_page() -> String {
 <p class=\"text-sm font-semibold text-surface-950\">No payment method on file</p>\
 <p class=\"text-xs text-surface-500\">Add a credit card or ACH to enable paid plans</p>\
 </div>\
+<div class=\"flex flex-col gap-2\">\
+<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button>\
 </div>\
-<button class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button>\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Usage This Month</h3>\
+<div class=\"mt-4 rounded-sm border border-dashed border-surface-300 p-4\" data-payment-methods-list hidden>\
+<h4 class=\"text-sm font-bold text-surface-950 mb-3\">Saved Payment Methods</h4>\
+<div class=\"flex items-center justify-between p-3 rounded-sm bg-surface-50 border border-surface-100\">\
+<div class=\"flex items-center gap-3\">\
+<svg class=\"h-6 w-6 text-surface-400\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"20\" height=\"14\" x=\"2\" y=\"5\" rx=\"2\"/><line x1=\"2\" x2=\"22\" y1=\"10\" y2=\"10\"/></svg>\
+<div><p class=\"text-sm font-semibold text-surface-950\" data-payment-method-label>Visa ending in 4242</p><p class=\"text-xs text-surface-500\" data-payment-method-expiry>Expires 12/28</p></div>\
+</div>\
+<div class=\"flex items-center gap-2\">\
+<span class=\"inline-flex items-center rounded-sm bg-success-50 px-2 py-0.5 text-xs font-bold text-success-700\">Default</span>\
+<button class=\"inline-flex items-center justify-center rounded-sm text-xs font-bold text-surface-600 hover:text-surface-900 h-8 px-2\" data-action=\"edit-payment\">Edit</button>\
+<button class=\"inline-flex items-center justify-center rounded-sm text-xs font-bold text-destructive hover:text-destructive/80 h-8 px-2\" data-action=\"delete-payment\">Delete</button>\
+</div>\
+</div>\
+</div>\
+</div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Usage This Month</h3>\
 {progress}\
 <p class=\"text-sm text-muted-foreground mt-2\">0 of 1,000 emails sent</p>\
-</div></div>",
+</div>\
+</section>\
+<section data-view-state=\"empty\" hidden><div class=\"rounded-sm border border-surface-200 bg-card p-12 text-center shadow-premium\"><p class=\"text-lg font-bold text-surface-950\">No billing data available</p><p class=\"text-sm text-muted-foreground mt-1\">Billing information will appear once you start sending emails.</p></div></section>\
+</div>",
+        loading = render_table_loading_state("Loading billing data", "api", 4),
         progress = Progress { value: 0, variant: "default", size: "default", animated: false, show_value: true }.render_html(),
     )
 }
@@ -2445,7 +2540,8 @@ pub fn web_settings_webhooks_page() -> String {
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Webhooks</h1>\
 <button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Webhook</button></div>\
-{table}{empty}</div>",
+{loading}{table}{empty}</div>",
+        loading = render_table_loading_state("Loading webhooks", "api", 4),
         table = table.render_html(),
         empty = EmptyState { title: "No webhooks configured", description: Some("Add a webhook to receive signed event notifications"), icon_markup: None, action_label: Some("Add Webhook") }.render_html(),
     )
@@ -2485,7 +2581,9 @@ pub fn web_settings_profile_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         email_label = Label {
@@ -2505,7 +2603,9 @@ pub fn web_settings_profile_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: true
+            disabled: true,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         save_button = Button {
@@ -2535,7 +2635,9 @@ pub fn web_settings_profile_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         new_label = Label {
@@ -2555,7 +2657,9 @@ pub fn web_settings_profile_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         update_button = Button {
@@ -2612,7 +2716,7 @@ pub fn control_plane_dashboard_page() -> String {
     </section>
 
     <section class="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
-        <article class="apex-panel rounded-sm border border-surface-200 bg-white shadow-premium">
+        <article class="apex-panel rounded-sm border border-surface-200 bg-card shadow-premium">
             <div class="border-b border-surface-200 px-5 py-4">
                 <p class="text-[10px] uppercase tracking-[0.22em] text-surface-400">Operational Lanes</p>
                 <h2 class="mt-1 text-lg font-bold uppercase tracking-tight text-surface-950">Launch sequence</h2>
@@ -2625,7 +2729,7 @@ pub fn control_plane_dashboard_page() -> String {
             </div>
         </article>
 
-        <article class="apex-panel rounded-sm border border-surface-200 bg-white shadow-premium">
+        <article class="apex-panel rounded-sm border border-surface-200 bg-card shadow-premium">
             <div class="border-b border-surface-200 px-5 py-4">
                 <p class="text-[10px] uppercase tracking-[0.22em] text-surface-400">Capacity Matrix</p>
                 <h2 class="mt-1 text-lg font-bold uppercase tracking-tight text-surface-950">Regional health</h2>
@@ -2648,7 +2752,7 @@ fn render_cp_signal_grid(signals: &[(&str, &str, &str)]) -> String {
         .iter()
         .map(|(label, value, description)| {
             format!(
-                "<article class=\"apex-signal-card rounded-sm border border-surface-200 bg-white p-4 shadow-premium\"><p class=\"text-[10px] font-bold uppercase tracking-[0.2em] text-surface-400\">{}</p><p class=\"mt-3 text-2xl font-bold tracking-tight text-surface-950\">{}</p><p class=\"mt-1 text-xs leading-5 text-surface-500\">{}</p></article>",
+                "<article class=\"apex-signal-card rounded-sm border border-surface-200 bg-card p-4 shadow-premium\"><p class=\"text-[10px] font-bold uppercase tracking-[0.2em] text-surface-400\">{}</p><p class=\"mt-3 text-2xl font-bold tracking-tight text-surface-950\">{}</p><p class=\"mt-1 text-xs leading-5 text-surface-500\">{}</p></article>",
                 label, value, description
             )
         })
@@ -2676,7 +2780,13 @@ fn render_cp_collection_page(
     // Glitch fix: the section header above already labels this inventory; suppress the
     // table caption so it doesn't repeat below the empty body row.
     table.caption = None;
+    let column_count = table.columns.len().max(1);
     let table_html = table.render_html();
+    let loading = render_table_loading_state(
+        &format!("Loading {}", title),
+        "infrastructure",
+        column_count,
+    );
     let empty = EmptyState {
         icon_markup: None,
         title: empty_title,
@@ -2685,11 +2795,11 @@ fn render_cp_collection_page(
     }
     .render_html();
     let body = format!(
-        "<div class=\"hidden md:block\">{}</div><div class=\"md:hidden\">{}</div>",
-        table_html, empty
+        "<div class=\"hidden md:block\">{}{}</div><div class=\"md:hidden\">{}</div>",
+        loading, table_html, empty
     );
     format!(
-        "<div class=\"space-y-6\"><div class=\"apex-page-heading flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between\"><div class=\"max-w-3xl\"><p class=\"apex-eyebrow\"><span>Control Plane</span></p><h1 class=\"text-2xl font-bold uppercase tracking-tight text-surface-950\">{}</h1><p class=\"mt-2 text-sm leading-6 text-surface-600\">{}</p></div>{}</div><div class=\"grid gap-3 sm:grid-cols-3\">{}</div><section class=\"apex-panel apex-inventory-panel rounded-sm border border-surface-200 bg-white shadow-premium\"><div class=\"apex-inventory-head flex items-center justify-between gap-4 border-b border-surface-200 px-5 py-4\"><div><p class=\"text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400\">Inventory</p><h2 class=\"mt-1 text-base font-bold text-surface-950\">{}</h2></div><span class=\"hidden md:inline-flex items-center gap-2 rounded-sm bg-surface-100 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500\"><span class=\"h-1.5 w-1.5 rounded-full bg-primary\" aria-hidden=\"true\"></span>Live</span></div>{}</section></div>",
+        "<div class=\"space-y-6\"><div class=\"apex-page-heading flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between\"><div class=\"max-w-3xl\"><p class=\"apex-eyebrow\"><span>Control Plane</span></p><h1 class=\"text-2xl font-bold uppercase tracking-tight text-surface-950\">{}</h1><p class=\"mt-2 text-sm leading-6 text-surface-600\">{}</p></div>{}</div><div class=\"grid gap-3 sm:grid-cols-3\">{}</div><section class=\"apex-panel apex-inventory-panel rounded-sm border border-surface-200 bg-card shadow-premium\"><div class=\"apex-inventory-head flex items-center justify-between gap-4 border-b border-surface-200 px-5 py-4\"><div><p class=\"text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400\">Inventory</p><h2 class=\"mt-1 text-base font-bold text-surface-950\">{}</h2></div><span class=\"hidden md:inline-flex items-center gap-2 rounded-sm bg-surface-100 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500\"><span class=\"h-1.5 w-1.5 rounded-full bg-primary\" aria-hidden=\"true\"></span>Live</span></div>{}</section></div>",
         title,
         subtitle,
         action_markup,
@@ -2765,7 +2875,9 @@ pub fn control_plane_tenants_new_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         domain_label = Label {
@@ -2785,7 +2897,9 @@ pub fn control_plane_tenants_new_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         save_button = Button {
@@ -2867,7 +2981,9 @@ pub fn control_plane_operators_new_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         email_label = Label {
@@ -2887,7 +3003,9 @@ pub fn control_plane_operators_new_page() -> String {
             left_icon: None,
             right_icon: None,
             error: None,
-            disabled: false
+            disabled: false,
+            autocomplete: None,
+            required: true
         }
         .render_html(),
         save_button = Button {
@@ -2911,7 +3029,7 @@ pub fn control_plane_analytics_page() -> String {
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {volume}{latency}{errors}{uptime}\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">System Volume</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">System Volume</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
         volume = Card { title: "Messages/hr", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Current</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         latency = Card { title: "P99 Latency", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0ms</p><p class=\"text-sm text-muted-foreground\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
@@ -2925,7 +3043,7 @@ pub fn control_plane_analytics_page() -> String {
 pub fn control_plane_discovery_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Service Discovery</h1>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\">\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Registered Services</h3>\
 <div class=\"space-y-3\">\
 <div class=\"flex items-center justify-between p-3 bg-muted/50 rounded-sm\"><span class=\"font-medium\">MTA</span><span class=\"inline-flex items-center gap-2 text-sm text-success-500\"><span class=\"h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>Healthy</span></div>\
@@ -2982,8 +3100,8 @@ pub fn control_plane_infrastructure_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Infrastructure</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/infrastructure/nodes\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Nodes</h3><p class=\"text-sm text-muted-foreground mt-1\">View cluster nodes and health</p></a>\
-<a href=\"/infrastructure/queues\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Queues</h3><p class=\"text-sm text-muted-foreground mt-1\">Monitor message queues</p></a>\
+<a href=\"/infrastructure/nodes\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Nodes</h3><p class=\"text-sm text-muted-foreground mt-1\">View cluster nodes and health</p></a>\
+<a href=\"/infrastructure/queues\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Queues</h3><p class=\"text-sm text-muted-foreground mt-1\">Monitor message queues</p></a>\
 </nav></div>".to_string()
 }
 
@@ -3113,7 +3231,7 @@ pub fn control_plane_billing_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Billing</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/billing/plans\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Plans</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage subscription plans</p></a>\
+<a href=\"/billing/plans\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Plans</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage subscription plans</p></a>\
 </nav></div>".to_string()
 }
 
@@ -3161,7 +3279,7 @@ pub fn control_plane_compliance_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Compliance</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/compliance/gdpr\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">GDPR</h3><p class=\"text-sm text-muted-foreground mt-1\">Data protection compliance</p></a>\
+<a href=\"/compliance/gdpr\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">GDPR</h3><p class=\"text-sm text-muted-foreground mt-1\">Data protection compliance</p></a>\
 </nav></div>".to_string()
 }
 
@@ -3169,7 +3287,7 @@ pub fn control_plane_compliance_page() -> String {
 pub fn control_plane_gdpr_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">GDPR Compliance</h1>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\">\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Data Subject Requests</h3>\
 <p class=\"text-sm text-muted-foreground\">Process data access, export, and deletion requests.</p>\
 </div></div>"
@@ -3259,7 +3377,7 @@ pub fn control_plane_settings_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Settings</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
-<a href=\"/settings/security\" class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Security</h3><p class=\"text-sm text-muted-foreground mt-1\">Authentication and access control</p></a>\
+<a href=\"/settings/security\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Security</h3><p class=\"text-sm text-muted-foreground mt-1\">Authentication and access control</p></a>\
 </nav></div>".to_string()
 }
 
@@ -3267,7 +3385,7 @@ pub fn control_plane_settings_page() -> String {
 pub fn control_plane_security_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Security Settings</h1>\
-<div class=\"rounded-sm border border-surface-200 bg-white p-6 md:p-8 shadow-premium\">\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">MFA Configuration</h3>\
 <div id=\"mfa-status\" class=\"mb-4\">\
 <p class=\"text-sm text-surface-500\">Loading MFA status…</p>\
@@ -3292,7 +3410,7 @@ Enter the 6-digit code from your authenticator app\
 </label>\
 <div class=\"flex gap-3\">\
 <input id=\"mfa-code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{{6}}\" maxlength=\"6\"\
-class=\"flex-1 rounded-md border border-surface-300 bg-white px-3 py-2 text-sm \
+class=\"flex-1 rounded-md border border-surface-300 bg-background px-3 py-2 text-sm \
 placeholder-surface-400 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500\"\
 placeholder=\"000000\" autocomplete=\"one-time-code\"/>\
 <button id=\"mfa-verify-btn\"\
@@ -3481,9 +3599,9 @@ pub fn marketing_pricing_page() -> String {
 <div class=\"text-center mb-16\"><h1 class=\"text-4xl font-bold text-surface-900\">Simple, transparent pricing</h1>\
 <p class=\"mt-4 text-lg text-surface-600\">Start free, scale as you grow</p></div>\
 <div class=\"grid md:grid-cols-3 gap-8 max-w-5xl mx-auto\">\
-<div class=\"rounded-sm border bg-white p-8\"><h3 class=\"text-lg font-bold\">Free</h3><p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">30,000 emails/month</p></div>\
-<div class=\"rounded-sm border-2 border-primary bg-white p-8 relative\"><div class=\"absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-xs font-bold px-3 py-1 rounded-sm\">Popular</div><h3 class=\"text-lg font-bold\">Pro</h3><p class=\"text-3xl font-bold mt-4\">$65<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">150,000 emails/month</p></div>\
-<div class=\"rounded-sm border bg-white p-8\"><h3 class=\"text-lg font-bold\">Enterprise</h3><p class=\"text-3xl font-bold mt-4\">$3,000<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">5,000,000 emails/month on annual contracts</p></div>\
+<div class=\"rounded-sm border bg-card p-8\"><h3 class=\"text-lg font-bold\">Free</h3><p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">30,000 emails/month</p></div>\
+<div class=\"rounded-sm border-2 border-primary bg-card p-8 relative\"><div class=\"absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-xs font-bold px-3 py-1 rounded-sm\">Popular</div><h3 class=\"text-lg font-bold\">Pro</h3><p class=\"text-3xl font-bold mt-4\">$65<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">150,000 emails/month</p></div>\
+<div class=\"rounded-sm border bg-card p-8\"><h3 class=\"text-lg font-bold\">Enterprise</h3><p class=\"text-3xl font-bold mt-4\">$3,000<span class=\"text-sm font-normal text-surface-500\">/mo</span></p><p class=\"text-sm text-surface-500 mt-2\">5,000,000 emails/month on annual contracts</p></div>\
 </div></div></section>".to_string()
 }
 
@@ -3491,7 +3609,7 @@ pub fn marketing_pricing_calculator_page() -> String {
     "<section class=\"py-20 px-4\"><div class=\"max-w-3xl mx-auto\">\
 <h1 class=\"text-4xl font-bold text-surface-900 mb-4\">Pricing Calculator</h1>\
 <p class=\"text-lg text-surface-600 mb-8\">Estimate your monthly cost based on usage.</p>\
-<div class=\"rounded-sm border bg-white p-8 space-y-6\">\
+<div class=\"rounded-sm border bg-card p-8 space-y-6\">\
 <div><label class=\"text-sm font-medium\">Monthly emails</label>\
 <input type=\"range\" min=\"0\" max=\"1000000\" value=\"30000\" class=\"w-full mt-2\" />\
 <p class=\"text-sm text-surface-500 mt-1\">30,000 emails/month</p></div>\
@@ -3683,7 +3801,7 @@ pub fn control_plane_login_page(
     let mcaptcha_html = mcaptcha_widget_html(mcaptcha_site_key, mcaptcha_base_url);
     format!(
         "<main class=\"flex min-h-screen items-center justify-center bg-surface-50\">\
-<div class=\"w-full max-w-md space-y-10 rounded-sm border border-surface-200 bg-white p-10 shadow-premium\">\
+<div class=\"w-full max-w-md space-y-10 rounded-sm border border-surface-200 bg-card p-10 shadow-premium\">\
 <div class=\"text-center\">\
 <div class=\"mx-auto flex h-14 w-14 items-center justify-center rounded-sm bg-primary text-white font-bold text-xl shadow-premium mb-8\">A</div>\
 <h1 class=\"text-3xl font-bold uppercase tracking-tighter text-surface-950\">Control Plane</h1>\

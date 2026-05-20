@@ -131,7 +131,7 @@ Dedicated IPs are provisioned automatically when a tenant upgrades to a plan wit
 5. **TransportRouter** picks up the change on next cache refresh
 6. Tenant email automatically routes via SMTP
 
-### IP Warmup (45-day schedule)
+### IP Warmup (60-day schedule)
 
 New dedicated IPs start in `warming` status with graduated send volume:
 
@@ -147,7 +147,10 @@ New dedicated IPs start in `warming` status with graduated send volume:
 | 21-28 | 10,000 |
 | 29-35 | 25,000 |
 | 36-44 | 50,000 |
-| 45+ | Unlimited |
+| 45-49 | 75,000 |
+| 50-54 | 100,000 |
+| 55-59 | 250,000 |
+| 60+ | Unlimited |
 
 > **During warmup**, messages exceeding the daily limit overflow to SES shared sending. This ensures deliverability is never blocked.
 

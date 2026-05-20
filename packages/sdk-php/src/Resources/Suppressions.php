@@ -60,14 +60,16 @@ class Suppressions
     }
 
     /**
-     * Remove an address from the suppression list.
+     * Remove a suppression entry by its ID.
      * Note: does NOT re-subscribe — only removes internal suppression.
+     *
+     * @param string $id  The suppression entry ID (UUID)
      */
-    public function delete(string $email): array
+    public function delete(string $id): array
     {
         return $this->client->request(
             'DELETE',
-            '/v1/suppressions/' . urlencode($email)
+            '/v1/suppressions/' . urlencode($id)
         );
     }
 

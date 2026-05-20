@@ -74,7 +74,18 @@ fn empty_leads_response() -> LeadsResponse {
     }
 }
 
+/// API-114/115: Track whether campaign tables have been ensured to avoid
+/// running DDL on every request (causes latency and lock contention).
+/// Tables should be created via migrations; this is a safety net only.
+use std::sync::OnceLock;
+static CAMPAIGN_TABLES_ENSURE: OnceLock<()> = OnceLock::new();
+
 async fn ensure_campaign_tables(db: &sqlx::PgPool) -> Result<(), ApiError> {
+    // Only run DDL once per process lifetime.
+    if CAMPAIGN_TABLES_ENSURE.get().is_some() {
+        return Ok(());
+    }
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS drip_campaigns (
             id TEXT PRIMARY KEY,
@@ -117,6 +128,7 @@ async fn ensure_campaign_tables(db: &sqlx::PgPool) -> Result<(), ApiError> {
     .execute(db)
     .await?;
 
+    let _ = CAMPAIGN_TABLES_ENSURE.set(());
     Ok(())
 }
 
@@ -395,8 +407,10 @@ async fn update_leads(
     }
 
     sets.push("updated_at = NOW()".into());
+    // Add tenant_id filter to WHERE clause to prevent cross-tenant lead modification.
+    let tenant_param_idx = bind_idx;
     let sql = format!(
-        "UPDATE sales_leads SET {} WHERE id = ANY($1)",
+        "UPDATE sales_leads SET {} WHERE id = ANY($1) AND tenant_id = ${tenant_param_idx}",
         sets.join(", ")
     );
 
@@ -420,6 +434,8 @@ async fn update_leads(
     if let Some(deal) = body.deal_value {
         query = query.bind(deal);
     }
+    // Bind tenant_id for WHERE clause scoping
+    query = query.bind(&auth.tenant_id);
 
     let result = query.execute(&state.db).await?;
 
@@ -966,9 +982,11 @@ async fn start_outreach(
 
     ensure_campaign_tables(&state.db).await?;
 
+    // API-103: Scope outreach query by tenant_id to prevent cross-tenant access.
     let lead_rows: Vec<(String, Option<String>)> =
-        sqlx::query_as("SELECT id, contact_email FROM sales_leads WHERE id = ANY($1)")
+        sqlx::query_as("SELECT id, contact_email FROM sales_leads WHERE id = ANY($1) AND tenant_id = $2")
             .bind(&body.lead_ids)
+            .bind(&auth.tenant_id)
             .fetch_all(&state.db)
             .await?;
 
@@ -1034,16 +1052,20 @@ async fn start_outreach(
     .execute(&state.db)
     .await?;
 
-    for (lead_id, email) in &valid_recipients {
-        sqlx::query(
-            "INSERT INTO campaign_recipients (campaign_id, lead_id, email, status, created_at)
-             VALUES ($1, $2, $3, 'queued', NOW())",
-        )
-        .bind(&campaign_id)
-        .bind(lead_id)
-        .bind(email)
-        .execute(&state.db)
-        .await?;
+    // RS-069: Batch INSERT instead of N+1 individual INSERT statements.
+    // Build a single query with multiple value tuples for better performance.
+    if !valid_recipients.is_empty() {
+        let mut query_builder = sqlx::QueryBuilder::new(
+            "INSERT INTO campaign_recipients (campaign_id, lead_id, email, status, created_at) "
+        );
+        query_builder.push_values(&valid_recipients, |mut b, (lead_id, email)| {
+            b.push_bind(&campaign_id)
+             .push_bind(lead_id)
+             .push_bind(email)
+             .push_bind("queued")
+             .push_bind(chrono::Utc::now());
+        });
+        query_builder.build().execute(&state.db).await?;
     }
 
     log_sales_audit(
@@ -1124,20 +1146,24 @@ async fn save_settings(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    // Ensure table exists
-    if let Err(e) = sqlx::query(
-        "CREATE TABLE IF NOT EXISTS sales_settings (
-            id SERIAL PRIMARY KEY,
-            scoring_weights JSONB NOT NULL DEFAULT '{}'::jsonb,
-            schedule JSONB NOT NULL DEFAULT '{}'::jsonb,
-            notifications JSONB NOT NULL DEFAULT '{}'::jsonb,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-         )",
-    )
-    .execute(&state.db)
-    .await
-    {
-        tracing::warn!(error = %e, "Failed to ensure sales_settings table exists");
+    // API-114/115: Use OnceLock to avoid running DDL on every request.
+    static SALES_SETTINGS_ENSURE: OnceLock<()> = OnceLock::new();
+    if SALES_SETTINGS_ENSURE.get().is_none() {
+        if let Err(e) = sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sales_settings (
+                id SERIAL PRIMARY KEY,
+                scoring_weights JSONB NOT NULL DEFAULT '{}'::jsonb,
+                schedule JSONB NOT NULL DEFAULT '{}'::jsonb,
+                notifications JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+             )",
+        )
+        .execute(&state.db)
+        .await
+        {
+            tracing::warn!(error = %e, "Failed to ensure sales_settings table exists");
+        }
+        let _ = SALES_SETTINGS_ENSURE.set(());
     }
 
     // Upsert settings (single row)

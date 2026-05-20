@@ -1,0 +1,82 @@
+{
+  "meta": {
+    "version": "1.0",
+    "description": "Email delivery performance baselines. These values represent the expected performance of the email delivery pipeline from submission through queue processing to outbound SMTP delivery. Measured on a dedicated staging environment.",
+    "created_at": "2026-05-17T22:30:00Z",
+    "created_by": "platform-engineering",
+    "environment": "hetzner-cx42 (4 vCPU, 16 GB RAM) — dedicated staging",
+    "source": "load-tests :: performance benchmarks + SMTP MTA monitoring"
+  },
+  "submission_throughput": {
+    "metric_name": "submission_throughput",
+    "description": "Number of emails the API server can accept and enqueue per second. Limited by payload validation, spam scanning, and queue write throughput.",
+    "baseline_value": 1000,
+    "unit": "emails/sec",
+    "p50": 900,
+    "p95": 1000,
+    "p99": 1050,
+    "measurement_period": "10m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "load-tests :: http-journey/email-send-load-test.js"
+  },
+  "queue_processing_throughput": {
+    "metric_name": "queue_processing_throughput",
+    "description": "Number of emails the worker service can dequeue, process (render template, check bounce, apply rate limits), and forward to the outbound MTA per second.",
+    "baseline_value": 500,
+    "unit": "emails/sec",
+    "p50": 450,
+    "p95": 500,
+    "p99": 520,
+    "measurement_period": "15m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "load-tests :: worker-processors throughput benchmark"
+  },
+  "delivery_time_p50": {
+    "metric_name": "delivery_time_p50",
+    "description": "Median time from email submission (API accept) to successful SMTP delivery acknowledgment. Includes queue wait time, template rendering, and MTA handoff.",
+    "baseline_value": 1500,
+    "unit": "ms",
+    "p50": 1500,
+    "p95": 3500,
+    "p99": 8000,
+    "measurement_period": "30m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "MTA delivery logs :: Prometheus metric `mta_delivery_duration_seconds`"
+  },
+  "delivery_time_p95": {
+    "metric_name": "delivery_time_p95",
+    "description": "95th percentile time from email submission to SMTP delivery acknowledgment.",
+    "baseline_value": 3500,
+    "unit": "ms",
+    "p50": 1500,
+    "p95": 3500,
+    "p99": 8000,
+    "measurement_period": "30m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "MTA delivery logs :: Prometheus metric `mta_delivery_duration_seconds`"
+  },
+  "delivery_time_p99": {
+    "metric_name": "delivery_time_p99",
+    "description": "99th percentile time from email submission to SMTP delivery acknowledgment.",
+    "baseline_value": 8000,
+    "unit": "ms",
+    "p50": 1500,
+    "p95": 3500,
+    "p99": 8000,
+    "measurement_period": "30m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "MTA delivery logs :: Prometheus metric `mta_delivery_duration_seconds`"
+  },
+  "bounce_processing_time": {
+    "metric_name": "bounce_processing_time",
+    "description": "Time from bounce notification receipt to bounce event recorded in the database and suppression list updated.",
+    "baseline_value": 2000,
+    "unit": "ms",
+    "p50": 800,
+    "p95": 2000,
+    "p99": 5000,
+    "measurement_period": "30m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "bounce-analytics worker :: `bounce_processing_duration_seconds` metric"
+  }
+}

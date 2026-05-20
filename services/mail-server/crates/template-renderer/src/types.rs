@@ -216,6 +216,7 @@ pub const STARTER_TEMPLATE: &str = r#"<html>
       </div>
       <div class="footer">
         <p>{{ footer_text }}</p>
+        <p style="margin-top:8px"><a href="{{ base_url }}/unsubscribe?token={{ unsubscribe_token }}" style="color:#71717a">Unsubscribe</a></p>
       </div>
     </div>
   </body>
@@ -518,6 +519,9 @@ mod tests {
         assert!(STARTER_TEMPLATE.contains("{{ name }}"));
         assert!(STARTER_TEMPLATE.contains("{{ body }}"));
         assert!(STARTER_TEMPLATE.contains("{{ footer_text }}"));
+        assert!(STARTER_TEMPLATE.contains("{{ base_url }}"));
+        assert!(STARTER_TEMPLATE.contains("{{ unsubscribe_token }}"));
+        assert!(STARTER_TEMPLATE.contains("/unsubscribe"));
     }
 
     #[test]

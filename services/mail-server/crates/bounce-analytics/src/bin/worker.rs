@@ -11,6 +11,9 @@ use std::time::Duration;
 use bounce_analytics::aggregator::BounceAggregator;
 use bounce_analytics::config::BounceAnalyticsConfig;
 use clap::Parser;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use sqlx::PgPool;
 use tracing::{error, info};
 
@@ -26,15 +29,30 @@ struct Cli {
     interval: Option<u64>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Initialize logging
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "bounce-analytics-worker".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "bounce_analytics=info,sqlx=warn".into()),
         )
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let _guard = init_tracing();
 
     let cli = Cli::parse();
     dotenvy::dotenv().ok();

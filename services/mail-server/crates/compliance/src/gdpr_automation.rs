@@ -367,6 +367,62 @@ impl GdprAutomation {
             .map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
+        // RS-060: Additional PII tables that were missing from the original erasure.
+        // 8. Delete user API keys (contain tenant association PII)
+        let r = sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to delete api_keys during erasure (table may not exist)");
+                sqlx::postgres::PgQueryResult::default()
+            });
+        total_deleted += r.rows_affected() as i64;
+
+        // 9. Delete user sessions (contain PII via session tokens)
+        let r = sqlx::query("DELETE FROM sessions WHERE tenant_id = $1")
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to delete sessions during erasure (table may not exist)");
+                sqlx::postgres::PgQueryResult::default()
+            });
+        total_deleted += r.rows_affected() as i64;
+
+        // 10. Delete contact lists and list memberships (contain email PII)
+        let r = sqlx::query("DELETE FROM contact_list_members WHERE tenant_id = $1")
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to delete contact_list_members during erasure (table may not exist)");
+                sqlx::postgres::PgQueryResult::default()
+            });
+        total_deleted += r.rows_affected() as i64;
+
+        // 11. Delete webhook configurations (may contain email addresses in config)
+        let r = sqlx::query("DELETE FROM webhooks WHERE tenant_id = $1")
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to delete webhooks during erasure (table may not exist)");
+                sqlx::postgres::PgQueryResult::default()
+            });
+        total_deleted += r.rows_affected() as i64;
+
+        // 12. Delete billing/invoice records that contain the user's email
+        let r = sqlx::query("DELETE FROM invoices WHERE tenant_id = $1")
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to delete invoices during erasure (table may not exist)");
+                sqlx::postgres::PgQueryResult::default()
+            });
+        total_deleted += r.rows_affected() as i64;
+
         tx.commit().await.map_err(|e| format!("DB: {e}"))?;
 
         // Clear Redis keys

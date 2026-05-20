@@ -1,0 +1,20 @@
+# Redis ACL Configuration
+# =============================================================================
+# SECURITY: This file replaces --requirepass on the command line to prevent
+# the password from being visible via /proc/<pid>/cmdline.
+#
+# Format: user <username> <rules...>
+# The "default" user is the one used by legacy AUTH (requirepass equivalent).
+#
+# Generate the SHA256 hash:
+#   redis-cli ACL GENPASS 32
+# Or use a plaintext password (less secure but simpler for Docker Compose):
+#   user default on >${REDIS_PASSWORD} ~* &* +@all
+#
+# For production, use a hashed password:
+#   user default on #<sha256-hash> ~* &* +@all
+# =============================================================================
+
+# Default user — password is injected via REDIS_PASSWORD env var in entrypoint.sh
+# The entrypoint.sh script rewrites this file at startup with the actual password.
+user default on >REPLACE_ME_PASSWORD ~* &* +@all

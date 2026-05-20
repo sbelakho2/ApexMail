@@ -1,4 +1,25 @@
 #!/bin/sh
+# =============================================================================
+# SECURE secret loading for Docker Compose environments
+# =============================================================================
+#
+# SECURITY NOTICE: This script exports secrets as environment variables, which
+# are visible in /proc/<pid>/environ. This is an inherent limitation of the
+# environment-variable-based secret model used by Docker Compose.
+#
+# For production-deployment alternatives with stronger isolation:
+#   1. Kubernetes: Use Secrets mounted as files, read directly by the app
+#   2. HashiCorp Vault: Use Vault agent sidecar for secret injection
+#   3. Hardware-backed: Use TPM/enclave for key material
+#   4. Docker Swarm: Use Docker secrets (already used as input)
+#
+# MITIGATIONS in this script:
+#   - Sets umask 077 to protect any temporary files
+#   - Refuses to run with setuid/setgid
+#   - Unsets the FILE_ENV variable after loading (reducing surface area)
+#   - Uses `exec` to replace shell (env vars only exist in final process)
+#   - Minimizes time between loading and exec
+# =============================================================================
 set -eu
 original_umask="$(umask)"
 umask 077
@@ -48,6 +69,10 @@ load_secret() {
         exit 1
     fi
 
+    # SECURITY: export makes the value visible in /proc/PID/environ
+    # This is an accepted trade-off for Docker Compose environments.
+    # The value is exported here because the target application expects
+    # an environment variable, not a file path.
     export "$target_env=$secret_value"
     unset "$file_env"
 }

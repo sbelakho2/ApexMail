@@ -91,6 +91,7 @@ CREATE TABLE email_queue (
 ) PARTITION BY RANGE (created_at);
 
 -- Create monthly partitions: 3 past + 3 future (current month = 2026-05)
+-- H-06: Extended ranges through 2027-12 to cover longer deployment cycles.
 CREATE TABLE email_queue_2026_02 PARTITION OF email_queue
     FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
 CREATE TABLE email_queue_2026_03 PARTITION OF email_queue
@@ -103,6 +104,43 @@ CREATE TABLE email_queue_2026_06 PARTITION OF email_queue
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
 CREATE TABLE email_queue_2026_07 PARTITION OF email_queue
     FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
+CREATE TABLE email_queue_2026_08 PARTITION OF email_queue
+    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
+CREATE TABLE email_queue_2026_09 PARTITION OF email_queue
+    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE email_queue_2026_10 PARTITION OF email_queue
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+CREATE TABLE email_queue_2026_11 PARTITION OF email_queue
+    FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+CREATE TABLE email_queue_2026_12 PARTITION OF email_queue
+    FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
+CREATE TABLE email_queue_2027_01 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
+CREATE TABLE email_queue_2027_02 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-02-01') TO ('2027-03-01');
+CREATE TABLE email_queue_2027_03 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-03-01') TO ('2027-04-01');
+CREATE TABLE email_queue_2027_04 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-04-01') TO ('2027-05-01');
+CREATE TABLE email_queue_2027_05 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-05-01') TO ('2027-06-01');
+CREATE TABLE email_queue_2027_06 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-06-01') TO ('2027-07-01');
+CREATE TABLE email_queue_2027_07 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-07-01') TO ('2027-08-01');
+CREATE TABLE email_queue_2027_08 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-08-01') TO ('2027-09-01');
+CREATE TABLE email_queue_2027_09 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-09-01') TO ('2027-10-01');
+CREATE TABLE email_queue_2027_10 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-10-01') TO ('2027-11-01');
+CREATE TABLE email_queue_2027_11 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-11-01') TO ('2027-12-01');
+CREATE TABLE email_queue_2027_12 PARTITION OF email_queue
+    FOR VALUES FROM ('2027-12-01') TO ('2028-01-01');
+-- DB-102: Default partition catches any rows outside the defined ranges.
+-- This prevents INSERT failures when data falls outside partition bounds.
+CREATE TABLE email_queue_default PARTITION OF email_queue DEFAULT;
 
 -- Indexes on parent table (propagated to all partitions)
 CREATE INDEX IF NOT EXISTS idx_email_queue_tenant_status_created
@@ -118,11 +156,18 @@ CREATE INDEX IF NOT EXISTS idx_email_queue_sent_at
     WHERE sent_at IS NOT NULL;
 
 -- Migrate data from old table
+-- H-07: Use ON CONFLICT (id, created_at) DO UPDATE to avoid silently losing data.
+-- The composite PK (id, created_at) ensures each row is unique.
 INSERT INTO email_queue
 SELECT * FROM email_queue_old
-ON CONFLICT DO NOTHING;
+ON CONFLICT (id, created_at) DO UPDATE SET
+    from_address = EXCLUDED.from_address,
+    to_addresses = EXCLUDED.to_addresses,
+    subject = EXCLUDED.subject,
+    status = EXCLUDED.status,
+    updated_at = EXCLUDED.updated_at;
 
--- Verify data integrity before dropping old table
+-- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
 DO $$
 DECLARE
     v_old_count BIGINT;
@@ -132,12 +177,15 @@ BEGIN
     EXECUTE 'SELECT COUNT(*) FROM email_queue' INTO v_new_count;
     RAISE NOTICE 'email_queue migration: % rows in old table, % rows in new table', v_old_count, v_new_count;
     IF v_old_count > 0 AND v_new_count = 0 THEN
-        RAISE WARNING 'email_queue: 0 rows migrated from % rows in old table — data may be lost!', v_old_count;
+        RAISE EXCEPTION 'email_queue: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
     END IF;
+    IF v_old_count > v_new_count THEN
+        RAISE WARNING 'email_queue: % rows in old table but only % in new table — some data may have been lost during migration', v_old_count, v_new_count;
+    END IF;
+    -- Only drop old table if migration succeeded
+    EXECUTE 'DROP TABLE IF EXISTS email_queue_old';
+    RAISE NOTICE 'email_queue: old table dropped successfully';
 END $$;
-
--- Drop old table
-DROP TABLE IF EXISTS email_queue_old;
 
 -- =============================================================================
 -- 2. email_delivery_log — Monthly RANGE on attempted_at
@@ -161,7 +209,7 @@ CREATE TABLE email_delivery_log (
 
 ) PARTITION BY RANGE (attempted_at);
 
--- Monthly partitions: Feb 2026 – Jul 2026
+-- Monthly partitions: Feb 2026 – Dec 2027 (H-06: extended ranges)
 CREATE TABLE email_delivery_log_2026_02 PARTITION OF email_delivery_log
     FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
 CREATE TABLE email_delivery_log_2026_03 PARTITION OF email_delivery_log
@@ -174,6 +222,42 @@ CREATE TABLE email_delivery_log_2026_06 PARTITION OF email_delivery_log
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
 CREATE TABLE email_delivery_log_2026_07 PARTITION OF email_delivery_log
     FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
+CREATE TABLE email_delivery_log_2026_08 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
+CREATE TABLE email_delivery_log_2026_09 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE email_delivery_log_2026_10 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+CREATE TABLE email_delivery_log_2026_11 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+CREATE TABLE email_delivery_log_2026_12 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
+CREATE TABLE email_delivery_log_2027_01 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
+CREATE TABLE email_delivery_log_2027_02 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-02-01') TO ('2027-03-01');
+CREATE TABLE email_delivery_log_2027_03 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-03-01') TO ('2027-04-01');
+CREATE TABLE email_delivery_log_2027_04 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-04-01') TO ('2027-05-01');
+CREATE TABLE email_delivery_log_2027_05 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-05-01') TO ('2027-06-01');
+CREATE TABLE email_delivery_log_2027_06 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-06-01') TO ('2027-07-01');
+CREATE TABLE email_delivery_log_2027_07 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-07-01') TO ('2027-08-01');
+CREATE TABLE email_delivery_log_2027_08 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-08-01') TO ('2027-09-01');
+CREATE TABLE email_delivery_log_2027_09 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-09-01') TO ('2027-10-01');
+CREATE TABLE email_delivery_log_2027_10 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-10-01') TO ('2027-11-01');
+CREATE TABLE email_delivery_log_2027_11 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-11-01') TO ('2027-12-01');
+CREATE TABLE email_delivery_log_2027_12 PARTITION OF email_delivery_log
+    FOR VALUES FROM ('2027-12-01') TO ('2028-01-01');
+-- DB-102: Default partition
+CREATE TABLE email_delivery_log_default PARTITION OF email_delivery_log DEFAULT;
 
 -- Indexes on parent table
 CREATE INDEX IF NOT EXISTS idx_email_delivery_log_email_attempted
@@ -182,12 +266,15 @@ CREATE INDEX IF NOT EXISTS idx_email_delivery_log_status_attempted
     ON email_delivery_log (status, attempted_at)
     WHERE status IN ('pending', 'retrying');
 
--- Migrate data
+-- Migrate data (H-07: ON CONFLICT DO UPDATE to avoid silent data loss)
 INSERT INTO email_delivery_log
 SELECT * FROM email_delivery_log_old
-ON CONFLICT DO NOTHING;
+ON CONFLICT (id, attempted_at) DO UPDATE SET
+    email_id = EXCLUDED.email_id,
+    status = EXCLUDED.status,
+    error_message = EXCLUDED.error_message;
 
--- Verify data integrity before dropping old table
+-- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
 DO $$
 DECLARE
     v_old_count BIGINT;
@@ -197,11 +284,14 @@ BEGIN
     EXECUTE 'SELECT COUNT(*) FROM email_delivery_log' INTO v_new_count;
     RAISE NOTICE 'email_delivery_log migration: % rows in old table, % rows in new table', v_old_count, v_new_count;
     IF v_old_count > 0 AND v_new_count = 0 THEN
-        RAISE WARNING 'email_delivery_log: 0 rows migrated from % rows in old table — data may be lost!', v_old_count;
+        RAISE EXCEPTION 'email_delivery_log: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
     END IF;
+    IF v_old_count > v_new_count THEN
+        RAISE WARNING 'email_delivery_log: % rows in old table but only % in new table — some data may have been lost', v_old_count, v_new_count;
+    END IF;
+    EXECUTE 'DROP TABLE IF EXISTS email_delivery_log_old';
+    RAISE NOTICE 'email_delivery_log: old table dropped successfully';
 END $$;
-
-DROP TABLE IF EXISTS email_delivery_log_old;
 
 -- =============================================================================
 -- 3. mail_messages — Quarterly RANGE on created_at
@@ -250,7 +340,7 @@ CREATE TABLE mail_messages (
 
 ) PARTITION BY RANGE (created_at);
 
--- Quarterly partitions: 2025 Q4 through 2027 Q1 (2 past + 1 current + 3 future)
+-- Quarterly partitions: 2025 Q4 through 2029 Q4 (H-06: extended ranges)
 CREATE TABLE mail_messages_2025_q4 PARTITION OF mail_messages
     FOR VALUES FROM ('2025-10-01') TO ('2026-01-01');
 CREATE TABLE mail_messages_2026_q1 PARTITION OF mail_messages
@@ -263,6 +353,30 @@ CREATE TABLE mail_messages_2026_q4 PARTITION OF mail_messages
     FOR VALUES FROM ('2026-10-01') TO ('2027-01-01');
 CREATE TABLE mail_messages_2027_q1 PARTITION OF mail_messages
     FOR VALUES FROM ('2027-01-01') TO ('2027-04-01');
+CREATE TABLE mail_messages_2027_q2 PARTITION OF mail_messages
+    FOR VALUES FROM ('2027-04-01') TO ('2027-07-01');
+CREATE TABLE mail_messages_2027_q3 PARTITION OF mail_messages
+    FOR VALUES FROM ('2027-07-01') TO ('2027-10-01');
+CREATE TABLE mail_messages_2027_q4 PARTITION OF mail_messages
+    FOR VALUES FROM ('2027-10-01') TO ('2028-01-01');
+CREATE TABLE mail_messages_2028_q1 PARTITION OF mail_messages
+    FOR VALUES FROM ('2028-01-01') TO ('2028-04-01');
+CREATE TABLE mail_messages_2028_q2 PARTITION OF mail_messages
+    FOR VALUES FROM ('2028-04-01') TO ('2028-07-01');
+CREATE TABLE mail_messages_2028_q3 PARTITION OF mail_messages
+    FOR VALUES FROM ('2028-07-01') TO ('2028-10-01');
+CREATE TABLE mail_messages_2028_q4 PARTITION OF mail_messages
+    FOR VALUES FROM ('2028-10-01') TO ('2029-01-01');
+CREATE TABLE mail_messages_2029_q1 PARTITION OF mail_messages
+    FOR VALUES FROM ('2029-01-01') TO ('2029-04-01');
+CREATE TABLE mail_messages_2029_q2 PARTITION OF mail_messages
+    FOR VALUES FROM ('2029-04-01') TO ('2029-07-01');
+CREATE TABLE mail_messages_2029_q3 PARTITION OF mail_messages
+    FOR VALUES FROM ('2029-07-01') TO ('2029-10-01');
+CREATE TABLE mail_messages_2029_q4 PARTITION OF mail_messages
+    FOR VALUES FROM ('2029-10-01') TO ('2030-01-01');
+-- DB-102: Default partition
+CREATE TABLE mail_messages_default PARTITION OF mail_messages DEFAULT;
 
 -- Indexes on parent table
 CREATE INDEX IF NOT EXISTS idx_mail_messages_mailbox
@@ -290,12 +404,16 @@ CREATE INDEX IF NOT EXISTS idx_mail_messages_account_id
 CREATE INDEX IF NOT EXISTS idx_mail_messages_mailbox_id
     ON mail_messages (mailbox_id);
 
--- Migrate data
+-- Migrate data (H-07: ON CONFLICT DO UPDATE to avoid silent data loss)
 INSERT INTO mail_messages
 SELECT * FROM mail_messages_old
-ON CONFLICT DO NOTHING;
+ON CONFLICT (id, created_at) DO UPDATE SET
+    from_address = EXCLUDED.from_address,
+    subject = EXCLUDED.subject,
+    is_read = EXCLUDED.is_read,
+    updated_at = EXCLUDED.updated_at;
 
--- Verify data integrity before dropping old table
+-- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
 DO $$
 DECLARE
     v_old_count BIGINT;
@@ -305,11 +423,14 @@ BEGIN
     EXECUTE 'SELECT COUNT(*) FROM mail_messages' INTO v_new_count;
     RAISE NOTICE 'mail_messages migration: % rows in old table, % rows in new table', v_old_count, v_new_count;
     IF v_old_count > 0 AND v_new_count = 0 THEN
-        RAISE WARNING 'mail_messages: 0 rows migrated from % rows in old table — data may be lost!', v_old_count;
+        RAISE EXCEPTION 'mail_messages: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
     END IF;
+    IF v_old_count > v_new_count THEN
+        RAISE WARNING 'mail_messages: % rows in old table but only % in new table — some data may have been lost', v_old_count, v_new_count;
+    END IF;
+    EXECUTE 'DROP TABLE IF EXISTS mail_messages_old';
+    RAISE NOTICE 'mail_messages: old table dropped successfully';
 END $$;
-
-DROP TABLE IF EXISTS mail_messages_old;
 
 -- =============================================================================
 -- 4. audit_logs — Quarterly RANGE on timestamp
@@ -344,7 +465,7 @@ CREATE TABLE audit_logs (
 
 ) PARTITION BY RANGE (timestamp);
 
--- Quarterly partitions
+-- Quarterly partitions: 2025 Q4 through 2029 Q4 (H-06: extended ranges)
 CREATE TABLE audit_logs_2025_q4 PARTITION OF audit_logs
     FOR VALUES FROM ('2025-10-01') TO ('2026-01-01');
 CREATE TABLE audit_logs_2026_q1 PARTITION OF audit_logs
@@ -357,6 +478,30 @@ CREATE TABLE audit_logs_2026_q4 PARTITION OF audit_logs
     FOR VALUES FROM ('2026-10-01') TO ('2027-01-01');
 CREATE TABLE audit_logs_2027_q1 PARTITION OF audit_logs
     FOR VALUES FROM ('2027-01-01') TO ('2027-04-01');
+CREATE TABLE audit_logs_2027_q2 PARTITION OF audit_logs
+    FOR VALUES FROM ('2027-04-01') TO ('2027-07-01');
+CREATE TABLE audit_logs_2027_q3 PARTITION OF audit_logs
+    FOR VALUES FROM ('2027-07-01') TO ('2027-10-01');
+CREATE TABLE audit_logs_2027_q4 PARTITION OF audit_logs
+    FOR VALUES FROM ('2027-10-01') TO ('2028-01-01');
+CREATE TABLE audit_logs_2028_q1 PARTITION OF audit_logs
+    FOR VALUES FROM ('2028-01-01') TO ('2028-04-01');
+CREATE TABLE audit_logs_2028_q2 PARTITION OF audit_logs
+    FOR VALUES FROM ('2028-04-01') TO ('2028-07-01');
+CREATE TABLE audit_logs_2028_q3 PARTITION OF audit_logs
+    FOR VALUES FROM ('2028-07-01') TO ('2028-10-01');
+CREATE TABLE audit_logs_2028_q4 PARTITION OF audit_logs
+    FOR VALUES FROM ('2028-10-01') TO ('2029-01-01');
+CREATE TABLE audit_logs_2029_q1 PARTITION OF audit_logs
+    FOR VALUES FROM ('2029-01-01') TO ('2029-04-01');
+CREATE TABLE audit_logs_2029_q2 PARTITION OF audit_logs
+    FOR VALUES FROM ('2029-04-01') TO ('2029-07-01');
+CREATE TABLE audit_logs_2029_q3 PARTITION OF audit_logs
+    FOR VALUES FROM ('2029-07-01') TO ('2029-10-01');
+CREATE TABLE audit_logs_2029_q4 PARTITION OF audit_logs
+    FOR VALUES FROM ('2029-10-01') TO ('2030-01-01');
+-- DB-102: Default partition
+CREATE TABLE audit_logs_default PARTITION OF audit_logs DEFAULT;
 
 -- Indexes on parent table
 CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_ts
@@ -370,12 +515,15 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_resource
 CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome
     ON audit_logs (outcome) WHERE outcome <> 'success';
 
--- Migrate data
+-- Migrate data (H-07: ON CONFLICT DO UPDATE to avoid silent data loss)
 INSERT INTO audit_logs
 SELECT * FROM audit_logs_old
-ON CONFLICT DO NOTHING;
+ON CONFLICT (id, timestamp) DO UPDATE SET
+    action = EXCLUDED.action,
+    resource = EXCLUDED.resource,
+    outcome = EXCLUDED.outcome;
 
--- Verify data integrity before dropping old table
+-- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
 DO $$
 DECLARE
     v_old_count BIGINT;
@@ -385,11 +533,14 @@ BEGIN
     EXECUTE 'SELECT COUNT(*) FROM audit_logs' INTO v_new_count;
     RAISE NOTICE 'audit_logs migration: % rows in old table, % rows in new table', v_old_count, v_new_count;
     IF v_old_count > 0 AND v_new_count = 0 THEN
-        RAISE WARNING 'audit_logs: 0 rows migrated from % rows in old table — data may be lost!', v_old_count;
+        RAISE EXCEPTION 'audit_logs: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
     END IF;
+    IF v_old_count > v_new_count THEN
+        RAISE WARNING 'audit_logs: % rows in old table but only % in new table — some data may have been lost', v_old_count, v_new_count;
+    END IF;
+    EXECUTE 'DROP TABLE IF EXISTS audit_logs_old';
+    RAISE NOTICE 'audit_logs: old table dropped successfully';
 END $$;
-
-DROP TABLE IF EXISTS audit_logs_old;
 
 -- =============================================================================
 -- 5. bounce_analytics_daily — Monthly RANGE on date
@@ -418,7 +569,7 @@ CREATE TABLE bounce_analytics_daily (
 
 ) PARTITION BY RANGE (date);
 
--- Monthly partitions: Feb 2026 – Jul 2026
+-- Monthly partitions: Feb 2026 – Dec 2027 (H-06: extended ranges)
 CREATE TABLE bounce_analytics_daily_2026_02 PARTITION OF bounce_analytics_daily
     FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
 CREATE TABLE bounce_analytics_daily_2026_03 PARTITION OF bounce_analytics_daily
@@ -431,17 +582,56 @@ CREATE TABLE bounce_analytics_daily_2026_06 PARTITION OF bounce_analytics_daily
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
 CREATE TABLE bounce_analytics_daily_2026_07 PARTITION OF bounce_analytics_daily
     FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
+CREATE TABLE bounce_analytics_daily_2026_08 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
+CREATE TABLE bounce_analytics_daily_2026_09 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE bounce_analytics_daily_2026_10 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+CREATE TABLE bounce_analytics_daily_2026_11 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+CREATE TABLE bounce_analytics_daily_2026_12 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
+CREATE TABLE bounce_analytics_daily_2027_01 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
+CREATE TABLE bounce_analytics_daily_2027_02 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-02-01') TO ('2027-03-01');
+CREATE TABLE bounce_analytics_daily_2027_03 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-03-01') TO ('2027-04-01');
+CREATE TABLE bounce_analytics_daily_2027_04 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-04-01') TO ('2027-05-01');
+CREATE TABLE bounce_analytics_daily_2027_05 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-05-01') TO ('2027-06-01');
+CREATE TABLE bounce_analytics_daily_2027_06 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-06-01') TO ('2027-07-01');
+CREATE TABLE bounce_analytics_daily_2027_07 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-07-01') TO ('2027-08-01');
+CREATE TABLE bounce_analytics_daily_2027_08 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-08-01') TO ('2027-09-01');
+CREATE TABLE bounce_analytics_daily_2027_09 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-09-01') TO ('2027-10-01');
+CREATE TABLE bounce_analytics_daily_2027_10 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-10-01') TO ('2027-11-01');
+CREATE TABLE bounce_analytics_daily_2027_11 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-11-01') TO ('2027-12-01');
+CREATE TABLE bounce_analytics_daily_2027_12 PARTITION OF bounce_analytics_daily
+    FOR VALUES FROM ('2027-12-01') TO ('2028-01-01');
+-- DB-102: Default partition
+CREATE TABLE bounce_analytics_daily_default PARTITION OF bounce_analytics_daily DEFAULT;
 
 -- Indexes on parent table
 CREATE INDEX IF NOT EXISTS idx_bounce_analytics_daily_tenant_date
     ON bounce_analytics_daily (tenant_id, date DESC);
 
--- Migrate data
+-- Migrate data (H-07: ON CONFLICT DO UPDATE to avoid silent data loss)
 INSERT INTO bounce_analytics_daily
 SELECT * FROM bounce_analytics_daily_old
-ON CONFLICT DO NOTHING;
+ON CONFLICT (id, date) DO UPDATE SET
+    total_bounces = EXCLUDED.total_bounces,
+    hard_bounces = EXCLUDED.hard_bounces,
+    updated_at = EXCLUDED.updated_at;
 
--- Verify data integrity before dropping old table
+-- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
 DO $$
 DECLARE
     v_old_count BIGINT;
@@ -451,11 +641,14 @@ BEGIN
     EXECUTE 'SELECT COUNT(*) FROM bounce_analytics_daily' INTO v_new_count;
     RAISE NOTICE 'bounce_analytics_daily migration: % rows in old table, % rows in new table', v_old_count, v_new_count;
     IF v_old_count > 0 AND v_new_count = 0 THEN
-        RAISE WARNING 'bounce_analytics_daily: 0 rows migrated from % rows in old table — data may be lost!', v_old_count;
+        RAISE EXCEPTION 'bounce_analytics_daily: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
     END IF;
+    IF v_old_count > v_new_count THEN
+        RAISE WARNING 'bounce_analytics_daily: % rows in old table but only % in new table — some data may have been lost', v_old_count, v_new_count;
+    END IF;
+    EXECUTE 'DROP TABLE IF EXISTS bounce_analytics_daily_old';
+    RAISE NOTICE 'bounce_analytics_daily: old table dropped successfully';
 END $$;
-
-DROP TABLE IF EXISTS bounce_analytics_daily_old;
 
 -- =============================================================================
 -- 6. Auto-creation function for future partitions
@@ -473,7 +666,9 @@ DECLARE
     start_date TEXT;
     end_date TEXT;
 BEGIN
-    -- For each partitioned table, create partitions 3 periods ahead
+    -- H-06: For each partitioned table, create partitions 18 periods ahead
+    -- (18 months ≈ 1.5 years for monthly tables, 18 quarters ≈ 4.5 years for quarterly)
+    -- This provides sufficient runway for deployments that don't run pg_partman.
     FOR table_config IN
         SELECT
             parent.relname AS table_name,
@@ -485,7 +680,7 @@ BEGIN
         WHERE parent.relkind = 'p'  -- partitioned tables
           AND parent.relname IN ('email_queue', 'email_delivery_log', 'mail_messages', 'audit_logs', 'bounce_analytics_daily')
     LOOP
-        FOR i IN 1..3 LOOP
+        FOR i IN 1..18 LOOP
             IF table_config.period = 'month' THEN
                 partition_date := date_trunc('month', NOW()) + (i || ' months')::INTERVAL;
                 partition_name := table_config.table_name || '_' || to_char(partition_date, 'YYYY_MM');
@@ -512,5 +707,17 @@ $$ LANGUAGE plpgsql;
 
 -- Create future partitions immediately (H-06)
 SELECT create_future_partitions();
+
+-- H-06: Partition lifecycle management note:
+-- For production deployments, consider using pg_partman (PostgreSQL Partition Manager)
+-- for automatic partition creation and maintenance.
+-- Example setup:
+--   CREATE EXTENSION IF NOT EXISTS pg_partman;
+--   SELECT partman.create_parent(p_parent_table := 'public.email_queue',
+--     p_control := 'created_at', p_type := 'range', p_interval := '1 month',
+--     p_premake := 6, p_start_partition := '2026-02-01');
+-- Without pg_partman, ensure create_future_partitions() is called periodically
+-- via pg_cron or application startup:
+--   SELECT cron.schedule('create-partitions', '0 0 1 * *', 'SELECT create_future_partitions()');
 
 COMMIT;

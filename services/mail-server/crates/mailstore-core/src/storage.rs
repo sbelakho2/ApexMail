@@ -17,6 +17,11 @@ use crate::models::*;
 /// `row_to_message` can distinguish encrypted content from legacy plaintext.
 const ENCRYPTED_PREFIX: &str = "$AES256GCM$";
 
+// SAFETY: Column-list constants are compile-time hardcoded strings, never
+// constructed from user input. The format!() calls that embed them into SQL
+// queries are safe because the format argument is a static constant, not
+// dynamic data. These constants exist solely to avoid repeating column names
+// across similar queries and do not introduce SQL injection risk.
 const ACCOUNT_COLUMNS: &str = "id, email, domain, password_hash, display_name, quota_bytes, used_bytes, is_active, created_at, updated_at";
 const MAILBOX_COLUMNS: &str = "id, account_id, name, parent_id, mailbox_type, total_messages, unread_messages, uidnext, created_at, updated_at";
 const MESSAGE_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, subject, date, text_body, html_body, raw_size, is_read, is_starred, is_deleted, is_spam, labels, headers, attachments, created_at, updated_at";
@@ -130,6 +135,7 @@ impl MessageStorage {
         // DI-001: Wrap account insert + default mailbox creation in a single transaction
         let mut tx = self.pool.begin().await?;
 
+        // SAFETY: ACCOUNT_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO mail_accounts (email, domain, password_hash, display_name)
@@ -170,6 +176,7 @@ impl MessageStorage {
 
     /// Get account by email
     pub async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>> {
+        // SAFETY: ACCOUNT_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_accounts WHERE email = $1 AND is_active = true",
             ACCOUNT_COLUMNS
@@ -194,6 +201,7 @@ impl MessageStorage {
 
     /// Get account by ID
     pub async fn get_account(&self, account_id: &Uuid) -> Result<Option<Account>> {
+        // SAFETY: ACCOUNT_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_accounts WHERE id = $1",
             ACCOUNT_COLUMNS
@@ -253,6 +261,7 @@ impl MessageStorage {
 
     /// List mailboxes for an account
     pub async fn list_mailboxes(&self, account_id: &Uuid) -> Result<Vec<Mailbox>> {
+        // SAFETY: MAILBOX_COLUMNS is a compile-time constant string, not user input.
         let rows = sqlx::query(&format!(
             "SELECT {} FROM mail_mailboxes WHERE account_id = $1 ORDER BY name",
             MAILBOX_COLUMNS
@@ -294,6 +303,7 @@ impl MessageStorage {
         account_id: &Uuid,
         name: &str,
     ) -> Result<Option<Mailbox>> {
+        // SAFETY: MAILBOX_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_mailboxes WHERE account_id = $1 AND lower(name) = lower($2)",
             MAILBOX_COLUMNS
@@ -358,6 +368,7 @@ impl MessageStorage {
         // ON CONFLICT DO UPDATE with FALSE WHERE ensures we don't actually update,
         // but returns no rows if a concurrent insert beat us. We then fall back to
         // fetching within the same transaction.
+        // SAFETY: MAILBOX_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO mail_mailboxes (account_id, name, mailbox_type)
@@ -446,6 +457,7 @@ impl MessageStorage {
             MailboxType::Custom => return Ok(None),
         };
 
+        // SAFETY: MAILBOX_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_mailboxes WHERE account_id = $1 AND mailbox_type = $2",
             MAILBOX_COLUMNS
@@ -592,6 +604,7 @@ impl MessageStorage {
     /// DI-009: Standard read — uses a fresh connection from the pool. Returns committed
     /// data visible at the time of the query (READ COMMITTED isolation).
     pub async fn get_message(&self, message_id: &Uuid) -> Result<Option<StoredMessage>> {
+        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_messages WHERE id = $1",
             MESSAGE_COLUMNS
@@ -616,6 +629,7 @@ impl MessageStorage {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *tx)
             .await?;
+        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_messages WHERE id = $1",
             MESSAGE_COLUMNS
@@ -637,6 +651,7 @@ impl MessageStorage {
         mailbox_id: &Uuid,
         uid: i64,
     ) -> Result<Option<StoredMessage>> {
+        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_messages WHERE account_id = $1 AND mailbox_id = $2 AND uid = $3",
             MESSAGE_COLUMNS
@@ -655,6 +670,10 @@ impl MessageStorage {
 
     /// List messages
     pub async fn list_messages(&self, query: &MessageQuery) -> Result<Vec<StoredMessage>> {
+        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
+        // The dynamic WHERE clauses below use format!() only for parameter placeholder
+        // indices ($1, $2, ...), never for actual user values. All user-supplied values
+        // are passed via sqlx::query().bind(), which uses parameterized queries.
         let mut sql = format!(
             "SELECT {} FROM mail_messages WHERE account_id = $1",
             MESSAGE_COLUMNS
@@ -739,6 +758,7 @@ impl MessageStorage {
         .fetch_one(&self.pool)
         .await?;
 
+        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
         let rows = sqlx::query(&format!(
             r#"
             SELECT {} FROM mail_messages
@@ -845,6 +865,7 @@ impl MessageStorage {
             return Ok(Vec::new());
         }
 
+        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
         let rows = sqlx::query(&format!(
             "SELECT {} FROM mail_messages WHERE account_id = $1 AND mailbox_id = $2 AND uid = ANY($3)",
             MESSAGE_COLUMNS

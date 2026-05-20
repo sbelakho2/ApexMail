@@ -60,8 +60,8 @@ class TemplatesResource:
         payload = {
             "name": name,
             "subject": subject,
-            "htmlBody": html_body,
-            "textBody": text_body,
+            "html_body": html_body,
+            "text_body": text_body,
         }
         data = self._client._request("POST", "/v1/templates", json=payload)
         return Template(**_extract_item(data, "template"))
@@ -109,9 +109,9 @@ class TemplatesResource:
         if subject is not None:
             payload["subject"] = subject
         if html_body is not None:
-            payload["htmlBody"] = html_body
+            payload["html_body"] = html_body
         if text_body is not None:
-            payload["textBody"] = text_body
+            payload["text_body"] = text_body
         if not payload:
             raise ValidationError("Update payload must include at least one field")
         data = self._client._request("PUT", f"/v1/templates/{template_id}", json=payload)
@@ -164,8 +164,8 @@ class AsyncTemplatesResource:
         payload = {
             "name": name,
             "subject": subject,
-            "htmlBody": html_body,
-            "textBody": text_body,
+            "html_body": html_body,
+            "text_body": text_body,
         }
         data = await self._client._request("POST", "/v1/templates", json=payload)
         return Template(**_extract_item(data, "template"))
@@ -213,9 +213,9 @@ class AsyncTemplatesResource:
         if subject is not None:
             payload["subject"] = subject
         if html_body is not None:
-            payload["htmlBody"] = html_body
+            payload["html_body"] = html_body
         if text_body is not None:
-            payload["textBody"] = text_body
+            payload["text_body"] = text_body
         if not payload:
             raise ValidationError("Update payload must include at least one field")
         data = await self._client._request("PUT", f"/v1/templates/{template_id}", json=payload)

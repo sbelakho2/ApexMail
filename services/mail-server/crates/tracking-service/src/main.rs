@@ -55,12 +55,18 @@ async fn main() -> Result<()> {
     let codec = TrackingCodec::new(&cfg.secret_key);
 
     // ── PostgreSQL ────────────────────────────────────────────────────
+    // PERF-100: Statement caching enabled (capacity 100) to avoid
+    // re-preparation roundtrips for repeated queries.
+    let connect_opts = cfg.database.url
+        .parse::<sqlx::postgres::PgConnectOptions>()
+        .context("Failed to parse database URL")?
+        .statement_cache_capacity(100);
     let db = PgPoolOptions::new()
         .max_connections(cfg.database.max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
         .idle_timeout(std::time::Duration::from_secs(300))
         .max_lifetime(std::time::Duration::from_secs(1800))
-        .connect(&cfg.database.url)
+        .connect_with(connect_opts)
         .await
         .context("Failed to connect to PostgreSQL")?;
 

@@ -1,0 +1,83 @@
+<clickhouse>
+    <!-- =========================================================================
+         ClickHouse Query Log Configuration
+         =========================================================================
+         Enables structured query logging for performance monitoring.
+         Uses partition_by / order_by / ttl attributes (ClickHouse 24.8 syntax).
+         ========================================================================= -->
+
+    <!-- Query log - performance monitoring with 30-day retention -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <order_by>(event_date, event_time)</order_by>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </query_log>
+
+    <!-- Query thread log - thread-level performance diagnostics -->
+    <query_thread_log>
+        <database>system</database>
+        <table>query_thread_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <order_by>(event_date, event_time)</order_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_thread_log>
+
+    <!-- Trace log - sampling profiler for query execution -->
+    <trace_log>
+        <database>system</database>
+        <table>trace_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <order_by>(event_date, event_time)</order_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </trace_log>
+
+    <!-- Metric log - system-level metrics for performance trending -->
+    <metric_log>
+        <database>system</database>
+        <table>metric_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <order_by>(event_date, event_time)</order_by>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+        <collect_interval_milliseconds>10000</collect_interval_milliseconds>
+    </metric_log>
+
+    <!-- Asynchronous metric log - background metrics -->
+    <asynchronous_metric_log>
+        <database>system</database>
+        <table>asynchronous_metric_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <order_by>(event_date, event_time)</order_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+
+    <!-- Session log - active session tracking -->
+    <session_log>
+        <database>system</database>
+        <table>session_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <order_by>(event_date, event_time)</order_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </session_log>
+
+    <!-- Text log - ClickHouse server operational logging -->
+    <text_log>
+        <database>system</database>
+        <table>text_log</table>
+        <level>error</level>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <order_by>(event_date, event_time)</order_by>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+    </text_log>
+
+    <!-- Query views log -->
+    <query_views_log>
+        <database>system</database>
+        <table>query_views_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <order_by>(event_date, event_time)</order_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_views_log>
+</clickhouse>

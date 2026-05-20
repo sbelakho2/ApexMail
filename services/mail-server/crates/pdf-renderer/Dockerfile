@@ -4,20 +4,36 @@ WORKDIR /app
 
 # Copy workspace Cargo files for dependency caching
 COPY Cargo.toml Cargo.lock ./
-COPY crates/pdf-renderer/Cargo.toml crates/pdf-renderer/Cargo.toml
 
-# Create stub lib to pre-compile dependencies
+# Copy Cargo.toml files for pdf-renderer and its workspace dependencies
+COPY crates/pdf-renderer/Cargo.toml crates/pdf-renderer/Cargo.toml
+COPY crates/apexmail-lib/Cargo.toml crates/apexmail-lib/Cargo.toml
+COPY crates/apexmail-db/Cargo.toml crates/apexmail-db/Cargo.toml
+COPY crates/observability-service/Cargo.toml crates/observability-service/Cargo.toml
+
+# Create stub libs to pre-compile dependencies
 RUN mkdir -p crates/pdf-renderer/src && \
     echo "fn main() {}" > crates/pdf-renderer/src/main.rs && \
     echo "" > crates/pdf-renderer/src/lib.rs && \
+    mkdir -p crates/apexmail-lib/src && \
+    echo "" > crates/apexmail-lib/src/lib.rs && \
+    mkdir -p crates/apexmail-db/src && \
+    echo "" > crates/apexmail-db/src/lib.rs && \
+    mkdir -p crates/observability-service/src && \
+    echo "" > crates/observability-service/src/lib.rs && \
     cargo build --release --package pdf-renderer 2>/dev/null || true
 
-# Copy actual source
+# Copy actual source for all dependency crates
+COPY crates/apexmail-lib/ crates/apexmail-lib/
+COPY crates/apexmail-db/ crates/apexmail-db/
+COPY crates/observability-service/ crates/observability-service/
+
+# Copy actual source for pdf-renderer
 COPY crates/pdf-renderer/ crates/pdf-renderer/
 
 # Build the real binary
-RUN cargo build --release --bin pdf-renderer-server && \
-    strip target/release/pdf-renderer-server
+RUN cargo build --release --bin pdf-renderer && \
+    strip target/release/pdf-renderer
 
 # ── Runtime ─────────────────────────────────────────────────────────────
 
@@ -33,7 +49,7 @@ RUN apt-get update && \
 
 RUN useradd --system --no-create-home --uid 1001 pdf
 
-COPY --from=builder /app/target/release/pdf-renderer-server /usr/local/bin/pdf-renderer-server
+COPY --from=builder /app/target/release/pdf-renderer /usr/local/bin/pdf-renderer-server
 
 USER pdf
 

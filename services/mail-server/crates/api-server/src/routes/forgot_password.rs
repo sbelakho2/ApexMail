@@ -150,10 +150,11 @@ async fn forgot_password(
         // Enqueue the password reset email into both the messages audit log
         // and the email_queue so the worker processor delivers it.
         let encoded_token = percent_encode_component(&token);
-        let encoded_email_param = percent_encode_component(&email);
+        // CWE-598: Use path-based token instead of query parameter to prevent
+        // sensitive token exposure in server logs, referrer headers, and browser history.
         let reset_link = format!(
-            "{}/reset-password?token={}&email={}",
-            state.config.base_url, encoded_token, encoded_email_param,
+            "{}/reset-password/{}",
+            state.config.base_url, encoded_token,
         );
         let msg_id = apexmail_lib::id::generate_id("msg", 22);
         let safe_email = html_escape(&email);

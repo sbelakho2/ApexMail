@@ -150,9 +150,9 @@ impl ImapPoller {
             .unwrap_or_else(|| account.email.clone());
         let password_owned = password.to_owned();
         let subject_owned = subject_pattern.to_owned();
-        let _timeout_secs = self.config.imap_connection_timeout_secs;
+        let timeout_secs = self.config.imap_connection_timeout_secs;
 
-        tokio::task::spawn_blocking(move || {
+        let poll_fut = tokio::task::spawn_blocking(move || {
             let tls = TlsConnector::builder()
                 .build()
                 .map_err(|e| format!("TLS connector build error: {}", e))?;
@@ -212,9 +212,14 @@ impl ImapPoller {
             // Message not found in any of the checked folders.
             let _ = session.logout();
             Ok(None)
-        })
-        .await
-        .map_err(|e| format!("IMAP poll task panicked or cancelled: {}", e))?
+        });
+
+        // RS-M-03: Apply configurable timeout to prevent long-lived IMAP connections
+        // from consuming file descriptors. Default is 30s.
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), poll_fut).await {
+            Ok(result) => result.map_err(|e| format!("IMAP poll task panicked or cancelled: {}", e))?,
+            Err(_) => Err(format!("IMAP poll timed out after {} seconds", timeout_secs)),
+        }
     }
 }
 
@@ -245,8 +250,9 @@ impl ImapPoller {
             .clone()
             .unwrap_or_else(|| account.email.clone());
         let password_owned = password.to_owned();
+        let timeout_secs = self.config.imap_connection_timeout_secs;
 
-        tokio::task::spawn_blocking(move || {
+        let health_fut = tokio::task::spawn_blocking(move || {
             let tls = TlsConnector::builder()
                 .build()
                 .map_err(|e| format!("TLS connector build error: {}", e))?;
@@ -264,9 +270,13 @@ impl ImapPoller {
 
             let _ = session.logout();
             Ok::<(), String>(())
-        })
-        .await
-        .map_err(|e| format!("IMAP health-check task panicked: {}", e))?
+        });
+
+        // RS-M-03: Apply configurable timeout for health checks as well.
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), health_fut).await {
+            Ok(result) => result.map_err(|e| format!("IMAP health-check task panicked: {}", e))?,
+            Err(_) => Err(format!("IMAP health check timed out after {} seconds", timeout_secs)),
+        }
     }
 }
 

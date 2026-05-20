@@ -305,7 +305,7 @@ curl -X GET "https://api.apexmail.ee/v1/templates?category=transactional&active=
 
 ### PUT `/v1/templates/:id`
 
-Partially update a template. Only the supplied fields are changed; a new version is created automatically.
+Update a template. Only the supplied fields are changed (partial update semantics); a new version is created automatically.
 
 **Scope:** `templates:write`
 

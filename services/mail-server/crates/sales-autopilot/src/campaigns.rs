@@ -38,6 +38,21 @@ pub trait CampaignEmailDispatcher: Send + Sync + std::fmt::Debug {
         template_id: &str,
         recipient_emails: &[String],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>>;
+
+    /// Generate a CAN-SPAM compliant unsubscribe link for a campaign recipient (SALES-02).
+    ///
+    /// Every commercial email sent through a campaign MUST include this link
+    /// to provide recipients with a one-click unsubscribe mechanism.
+    /// The link should point to a page that immediately processes the opt-out.
+    ///
+    /// Returns an absolute URL string such as
+    /// `https://app.apexmail.ee/unsubscribe/{tenant_id}/{campaign_id}/{recipient_hash}`.
+    fn unsubscribe_link(
+        &self,
+        tenant_id: &str,
+        campaign_id: Uuid,
+        recipient_email: &str,
+    ) -> String;
 }
 
 /// A no-op dispatcher used as the default. Logs that campaign emails
@@ -67,6 +82,24 @@ impl CampaignEmailDispatcher for NoopCampaignDispatcher {
             );
             Ok(0)
         })
+    }
+
+    fn unsubscribe_link(
+        &self,
+        tenant_id: &str,
+        campaign_id: Uuid,
+        recipient_email: &str,
+    ) -> String {
+        use std::fmt::Write;
+        let mut hash_input = String::new();
+        let _ = write!(hash_input, "{}:{}:{}", tenant_id, campaign_id, recipient_email);
+        // Use SHA-256 to produce a deterministic, opaque hash of the recipient
+        // details. The full hash is 64 hex chars; we take the first 16 for a
+        // compact but sufficiently unique unsubscribe token (64-bit collision
+        // space).
+        let full_hash = apexmail_lib::hash_api_key(&hash_input);
+        let hash_short = &full_hash[..16];
+        format!("https://sales.apexmail.ee/unsubscribe/{}/{}/{}", tenant_id, campaign_id, hash_short)
     }
 }
 

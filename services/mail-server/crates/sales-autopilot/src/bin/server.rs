@@ -1,3 +1,6 @@
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -12,15 +15,30 @@ use sales_autopilot::{
 };
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Initialise structured logging
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "sales-autopilot".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .json()
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let _guard = init_tracing();
 
     let cfg = SalesConfig::from_env();
     tracing::info!(
@@ -55,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         .context("Failed to initialize CRM storage")?;
 
     let state = AppState {
+        config: cfg.clone(),
         enrichment: EnrichmentService::new(Arc::new(HttpEnrichmentProvider::new(
             &cfg.enrichment_api_url,
             "",

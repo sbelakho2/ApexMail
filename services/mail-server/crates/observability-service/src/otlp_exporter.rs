@@ -239,11 +239,17 @@ pub fn init_otlp_tracing(
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
+    // JSON formatter with trace/correlation ID fields for OBS-M-01 compliance.
+    // Every log entry includes the current OTel span context (trace_id, span_id)
+    // so operators can correlate log entries with distributed traces in Tempo.
     let fmt_layer = tracing_subscriber::fmt::layer()
+        .json()
         .with_target(true)
         .with_thread_ids(true)
         .with_file(true)
-        .with_line_number(true);
+        .with_line_number(true)
+        .with_span_list(true)  // Include active span context in log output
+        .with_current_span(true); // Logs include the current span's trace_id/span_id
 
     tracing_subscriber::registry()
         .with(env_filter)

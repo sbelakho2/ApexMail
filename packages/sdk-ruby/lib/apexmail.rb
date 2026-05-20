@@ -238,10 +238,7 @@ module ApexMail
                else
                  JSON.parse(body_text, symbolize_names: true)
                end
-    rescue JSON::ParserError => e
-      parsed = { raw: body_text, parse_error: e.message }
-    ensure
-      parsed ||= {}
+
       error = parsed[:error]
       if error.is_a?(Hash)
         message = error[:message] || body_text
@@ -253,6 +250,11 @@ module ApexMail
         details = parsed[:errors]
       end
       message = "HTTP #{resp.code}" if message.to_s.empty?
+
+      # SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
+      if parsed.is_a?(Hash) && parsed.key?(:data)
+        parsed = parsed[:data]
+      end
 
       case resp.code.to_i
       when 200..299
@@ -269,9 +271,9 @@ module ApexMail
       when 409
         raise ConflictError.new(message || "Conflict",
                                 status_code: 409, code: code, details: details)
-      when 400
+      when 400, 422
         raise ValidationError.new(message || "Bad request",
-                                  status_code: 400, code: code, details: details)
+                                  status_code: resp.code.to_i, code: code, details: details)
       when 429
         raise RateLimitError.new(message || "Rate limit exceeded",
                                  status_code: 429, code: code, details: details,
@@ -280,6 +282,8 @@ module ApexMail
         raise Error.new(message,
                         status_code: resp.code.to_i, code: code, details: details)
       end
+    rescue JSON::ParserError => e
+      { raw: body_text, parse_error: e.message }
     end
   end
 
@@ -426,6 +430,7 @@ module ApexMail
 
     # Cancel a queued or scheduled email by ID.
     # @param id [String] The message ID to cancel
+    # @return [Hash] Queue cancellation result with +id+ and +status+ keys
     def cancel(id)
       @t.request("POST", "/v1/messages/#{ApexMail.encode_path(id)}/cancel", body: {})
     end
@@ -553,7 +558,7 @@ module ApexMail
     # @param id     [String]
     # @param params [Hash] { url:, events:, secret:, active: }
     def update(id, **params)
-      @t.request("PATCH", "/v1/webhooks/#{ApexMail.encode_path(id)}", body: params)
+      @t.request("PUT", "/v1/webhooks/#{ApexMail.encode_path(id)}", body: params)
     end
 
     def delete(id)
@@ -648,8 +653,8 @@ module ApexMail
       @t.request("GET", "/v1/suppressions/check/#{ApexMail.encode_path(email)}")
     end
 
-    def delete(email)
-      @t.request("DELETE", "/v1/suppressions/#{ApexMail.encode_path(email)}")
+    def delete(id)
+      @t.request("DELETE", "/v1/suppressions/#{ApexMail.encode_path(id)}")
     end
 
     def bulk(entries:)
@@ -714,8 +719,8 @@ module ApexMail
       @t.request("POST", "/v1/auth/api-keys", body: body)
     end
 
-    def list(limit: 50, offset: 0)
-      query = ApexMail.build_query(limit: limit, offset: offset)
+    def list(limit: 50, offset: 0, cursor: nil)
+      query = ApexMail.build_query(limit: limit, offset: offset, cursor: cursor)
       @t.request("GET", "/v1/auth/api-keys#{query}")
     end
 

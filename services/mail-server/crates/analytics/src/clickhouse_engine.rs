@@ -98,7 +98,21 @@ impl ClickHouseEngine {
             // For critical reads-after-write (e.g., real-time dashboards), set
             // wait_for_async_insert=1 or query the raw events table.
             .with_option("async_insert", "1")
-            .with_option("wait_for_async_insert", "0");
+            .with_option("wait_for_async_insert", "0")
+            // SCALE-M-03: Batch insert tuning for optimal write throughput.
+            // async_insert_busy_timeout_ms: how long ClickHouse buffers before flushing
+            //   (200ms default gives ~5 flushes/sec without excessive latency).
+            // async_insert_max_data_size: max bytes buffered before forced flush
+            //   (10MB batches balance memory overhead vs throughput).
+            // max_insert_block_size: cap on a single insert block for memory stability
+            //   (keep at 1M default; lower if we see OOM under heavy write load).
+            // min_insert_block_size_rows / min_insert_block_size_bytes: control how
+            //   aggressively ClickHouse merges small inserts into one block.
+            .with_option("async_insert_busy_timeout_ms", "200")
+            .with_option("async_insert_max_data_size", "10000000")
+            .with_option("max_insert_block_size", "1048576")
+            .with_option("min_insert_block_size_rows", "100000")
+            .with_option("min_insert_block_size_bytes", "50000000");
 
         if config.tls_enabled {
             client_builder = client_builder.with_option("secure", "1");

@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS dedicated_ips (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id         UUID NOT NULL,
     ip_address        TEXT NOT NULL,
-    region            TEXT NOT NULL DEFAULT 'us-east-1',
+    region            VARCHAR(64) NOT NULL DEFAULT 'us-east-1',
 
 -- SES integration
     ses_pool_name     TEXT,
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS dedicated_ips (
 
 -- Billing integration
     billing_status    TEXT NOT NULL DEFAULT 'pending_charge'
-        CHECK (billing_status IN ('included', 'pending_charge', 'active', 'pending_cancel', 'canceled')),
+        CHECK (billing_status IN ('included', 'pending_charge', 'active', 'pending_cancel', 'canceled', 'cancelled')),
     stripe_subscription_item_id TEXT,
     billing_failure_count INT NOT NULL DEFAULT 0,
     billing_retry_after TIMESTAMPTZ,

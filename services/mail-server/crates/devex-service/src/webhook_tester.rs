@@ -207,16 +207,17 @@ impl WebhookTester {
     }
 }
 
-/// Constant-time byte comparison.
+/// RS-064: Constant-time byte comparison that does NOT leak length through timing.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let len_matches = a.len() == b.len();
     let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    for (x, y) in a.iter().zip(b.iter().chain(std::iter::repeat(&0))) {
         diff |= x ^ y;
     }
-    diff == 0
+    for y in b.iter().skip(a.len()) {
+        diff |= *y;
+    }
+    len_matches && diff == 0
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

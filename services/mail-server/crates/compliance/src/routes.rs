@@ -145,17 +145,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
 // ── Auth middleware (per-request via Bearer token) ─────────────────────────
 
-/// Timing-safe comparison for auth tokens.
-/// Guards against timing attacks by using constant-time comparison.
+/// RS-064: Timing-safe comparison for auth tokens.
+/// Does NOT leak length through timing — always iterates over both strings fully.
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let len_matches = a.len() == b.len();
     let mut result: u8 = 0;
-    for (ca, cb) in a.bytes().zip(b.bytes()) {
+    for (ca, cb) in a.bytes().zip(b.bytes().chain(std::iter::repeat(0))) {
         result |= ca ^ cb;
     }
-    result == 0
+    for cb in b.bytes().skip(a.len()) {
+        result |= cb;
+    }
+    len_matches && result == 0
 }
 
 /// Verify the Bearer token in the request headers.

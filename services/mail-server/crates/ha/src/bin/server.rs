@@ -10,19 +10,38 @@ use ha::multi_region::MultiRegionService;
 use ha::replication::ReplicationService;
 use ha::routes::{build_router, AppState};
 use ha::types::HealthStatus;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 
 use std::error::Error;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "ha-server".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .json()
         .with_target(true)
         .with_env_filter("info")
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let _guard = init_tracing();
 
     let config = Arc::new(Config::from_env());
     info!(

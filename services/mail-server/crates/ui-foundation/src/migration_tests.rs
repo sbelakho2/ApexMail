@@ -304,6 +304,8 @@ fn migration_primitives_render_valid_html() {
         right_icon: None,
         error: None,
         disabled: false,
+        autocomplete: None,
+        required: false,
     };
     let html = input.render_html();
     assert!(html.contains("<input"), "Input missing <input> tag");

@@ -260,6 +260,8 @@ pub struct Input<'a> {
     pub right_icon: Option<&'a str>,
     pub error: Option<&'a str>,
     pub disabled: bool,
+    pub autocomplete: Option<&'a str>,
+    pub required: bool,
 }
 
 impl<'a> Input<'a> {
@@ -276,8 +278,17 @@ impl<'a> Input<'a> {
         } else {
             ""
         };
+        let autocomplete_attr = self
+            .autocomplete
+            .map(|value| format!(" autocomplete=\"{}\"", value))
+            .unwrap_or_default();
+        let required_attr = if self.required {
+            " required aria-required=\"true\""
+        } else {
+            ""
+        };
         let input_markup = format!(
-            "<input type=\"{}\" value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-sm border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}{}{}\" data-variant=\"{}\" data-size=\"{}\" />",
+            "<input type=\"{}\" value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-sm border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}{}{}{}\"{} data-variant=\"{}\" data-size=\"{}\" />",
             self.input_type,
             self.value,
             self.placeholder,
@@ -285,6 +296,8 @@ impl<'a> Input<'a> {
             input_size_class(self.size),
             disabled,
             aria_error,
+            autocomplete_attr,
+            required_attr,
             resolved_variant,
             self.size,
         );
@@ -1013,7 +1026,7 @@ impl<'a> DropdownMenu<'a> {
             format!("<div role=\"menuitem\" tabindex=\"{}\" class=\"relative flex cursor-default select-none items-center rounded-sm px-3 py-3 text-[14px] font-medium outline-none transition-colors focus:bg-surface-100 focus:text-surface-900 cursor-pointer min-h-[44px]{}{}\">{}{}</div>", tabindex, inset, destructive, item.label, shortcut)
         }).collect::<Vec<_>>().join("");
         let keyboard_attrs = " data-keyboard-contract=\"dropdown-menu\" data-keyboard-arrow-navigates=\"true\" data-keyboard-enter-activates=\"true\" data-keyboard-escape-closes=\"true\"";
-        format!("<div class=\"z-50 min-w-[8rem] overflow-hidden rounded-sm border border-surface-200/60 bg-white/90 backdrop-blur-xl p-1.5 text-surface-900 data-[state=open]:animate-in\" role=\"menu\"{}>{}{}</div>{}", keyboard_attrs, label, items, separator)
+        format!("<div class=\"z-50 min-w-[8rem] overflow-hidden rounded-sm border border-surface-200/60 bg-card/90 backdrop-blur-xl p-1.5 text-surface-900 data-[state=open]:animate-in\" role=\"menu\"{}>{}{}</div>{}", keyboard_attrs, label, items, separator)
     }
 }
 
@@ -1507,7 +1520,7 @@ impl<'a> Card<'a> {
             ""
         };
         format!(
-            "<div class=\"apex-card rounded-sm border border-surface-200 bg-white text-surface-950 transition-premium {} {}{}\"><div class=\"flex flex-col space-y-2 min-w-0 mb-4\"><h3 class=\"text-xs font-bold uppercase tracking-widest leading-tight break-words text-surface-400\">{}</h3></div><div class=\"min-w-0\">{}</div></div>",
+            "<div class=\"apex-card rounded-sm border border-surface-200 bg-card text-surface-950 transition-premium {} {}{}\"><div class=\"flex flex-col space-y-2 min-w-0 mb-4\"><h3 class=\"text-xs font-bold uppercase tracking-widest leading-tight break-words text-surface-400\">{}</h3></div><div class=\"min-w-0\">{}</div></div>",
             card_variant_class(self.variant),
             card_padding_class(self.padding),
             interactive,
@@ -1851,7 +1864,7 @@ fn alert_dialog_confirm_class(variant: &str) -> &'static str {
 
 fn tooltip_variant_class(variant: &str) -> &'static str {
     match variant {
-        "light" => "bg-white text-surface-900 border-surface-200",
+        "light" => "bg-card text-surface-900 border-surface-200",
         "glass" => "backdrop-blur-md bg-white/10 border-white/20 text-white ",
         _ => "bg-surface-900 text-white border-surface-800 ",
     }
@@ -1880,7 +1893,7 @@ fn toast_variant_class(variant: &str) -> &'static str {
         "destructive" => "destructive group border-destructive/30 bg-destructive/10 backdrop-blur-xl text-destructive",
         "warning" => "border-warning/30 bg-warning/10 backdrop-blur-xl text-warning-700",
         "info" => "border-primary/30 bg-primary/10 backdrop-blur-xl text-primary-700",
-        _ => "border-surface-200 bg-white/90 backdrop-blur-xl text-surface-900",
+        _ => "border-surface-200 bg-card/90 backdrop-blur-xl text-surface-900",
     }
 }
 
@@ -2558,6 +2571,8 @@ mod tests {
             right_icon: None,
             error: None,
             disabled: false,
+            autocomplete: None,
+        required: false,
         };
         let progress = Progress {
             value: 42,
@@ -2656,6 +2671,8 @@ mod tests {
             right_icon: Some("<svg></svg>"),
             error: Some("Required"),
             disabled: false,
+            autocomplete: None,
+            required: false,
         }
         .render_html();
 
@@ -2679,6 +2696,8 @@ mod tests {
             right_icon: None,
             error: None,
             disabled: true,
+            autocomplete: None,
+            required: false,
         }
         .render_html();
 

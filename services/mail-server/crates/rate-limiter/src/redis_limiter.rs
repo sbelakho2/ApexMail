@@ -190,7 +190,17 @@ impl RedisLimiter {
         let key_scope = tenant_id.unwrap_or("default");
         let cm = match &self.cm {
             Some(cm) => cm,
-            None => return self.fallback.check_n(1),
+            // RS-054: When Redis is unavailable, fail-open (allow) instead of
+            // consuming tokens from the in-memory fallback, which causes over-limiting.
+            // Peek is read-only and should not modify state.
+            None => {
+                warn!(
+                    "Redis unavailable during peek — allowing request (fail-open) to avoid over-limiting"
+                );
+                return Decision::Allowed {
+                    remaining: self.max_requests,
+                };
+            }
         };
 
         let key = format!("{}{}", self.key_prefix, key_scope);

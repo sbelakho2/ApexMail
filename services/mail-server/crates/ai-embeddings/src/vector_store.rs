@@ -377,26 +377,18 @@ fn compute_hmac(key: &[u8], data: &[u8]) -> Result<String, EmbeddingError> {
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
-/// Constant-time comparison to prevent timing attacks on HMAC verification.
+/// RS-064: Constant-time comparison that does NOT leak length through timing.
+/// Always iterates over both strings fully regardless of length difference.
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-
-    // Perform comparison with approximately constant time
-    // (within noise of CPU scheduling)
-    let start = Instant::now();
+    let len_matches = a.len() == b.len();
     let mut result = 0u8;
-    for (ca, cb) in a.bytes().zip(b.bytes()) {
+    for (ca, cb) in a.bytes().zip(b.bytes().chain(std::iter::repeat(0))) {
         result |= ca ^ cb;
     }
-    // Waste a small amount of time proportional to the length
-    // to make timing less discriminative for different-length mismatches
-    std::hint::spin_loop();
-    let _elapsed = start.elapsed();
-    let _ = _elapsed; // keep variable alive
-
-    result == 0
+    for cb in b.bytes().skip(a.len()) {
+        result |= cb;
+    }
+    len_matches && result == 0
 }
 
 /// Min-heap entry for top-K search (inverted comparison).

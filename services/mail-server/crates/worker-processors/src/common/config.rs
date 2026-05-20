@@ -187,6 +187,8 @@ impl Default for TrackingConfig {
 }
 
 /// Warmup configuration.
+/// DEPRECATED: This warmup config is unused. Hetzner dedicated IP warmup is managed
+/// by the API server's DedicatedIpProvider (mail-common::warmup).
 #[derive(Debug, Clone)]
 pub struct WarmupConfig {
     pub enabled: bool,
@@ -254,6 +256,14 @@ pub struct WebhookConfig {
     /// When set, dedup keys are HMAC(webhook_id || nonce, key) instead of
     /// plain `format!("webhook:dedup:{}:{}", job.id, job.attempt)`.
     pub dedup_hmac_key: Option<zeroize::Zeroizing<String>>,
+    /// Maximum retries per webhook endpoint within the retry budget window
+    /// (RS-H-07). When the retry budget is exhausted, new failures are moved
+    /// directly to the dead letter queue rather than scheduled for retry.
+    /// Set to 0 to disable budget enforcement.
+    pub retry_budget_max: u32,
+    /// Time window in seconds for the retry budget (RS-H-07).
+    /// Retry counts are tracked in Redis and reset after this window elapses.
+    pub retry_budget_window_secs: u64,
 }
 
 impl Default for WebhookConfig {
@@ -268,6 +278,8 @@ impl Default for WebhookConfig {
             request_timeout: Duration::from_secs(30),
             dns_cache_ttl: Duration::from_secs(60),
             dedup_hmac_key: None,
+            retry_budget_max: 50,
+            retry_budget_window_secs: 3600, // 1 hour
         }
     }
 }

@@ -21,6 +21,10 @@ const MAX_EVENT_BUFFER_SIZE: usize = 50_000;
 /// Maximum aggregation buffer keys before forced eviction.
 const MAX_AGGREGATION_BUFFER_SIZE: usize = 10_000;
 
+/// Minimum events in buffer before triggering a flush (even if flush_interval
+/// has elapsed). Prevents tiny flushes that waste ClickHouse write throughput.
+const MIN_FLUSH_BATCH_SIZE: usize = 50;
+
 /// Analytics processor for event aggregation and real-time stats.
 pub struct AnalyticsProcessor {
     db: PgPool,
@@ -360,7 +364,12 @@ impl AnalyticsProcessor {
         }
     }
 
-    /// Periodic flush loop.
+    /// Periodic flush loop — flushes when either:
+    /// 1. The flush interval has elapsed AND there are MIN_FLUSH_BATCH_SIZE events, OR
+    /// 2. The buffer exceeds the configured batch_size (size-based trigger, see process_events_inner).
+    ///
+    /// This prevents tiny flushes that waste ClickHouse write throughput while still
+    /// ensuring timely delivery during low-volume periods.
     async fn flush_loop(&self) {
         let mut flush_interval = interval(self.config.base.flush_interval);
         flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -368,8 +377,20 @@ impl AnalyticsProcessor {
         while self.is_running.load(Ordering::SeqCst) {
             tokio::select! {
                 _ = flush_interval.tick() => {
-                    if let Err(e) = self.flush_buffers().await {
-                        error!("Flush error: {}", e);
+                    // Only flush if the buffer has enough events to justify a batch.
+                    let buffer_len = self.event_buffer.read()
+                        .map(|b| b.len())
+                        .unwrap_or(0);
+                    if buffer_len >= MIN_FLUSH_BATCH_SIZE {
+                        if let Err(e) = self.flush_buffers().await {
+                            error!("Flush error: {}", e);
+                        }
+                    } else {
+                        debug!(
+                            buffer_len = buffer_len,
+                            min_flush = MIN_FLUSH_BATCH_SIZE,
+                            "Skipping flush — buffer below minimum batch size"
+                        );
                     }
                 }
                 _ = self.shutdown_notify.notified() => break,

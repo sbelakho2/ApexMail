@@ -8,6 +8,7 @@
 //! 5. GET /v1/domains/:id/dns-records shows required DNS records.
 
 use super::helpers::{clamp_limit, default_limit};
+use apexmail_lib::cache::cache_del;
 use aws_sdk_sesv2::types::DkimSigningKeyLength;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -112,10 +113,8 @@ async fn create_domain(
         sqlx::query_as("SELECT EXISTS(SELECT 1 FROM domains WHERE tenant_id = $1 AND name = $2)")
             .bind(&auth.tenant_id)
             .bind(&body.name)
-            .fetch_one(&state.db)
-            .await
-            .map(Some)
-            .unwrap_or(None);
+            .fetch_optional(&state.db)
+            .await?;
 
     if existing.is_some_and(|r| r.0) {
         return Err(ApiError::Conflict("domain already exists".into()));
@@ -125,8 +124,7 @@ async fn create_domain(
     let domain_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
         .bind(&auth.tenant_id)
         .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
+        .await?;
 
     let max_domains: Option<(i64,)> = sqlx::query_as(
         r#"SELECT COALESCE((p.features->>'max_sending_domains')::bigint, -1)
@@ -135,8 +133,7 @@ async fn create_domain(
     )
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
+    .await?;
 
     if let Some((limit,)) = max_domains {
         // -1 means unlimited
@@ -359,6 +356,12 @@ async fn verify_domain(
     .bind(id)
     .execute(&state.db)
     .await?;
+
+    // SCALE-M-05: Invalidate cached domain data on verification status change
+    let cache_key = format!("apexmail:cache:domain:{}", id);
+    if let Err(e) = cache_del(&state.redis, &cache_key).await {
+        warn!(error = %e, domain_id = %id, "failed to invalidate domain cache after verification");
+    }
 
     Ok(Json(VerifyResponse {
         domain: row.name,

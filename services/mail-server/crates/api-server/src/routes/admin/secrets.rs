@@ -89,10 +89,12 @@ fn default_limit() -> i64 {
 }
 
 fn build_list_secrets_sql() -> &'static str {
+    // RS-050: Scoped by tenant_id to prevent cross-tenant secret exposure.
     "SELECT id, name, type, description, rotation_policy, status,
             access_count, last_accessed, last_rotated, expires_at,
             created_at, updated_at
-     FROM secrets ORDER BY created_at DESC
+     FROM secrets WHERE tenant_id = $3
+     ORDER BY created_at DESC
      LIMIT $1 OFFSET $2"
 }
 
@@ -126,9 +128,11 @@ async fn list_secrets(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
+    // RS-050: Bind tenant_id from authenticated session, not user input.
     let rows = sqlx::query_as::<_, SecretRow>(build_list_secrets_sql())
         .bind(limit)
         .bind(offset)
+        .bind(&auth.tenant_id)
         .fetch_all(&state.db)
         .await?;
 
@@ -191,9 +195,10 @@ async fn create_secret(
         return Err(ApiError::Validation(vec!["Invalid rotation policy".into()]));
     }
 
+    // RS-050: Include tenant_id from authenticated session in INSERT.
     let row = sqlx::query_as::<_, SecretRow>(
-        "INSERT INTO secrets (name, type, description, rotation_policy, status)
-         VALUES ($1, $2, $3, $4, 'active')
+        "INSERT INTO secrets (name, type, description, rotation_policy, status, tenant_id)
+         VALUES ($1, $2, $3, $4, 'active', $5)
          RETURNING id, name, type, description, rotation_policy, status,
                    access_count, last_accessed, last_rotated, expires_at,
                    created_at, updated_at",
@@ -202,6 +207,7 @@ async fn create_secret(
     .bind(&body.secret_type)
     .bind(&body.description)
     .bind(&body.rotation_policy)
+    .bind(&auth.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -232,11 +238,13 @@ async fn update_secret(
 
     match body.action.as_str() {
         "rotate" => {
+            // RS-050: Scope rotate by tenant_id to prevent cross-tenant modification.
             let result = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
                 "UPDATE secrets SET last_rotated = NOW(), status = 'active', updated_at = NOW()
-                 WHERE id = $1 RETURNING last_rotated",
+                 WHERE id = $1 AND tenant_id = $2 RETURNING last_rotated",
             )
             .bind(&body.id)
+            .bind(&auth.tenant_id)
             .fetch_optional(&state.db)
             .await?;
 
@@ -260,11 +268,13 @@ async fn update_secret(
             }
         }
         "revoke" => {
+            // RS-050: Scope revoke by tenant_id to prevent cross-tenant modification.
             let result = sqlx::query(
                 "UPDATE secrets SET status = 'revoked', updated_at = NOW()
-                 WHERE id = $1 RETURNING id",
+                 WHERE id = $1 AND tenant_id = $2 RETURNING id",
             )
             .bind(&body.id)
+            .bind(&auth.tenant_id)
             .fetch_optional(&state.db)
             .await?;
 
@@ -315,8 +325,10 @@ async fn delete_secret(
         .or(query.id)
         .ok_or_else(|| ApiError::Validation(vec!["Secret ID is required".into()]))?;
 
-    let result = sqlx::query("DELETE FROM secrets WHERE id = $1 RETURNING id")
+    // RS-050: Scope delete by tenant_id to prevent cross-tenant deletion.
+    let result = sqlx::query("DELETE FROM secrets WHERE id = $1 AND tenant_id = $2 RETURNING id")
         .bind(&id)
+        .bind(&auth.tenant_id)
         .fetch_optional(&state.db)
         .await?;
 
@@ -347,5 +359,6 @@ mod tests {
         let sql = build_list_secrets_sql();
 
         assert!(sql.contains("LIMIT $1 OFFSET $2"));
+        assert!(sql.contains("WHERE tenant_id = $3"), "list_secrets must scope by tenant_id");
     }
 }

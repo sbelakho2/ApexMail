@@ -2,8 +2,8 @@
 # =============================================================================
 # Redis entrypoint wrapper
 # =============================================================================
-# Reads password from Docker secret file and optionally configures TLS.
-# H11: TLS configuration added for encrypted Redis traffic.
+# Reads password from Docker secret file and configures Redis authentication
+# using an ACL file (avoiding --requirepass which leaks via /proc/<pid>/cmdline).
 #
 # Development: uses self-signed certs generated on startup.
 # Production:  mount proper CA-signed certificates and set:
@@ -30,8 +30,21 @@ else
     fi
 fi
 
+# ── ACL file setup ──────────────────────────────────────────────────────────
+# SECURITY (SEC-103): Use ACL file instead of --requirepass to prevent the
+# password from being visible via /proc/<pid>/cmdline.
+ACL_DIR="/tmp/redis-acl"
+ACL_FILE="${ACL_DIR}/users.acl"
+mkdir -p "$ACL_DIR"
+
+# Write ACL file with the password from the secret
+# Using plaintext password in ACL file (Redis reads it at startup)
+echo "user default on >${REDIS_PASSWORD} ~* &* +@all" > "$ACL_FILE"
+chmod 600 "$ACL_FILE"
+unset REDIS_PASSWORD
+
 # ── TLS Configuration ──────────────────────────────────────────────────────
-# H11: If REDIS_TLS_ENABLED=true, configure TLS certificates.
+# If REDIS_TLS_ENABLED=true, configure TLS certificates.
 # In dev, generate a self-signed cert if none provided.
 TLS_ARGS=""
 if [ "${REDIS_TLS_ENABLED:-false}" = "true" ]; then
@@ -75,5 +88,5 @@ exec redis-server \
     --appendonly yes \
     --maxmemory "${REDIS_MAXMEMORY:-256mb}" \
     --maxmemory-policy "${REDIS_MAXMEMORY_POLICY:-noeviction}" \
-    --requirepass "$REDIS_PASSWORD" \
+    --aclfile "$ACL_FILE" \
     $TLS_ARGS

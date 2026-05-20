@@ -4,6 +4,9 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use std::path::PathBuf;
 use tonic::transport::Channel;
 use tracing::{error, info};
@@ -87,11 +90,18 @@ enum Commands {
     Stats,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Structured JSON logging with env-driven filter
-    // Sampling strategy: default `info` level; use RUST_LOG for fine-grained control.
-    // For high-volume outbound queue, consider `RUST_LOG=warn,outbound_queue=info` in prod.
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "send-email".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .json()
         .with_target(true)
@@ -100,6 +110,12 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let _guard = init_tracing();
 
     let cli = Cli::parse();
 

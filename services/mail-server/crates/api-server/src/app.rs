@@ -26,7 +26,7 @@ use tower_http::trace::TraceLayer;
 use ui_foundation::axum_router as ui_router;
 
 use crate::config::Config;
-use crate::middleware::{auth, ddos, idempotency, metrics, rate_limiter, request_logger};
+use crate::middleware::{auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning};
 use crate::routes;
 use crate::state::AppState;
 
@@ -537,6 +537,10 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(content_type_check))
         .layer(axum::middleware::from_fn(security_headers))
         .layer(axum::middleware::from_fn(request_logger::request_logger))
+        // Accept-header API version negotiation (RS-M-10)
+        .layer(axum::middleware::from_fn(
+            versioning::api_versioning_middleware,
+        ))
         .layer(overload_protection)
         // Prometheus request metrics — placed after the router so MatchedPath is
         // available from extensions, but before compression/timeout so the

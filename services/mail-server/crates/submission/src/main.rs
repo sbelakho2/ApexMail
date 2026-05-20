@@ -5,6 +5,9 @@
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use rustls_pemfile::{certs, private_key};
 use std::fs::File;
 use std::io::BufReader as StdBufReader;
@@ -98,9 +101,18 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logging
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "submission-server".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -108,6 +120,12 @@ async fn main() -> Result<()> {
         )
         .json()
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let _guard = init_tracing();
 
     let args = Args::parse();
 

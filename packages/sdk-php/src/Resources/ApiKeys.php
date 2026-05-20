@@ -38,6 +38,7 @@ class ApiKeys
         $query = http_build_query(array_filter([
             'limit'  => $options['limit']  ?? 50,
             'offset' => $options['offset'] ?? 0,
+            'cursor' => $options['cursor'] ?? null,
         ], static fn ($value) => $value !== null && $value !== ''));
 
         return $this->client->request('GET', '/v1/auth/api-keys' . ($query ? '?' . $query : ''));

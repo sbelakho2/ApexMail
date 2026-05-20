@@ -12,6 +12,14 @@
 #   Production:  docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 # =============================================================================
 
+# ── Shared logging configuration ──────────────────────────────────────────────
+# All services inherit these defaults unless overridden.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   # ===========================================================================
   # DATABASE
@@ -54,6 +62,7 @@ services:
       - /var/run/postgresql
     secrets:
       - postgres_password
+    logging: *default-logging
 
   # ===========================================================================
   # REDIS
@@ -100,6 +109,103 @@ services:
       - /tmp
     secrets:
       - redis_password
+    logging: *default-logging
+
+  # ===========================================================================
+  # REDIS SENTINEL (High Availability — SCALE-H-01)
+  # ===========================================================================
+  # Three Sentinel instances provide quorum-based automatic failover for the
+  # Redis primary.  Sentinel monitors the primary and promotes a replica when
+  # the primary becomes unreachable.  Applications should connect via Sentinel
+  # (not directly to the primary) so they automatically discover the new
+  # primary after failover.
+  #
+  # Production note: In a real deployment each Sentinel should run on a
+  # separate host/VM.  This compose setup collocates them for development.
+  # ===========================================================================
+  redis-sentinel-1:
+    image: redis:7.4-alpine
+    container_name: apexmail-redis-sentinel-1
+    restart: unless-stopped
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./deploy/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${REDIS_SENTINEL_1_PORT:-127.0.0.1:26379}:26379"
+    networks:
+      - apexmail_data
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging: *default-logging
+
+  redis-sentinel-2:
+    image: redis:7.4-alpine
+    container_name: apexmail-redis-sentinel-2
+    restart: unless-stopped
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./deploy/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${REDIS_SENTINEL_2_PORT:-127.0.0.1:26380}:26379"
+    networks:
+      - apexmail_data
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging: *default-logging
+
+  redis-sentinel-3:
+    image: redis:7.4-alpine
+    container_name: apexmail-redis-sentinel-3
+    restart: unless-stopped
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./deploy/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${REDIS_SENTINEL_3_PORT:-127.0.0.1:26381}:26379"
+    networks:
+      - apexmail_data
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging: *default-logging
 
   # =========================================================================
   # OBSERVABILITY SERVICE
@@ -140,6 +246,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    logging: *default-logging
 
   # =========================================================================
   # OPENTELEMETRY COLLECTOR
@@ -169,6 +276,7 @@ services:
           memory: 128M
     security_opt:
       - no-new-privileges:true
+    logging: *default-logging
 
   # =========================================================================
   # TEMPO (Optional distributed tracing backend)
@@ -196,6 +304,7 @@ services:
           memory: 128M
     security_opt:
       - no-new-privileges:true
+    logging: *default-logging
 
   # ===========================================================================
   # TRACKING SERVER
@@ -252,16 +361,13 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
       CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
       CLICKHOUSE_MAX_CONNECTIONS: ${CLICKHOUSE_MAX_CONNECTIONS:-20}
+      # ── JWT (SEC-119: RS256 for all JWT operations) ──────────────────────
+      JWT_PUBLIC_KEY_PEM: ${JWT_PUBLIC_KEY_PEM:?JWT_PUBLIC_KEY_PEM is required}
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
       - "127.0.0.1:${TRACKING_PORT:-3001}:3001"
       - "127.0.0.1:${TRACKING_METRICS_PORT:-9092}:9092"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 3001"]
       interval: 15s
@@ -287,6 +393,7 @@ services:
       - postgres_password
       - clickhouse_password
       - redis_password
+    logging: *default-logging
 
   # ==========================================================================
   # API SERVER
@@ -350,11 +457,6 @@ services:
     ports:
       - "127.0.0.1:${API_PORT:-8080}:8080"
       - "127.0.0.1:${API_METRICS_PORT:-9090}:9090"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 8080"]
       interval: 15s
@@ -380,6 +482,7 @@ services:
     secrets:
       - postgres_password
       - redis_password
+    logging: *default-logging
 
   # ==========================================================================
   # ENTERPRISE SERVER
@@ -417,11 +520,6 @@ services:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
       - "127.0.0.1:${ENTERPRISE_PORT:-3002}:3002"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 3002"]
       interval: 15s
@@ -446,6 +544,7 @@ services:
     secrets:
       - postgres_password
       - redis_password
+    logging: *default-logging
 
   # ===========================================================================
   # MTA (Mail Transfer Agent)
@@ -464,6 +563,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
+      LOCAL_DOMAINS: ${LOCAL_DOMAINS:-apexmail.ee}
       METRICS_PORT: 9090
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 25"]
@@ -488,6 +588,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    logging: *default-logging
 
   # ===========================================================================
   # PDF RENDERER (Typst-based PDF generation)
@@ -551,6 +652,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    logging: *default-logging
 
   # ===========================================================================
   # CLICKHOUSE (OLAP Analytics)
@@ -569,6 +671,8 @@ services:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
       - ./deploy/clickhouse/logging.xml:/etc/clickhouse-server/config.d/logging.xml:ro
+      - ./deploy/clickhouse/query-log.xml:/etc/clickhouse-server/config.d/query-log.xml:ro
+      - ./deploy/clickhouse/users.xml:/etc/clickhouse-server/users.d/apexmail-users.xml:ro
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
       - "${CLICKHOUSE_HTTP_PORT:-127.0.0.1:8123}:8123"
@@ -592,6 +696,7 @@ services:
         hard: 262144
     secrets:
       - clickhouse_password
+    logging: *default-logging
     security_opt:
       - no-new-privileges:true
       - apparmor:docker-default
@@ -619,7 +724,13 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}'
       - '--storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-20GB}'
-      - '--web.enable-lifecycle'
+      # SECURITY (SEC-105): Lifecycle API disabled to prevent unauthenticated
+      # remote shutdown/reload. Use SIGHUP for config reloads if needed.
+      # Note: listen-address is NOT restricted to localhost because Grafana
+      # and other monitoring containers need network access to query Prometheus.
+      # Host-side port binding is already restricted to 127.0.0.1 via the
+      # ports mapping below.
+      - '--web.enable-lifecycle=false'
     ports:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     networks:
@@ -639,6 +750,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    logging: *default-logging
 
   # ===========================================================================
   # GRAFANA (Optional dashboards)
@@ -656,10 +768,15 @@ services:
       - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro
     environment:
       GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-apexmail-dev-admin}
+      # SECURITY-CRITICAL: Change this password in production!
+      # Use a strong, randomly-generated password. Set via GRAFANA_ADMIN_PASSWORD
+      # environment variable. The default "changeme" is INSECURE for production.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
       GF_USERS_ALLOW_SIGN_UP: false
       GF_SECURITY_DISABLE_GRAVATAR: true
       GF_ANALYTICS_REPORTING_ENABLED: false
+      # SECURITY: Disable anonymous access - all users must authenticate
+      GF_AUTH_ANONYMOUS_ENABLED: false
       GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
     ports:
       - "${GRAFANA_PORT:-127.0.0.1:3003}:3000"
@@ -679,6 +796,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    logging: *default-logging
 
   # =========================================================================
   # LOKI (Log aggregation)
@@ -710,6 +828,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    logging: *default-logging
 
   # =========================================================================
   # ALERTMANAGER
@@ -736,6 +855,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    logging: *default-logging
 
   # =========================================================================
   # POSTGRES EXPORTER
@@ -762,6 +882,7 @@ services:
       - monitoring
     secrets:
       - postgres_password
+    logging: *default-logging
 
   # =========================================================================
   # REDIS EXPORTER
@@ -787,6 +908,7 @@ services:
       - monitoring
     secrets:
       - redis_password
+    logging: *default-logging
 
   # =========================================================================
   # CLICKHOUSE EXPORTER
@@ -824,6 +946,7 @@ services:
       - monitoring
     secrets:
       - clickhouse_password
+    logging: *default-logging
 
   # =========================================================================
   # NODE EXPORTER
@@ -849,6 +972,7 @@ services:
       - apexmail_monitoring
     profiles:
       - monitoring
+    logging: *default-logging
 
   # =========================================================================
   # BLACKBOX EXPORTER
@@ -861,6 +985,11 @@ services:
     security_opt:
       - no-new-privileges:true
       - apparmor:docker-default
+    # SECURITY: NET_RAW is required for ICMP probes (ping-based blackbox checks)
+    # but is dropped by default. Only add if you use ICMP probe modules.
+    # Without this capability, ICMP probes will fail with "operation not permitted".
+    cap_add:
+      - NET_RAW
     volumes:
       - ./deploy/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
     command:
@@ -869,6 +998,7 @@ services:
       - apexmail_monitoring
     profiles:
       - monitoring
+    logging: *default-logging
 
   # =========================================================================
   # SYNTHETIC TRANSACTION MONITOR
@@ -901,6 +1031,7 @@ services:
       - apexmail_monitoring
     profiles:
       - monitoring
+    logging: *default-logging
 
 # ===========================================================================
 # VOLUMES

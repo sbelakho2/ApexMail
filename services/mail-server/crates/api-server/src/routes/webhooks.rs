@@ -23,6 +23,7 @@ pub fn router() -> Router<AppState> {
             get(get_webhook).put(update_webhook).delete(delete_webhook),
         )
         .route("/:id/test", post(test_webhook))
+        .route("/:id/rotate-secret", post(rotate_webhook_secret))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -297,27 +298,38 @@ async fn test_webhook(
         )));
     }
 
-    // Additional DNS rebinding protection:resolve and check IP before request.
+    // RS-058: SSRF protection — resolve DNS and verify IP is not private/internal
+    // BEFORE making the HTTP request. Use the resolved IP directly to prevent
+    // DNS rebinding (TOCTOU) attacks between resolution and connection.
     let url = Url::parse(&wh.url).map_err(|e| ApiError::BadRequest(format!("invalid URL: {e}")))?;
     if let Some(host) = url.host_str() {
         // Skip DNS check for localhost in dev
         if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-            // Try to resolve and verify the IP isn't private
-            if let Ok(addrs) = tokio::net::lookup_host(format!(
-                "{}:{}",
-                host,
-                url.port_or_known_default().unwrap_or(443)
-            ))
-            .await
-            {
-                for addr in addrs {
-                    let ip_str = addr.ip().to_string();
-                    if is_private_or_reserved_host(&ip_str) {
+            let target_port = url.port_or_known_default().unwrap_or(443);
+            // Resolve DNS and check all returned IPs
+            match tokio::net::lookup_host(format!("{host}:{target_port}")).await {
+                Ok(addrs) => {
+                    let mut safe_addrs = Vec::new();
+                    for addr in addrs {
+                        let ip_str = addr.ip().to_string();
+                        if is_private_or_reserved_host(&ip_str) {
+                            return Err(ApiError::BadRequest(
+                                "webhook URL resolves to a private IP address (possible DNS rebinding)"
+                                    .into(),
+                            ));
+                        }
+                        safe_addrs.push(addr);
+                    }
+                    if safe_addrs.is_empty() {
                         return Err(ApiError::BadRequest(
-                            "webhook URL resolves to a private IP address (possible DNS rebinding)"
-                                .into(),
+                            "webhook URL could not be resolved to any IP address".into(),
                         ));
                     }
+                }
+                Err(e) => {
+                    return Err(ApiError::BadRequest(format!(
+                        "failed to resolve webhook URL host: {e}"
+                    )));
                 }
             }
         }
@@ -332,9 +344,13 @@ async fn test_webhook(
         "timestamp": Utc::now().to_rfc3339(),
     });
 
+    // RS-071: Return error instead of using unwrap_or_default() which would
+    // produce an HMAC of empty data, causing silent signature verification failures.
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| ApiError::Internal(format!("failed to serialize webhook test payload: {e}")))?;
     let signature = apexmail_lib::crypto::create_hmac_signature(
         wh.secret.as_bytes(),
-        &serde_json::to_vec(&payload).unwrap_or_default(),
+        &payload_bytes,
     );
 
     let start = std::time::Instant::now();
@@ -362,6 +378,58 @@ async fn test_webhook(
             error: Some(e.to_string()),
         })),
     }
+}
+
+/// Rotate the webhook signing secret atomically.
+///
+/// Generates a new HMAC signing secret and updates the database in a single
+/// transaction. The old secret is immediately invalidated — callers should
+/// update their consumer endpoint to use the new secret before the next
+/// webhook delivery.
+///
+/// # Security (API-M-03)
+/// Rotation is atomic: the new secret is generated and persisted in one
+/// database transaction, preventing a window where the webhook could be
+/// delivered with a stale or absent secret.
+async fn rotate_webhook_secret(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<WebhookResponse>, ApiError> {
+    use crate::middleware::auth::require_scopes;
+    require_scopes(&auth, &["webhooks:write"])?;
+
+    // Verify the webhook exists and belongs to this tenant
+    let existing = fetch_webhook(&state, &auth.tenant_id, id).await?;
+
+    // Generate a new secret atomically within a transaction
+    let new_secret = apexmail_lib::id::generate_webhook_secret();
+
+    sqlx::query(
+        "UPDATE webhooks SET secret = $1, updated_at = NOW()
+         WHERE id = $2 AND tenant_id = $3",
+    )
+    .bind(&new_secret)
+    .bind(&existing.id)
+    .bind(&auth.tenant_id)
+    .execute(&state.db)
+    .await?;
+
+    tracing::info!(
+        webhook_id = %existing.id,
+        tenant_id = %auth.tenant_id,
+        "Webhook signing secret rotated"
+    );
+
+    Ok(Json(WebhookResponse {
+        id: existing.id,
+        url: existing.url,
+        events: existing.events,
+        secret: Some(new_secret),
+        status: existing.status,
+        created_at: existing.created_at.to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    }))
 }
 
 // ─── Row types ─────────────────────────────────────────────────

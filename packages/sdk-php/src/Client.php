@@ -21,17 +21,6 @@ namespace ApexMail;
  * @package ApexMail
  */
 
-// ── Autoload sub-classes ──
-require_once __DIR__ . '/Exceptions.php';
-require_once __DIR__ . '/Resources/Emails.php';
-require_once __DIR__ . '/Resources/Domains.php';
-require_once __DIR__ . '/Resources/Webhooks.php';
-require_once __DIR__ . '/Resources/Templates.php';
-require_once __DIR__ . '/Resources/Suppressions.php';
-require_once __DIR__ . '/Resources/Events.php';
-require_once __DIR__ . '/Resources/Analytics.php';
-require_once __DIR__ . '/Resources/ApiKeys.php';
-
 class Client
 {
     public const SDK_VERSION     = '1.0.0';
@@ -339,6 +328,13 @@ class Client
         $decoded = json_decode($responseBody, true, 512, JSON_THROW_ON_ERROR);
 
         if (is_array($decoded)) {
+            // SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
+            if (isset($decoded['data'])) {
+                $data = $decoded['data'];
+                if (is_array($data)) {
+                    return $data;
+                }
+            }
             return $decoded;
         }
 

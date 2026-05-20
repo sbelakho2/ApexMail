@@ -28,7 +28,10 @@ use crate::state::AppState;
 /// # Security
 /// `deny_unknown_fields` prevents cache-poisoning attacks where an attacker
 /// writes extra JSON fields to Redis that would be silently ignored by serde.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// RS-H-06: Custom Debug impl that redacts sensitive fields from log output.
+/// Prevents tenant_id, user_id, session_id, and scopes from appearing in
+/// debug logs which could expose sensitive authentication data.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthUser {
     pub tenant_id: String,
@@ -36,6 +39,18 @@ pub struct AuthUser {
     pub api_key_id: Option<String>,
     pub session_id: Option<String>,
     pub scopes: Vec<String>,
+}
+
+impl std::fmt::Debug for AuthUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthUser")
+            .field("tenant_id", &format!("{}..{}", &self.tenant_id[..self.tenant_id.len().min(4)], self.tenant_id.len()))
+            .field("user_id", &self.user_id.as_ref().map(|id| format!("{}..{}", &id[..id.len().min(4)], id.len())))
+            .field("api_key_id", &self.api_key_id.as_ref().map(|id| format!("{}..{}", &id[..id.len().min(4)], id.len())))
+            .field("session_id", &self.session_id.as_ref().map(|_| "[REDACTED]"))
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 // ─── JWT claims ────────────────────────────────────────────────

@@ -295,13 +295,13 @@ jobs:
       # H5: Uses Trivy (open-source, no rate limits) to scan the API server image
       - name: Run Trivy vulnerability scanner (api-server)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        continue-on-error: true
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api-server:${{ github.sha }}
           format: sarif
           output: trivy-api-server-results.sarif
           severity: CRITICAL,HIGH
-          exit-code: 0
+          # SECURITY: Fail CI on HIGH/CRITICAL CVEs. Do not set to 0.
+          exit-code: 1
 
       - name: Upload Trivy scan results to GitHub Security
         uses: github/codeql-action/upload-sarif@1521896cd211af95be3f02edf6f436e10b819c27 # v3.35.4
@@ -312,13 +312,13 @@ jobs:
 
       - name: Run Trivy vulnerability scanner (MTA)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        continue-on-error: true
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mta:${{ github.sha }}
           format: sarif
           output: trivy-mta-results.sarif
           severity: CRITICAL,HIGH
-          exit-code: 0
+          # SECURITY: Fail CI on HIGH/CRITICAL CVEs. Do not set to 0.
+          exit-code: 1
 
       - name: Upload Trivy scan results to GitHub Security (MTA)
         uses: github/codeql-action/upload-sarif@1521896cd211af95be3f02edf6f436e10b819c27 # v3.35.4

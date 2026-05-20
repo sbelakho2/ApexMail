@@ -14,8 +14,9 @@ global:
   imageRegistry: "apexmail"
   # Optional global tag for helper/toolbox images; service images can still override per workload.
   imageTag: ""
-  # Pull policy: Always for production, IfNotPresent for dev
-  imagePullPolicy: IfNotPresent
+  # SECURITY: Always pull the latest image in production to ensure security patches
+  # are applied. For development, override to IfNotPresent.
+  imagePullPolicy: Always
   # Image pull secrets (for private registries)
   imagePullSecrets: []
   # Storage class for persistent volumes (override per cloud provider)
@@ -48,7 +49,8 @@ namespace: apexmail
 
 apiServer:
   enabled: true
-  replicaCount: 2
+  # PERF-105: 3 replicas for production availability (N+2 redundancy)
+  replicaCount: 3
   image:
     repository: api-server
     tag: ""  # defaults to Chart.AppVersion
@@ -202,7 +204,8 @@ mta:
 
 worker:
   enabled: true
-  replicaCount: 2
+  # PERF-105: 3 replicas for production availability (N+2 redundancy)
+  replicaCount: 3
   image:
     repository: worker-service
     tag: ""
@@ -353,6 +356,20 @@ postgresql:
       limits:
         cpu: "2"
         memory: 2Gi
+    # OBS-M-03: PostgreSQL slow query logging for performance monitoring
+    # Logs all queries exceeding 1 second execution time to aid query optimization
+    extendedConfiguration: |-
+      log_min_duration_statement = 1000
+      log_checkpoints = on
+      log_connections = on
+      log_disconnections = on
+      log_lock_waits = on
+      log_temp_files = 0
+      log_autovacuum_min_duration = 1000
+      # Track query statistics for pg_stat_statements (requires extension)
+      shared_preload_libraries = 'pg_stat_statements'
+      pg_stat_statements.max = 10000
+      pg_stat_statements.track = all
   # For production: use an external managed database (RDS, Cloud SQL, etc.)
   # and set postgresql.enabled=false with externalDatabase settings below.
 

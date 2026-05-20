@@ -8,6 +8,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -125,7 +126,14 @@ struct RiskAssessmentRow {
     sent: i64,
 }
 
+/// API-114/115: Track whether risk settings table has been ensured to avoid
+/// running DDL on every request (causes latency and lock contention).
+static RISK_TABLE_ENSURE: OnceLock<()> = OnceLock::new();
+
 async fn ensure_risk_settings_table(db: &sqlx::PgPool) -> Result<(), ApiError> {
+    if RISK_TABLE_ENSURE.get().is_some() {
+        return Ok(());
+    }
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS risk_settings (
             id INTEGER PRIMARY KEY,
@@ -145,6 +153,7 @@ async fn ensure_risk_settings_table(db: &sqlx::PgPool) -> Result<(), ApiError> {
     .execute(db)
     .await?;
 
+    let _ = RISK_TABLE_ENSURE.set(());
     Ok(())
 }
 

@@ -2,6 +2,9 @@
 
 use anyhow::Context;
 use dashmap::DashMap;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use ops_service::config::OpsConfig;
 use ops_service::health::HealthChecker;
 use ops_service::incidents::IncidentManager;
@@ -11,10 +14,25 @@ use ops_service::warmup::IpWarmupManager;
 use std::sync::Arc;
 use tracing::info;
 
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "ops-service".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
+    tracing_subscriber::fmt().json().with_target(true).init();
+    None
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialise structured JSON logging
-    tracing_subscriber::fmt().json().with_target(true).init();
+    let _guard = init_tracing();
 
     let config = OpsConfig::from_env();
     info!(?config, "ops-service starting");

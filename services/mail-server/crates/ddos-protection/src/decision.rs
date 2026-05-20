@@ -2,14 +2,15 @@
 
 use std::time::Duration;
 
+/// RS-064: Constant-time comparison that does NOT leak length through timing.
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.bytes()
-        .zip(b.bytes())
-        .fold(0u8, |diff, (x, y)| diff | (x ^ y))
-        == 0
+    let len_matches = a.len() == b.len();
+    let diff: u8 = a
+        .bytes()
+        .zip(b.bytes().chain(std::iter::repeat(0)))
+        .fold(0u8, |diff, (x, y)| diff | (x ^ y));
+    let tail_diff: u8 = b.bytes().skip(a.len()).fold(0u8, |d, x| d | x);
+    len_matches && diff == 0 && tail_diff == 0
 }
 
 /// Decision returned by the DDoS protector

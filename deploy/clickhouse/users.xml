@@ -1,0 +1,78 @@
+<clickhouse>
+    <!-- =========================================================================
+         ApexMail ClickHouse User Configuration
+         =========================================================================
+         Enforces password-based authentication for the default user.
+         The password is read from the CLICKHOUSE_PASSWORD environment variable.
+         ========================================================================= -->
+
+    <!-- Default user - requires password from environment variable -->
+    <users>
+        <default>
+            <!-- Password is loaded from CLICKHOUSE_PASSWORD env var -->
+            <password from_env="CLICKHOUSE_PASSWORD"></password>
+            <!-- SECURITY: Restricted to internal Docker/container networks only.
+                 Do NOT open to ::/0 — the default user has access_management enabled. -->
+            <networks>
+                <ip>::1</ip>
+                <ip>127.0.0.1</ip>
+                <ip>172.16.0.0/12</ip>
+                <ip>10.0.0.0/8</ip>
+                <ip>192.168.0.0/16</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </default>
+
+        <!-- Application user for ApexMail services -->
+        <apexmail>
+            <!-- Password is loaded from CLICKHOUSE_PASSWORD env var -->
+            <password from_env="CLICKHOUSE_PASSWORD"></password>
+            <!-- SECURITY: Restricted to internal Docker/container networks only. -->
+            <networks>
+                <ip>::1</ip>
+                <ip>127.0.0.1</ip>
+                <ip>172.16.0.0/12</ip>
+                <ip>10.0.0.0/8</ip>
+                <ip>192.168.0.0/16</ip>
+            </networks>
+            <profile>readwrite</profile>
+            <quota>default</quota>
+        </apexmail>
+    </users>
+
+    <!-- Quotas -->
+    <quotas>
+        <default>
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+
+    <!-- Profiles -->
+    <profiles>
+        <default>
+            <max_memory_usage>10000000000</max_memory_usage>
+            <load_balancing>random</load_balancing>
+            <log_queries>0</log_queries>
+        </default>
+        <readwrite>
+            <max_memory_usage>10000000000</max_memory_usage>
+            <load_balancing>random</load_balancing>
+            <log_queries>1</log_queries>
+        </readwrite>
+        <readonly>
+            <max_memory_usage>10000000000</max_memory_usage>
+            <load_balancing>random</load_balancing>
+            <log_queries>0</log_queries>
+            <readonly>1</readonly>
+        </readonly>
+    </profiles>
+</clickhouse>

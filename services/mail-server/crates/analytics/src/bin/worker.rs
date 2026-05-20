@@ -1,6 +1,9 @@
 //! Analytics worker binary – standalone process with cron scheduling.
 
 use clap::Parser;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use tracing::{error, info};
 
 #[derive(Parser)]
@@ -19,12 +22,18 @@ struct Args {
     health: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
-    // Structured JSON logging with env-driven filter
-    // Sampling strategy: default `info` level; use `RUST_LOG` for fine-grained control.
-    // In production, set `RUST_LOG=warn,analytics=info` to reduce high-volume analytics output.
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "analytics-worker".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .json()
         .with_target(true)
@@ -33,6 +42,13 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    let _guard = init_tracing();
 
     let config = analytics::config::AnalyticsConfig::from_env();
     let args = Args::parse();

@@ -2,16 +2,19 @@
 //!
 //! `POST /v1/stream/token`
 //!
-//! Authenticated users call this endpoint to receive a short-lived HMAC-SHA256
+//! Authenticated users call this endpoint to receive a short-lived RS256
 //! signed JWT that can be sent as a Bearer token to the tracking-service's
 //! SSE endpoint (`GET /v1/stream`).
 //!
 //! The token is intentionally:
 //! - Short-lived (5 minutes) to limit replay window.
-//! - Signed with HMAC-SHA256 using the shared `TRACKING_SECRET_KEY`
-//!   (the same key the tracking-service uses to verify).
+//! - Signed with RS256 using the application's RSA private key
+//!   (the same public key the tracking-service uses to verify).
 //! - Scoped to `["stream"]` — the tracking-service rejects tokens without
 //!   this scope.
+//!
+//! SECURITY (SEC-119): All JWT operations use RS256 (asymmetric) to prevent
+//! algorithm confusion attacks. HS256 is not used for any JWT tokens.
 //!
 //! This endpoint requires standard API authentication (Bearer JWT or X-API-Key).
 
@@ -19,7 +22,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
-use base64::Engine;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -52,7 +55,7 @@ fn default_ttl() -> u64 {
 /// Response with the signed SSE token.
 #[derive(Debug, Serialize)]
 pub struct StreamTokenResponse {
-    /// The HMAC-SHA256 signed JWT for SSE connections.
+    /// The RS256-signed JWT for SSE connections.
     pub token: String,
     /// Expiration Unix timestamp.
     pub expires_at: u64,
@@ -88,25 +91,14 @@ async fn create_stream_token(
         message_id: body.message_id,
     };
 
-    let claims_json = serde_json::to_vec(&claims)
-        .map_err(|e| ApiError::Internal(format!("failed to serialize token claims: {e}")))?;
-
-    // Construct the JWT:base64url(header).base64url(claims).base64url(signature)
-    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let header = b64.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
-    let payload = b64.encode(&claims_json);
-    let signing_input = format!("{header}.{payload}");
-
-    // HMAC-SHA256 signature with the shared tracking secret
-    use hmac::Mac;
-    let mut mac =
-        hmac::Hmac::<sha2::Sha256>::new_from_slice(state.config.tracking_secret_key.as_bytes())
-            .map_err(|_| ApiError::Internal("HMAC key error".into()))?;
-    mac.update(signing_input.as_bytes());
-    let signature = mac.finalize().into_bytes();
-    let sig_b64 = b64.encode(signature);
-
-    let token = format!("{signing_input}.{sig_b64}");
+    // Sign with RS256 using the application's RSA private key
+    let token = encode(
+        &Header::new(Algorithm::RS256),
+        &claims,
+        &EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| ApiError::Internal(format!("invalid JWT private key: {e}")))?,
+    )
+    .map_err(|e| ApiError::Internal(format!("failed to encode stream token: {e}")))?;
 
     Ok((
         StatusCode::CREATED,

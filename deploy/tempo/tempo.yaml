@@ -37,6 +37,54 @@ compactor:
   compaction:
     block_retention: 168h
 
+# ── Query-frontend / Search ─────────────────────────────────────────────────
+# Enables trace search functionality (required for Grafana Tempo datasource
+# search and traceQL queries).
+query_frontend:
+  search:
+    # Enable the search API endpoint
+    enabled: true
+    # Duration of the search request, cached results are returned within this window
+    duration: 24h
+
+querier:
+  search:
+    # Number of concurrent jobs to execute while searching
+    external_hedge_requests_at: 8s
+    external_hedge_requests_up_to: 2
+    # Maximum number of spans to return in a search query
+    max_spans_per_query: 10000
+
+# ── Metrics-generator ───────────────────────────────────────────────────────
+# Enables span metrics (RED metrics: Rate, Errors, Duration) derived from traces.
+metrics_generator:
+  registry:
+    collection_interval: 15s
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+# ── Ring configuration ──────────────────────────────────────────────────────
+# In production, use a consistent backend (etcd/consul) for the distributor
+# ring instead of the default in-memory ring. In-memory ring means each
+# distributor has an independent view of ingesters, which can cause data
+# loss during rolling restarts.
+#
+# For single-binary mode (single instance), in-memory is acceptable.
+# For scalable deployments, uncomment and configure:
+# ring:
+#   kvstore:
+#     store: etcd
+#     etcd:
+#       endpoints:
+#         - ${TEMPO_ETCD_ENDPOINT:-localhost:2379}
+#     # or for consul:
+#     # store: consul
+#     # consul:
+#     #   host: ${TEMPO_CONSUL_ENDPOINT:-localhost:8500}
+
 storage:
   trace:
     # Env-var-driven backend: "s3" for production, "local" (default) for dev
@@ -47,6 +95,8 @@ storage:
       access_key: ${TEMPO_S3_ACCESS_KEY:}
       secret_key: ${TEMPO_S3_SECRET_KEY:}
       region: ${TEMPO_S3_REGION:-us-east-1}
+      # SECURITY: Force path-style access (required for MinIO)
+      forcepathstyle: ${TEMPO_S3_FORCE_PATH_STYLE:-true}
     local:
       path: /var/tempo/traces
     wal:

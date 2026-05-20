@@ -1,19 +1,37 @@
 //! AI service binary entry-point.
 
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 use ai_service::{config::AiConfig, routes};
 
-#[tokio::main]
-async fn main() {
-    // Initialise structured logging
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "ai-service".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .json()
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() {
+    let _guard = init_tracing();
 
     let config = match AiConfig::from_env() {
         Ok(cfg) => cfg,

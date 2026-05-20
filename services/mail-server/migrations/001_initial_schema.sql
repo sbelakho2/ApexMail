@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS email_queue (
     subject TEXT NOT NULL,
     text_body TEXT,
     html_body TEXT,
+    raw_headers TEXT,
     headers JSONB DEFAULT '{}'::jsonb,
     attachments JSONB DEFAULT '[]'::jsonb,
     

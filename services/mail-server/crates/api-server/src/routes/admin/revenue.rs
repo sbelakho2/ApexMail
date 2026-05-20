@@ -30,14 +30,17 @@ const ALLOWED_COLUMNS: &[&str] = &[
 ];
 
 /// Validate that a column name is in the allowlist before using it in SQL.
-/// Returns the column name on success, or panics on invalid input.
-fn validated_column(col: &str) -> &str {
-    assert!(
-        ALLOWED_COLUMNS.contains(&col),
-        "column '{}' is not in the allowlist for dynamic SQL construction",
-        col
-    );
-    col
+/// Returns the column name on success, or an error on invalid input.
+/// RS-055: Uses proper error return instead of assert!() to prevent DoS via panic.
+fn validated_column(col: &str) -> Result<&str, ApiError> {
+    if ALLOWED_COLUMNS.contains(&col) {
+        Ok(col)
+    } else {
+        tracing::warn!(column = %col, "rejected unknown column name for dynamic SQL construction");
+        Err(ApiError::Internal(format!(
+            "column '{col}' is not in the allowlist for dynamic SQL construction"
+        )))
+    }
 }
 
 pub fn router() -> Router<AppState> {
@@ -205,9 +208,9 @@ fn build_subscription_revenue_sql(has_billing_interval: bool, cancel_expr: &str)
     )
 }
 
-fn build_plan_change_sql(audit_time_col: &str) -> String {
-    let audit_time_col = validated_column(audit_time_col);
-    format!(
+fn build_plan_change_sql(audit_time_col: &str) -> Result<String, ApiError> {
+    let audit_time_col = validated_column(audit_time_col)?;
+    Ok(format!(
         "SELECT a.{audit_time_col} as logged_at,
                 a.metadata->>'changeType' as change_type,
                 a.metadata->>'billingInterval' as billing_interval,
@@ -226,12 +229,12 @@ fn build_plan_change_sql(audit_time_col: &str) -> String {
          WHERE a.action = 'plan.changed'
            AND a.metadata IS NOT NULL
            AND a.{audit_time_col} >= $1"
-    )
+    ))
 }
 
-fn audit_log_spend_sql(audit_time_col: &str) -> String {
-    let audit_time_col = validated_column(audit_time_col);
-    format!(
+fn audit_log_spend_sql(audit_time_col: &str) -> Result<String, ApiError> {
+    let audit_time_col = validated_column(audit_time_col)?;
+    Ok(format!(
         "SELECT COALESCE(SUM(
             CASE
                 WHEN jsonb_typeof(metadata->'spendCents') = 'number'
@@ -251,7 +254,7 @@ fn audit_log_spend_sql(audit_time_col: &str) -> String {
          )
            AND metadata IS NOT NULL
            AND {audit_time_col} >= $1"
-    )
+    ))
 }
 
 async fn marketing_spend_cents_since(
@@ -260,11 +263,11 @@ async fn marketing_spend_cents_since(
 ) -> Result<i64, ApiError> {
     if table_exists(db, "marketing_spend").await {
         let time_col = if column_exists(db, "marketing_spend", "spent_at").await {
-            Some(validated_column("spent_at"))
+            Some(validated_column("spent_at")?)
         } else if column_exists(db, "marketing_spend", "date").await {
-            Some(validated_column("date"))
+            Some(validated_column("date")?)
         } else if column_exists(db, "marketing_spend", "created_at").await {
-            Some(validated_column("created_at"))
+            Some(validated_column("created_at")?)
         } else {
             None
         };
@@ -272,7 +275,7 @@ async fn marketing_spend_cents_since(
         let mut amount_col = None;
         for column in ["amount_cents", "cost_cents", "spend_cents"] {
             if column_exists(db, "marketing_spend", column).await {
-                amount_col = Some(validated_column(column));
+                amount_col = Some(validated_column(column)?);
                 break;
             }
         }
@@ -297,11 +300,11 @@ async fn marketing_spend_cents_since(
 
     if table_exists(db, "audit_logs").await {
         let audit_time_col = if column_exists(db, "audit_logs", "timestamp").await {
-            validated_column("timestamp")
+            validated_column("timestamp")?
         } else {
-            validated_column("created_at")
+            validated_column("created_at")?
         };
-        let sql = audit_log_spend_sql(audit_time_col);
+        let sql = audit_log_spend_sql(audit_time_col)?;
         return Ok(sqlx::query_scalar::<_, i64>(&sql)
             .bind(cutoff)
             .fetch_one(db)
@@ -338,7 +341,7 @@ async fn get_revenue(
         if table_exists(db, "subscriptions").await && table_exists(db, "plans").await {
             let has_billing_interval = column_exists(db, "subscriptions", "billing_interval").await;
             let cancel_expr = if column_exists(db, "subscriptions", "canceled_at").await {
-                validated_column("s.canceled_at")
+                validated_column("s.canceled_at")?
             } else {
                 // Hardcoded CASE expression - not from user input, safe from injection
                 "CASE WHEN s.status = 'canceled' THEN s.updated_at ELSE NULL END"
@@ -369,11 +372,11 @@ async fn get_revenue(
 
     let plan_changes = if table_exists(db, "audit_logs").await && table_exists(db, "plans").await {
         let audit_time_col = if column_exists(db, "audit_logs", "timestamp").await {
-            validated_column("timestamp")
+            validated_column("timestamp")?
         } else {
-            validated_column("created_at")
+            validated_column("created_at")?
         };
-        let sql = build_plan_change_sql(audit_time_col);
+        let sql = build_plan_change_sql(audit_time_col)?;
 
         sqlx::query_as::<_, PlanChangeRevenueRow>(&sql)
             .bind(earliest_month)

@@ -26,10 +26,12 @@ SET uidnext = COALESCE((
     SELECT MAX(uid) + 1 FROM mail_messages mm WHERE mm.mailbox_id = mb.id
 ), 1);
 
--- C-09/C-18: Lock the table to prevent concurrent inserts with NULL uid,
--- then do a second backfill for any rows inserted between the first backfill
--- and the lock, before applying SET NOT NULL.
-LOCK TABLE mail_messages IN EXCLUSIVE MODE;
+-- C-09/C-18: Lock the table with ACCESS EXCLUSIVE to prevent concurrent
+-- inserts with NULL uid, then do a second backfill for any rows inserted
+-- between the first backfill and the lock, before applying SET NOT NULL.
+-- ACCESS EXCLUSIVE MODE is required because IN EXCLUSIVE MODE still allows
+-- concurrent reads, which could allow INSERTs to slip through the window.
+LOCK TABLE mail_messages IN ACCESS EXCLUSIVE MODE;
 
 -- Second backfill: catch any rows inserted after the first backfill
 WITH ranked AS (

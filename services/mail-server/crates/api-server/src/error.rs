@@ -81,6 +81,7 @@ pub struct ErrorDetail {
 // ─── ApiError enum ─────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ApiError {
     #[error("{0}")]
     BadRequest(String),

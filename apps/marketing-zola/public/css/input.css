@@ -56,6 +56,7 @@
 
 :root {
   --apex-style-name: 'Apex Style';
+  color-scheme: light dark;
 
   /* Font Variables */
   --font-apex: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
@@ -76,6 +77,10 @@
 
   /* Primary — matches brand-500 */
   --primary: 239 68 68;
+
+  /* Background and foreground semantic tokens */
+  --background: 250 250 250;
+  --foreground: 9 9 11;
 
   /* Surfaces — Zinc palette for neutral, industrial feel (Light Mode) */
   --surface-50: 250 250 250;
@@ -144,6 +149,9 @@
   --radius-lg: 6px;
   --radius-xl: 8px;
 
+  /* Brand gradient — applied to primary buttons, headings, and accent elements */
+  --brand-gradient: linear-gradient(135deg, #dc2626, #991b1b);
+
   /* Theme transition speed */
   --theme-transition-duration: 200ms;
 }
@@ -156,6 +164,8 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --background: 9 9 11;
+    --foreground: 250 250 250;
     --surface-50: 9 9 11;
     --surface-100: 24 24 27;
     --surface-200: 39 39 42;
@@ -171,6 +181,8 @@
 }
 
 html.dark {
+  --background: 9 9 11;
+  --foreground: 250 250 250;
   --surface-50: 9 9 11;
   --surface-100: 24 24 27;
   --surface-200: 39 39 42;
@@ -698,15 +710,34 @@ html.dark :focus-visible {
   }
 
   .btn-primary {
-    @apply px-6 py-3 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-sm border border-brand-700 transition-premium tracking-tight text-xs;
+    @apply px-6 py-3 text-white font-bold rounded-sm border border-brand-700 transition-premium tracking-tight text-xs;
+    background: var(--brand-gradient);
+    min-height: 44px;
+  }
+  .btn-primary:hover {
+    filter: brightness(0.9);
   }
 
   .btn-secondary {
     @apply px-6 py-3 border border-surface-200 hover:border-surface-950 hover:bg-surface-50 bg-surface-50 text-surface-950 font-bold rounded-sm transition-premium tracking-tight text-xs;
+    min-height: 44px;
   }
 
   .btn-accent {
-    @apply px-6 py-3 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-sm border border-brand-700 transition-premium tracking-tight text-xs;
+    @apply px-6 py-3 text-white font-bold rounded-sm border border-brand-700 transition-premium tracking-tight text-xs;
+    background: var(--brand-gradient);
+    min-height: 44px;
+  }
+  .btn-accent:hover {
+    filter: brightness(0.9);
+  }
+
+  /* Heading gradient — applied to marketing page headings */
+  .heading-gradient {
+    background: var(--brand-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
   }
 
   /* Apex Style Prose — for technical documentation and legal pages */

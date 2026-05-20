@@ -1,4 +1,7 @@
 use clap::Parser;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use std::sync::Arc;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -43,13 +46,29 @@ struct Cli {
     sidecar_tls_ca_path: String,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "ai-embeddings".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .json()
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    let _guard = init_tracing();
 
     let cli = Cli::parse();
 

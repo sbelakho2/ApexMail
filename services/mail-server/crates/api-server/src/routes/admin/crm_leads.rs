@@ -82,14 +82,17 @@ async fn list_crm_leads(
             serde_json::Value,
         ),
     >(
+        // API-104: Scope CRM leads by tenant_id to prevent cross-tenant access.
         "SELECT id::text, company_name, domain, contact_email, contact_name,
                 stage, score, source, last_activity, created_at,
                 COALESCE(tags, '[]'::jsonb)
-         FROM sales_leads ORDER BY score DESC NULLS LAST, created_at DESC
+         FROM sales_leads WHERE tenant_id = $3
+         ORDER BY score DESC NULLS LAST, created_at DESC
          LIMIT $1 OFFSET $2",
     )
     .bind(limit)
     .bind(offset)
+    .bind(&auth.tenant_id)
     .fetch_all(&state.db)
     .await?;
 

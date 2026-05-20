@@ -60,12 +60,20 @@ pub struct SmtpSenderConfig {
 const DEFAULT_SMTP_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_SMTP_MAX_RETRIES: u32 = 3;
 const DEFAULT_SMTP_RETRY_DELAY_SECONDS: u64 = 30;
-const DEFAULT_SMTP_CONNECTION_POOL_SIZE: usize = 2;
+const DEFAULT_SMTP_CONNECTION_POOL_SIZE: usize = 10;
 const DEFAULT_SMTP_MX_CACHE_TTL_SECS: u64 = 300;
 const DEFAULT_SMTP_CONNECTION_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_SMTP_POOL_ACQUISITION_TIMEOUT_SECONDS: u64 = 10;
 const DEFAULT_MAX_SMTP_RESPONSE_LINE: usize = 1_000;
 const PRODUCTION_ENV_VARS: &[&str] = &["NODE_ENV", "APP_ENV", "APEXMAIL_ENV", "ENVIRONMENT"];
+
+fn default_connection_pool_size() -> usize {
+    env::var("SMTP_CONNECTION_POOL_SIZE")
+        .ok()
+        .and_then(|val| val.parse::<usize>().ok())
+        .filter(|val| *val > 0)
+        .unwrap_or(DEFAULT_SMTP_CONNECTION_POOL_SIZE)
+}
 
 impl Default for SmtpSenderConfig {
     fn default() -> Self {
@@ -75,7 +83,7 @@ impl Default for SmtpSenderConfig {
             max_retries: DEFAULT_SMTP_MAX_RETRIES,
             retry_delay_seconds: DEFAULT_SMTP_RETRY_DELAY_SECONDS,
             require_starttls: true,
-            connection_pool_size: DEFAULT_SMTP_CONNECTION_POOL_SIZE,
+            connection_pool_size: default_connection_pool_size(),
             mx_cache_ttl_secs: default_mx_cache_ttl_secs(),
             connection_timeout_seconds: DEFAULT_SMTP_CONNECTION_TIMEOUT_SECONDS,
             pool_acquisition_timeout_seconds: DEFAULT_SMTP_POOL_ACQUISITION_TIMEOUT_SECONDS,

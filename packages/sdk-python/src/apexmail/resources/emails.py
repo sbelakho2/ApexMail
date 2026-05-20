@@ -262,6 +262,7 @@ class EmailsResource:
         *,
         limit: int = 25,
         offset: int = 0,
+        cursor: Optional[int] = None,
         status: Optional[Union[str, EmailStatus]] = None,
         from_: Optional[str] = None,
         to: Optional[str] = None,
@@ -275,6 +276,7 @@ class EmailsResource:
         Args:
             limit: Number of results (1-100)
             offset: Number of results to skip
+            cursor: Pagination cursor (from previous response's pagination)
             status: Filter by status
             from_: Filter by sender
             to: Filter by recipient
@@ -286,6 +288,8 @@ class EmailsResource:
             EmailListResponse with emails and pagination
         """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if cursor is not None:
+            params["cursor"] = cursor
         if status:
             params["status"] = status.value if isinstance(status, EmailStatus) else status
         if from_:
@@ -429,6 +433,7 @@ class AsyncEmailsResource:
         *,
         limit: int = 25,
         offset: int = 0,
+        cursor: Optional[int] = None,
         status: Optional[Union[str, EmailStatus]] = None,
         from_: Optional[str] = None,
         to: Optional[str] = None,
@@ -438,6 +443,8 @@ class AsyncEmailsResource:
     ) -> EmailListResponse:
         """List emails with optional filters asynchronously."""
         params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if cursor is not None:
+            params["cursor"] = cursor
         if status:
             params["status"] = status.value if isinstance(status, EmailStatus) else status
         if from_:

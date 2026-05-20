@@ -382,6 +382,8 @@ mod tests {
             right_icon: None,
             error: None,
             disabled: false,
+            autocomplete: None,
+        required: false,
         };
         let html = inp.render_html();
         let classes = extract_classes(&html);

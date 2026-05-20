@@ -148,7 +148,11 @@ impl DatabaseConfig {
             user: env::var("DB_USER").unwrap_or_else(|_| "apexmail".into()),
             password: env::var("DB_PASSWORD").unwrap_or_default(),
             ssl: env::var("DB_SSL").map(|v| v == "true").unwrap_or(false),
-            max_connections: 20,
+            // SCALE-M-01: Read max_connections from env, default 20
+            max_connections: env::var("DB_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
             idle_timeout_secs: 30,
             connect_timeout_secs: 10,
         }

@@ -6,71 +6,94 @@ global:
   smtp_auth_username: '${SMTP_USERNAME:-}'
   smtp_auth_password: '${SMTP_PASSWORD:-}'
   smtp_require_tls: true
+  # PagerDuty configuration
+  pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+  # OpsGenie configuration
+  opsgenie_api_url: 'https://api.opsgenie.com'
+  opsgenie_api_key: '${OPSGENIE_API_KEY:-}'
 
 route:
-  receiver: warning-notify
+  receiver: default
   group_by: ['alertname', 'severity', 'instance']
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 3h
   routes:
-    # ── Critical alerts: all receivers fire (webhook + fallbacks) ──
+    # ── Critical alerts: PagerDuty/OpsGenie + email + Slack ──
     - matchers:
         - severity="critical"
-      receiver: critical-pager
+      receiver: critical
       repeat_interval: 30m
-      continue: true
-    - matchers:
-        - severity="critical"
-      receiver: critical-fallback
-      repeat_interval: 30m
-    # ── Warning alerts: webhook + fallback ──
+      continue: false
+    # ── Warning alerts: Slack + email ──
     - matchers:
         - severity="warning"
-      receiver: warning-notify
+      receiver: warning
       repeat_interval: 2h
-      continue: true
-    - matchers:
-        - severity="warning"
-      receiver: warning-fallback
-      repeat_interval: 2h
-    # ── Info alerts ──
+      continue: false
+    # ── Info alerts: Slack (low-priority) ──
     - matchers:
         - severity="info"
-      receiver: info-log
+      receiver: info
       repeat_interval: 12h
+      continue: false
 
 receivers:
-  # ── Primary webhook receivers ──
-  - name: critical-pager
-    webhook_configs:
-      - url: 'http://observability:4400/alerts/critical'
+  # ── Critical: PagerDuty + OpsGenie + Email + Slack ──
+  - name: critical
+    pagerduty_configs:
+      - routing_key: '${PAGERDUTY_ROUTING_KEY:-}'
+        severity: critical
         send_resolved: true
-  - name: warning-notify
-    webhook_configs:
-      - url: 'http://observability:4400/alerts/warning'
+        images:
+          - src: 'https://status.apexmail.ee/assets/img/apexmail-icon.png'
+        links:
+          - href: 'https://grafana.apexmail.ee/d/apexmail-api'
+            text: 'ApexMail API Dashboard'
+          - href: 'https://status.apexmail.ee'
+            text: 'Status Page'
+    opsgenie_configs:
+      - api_key: '${OPSGENIE_API_KEY:-}'
+        responders:
+          - type: team
+            name: 'on-call'
+        priority: P1
         send_resolved: true
-  - name: info-log
-    webhook_configs:
-      - url: 'http://observability:4400/alerts/info'
-        send_resolved: true
-
-  # ── Fallback receivers (SPOF mitigation) ──
-  - name: critical-fallback
-    email_configs:
-      - to: 'admin@apexmail.ee'
-        send_resolved: true
-        headers:
-          subject: '[CRITICAL] {{ .GroupLabels.alertname }} - ApexMail'
     webhook_configs:
       - url: 'https://hooks.slack.com/services/${SLACK_WEBHOOK_PATH:-}'
         send_resolved: true
-        # Slack webhook is optional; if SLACK_WEBHOOK_PATH is not set, this
-        # receiver gracefully degrades to email-only delivery.
-
-  - name: warning-fallback
+      - url: 'http://observability:4400/alerts/critical'
+        send_resolved: true
     email_configs:
-      - to: 'admin@apexmail.ee'
+      - to: '${ALERT_EMAIL_CRITICAL:-admin@apexmail.ee}'
+        send_resolved: true
+        headers:
+          subject: '[CRITICAL] {{ .GroupLabels.alertname }} - ApexMail'
+          priority: urgent
+
+  # ── Warning: Slack + Email ──
+  - name: warning
+    webhook_configs:
+      - url: 'https://hooks.slack.com/services/${SLACK_WEBHOOK_PATH:-}'
+        send_resolved: true
+      - url: 'http://observability:4400/alerts/warning'
+        send_resolved: true
+    email_configs:
+      - to: '${ALERT_EMAIL_WARNING:-admin@apexmail.ee}'
         send_resolved: true
         headers:
           subject: '[WARNING] {{ .GroupLabels.alertname }} - ApexMail'
+
+  # ── Info: Slack (low-priority channel) ──
+  - name: info
+    webhook_configs:
+      - url: 'https://hooks.slack.com/services/${SLACK_WEBHOOK_PATH_LOW:-}'
+        send_resolved: true
+      - url: 'http://observability:4400/alerts/info'
+        send_resolved: true
+
+  # ── Default fallback ──
+  - name: default
+    webhook_configs:
+      - url: 'http://observability:4400/alerts/default'
+        send_resolved: true

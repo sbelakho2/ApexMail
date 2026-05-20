@@ -1,7 +1,7 @@
 //! Database and Redis pool management.
 
 use deadpool_redis::{Config as RedisConfig, Pool as DeadpoolRedis, Runtime};
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use std::time::Duration;
 
 use super::error::{ProcessorError, ProcessorResult};
@@ -13,12 +13,19 @@ pub type DbPool = PgPool;
 pub type RedisPool = DeadpoolRedis;
 
 /// Create a PostgreSQL connection pool.
+///
+/// PERF-116: Acquire timeout increased to 60s (from 30s) to prevent premature
+/// timeouts under heavy load. Statement caching (capacity 100) is enabled to
+/// avoid re-preparation roundtrips for repeated queries.
 pub async fn create_db_pool(database_url: &str, max_connections: u32) -> ProcessorResult<DbPool> {
+    let connect_opts = database_url
+        .parse::<PgConnectOptions>()?
+        .statement_cache_capacity(100);
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
-        .acquire_timeout(Duration::from_secs(30))
+        .acquire_timeout(Duration::from_secs(60))
         .idle_timeout(Duration::from_secs(600))
-        .connect(database_url)
+        .connect_with(connect_opts)
         .await?;
     Ok(pool)
 }

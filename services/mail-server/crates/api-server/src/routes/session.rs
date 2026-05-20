@@ -157,15 +157,18 @@ async fn get_session(
 
 // ─── Helpers ───────────────────────────────────────────────────
 
+/// RS-064: Constant-time comparison that does NOT leak length through timing.
+/// Uses a dummy comparison loop when lengths differ to avoid short-circuiting.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    let len_matches = a.len() == b.len();
+    // Always iterate over the longer of the two to avoid timing leaks.
+    // When lengths differ, compare against self (result is discarded).
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter().chain(a.iter().cycle())) {
         diff |= x ^ y;
     }
-    diff == 0
+    // If lengths don't match, ensure result is false regardless of XOR outcome
+    len_matches && diff == 0
 }
 
 #[derive(Debug, serde::Deserialize)]

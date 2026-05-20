@@ -80,13 +80,15 @@ public final class Suppressions {
     }
 
     /**
-     * Remove an address from the suppression list.
+     * Remove a suppression entry by its ID.
      *
      * <p>This only removes the internal suppression record; it does NOT
      * re-subscribe an end-user to marketing communications.
+     *
+     * @param id  The suppression entry ID (UUID)
      */
-    public void delete(String email) {
-        client.request("DELETE", "/v1/suppressions/" + encode(email), null, Void.class);
+    public void delete(String id) {
+        client.request("DELETE", "/v1/suppressions/" + encode(id), null, Void.class);
     }
 
     /** Add suppressions in bulk using the API's batch endpoint. */

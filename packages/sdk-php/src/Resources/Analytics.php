@@ -26,9 +26,13 @@ class Analytics
      */
     public function get(array $options = []): array
     {
+        if (empty($options['from']) || empty($options['to'])) {
+            throw new \InvalidArgumentException("Analytics requires both 'from' and 'to' date parameters");
+        }
+
         $query = http_build_query(array_filter([
-            'from'    => $options['from']                      ?? null,
-            'to'      => $options['to']                        ?? null,
+            'from'    => $options['from'],
+            'to'      => $options['to'],
             'groupBy' => $options['group_by'] ?? $options['groupBy'] ?? null,
             'tag'     => $options['tag']                       ?? null,
             'domain'  => $options['domain']                    ?? null,

@@ -146,6 +146,160 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
+  /auth/mfa/verify:
+    post:
+      operationId: verifyMfaChallenge
+      summary: Complete MFA challenge
+      description: |
+        Verify a time-based one-time password (TOTP) code during login.
+        Requires an active MFA challenge obtained after primary authentication.
+      tags:
+        - Multi-Factor Authentication
+      security:
+        - SessionCookieAuth: []
+        - BearerSessionAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Idempotency key. If a request with the same key was processed within the
+            idempotency window (configurable, typically 5 minutes), the cached response
+            is returned without re-execution.
+          schema:
+            type: string
+            format: uuid
+          example: 7a8e3b1c-9d4f-4e2a-b6c8-1d2e3f4a5b6c
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteMfaChallengeRequest'
+      responses:
+        '200':
+          description: MFA challenge completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaChallengeResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /auth/mfa/setup:
+    post:
+      operationId: initMfaSetup
+      summary: Initialize MFA setup
+      description: |
+        Generate a new TOTP secret and provisioning URI for the authenticated user.
+        Returns a base32-encoded secret and an otpauth:// URI for use with authenticator apps.
+      tags:
+        - Multi-Factor Authentication
+      security:
+        - ApiKeyAuth: []
+        - SessionCookieAuth: []
+        - BearerSessionAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Idempotency key. If a request with the same key was processed within the
+            idempotency window (configurable, typically 5 minutes), the cached response
+            is returned without re-execution.
+          schema:
+            type: string
+            format: uuid
+          example: 7a8e3b1c-9d4f-4e2a-b6c8-1d2e3f4a5b6c
+      responses:
+        '200':
+          description: MFA setup initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaSetupResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /auth/mfa/confirm-setup:
+    post:
+      operationId: confirmMfaSetup
+      summary: Confirm MFA setup
+      description: |
+        Confirm MFA setup by submitting the current TOTP code generated from the
+        secret returned by the setup endpoint. On success, MFA is enabled for the
+        authenticated user.
+      tags:
+        - Multi-Factor Authentication
+      security:
+        - ApiKeyAuth: []
+        - SessionCookieAuth: []
+        - BearerSessionAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Idempotency key. If a request with the same key was processed within the
+            idempotency window (configurable, typically 5 minutes), the cached response
+            is returned without re-execution.
+          schema:
+            type: string
+            format: uuid
+          example: 7a8e3b1c-9d4f-4e2a-b6c8-1d2e3f4a5b6c
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmMfaSetupRequest'
+      responses:
+        '200':
+          description: MFA setup confirmed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaStatusResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /auth/mfa/status:
+    get:
+      operationId: mfaStatus
+      summary: Get MFA status
+      description: |
+        Return the MFA configuration status for the authenticated user,
+        including whether MFA is enabled and which methods are available.
+      tags:
+        - Multi-Factor Authentication
+      security:
+        - ApiKeyAuth: []
+        - SessionCookieAuth: []
+        - BearerSessionAuth: []
+      responses:
+        '200':
+          description: MFA status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaStatusResponse'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
   /auth/register:
     post:
       operationId: register
@@ -5095,133 +5249,6 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /domains/{domainId}/health:
-    get:
-      operationId: getDomainHealth
-      summary: Check DNS health
-      description: Perform a comprehensive DNS health check on the domain.
-      tags:
-        - Domains
-      parameters:
-        - $ref: '#/components/parameters/domainId'
-      responses:
-        '200':
-          description: DNS health status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Domain'
-        '401':
-          $ref: '#/components/responses/AuthenticationError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '429':
-          $ref: '#/components/responses/RateLimitError'
-
-  /domains/{domainId}/mta-sts:
-    get:
-      operationId: getDomainMtaSts
-      summary: Check MTA-STS configuration
-      description: Retrieve the MTA-STS policy and verification status for the domain.
-      tags:
-        - Domains
-      parameters:
-        - $ref: '#/components/parameters/domainId'
-      responses:
-        '200':
-          description: MTA-STS configuration
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Domain'
-        '401':
-          $ref: '#/components/responses/AuthenticationError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '429':
-          $ref: '#/components/responses/RateLimitError'
-
-  /domains/{domainId}/bimi:
-    get:
-      operationId: getDomainBimi
-      summary: Check BIMI configuration
-      description: Retrieve the BIMI record and Verified Mark Certificate (VMC) status for the domain.
-      tags:
-        - Domains
-      parameters:
-        - $ref: '#/components/parameters/domainId'
-      responses:
-        '200':
-          description: BIMI configuration
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Domain'
-        '401':
-          $ref: '#/components/responses/AuthenticationError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '429':
-          $ref: '#/components/responses/RateLimitError'
-
-  /domains/{domainId}/bimi/validate-logo:
-    post:
-      operationId: validateBimiLogo
-      summary: Validate BIMI logo
-      description: Validate a BIMI logo SVG file for compliance with the BIMI specification.
-      tags:
-        - Domains
-      parameters:
-        - $ref: '#/components/parameters/domainId'
-        - name: Idempotency-Key
-          in: header
-          required: false
-          description: |
-            Idempotency key. If a request with the same key was processed within the
-            idempotency window (configurable, typically 5 minutes), the cached response
-            is returned without re-execution. Idempotency is scoped to the authenticated
-            principal — two different API keys cannot replay each other's requests.
-          schema:
-            type: string
-            format: uuid
-          example: 7a8e3b1c-9d4f-4e2a-b6c8-1d2e3f4a5b6c
-      responses:
-        '200':
-          description: Logo validation result
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Domain'
-        '401':
-          $ref: '#/components/responses/AuthenticationError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '429':
-          $ref: '#/components/responses/RateLimitError'
-
-  /domains/{domainId}/tlsrpt:
-    get:
-      operationId: getDomainTlsRpt
-      summary: Check TLS reporting
-      description: Retrieve the TLS-RPT (TLS Reporting) policy and any received TLS reports for the domain.
-      tags:
-        - Domains
-      parameters:
-        - $ref: '#/components/parameters/domainId'
-      responses:
-        '200':
-          description: TLS reporting configuration
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Domain'
-        '401':
-          $ref: '#/components/responses/AuthenticationError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '429':
-          $ref: '#/components/responses/RateLimitError'
-
   /webhooks:
     post:
       operationId: createWebhook
@@ -5313,7 +5340,7 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-    patch:
+    put:
       operationId: updateWebhook
       summary: Update a webhook
       description: Update webhook configuration.
@@ -5420,6 +5447,45 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '502':
           description: Webhook endpoint rejected or failed the test delivery
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /webhooks/{webhookId}/rotate-secret:
+    post:
+      operationId: rotateWebhookSecret
+      summary: Rotate webhook signing secret
+      description: |
+        Atomically generate a new HMAC-SHA256 signing secret for a webhook endpoint.
+        The old secret is immediately invalidated — all future webhook payloads will
+        be signed with the new secret. This operation requires the `webhooks:write`
+        scope.
+      tags:
+        - Webhooks
+      parameters:
+        - $ref: '#/components/parameters/webhookId'
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Idempotency key. If a request with the same key was processed within the
+            idempotency window (configurable, typically 5 minutes), the cached response
+            is returned without re-execution. Idempotency is scoped to the authenticated
+            principal — two different API keys cannot replay each other's requests.
+          schema:
+            type: string
+            format: uuid
+          example: 7a8e3b1c-9d4f-4e2a-b6c8-1d2e3f4a5b6c
+      responses:
+        '200':
+          description: Webhook secret rotated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
         '429':
           $ref: '#/components/responses/RateLimitError'
 
@@ -12731,6 +12797,71 @@ components:
           type: boolean
         message:
           type: string
+
+    CompleteMfaChallengeRequest:
+      type: object
+      required:
+        - code
+        - challenge_token
+      properties:
+        code:
+          type: string
+          description: TOTP code from the authenticator app
+        challenge_token:
+          type: string
+          description: MFA challenge token obtained from the login response
+
+    MfaChallengeResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Session token issued after successful challenge
+        expires_at:
+          type: string
+          format: date-time
+        user:
+          $ref: '#/components/schemas/AuthUserInfo'
+
+    MfaSetupResponse:
+      type: object
+      required:
+        - secret
+        - uri
+      properties:
+        secret:
+          type: string
+          description: Base32-encoded TOTP secret
+        uri:
+          type: string
+          format: uri
+          description: otpauth:// URI for QR code generation
+
+    ConfirmMfaSetupRequest:
+      type: object
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          description: TOTP code generated from the setup secret
+
+    MfaStatusResponse:
+      type: object
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+          description: Whether MFA is currently enabled
+        method:
+          type: string
+          nullable: true
+          description: Configured MFA method (e.g. totp)
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
 
     ResetPasswordRequest:
       type: object

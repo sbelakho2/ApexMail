@@ -1,0 +1,70 @@
+{
+  "meta": {
+    "version": "1.0",
+    "description": "API throughput baselines for core ApexMail API endpoints. Values represent sustained requests per second under normal load on a standard GitHub Actions runner with local backing services.",
+    "created_at": "2026-05-17T22:30:00Z",
+    "created_by": "platform-engineering",
+    "environment": "github-actions-ubuntu-latest-2vcpu-7gb (postgres:16-alpine, redis:7-alpine)",
+    "source": "k6 load tests :: http-journey/*-load-test.js"
+  },
+  "auth_login": {
+    "metric_name": "auth_login_throughput",
+    "description": "Sustained throughput for POST /v1/auth/login. Limited by bcrypt cost factor and database connection pool.",
+    "baseline_value": 500,
+    "unit": "requests/sec",
+    "p50": 420,
+    "p95": 500,
+    "p99": 550,
+    "measurement_period": "10m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "load-tests/http-journey/auth-load-test.js"
+  },
+  "email_send": {
+    "metric_name": "email_send_throughput",
+    "description": "Sustained throughput for POST /v1/email/send. Includes payload validation, spam scanning, and queue submission overhead.",
+    "baseline_value": 200,
+    "unit": "requests/sec",
+    "p50": 180,
+    "p95": 200,
+    "p99": 220,
+    "measurement_period": "10m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "load-tests/http-journey/email-send-load-test.js"
+  },
+  "health_liveness": {
+    "metric_name": "health_liveness_throughput",
+    "description": "Sustained throughput for GET /v1/health/liveness. In-process check, no external dependencies — highest throughput endpoint.",
+    "baseline_value": 2000,
+    "unit": "requests/sec",
+    "p50": 1800,
+    "p95": 2000,
+    "p99": 2100,
+    "measurement_period": "10m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "load-tests/http-journey/health-load-test.js"
+  },
+  "health_readiness": {
+    "metric_name": "health_readiness_throughput",
+    "description": "Sustained throughput for GET /v1/health/readiness. Includes database and cache health checks.",
+    "baseline_value": 1800,
+    "unit": "requests/sec",
+    "p50": 1600,
+    "p95": 1800,
+    "p99": 1900,
+    "measurement_period": "10m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "load-tests/http-journey/health-load-test.js"
+  },
+  "combined_journey": {
+    "metric_name": "combined_journey_throughput",
+    "description": "Sustained throughput for the combined journey test (10% liveness + 10% readiness + 30% auth + 50% email send). Realistic traffic mix.",
+    "baseline_value": 300,
+    "unit": "requests/sec",
+    "p50": 280,
+    "p95": 300,
+    "p99": 320,
+    "measurement_period": "15m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "load-tests/http-journey/combined-journey-test.js"
+  }
+}

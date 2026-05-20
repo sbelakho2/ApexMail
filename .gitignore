@@ -60,8 +60,11 @@ lerna-debug.log*
 !.env.production.example
 .vast_api_key
 vast_instance_id.txt
+# NOTE: dhparam.pem is a placeholder checked in for developer convenience.
+# The real DH parameters must be generated per-deployment using:
+#   deploy/nginx/ssl/generate-dhparams.sh
+# All .pem files (including dhparam.pem with real values) are excluded below.
 *.pem
-!deploy/nginx/ssl/dhparam.pem
 *.key
 secrets/
 **/secrets/

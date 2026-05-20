@@ -1,6 +1,9 @@
 //! DevEx service entry point.
 
 use anyhow::{Context, Result};
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use tokio::signal;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -8,13 +11,28 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use devex_service::config::DevExConfig;
 use devex_service::routes::{build_router, AppState};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // ── Structured logging ────────────────────────────────────────────
+fn init_tracing() -> Result<Option<TracingGuard>> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "devex-service".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Ok(Some(guard)),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::registry()
         .with(fmt::layer().json())
         .with(EnvFilter::from_default_env().add_directive("devex_service=info".parse()?))
         .init();
+    Ok(None)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let _guard = init_tracing()?;
 
     info!("ApexMail DevEx Service starting");
 

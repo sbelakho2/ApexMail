@@ -1,0 +1,246 @@
+{
+  "title": "ApexMail SLO / SLI Compliance",
+  "uid": "apexmail-slo-compliance",
+  "description": "SLO/SLI dashboard tracking error rate, latency (p50/p95/p99), availability against 99.9% uptime target, and burn rate",
+  "tags": ["apexmail", "slo", "sli", "compliance"],
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "utc",
+  "editable": true,
+  "panels": [
+    {
+      "title": "API Availability (30d Rolling)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": { "values": false, "calcs": ["mean"] },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "red", "value": 0.99 },
+              { "color": "yellow", "value": 0.998 },
+              { "color": "green", "value": 0.999 }
+            ]
+          },
+          "min": 0,
+          "max": 1
+        }
+      },
+      "targets": [
+        {
+          "expr": "1 - (sum(increase(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[30d])) / clamp_min(sum(increase(apexmail_http_requests_total{job=\"apexmail-api\"}[30d])), 1))",
+          "legendFormat": "Availability"
+        }
+      ]
+    },
+    {
+      "title": "Error Rate (5xx / Total)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 10, "x": 6, "y": 0 },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          },
+          "custom": { "lineInterpolation": "smooth", "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(apexmail_http_requests_total{job=\"apexmail-api\"}[5m])), 1)",
+          "legendFormat": "Error Rate"
+        }
+      ]
+    },
+    {
+      "title": "API Latency - p50 / p95 / p99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineInterpolation": "smooth", "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "red", "value": 1.0 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(apexmail_http_request_duration_seconds_bucket{job=\"apexmail-api\"}[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(apexmail_http_request_duration_seconds_bucket{job=\"apexmail-api\"}[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(apexmail_http_request_duration_seconds_bucket{job=\"apexmail-api\"}[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Availability (Uptime) - 99.9% Target",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "options": {
+        "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0.95,
+          "max": 1,
+          "custom": { "lineInterpolation": "smooth", "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "red", "value": 0.99 },
+              { "color": "yellow", "value": 0.998 },
+              { "color": "green", "value": 0.999 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "1 - (sum(increase(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[1h])) / clamp_min(sum(increase(apexmail_http_requests_total{job=\"apexmail-api\"}[1h])), 1))",
+          "legendFormat": "1h Availability"
+        },
+        {
+          "expr": "1 - (sum(increase(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[24h])) / clamp_min(sum(increase(apexmail_http_requests_total{job=\"apexmail-api\"}[24h])), 1))",
+          "legendFormat": "24h Availability"
+        }
+      ]
+    },
+    {
+      "title": "SLO Burn Rate (Multi-window)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "options": {
+        "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": { "lineInterpolation": "smooth", "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.9 },
+              { "color": "red", "value": 0.95 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "1 - (sum(increase(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[1h])) / clamp_min(sum(increase(apexmail_http_requests_total{job=\"apexmail-api\"}[1h])), 1))",
+          "legendFormat": "1h Window"
+        },
+        {
+          "expr": "1 - (sum(increase(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[6h])) / clamp_min(sum(increase(apexmail_http_requests_total{job=\"apexmail-api\"}[6h])), 1))",
+          "legendFormat": "6h Window"
+        },
+        {
+          "expr": "1 - (sum(increase(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[30d])) / clamp_min(sum(increase(apexmail_http_requests_total{job=\"apexmail-api\"}[30d])), 1))",
+          "legendFormat": "30d Window"
+        }
+      ]
+    },
+    {
+      "title": "Request Throughput",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 22 },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "lineInterpolation": "smooth", "showPoints": "never" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(apexmail_http_requests_total{job=\"apexmail-api\"}[5m]))",
+          "legendFormat": "Total Requests/s"
+        },
+        {
+          "expr": "sum(rate(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"2..\"}[5m]))",
+          "legendFormat": "2xx/s"
+        },
+        {
+          "expr": "sum(rate(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[5m]))",
+          "legendFormat": "5xx/s"
+        }
+      ]
+    },
+    {
+      "title": "Email Delivery Latency (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 22 },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineInterpolation": "smooth", "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 300 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(apexmail_email_delivery_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "Delivery p95"
+        }
+      ]
+    }
+  ]
+}

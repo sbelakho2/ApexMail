@@ -6,9 +6,13 @@ global:
   evaluation_interval: 15s
   scrape_timeout: 10s
 
-# FIX-072: Load alerting rules
+# Load ALL alerting rules
 rule_files:
   - 'alerting-rules.yml'
+  - 'monitoring/alerts/certificate-expiry.yml'
+  - 'monitoring/alerts/disk-space.yml'
+  - 'prometheus/alerts/api-alerts.yml'
+  - 'prometheus/alerts/infrastructure-alerts.yml'
 
 # Local Docker Compose only runs tracking plus the exporter stack.
 # Production-style service discovery for API/worker lives in deployment
@@ -68,7 +72,7 @@ scrape_configs:
     # Host-level resource metrics use longer windows, so 30s keeps noise and scrape cost down.
     scrape_interval: 30s
 
-  - job_name: 'blackbox'
+  - job_name: 'blackbox-https'
     metrics_path: /probe
     params:
       module: [https_tls]
@@ -77,11 +81,57 @@ scrape_configs:
       - targets:
           - https://api.apexmail.ee/health
           - https://track.apexmail.ee/
+          - https://app.apexmail.ee/login
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
       - target_label: __address__
         replacement: blackbox-exporter:9115
+
+  # ── Blackbox HTTP API probes for critical user journeys ──
+  # Probes key API endpoints to verify functional correctness beyond simple health checks.
+  - job_name: 'blackbox-http-api-health'
+    metrics_path: /probe
+    params:
+      module: [http_api_health]
+    static_configs:
+      - targets:
+          - https://api.apexmail.ee/v1/health/readiness
+          - https://api.apexmail.ee/v1/health/liveness
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+    scrape_interval: 30s
+
+  - job_name: 'blackbox-http-login'
+    metrics_path: /probe
+    params:
+      module: [http_login]
+    static_configs:
+      - targets:
+          - https://api.apexmail.ee/v1/auth/login
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+    scrape_interval: 60s
+
+  - job_name: 'blackbox-http-email-send'
+    metrics_path: /probe
+    params:
+      module: [http_api_email_send]
+    static_configs:
+      - targets:
+          - https://api.apexmail.ee/v1/email/send
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+    scrape_interval: 120s
 
   - job_name: 'blackbox-smtp'
     metrics_path: /probe
@@ -111,11 +161,42 @@ scrape_configs:
       - target_label: __address__
         replacement: blackbox-exporter:9115
 
+  - job_name: 'blackbox-dns-txt'
+    metrics_path: /probe
+    params:
+      module: [dns_apexmail_txt]
+    static_configs:
+      - targets:
+          - apexmail.ee
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
   - job_name: 'synthetic-transactions'
     static_configs:
       - targets: ['synthetic-monitor:9128']
     metrics_path: '/metrics'
     scrape_interval: 30s
+
+  # ── Rate Limiter Metrics ──
+  - job_name: 'rate-limiter'
+    static_configs:
+      - targets: ['rate-limiter:9093']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # ── ClickHouse Query Performance Metrics ──
+  - job_name: 'clickhouse-query'
+    static_configs:
+      - targets: ['clickhouse-exporter:9116']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'clickhouse_query_(duration_seconds|read_bytes|read_rows|result_bytes|result_rows|memory_usage|cpu_usage)_(sum|count|bucket)'
+        action: keep
 
 alerting:
   alertmanagers:

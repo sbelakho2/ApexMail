@@ -3,6 +3,9 @@
 
 use clap::Parser;
 use deadpool_redis::{Config as DpRedisConfig, Runtime};
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use tokio::signal;
@@ -25,14 +28,30 @@ struct Cli {
     port: Option<u16>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "isolation-server".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "isolation=info,tower_http=info".into()),
         )
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let _guard = init_tracing();
 
     dotenvy::dotenv().ok();
 

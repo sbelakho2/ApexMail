@@ -16,6 +16,53 @@ modules:
       preferred_ip_protocol: "ip4"
       tls_config:
         insecure_skip_verify: false
+  http_post_2xx:
+    prober: http
+    timeout: 10s
+    http:
+      method: POST
+      headers:
+        Content-Type: application/json
+      follow_redirects: true
+      preferred_ip_protocol: "ip4"
+      fail_if_ssl: false
+  http_api_health:
+    prober: http
+    timeout: 10s
+    http:
+      method: GET
+      valid_status_codes: [200]
+      follow_redirects: false
+      preferred_ip_protocol: "ip4"
+      tls_config:
+        insecure_skip_verify: false
+      fail_if_not_ssl: true
+  http_api_email_send:
+    prober: http
+    timeout: 15s
+    http:
+      method: POST
+      headers:
+        Content-Type: application/json
+      body: '{"to":"probe@apexmail.ee","subject":"Blackbox Probe","text":"This is a synthetic probe test email"}'
+      valid_status_codes: [200, 201, 202]
+      follow_redirects: false
+      preferred_ip_protocol: "ip4"
+      tls_config:
+        insecure_skip_verify: false
+  http_login:
+    prober: http
+    timeout: 10s
+    http:
+      method: POST
+      headers:
+        Content-Type: application/json
+      body: '{"email":"probe@apexmail.ee"}'
+      valid_status_codes: [200, 201, 400, 401]
+      follow_redirects: false
+      preferred_ip_protocol: "ip4"
+      tls_config:
+        insecure_skip_verify: false
   tcp_connect:
     prober: tcp
     timeout: 5s
@@ -27,6 +74,15 @@ modules:
     dns:
       query_name: "apexmail.ee"
       query_type: "MX"
+      valid_rcodes:
+        - NOERROR
+      preferred_ip_protocol: "ip4"
+  dns_apexmail_txt:
+    prober: dns
+    timeout: 5s
+    dns:
+      query_name: "apexmail.ee"
+      query_type: "TXT"
       valid_rcodes:
         - NOERROR
       preferred_ip_protocol: "ip4"

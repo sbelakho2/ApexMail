@@ -4,6 +4,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::http::header;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -14,11 +17,18 @@ use edge_cases::services::{
     eai::EAIService,
 };
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Structured JSON logging with env-driven filter
-    // Sampling strategy: default to `info` level; use RUST_LOG for fine-grained control
-    // e.g., `RUST_LOG=warn,edge_cases=debug` for verbose debug in dev
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "edge-cases-server".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .json()
         .with_target(true)
@@ -27,6 +37,12 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let _guard = init_tracing();
 
     let config = EdgeCasesConfig::from_env()?;
     info!(port = config.port, "Starting edge-cases server");

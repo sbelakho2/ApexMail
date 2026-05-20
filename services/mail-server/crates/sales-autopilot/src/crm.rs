@@ -97,12 +97,32 @@ impl CrmService {
     }
 
     /// Compute a deterministic lead score (0–100) from three normalised
-    /// dimensions:email engagement, company size tier, and recency.
+    /// dimensions: email engagement, company size tier, and recency.
     /// Each input should be in `0.0..=1.0`.
+    ///
+    /// Uses default weights (40/30/30). For configurable weights, use
+    /// [`score_lead_with_weights`].
     pub fn score_lead(email_engagement: f64, company_size: f64, recency: f64) -> u8 {
-        let raw = email_engagement.clamp(0.0, 1.0) * 40.0
-            + company_size.clamp(0.0, 1.0) * 30.0
-            + recency.clamp(0.0, 1.0) * 30.0;
+        Self::score_lead_with_weights(email_engagement, company_size, recency, 40, 30, 30)
+    }
+
+    /// Compute a deterministic lead score with customisable weights (SALES-01).
+    ///
+    /// Each weight is an integer percentage point. The final score is:
+    ///   `engagement.clamp(0,1) * engagement_weight + company_size.clamp(0,1) * company_size_weight + recency.clamp(0,1) * recency_weight`
+    ///
+    /// The result is clamped to `0..=100`.
+    pub fn score_lead_with_weights(
+        email_engagement: f64,
+        company_size: f64,
+        recency: f64,
+        engagement_weight: u8,
+        company_size_weight: u8,
+        recency_weight: u8,
+    ) -> u8 {
+        let raw = email_engagement.clamp(0.0, 1.0) * engagement_weight as f64
+            + company_size.clamp(0.0, 1.0) * company_size_weight as f64
+            + recency.clamp(0.0, 1.0) * recency_weight as f64;
         (raw.round() as u8).min(100)
     }
 

@@ -41,7 +41,7 @@ public final class Webhooks {
 
     /** Update a webhook (URL, events, or active status). */
     public WebhookResponse update(String id, Map<String, Object> params) {
-        return client.request("PATCH", "/v1/webhooks/" + encode(id), params, WebhookResponse.class);
+        return client.request("PUT", "/v1/webhooks/" + encode(id), params, WebhookResponse.class);
     }
 
     /** Delete a webhook endpoint. */

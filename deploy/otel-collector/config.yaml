@@ -15,8 +15,20 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        # SECURITY: Enable TLS for production deployments
+        # Uncomment and configure with proper certificates:
+        # tls:
+        #   cert_file: /etc/otelcol/certs/tls.crt
+        #   key_file: /etc/otelcol/certs/tls.key
+        #   client_ca_file: /etc/otelcol/certs/ca.crt
       http:
         endpoint: 0.0.0.0:4318
+        # SECURITY: Enable TLS for production deployments
+        # Uncomment and configure with proper certificates:
+        # tls:
+        #   cert_file: /etc/otelcol/certs/tls.crt
+        #   key_file: /etc/otelcol/certs/tls.key
+        #   client_ca_file: /etc/otelcol/certs/ca.crt
   hostmetrics:
     collection_interval: 30s
     scrapers:

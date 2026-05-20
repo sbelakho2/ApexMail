@@ -172,11 +172,45 @@ pub struct AdClick {
     pub converted: bool,
 }
 
+/// A tracked conversion attributed to a specific campaign and lead (SALES-03).
+///
+/// Ties a lead's conversion event back to the campaign that drove it,
+/// enabling ROI analysis and attribution reporting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conversion {
+    pub id: Uuid,
+    pub tenant_id: String,
+    pub campaign_id: Uuid,
+    pub lead_id: Uuid,
+    /// Revenue attributed to this conversion (e.g., deal value in USD).
+    pub revenue: f64,
+    /// Description of the conversion event (e.g., "signed contract", "demo booked").
+    pub description: String,
+    pub converted_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Conversion tracking types (SALES-03)
+// ---------------------------------------------------------------------------
+
+/// Request body for recording a conversion.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateConversionBody {
+    pub campaign_id: Uuid,
+    pub lead_id: Uuid,
+    #[serde(default)]
+    pub revenue: f64,
+    #[serde(default)]
+    pub description: String,
+}
+
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SalesError {
     #[error("lead not found: {0}")]
     LeadNotFound(Uuid),
@@ -186,6 +220,9 @@ pub enum SalesError {
 
     #[error("event not found: {0}")]
     EventNotFound(Uuid),
+
+    #[error("conversion not found: {0}")]
+    ConversionNotFound(Uuid),
 
     #[error("invalid input: {0}")]
     InvalidInput(String),
@@ -219,7 +256,8 @@ impl axum::response::IntoResponse for SalesError {
         let (status, msg) = match &self {
             SalesError::LeadNotFound(_)
             | SalesError::CampaignNotFound(_)
-            | SalesError::EventNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
+            | SalesError::EventNotFound(_)
+            | SalesError::ConversionNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             SalesError::InvalidInput(_)
             | SalesError::MaxCampaignsReached(_)
             | SalesError::SlotUnavailable => (StatusCode::BAD_REQUEST, self.to_string()),

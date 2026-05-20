@@ -189,7 +189,7 @@ Stripe webhook (plan change)
   → Next message routes via SMTP automatically
 ```
 
-#### 2. Warmup (45-day schedule)
+#### 2. Warmup (60-day schedule)
 
 | Day | Daily limit |
 |-----|-------------|
@@ -203,7 +203,10 @@ Stripe webhook (plan change)
 | 21-28 | 10,000 |
 | 29-35 | 25,000 |
 | 36-44 | 50,000 |
-| 45+ | Unlimited |
+| 45-49 | 75,000 |
+| 50-54 | 100,000 |
+| 55-59 | 250,000 |
+| 60+ | Unlimited |
 
 During warmup, excess traffic overflows to SES shared sending automatically.
 

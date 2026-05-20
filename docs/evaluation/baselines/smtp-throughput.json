@@ -1,0 +1,82 @@
+{
+  "meta": {
+    "version": "1.0",
+    "description": "SMTP throughput baselines for the ApexMail MTA (Message Transfer Agent). Values represent outbound email delivery throughput measured from dedicated MTA instances.",
+    "created_at": "2026-05-17T22:30:00Z",
+    "created_by": "platform-engineering",
+    "environment": "hetzner-cx42 (4 vCPU, 16 GB RAM) — dedicated MTA node, 1 Gbps network",
+    "source": "MTA metrics :: Prometheus + Grafana dashboard (deploy/grafana/dashboards/mta-overview.json)"
+  },
+  "smtp_messages_per_second": {
+    "metric_name": "smtp_messages_per_second",
+    "description": "Number of SMTP messages successfully delivered per second per MTA instance. Includes successful deliveries only (2xx SMTP responses).",
+    "baseline_value": 250,
+    "unit": "emails/sec",
+    "p50": 200,
+    "p95": 250,
+    "p99": 270,
+    "measurement_period": "15m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "Prometheus :: rate(mta_delivered_total[5m])"
+  },
+  "smtp_connections": {
+    "metric_name": "smtp_connections_per_instance",
+    "description": "Number of concurrent SMTP connections maintained per MTA instance. Each connection corresponds to an open TCP socket to a receiving mail server.",
+    "baseline_value": 200,
+    "unit": "connections",
+    "p50": 150,
+    "p95": 200,
+    "p99": 220,
+    "measurement_period": "15m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "Prometheus :: mta_active_connections"
+  },
+  "smtp_connection_setup_time": {
+    "metric_name": "smtp_connection_setup_time",
+    "description": "Time to establish a new SMTP connection (TCP handshake + SMTP greeting + STARTTLS negotiation). Measured at the 95th percentile to exclude slow-responding remote servers.",
+    "baseline_value": 500,
+    "unit": "ms",
+    "p50": 200,
+    "p95": 500,
+    "p99": 1200,
+    "measurement_period": "15m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "Prometheus :: mta_connection_setup_duration_ms"
+  },
+  "smtp_delivery_per_connection": {
+    "metric_name": "smtp_delivery_per_connection",
+    "description": "Average number of messages delivered per SMTP connection. Higher values indicate better connection reuse (pipelining) and fewer per-message overheads.",
+    "baseline_value": 8,
+    "unit": "messages/connection",
+    "p50": 6,
+    "p95": 8,
+    "p99": 10,
+    "measurement_period": "15m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "Prometheus :: mta_delivered_total / mta_connections_total"
+  },
+  "smtp_error_rate": {
+    "metric_name": "smtp_delivery_error_rate",
+    "description": "Percentage of SMTP delivery attempts that resulted in a non-2xx response (temporary or permanent failure).",
+    "baseline_value": 2.5,
+    "unit": "percent",
+    "p50": 1.5,
+    "p95": 2.5,
+    "p99": 5.0,
+    "measurement_period": "15m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "Prometheus :: rate(mta_failed_total[5m]) / rate(mta_attempts_total[5m])"
+  },
+  "smtp_throughput_per_domain": {
+    "metric_name": "smtp_throughput_per_domain_max",
+    "description": "Maximum sustained throughput to a single destination domain (e.g., gmail.com, outlook.com). Limited by remote MTA rate limiting and connection throttling.",
+    "baseline_value": 50,
+    "unit": "emails/sec",
+    "p50": 30,
+    "p95": 50,
+    "p99": 60,
+    "measurement_period": "15m",
+    "created_at": "2026-05-17T22:30:00Z",
+    "source": "Prometheus :: rate(mta_delivered_total[5m]) by (destination_domain)"
+  }
+}

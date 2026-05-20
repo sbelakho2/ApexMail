@@ -63,11 +63,15 @@ if [[ ! -d "$SRC" ]]; then
   exit 1
 fi
 
-# privkey is 644 (not 600) because the front nginx container runs as uid 101
-# and reads these files via read-only bind mount. The directory itself is
-# host-only (root:root) so the key is not exposed beyond the box.
+# SECURITY (SEC-107): Private key must be 600 (owner-only) to prevent
+# unauthorized reads. The nginx container reads the key via Docker secret
+# or tmpfs mount — NOT via direct filesystem bind mount.
+# If using a bind mount, ensure the nginx container user (uid 101) can
+# read the key by either:
+#   a) Using Docker secrets (recommended)
+#   b) Setting group ownership: chown :101 privkey.pem && chmod 640 privkey.pem
 install -m 644 "$SRC/fullchain.pem" "$LIVE/fullchain.pem"
-install -m 644 "$SRC/privkey.pem"   "$LIVE/privkey.pem"
+install -m 600 "$SRC/privkey.pem"   "$LIVE/privkey.pem"
 install -m 644 "$SRC/chain.pem"     "$LIVE/ca-chain.pem"
 
 echo "[letsencrypt] reloading nginx with new cert"

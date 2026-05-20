@@ -8,6 +8,9 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::{routing::get, Router};
 use deadpool_redis::{Config as RedisConfig, Runtime};
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use sqlx::postgres::PgPoolOptions;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -20,12 +23,18 @@ use worker_processors::{
     AnalyticsProcessor, EmailProcessor, ReplyHandler, WebhookProcessor,
 };
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize structured JSON logging with env-driven filter
-    // Sampling strategy: default `info` level; use RUST_LOG for fine-grained control.
-    // For high-volume worker, set `RUST_LOG=warn,worker_processors=info` in production
-    // to reduce log volume while retaining visibility into worker operations.
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "worker".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .json()
         .with_target(true)
@@ -33,6 +42,12 @@ async fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let _guard = init_tracing();
 
     info!("Starting ApexMail Worker (Rust)");
 
@@ -43,12 +58,17 @@ async fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("REDIS_URL environment variable must be set"))?;
 
     // Create database pool
+    // PERF-116: Acquire timeout increased to 60s (from 10s) and statement
+    // caching enabled (capacity 100) to avoid re-preparation roundtrips.
+    let connect_opts = database_url
+        .parse::<sqlx::postgres::PgConnectOptions>()?
+        .statement_cache_capacity(100);
     let db = PgPoolOptions::new()
         .max_connections(30)
-        .acquire_timeout(Duration::from_secs(10))
+        .acquire_timeout(Duration::from_secs(60))
         .idle_timeout(Duration::from_secs(300))
         .max_lifetime(Duration::from_secs(1800))
-        .connect(&database_url)
+        .connect_with(connect_opts)
         .await?;
 
     info!("Connected to PostgreSQL");

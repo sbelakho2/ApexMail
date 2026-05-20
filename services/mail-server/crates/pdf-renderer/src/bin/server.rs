@@ -6,6 +6,9 @@
 //! PDF_PORT=3004 pdf-renderer
 
 use clap::Parser;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -23,11 +26,18 @@ struct Args {
     port: u16,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
-
-    // Initialize tracing
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "pdf-renderer".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -35,6 +45,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .json()
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+
+    let _guard = init_tracing();
 
     let args = Args::parse();
     let addr = format!("{}:{}", args.host, args.port);

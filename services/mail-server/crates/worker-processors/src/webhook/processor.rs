@@ -250,6 +250,61 @@ impl WebhookProcessor {
         result
     }
 
+    /// Retry budget Redis key for a webhook endpoint (RS-H-07).
+    fn retry_budget_redis_key(&self, webhook_id: &str) -> String {
+        format!("webhook:retry_budget:{}", webhook_id)
+    }
+
+    /// Check and consume the retry budget for a webhook endpoint (RS-H-07).
+    ///
+    /// Uses Redis INCR with EXPIRE to atomically track retry attempts within a
+    /// configurable time window. When the budget is exhausted, returns `false`
+    /// to signal that the job should be moved to the dead letter queue.
+    async fn check_retry_budget(&self, webhook_id: &str) -> ProcessorResult<bool> {
+        let budget_max = self.config.retry_budget_max;
+        if budget_max == 0 {
+            // Budget enforcement disabled
+            return Ok(true);
+        }
+
+        let key = self.retry_budget_redis_key(webhook_id);
+        let mut conn = self.redis.get().await?;
+
+        // Atomically increment the retry counter
+        let count: u32 = redis::cmd("INCR")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await?;
+
+        // Set expiry on first increment
+        if count == 1 {
+            let _: Result<(), _> = redis::cmd("EXPIRE")
+                .arg(&key)
+                .arg(self.config.retry_budget_window_secs as i64)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        if count > budget_max {
+            warn!(
+                webhook_id = %webhook_id,
+                retry_count = count,
+                budget_max = budget_max,
+                window_secs = self.config.retry_budget_window_secs,
+                "Webhook retry budget exhausted, moving to dead letter queue"
+            );
+            Ok(false)
+        } else {
+            debug!(
+                webhook_id = %webhook_id,
+                retry_count = count,
+                budget_max = budget_max,
+                "Webhook retry budget consumed"
+            );
+            Ok(true)
+        }
+    }
+
     /// Derive an HMAC-based dedup key for the webhook job (O-16.2 fix).
     /// Instead of a deterministic `format!("webhook:dedup:{}:{}", job.id, job.attempt)`
     /// which is predictable, we use `HMAC-SHA256(job.id, dedup_hmac_key)` to make the
@@ -681,26 +736,91 @@ impl WebhookProcessor {
                 "Webhook exhausted retries, moved to dead letter"
             );
         } else if result.is_retryable() {
-            // Schedule retry with backoff
-            let retry_delay = result
-                .retry_after_ms
-                .map(|ms| ms as i64)
-                .unwrap_or_else(|| job.next_retry_delay_ms());
+            // Check retry budget before scheduling (RS-H-07)
+            match self.check_retry_budget(&job.webhook_id).await {
+                Ok(true) => {
+                    // Budget available — schedule retry with backoff
+                    let retry_delay = result
+                        .retry_after_ms
+                        .map(|ms| ms as i64)
+                        .unwrap_or_else(|| job.next_retry_delay_ms());
 
-            sqlx::query(
-                "UPDATE webhook_queue SET status = 'pending', attempt = attempt + 1, scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, last_error = $2, updated_at = NOW() WHERE id = $3"
-            )
-            .bind(retry_delay)
-            .bind(error_msg)
-            .bind(&job.id)
-            .execute(&self.db)
-            .await?;
+                    sqlx::query(
+                        "UPDATE webhook_queue SET status = 'pending', attempt = attempt + 1, scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, last_error = $2, updated_at = NOW() WHERE id = $3"
+                    )
+                    .bind(retry_delay)
+                    .bind(error_msg)
+                    .bind(&job.id)
+                    .execute(&self.db)
+                    .await?;
 
-            debug!(
-                job_id = %job.id,
-                retry_delay_ms = retry_delay,
-                "Webhook scheduled for retry"
-            );
+                    debug!(
+                        job_id = %job.id,
+                        retry_delay_ms = retry_delay,
+                        "Webhook scheduled for retry"
+                    );
+                }
+                Ok(false) => {
+                    // Budget exhausted — move to dead letter queue immediately
+                    sqlx::query(
+                        r#"
+                        INSERT INTO webhook_deliveries (id, webhook_id, tenant_id, event_type, payload, status_code, response_time_ms, response_body, attempt, error, delivered_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                        "#,
+                    )
+                    .bind(format!("dlv_{}", uuid::Uuid::new_v4()))
+                    .bind(&job.webhook_id)
+                    .bind(&job.tenant_id)
+                    .bind(&job.event_type)
+                    .bind(&job.payload)
+                    .bind(result.status_code.map(|c| c as i32))
+                    .bind(result.response_time_ms as i64)
+                    .bind(&result.response_body)
+                    .bind(job.attempt)
+                    .bind(error_msg)
+                    .execute(&self.db)
+                    .await?;
+
+                    sqlx::query("DELETE FROM webhook_queue WHERE id = $1")
+                        .bind(&job.id)
+                        .execute(&self.db)
+                        .await?;
+
+                    error!(
+                        job_id = %job.id,
+                        webhook_id = %job.webhook_id,
+                        "Webhook retry budget exhausted, moved to dead letter"
+                    );
+                }
+                Err(e) => {
+                    // Redis unavailable — fall through to schedule retry
+                    warn!(
+                        job_id = %job.id,
+                        webhook_id = %job.webhook_id,
+                        error = %e,
+                        "Retry budget check failed (Redis may be unavailable), scheduling retry"
+                    );
+                    let retry_delay = result
+                        .retry_after_ms
+                        .map(|ms| ms as i64)
+                        .unwrap_or_else(|| job.next_retry_delay_ms());
+
+                    sqlx::query(
+                        "UPDATE webhook_queue SET status = 'pending', attempt = attempt + 1, scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, last_error = $2, updated_at = NOW() WHERE id = $3"
+                    )
+                    .bind(retry_delay)
+                    .bind(error_msg)
+                    .bind(&job.id)
+                    .execute(&self.db)
+                    .await?;
+
+                    debug!(
+                        job_id = %job.id,
+                        retry_delay_ms = retry_delay,
+                        "Webhook scheduled for retry (after budget check failure)"
+                    );
+                }
+            }
         } else {
             sqlx::query(
                 r#"

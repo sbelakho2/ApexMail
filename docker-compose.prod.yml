@@ -15,6 +15,9 @@ services:
   # MARKETING SITE (Zola static site, served by nginx-alpine on 8080)
   # ===========================================================================
   marketing:
+    # SECURITY: Pin to specific digest for reproducible builds
+    # Update digest after verified image build:
+    #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/sbelakho2/apexmail/marketing:latest
     image: ghcr.io/sbelakho2/apexmail/marketing:latest
     restart: unless-stopped
     read_only: true
@@ -217,8 +220,8 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required in production}
       # ── mCaptcha (login CAPTCHA protection) ───────────────────────────────
       MCAPTCHA_ENABLED: ${MCAPTCHA_ENABLED:?MCAPTCHA_ENABLED is required in production}
-      MCAPTCHA_SITE_KEY: ${MCAPTCHA_SITE_KEY:-dev}
-      MCAPTCHA_SECRET_KEY: ${MCAPTCHA_SECRET_KEY:-${MCAPTCHA_SECRET:-dev}}
+      MCAPTCHA_SITE_KEY: ${MCAPTCHA_SITE_KEY:?MCAPTCHA_SITE_KEY is required in production}
+      MCAPTCHA_SECRET_KEY: ${MCAPTCHA_SECRET_KEY:?MCAPTCHA_SECRET_KEY is required in production}
       MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:-https://demo.mcaptcha.org/api/v1/pow/siteverify}
       METRICS_PORT: 9090
     volumes:
@@ -302,6 +305,13 @@ services:
       - apexmail_data
     secrets:
       - postgres_password
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
 
   clickhouse:
     ports: []

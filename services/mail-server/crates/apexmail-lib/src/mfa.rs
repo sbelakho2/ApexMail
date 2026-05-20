@@ -169,16 +169,19 @@ fn generate_totp(secret: &[u8], counter: u64) -> String {
     format!("{:06}", code % 1_000_000)
 }
 
-/// Constant-time byte comparison to prevent timing side-channels.
+/// RS-064: Constant-time byte comparison that does NOT leak length through timing.
+/// Uses a dummy comparison loop when lengths differ to avoid short-circuiting.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let len_matches = a.len() == b.len();
     let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
+    // Always iterate over both slices fully to avoid timing leaks
+    for (x, y) in a.iter().zip(b.iter().chain(std::iter::repeat(&0))) {
         diff |= x ^ y;
     }
-    diff == 0
+    for y in b.iter().skip(a.len()) {
+        diff |= *y;
+    }
+    len_matches && diff == 0
 }
 
 /// Decode a base32 string (RFC 4648, no padding required).

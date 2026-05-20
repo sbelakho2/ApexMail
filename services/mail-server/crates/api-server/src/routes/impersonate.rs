@@ -2,6 +2,7 @@
 //!
 //! Allows platform operators to impersonate tenant accounts.
 //! All impersonation events are audit-logged.
+//! CRITICAL SECURITY: All endpoints require admin-level (*) scope.
 
 use super::helpers::extract_cookie;
 use axum::extract::State;
@@ -12,6 +13,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
+use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -51,8 +53,12 @@ struct ImpersonationTokenPayload {
 
 async fn start_impersonation(
     State(state): State<AppState>,
+    auth: AuthUser,
     Json(body): Json<ImpersonateRequest>,
 ) -> Result<Response, ApiError> {
+    // CRITICAL: Only platform admins can start impersonation sessions.
+    require_scopes(&auth, &["*"])?;
+
     if body.token.is_empty() {
         return Err(ApiError::BadRequest("missing impersonation token".into()));
     }
@@ -138,8 +144,12 @@ async fn start_impersonation(
 
 async fn end_impersonation(
     State(state): State<AppState>,
+    auth: AuthUser,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    // CRITICAL: Only platform admins can end impersonation sessions.
+    require_scopes(&auth, &["*"])?;
+
     // Try to read the impersonation cookie for audit logging
     let imp_token = extract_cookie(&headers, "impersonation_session");
     if let Some(token) = imp_token {

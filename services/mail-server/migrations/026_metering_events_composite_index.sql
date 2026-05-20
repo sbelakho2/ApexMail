@@ -9,6 +9,17 @@
 -- A single composite index on (tenant_id, event_type, timestamp) covers both
 -- patterns efficiently via a single index scan, avoiding bitmap combine of
 -- three separate single-column indexes.
+--
+-- NOTE: This migration MUST NOT be wrapped in a transaction block.
+-- CREATE INDEX CONCURRENTLY requires running outside any explicit transaction.
+-- The DO block with to_regclass guard prevents failure when metering_events
+-- hasn't been created yet (it's created in migration 052).
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_metering_events_tenant_type_ts
-    ON metering_events (tenant_id, event_type, timestamp);
+DO $$
+BEGIN
+  IF to_regclass('public.metering_events') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_metering_events_tenant_type_ts') THEN
+    EXECUTE 'CREATE INDEX CONCURRENTLY idx_metering_events_tenant_type_ts
+      ON metering_events (tenant_id, event_type, timestamp)';
+  END IF;
+END $$;

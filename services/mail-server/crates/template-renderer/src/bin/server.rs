@@ -1,4 +1,7 @@
 use clap::Parser;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use std::sync::Arc;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -20,20 +23,46 @@ struct Cli {
     port: u16,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
-
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "template-renderer".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .json()
         .init();
+    None
+}
+
+/// Utility to parse an env var or use a default value.
+fn env_or_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+
+    let _guard = init_tracing();
 
     let cli = Cli::parse();
 
-    tracing::info!("Connecting to database...");
+    let db_max_connections = env_or_u64("DB_MAX_CONNECTIONS", 10) as u32;
+
+    tracing::info!("Connecting to database (max_connections: {db_max_connections})...");
     let db = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(db_max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
         .idle_timeout(std::time::Duration::from_secs(300))
         .max_lifetime(std::time::Duration::from_secs(1800))
@@ -43,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let config = RendererConfig {
         db: DatabaseConfig {
             url: cli.database_url,
-            max_connections: 10,
+            max_connections: db_max_connections,
         },
         server: ServerConfig {
             host: cli.host.clone(),

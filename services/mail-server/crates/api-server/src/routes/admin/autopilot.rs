@@ -68,7 +68,15 @@ struct AutopilotStateRow {
     rules: serde_json::Value,
 }
 
+/// API-114/115: Track whether the autopilot state table has been ensured
+/// to avoid running DDL on every request (causes latency and lock contention).
+static AUTOPILOT_TABLE_ENSURE: OnceLock<()> = OnceLock::new();
+
 async fn ensure_autopilot_state_table(db: &sqlx::PgPool) -> Result<(), ApiError> {
+    // Only run DDL once per process lifetime; tables should be created via migrations.
+    if AUTOPILOT_TABLE_ENSURE.get().is_some() {
+        return Ok(());
+    }
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sales_autopilot_state (
             id INTEGER PRIMARY KEY,
@@ -91,6 +99,8 @@ async fn ensure_autopilot_state_table(db: &sqlx::PgPool) -> Result<(), ApiError>
     .execute(db)
     .await?;
 
+    // Mark as ensured so subsequent calls skip the DDL entirely.
+    let _ = AUTOPILOT_TABLE_ENSURE.set(());
     Ok(())
 }
 
@@ -175,8 +185,11 @@ fn max_approvals_per_cycle(rules: &serde_json::Value) -> i64 {
         .clamp(1, 25)
 }
 
+/// Process one autopilot cycle, scoped to a specific tenant.
+/// API-102: Background autopilot worker now filters by tenant_id.
 async fn process_autopilot_cycle(
     state: &AppState,
+    tenant_id: &str,
     rules: &serde_json::Value,
 ) -> Result<usize, ApiError> {
     if !table_exists(&state.db, "sales_leads").await {
@@ -191,6 +204,7 @@ async fn process_autopilot_cycle(
              FROM sales_leads
              WHERE status IN ('new', 'prospect')
                AND COALESCE(score, 0) >= $1
+               AND tenant_id = $3
              ORDER BY COALESCE(score, 0) DESC, created_at ASC
              LIMIT $2
          )
@@ -198,6 +212,7 @@ async fn process_autopilot_cycle(
     )
     .bind(PENDING_APPROVAL_SCORE)
     .bind(max_approvals_per_cycle(rules))
+    .bind(tenant_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -216,12 +231,17 @@ async fn process_autopilot_cycle(
     Ok(approved_ids.len())
 }
 
-async fn run_autopilot_worker(state: AppState) {
+/// API-105: Per-tenant autopilot worker state key.
+fn autopilot_tenant_worker_key(tenant_id: &str) -> String {
+    format!("apexmail:autopilot:worker:{tenant_id}")
+}
+
+async fn run_autopilot_worker(state: AppState, tenant_id: String) {
     loop {
         let current = match load_autopilot_state(&state.db).await {
             Ok(current) => current,
             Err(error) => {
-                tracing::warn!(error = %error, "autopilot worker failed to load state");
+                tracing::warn!(error = %error, tenant_id = %tenant_id, "autopilot worker failed to load state");
                 break;
             }
         };
@@ -231,8 +251,9 @@ async fn run_autopilot_worker(state: AppState) {
         }
 
         if !current.safe_mode {
-            if let Err(error) = process_autopilot_cycle(&state, &current.rules).await {
-                tracing::warn!(error = %error, "autopilot worker cycle failed");
+            // API-102: Process only leads for this specific tenant.
+            if let Err(error) = process_autopilot_cycle(&state, &tenant_id, &current.rules).await {
+                tracing::warn!(error = %error, tenant_id = %tenant_id, "autopilot worker cycle failed");
             }
         }
 
@@ -240,7 +261,8 @@ async fn run_autopilot_worker(state: AppState) {
     }
 }
 
-async fn ensure_autopilot_worker_running(state: AppState) {
+/// API-105: Spawn autopilot worker scoped to a specific tenant.
+async fn ensure_autopilot_worker_running(state: AppState, tenant_id: String) {
     let mut guard = worker_handle().lock().await;
     if guard
         .as_ref()
@@ -250,8 +272,9 @@ async fn ensure_autopilot_worker_running(state: AppState) {
         return;
     }
 
+    let tid = tenant_id.clone();
     *guard = Some(tokio::spawn(async move {
-        run_autopilot_worker(state).await;
+        run_autopilot_worker(state, tid).await;
     }));
 }
 
@@ -652,7 +675,8 @@ async fn post_autopilot(
             )
             .await?;
 
-            ensure_autopilot_worker_running(state.clone()).await;
+            // API-105: Pass tenant_id to scope the autopilot worker.
+            ensure_autopilot_worker_running(state.clone(), auth.tenant_id.clone()).await;
 
             log_autopilot_audit(
                 &state.db,
@@ -698,13 +722,15 @@ async fn post_autopilot(
 
             let candidate_id = extract_candidate_id(&body)
                 .ok_or_else(|| ApiError::Validation(vec!["candidateId is required".into()]))?;
+            // API-101: Scope approve by tenant_id to prevent IDOR.
             let result = sqlx::query(
                 "UPDATE sales_leads
                  SET status = 'qualified', updated_at = NOW()
-                 WHERE id = $1 AND status IN ('new', 'prospect') AND COALESCE(score, 0) >= $2",
+                 WHERE id = $1 AND tenant_id = $3 AND status IN ('new', 'prospect') AND COALESCE(score, 0) >= $2",
             )
             .bind(&candidate_id)
             .bind(PENDING_APPROVAL_SCORE)
+            .bind(&auth.tenant_id)
             .execute(&state.db)
             .await?;
 
@@ -728,13 +754,15 @@ async fn post_autopilot(
         "reject" => {
             let candidate_id = extract_candidate_id(&body)
                 .ok_or_else(|| ApiError::Validation(vec!["candidateId is required".into()]))?;
+            // API-101: Scope reject by tenant_id to prevent IDOR.
             let result = sqlx::query(
                 "UPDATE sales_leads
                  SET status = 'unqualified', updated_at = NOW()
-                 WHERE id = $1 AND status IN ('new', 'prospect') AND COALESCE(score, 0) >= $2",
+                 WHERE id = $1 AND tenant_id = $3 AND status IN ('new', 'prospect') AND COALESCE(score, 0) >= $2",
             )
             .bind(&candidate_id)
             .bind(PENDING_APPROVAL_SCORE)
+            .bind(&auth.tenant_id)
             .execute(&state.db)
             .await?;
 
@@ -760,12 +788,14 @@ async fn post_autopilot(
                 return Err(ApiError::Conflict("autopilot is in safe mode".into()));
             }
 
+            // API-100: Scope approve-all by tenant_id to prevent cross-tenant modification.
             let result = sqlx::query(
                 "UPDATE sales_leads
                  SET status = 'qualified', updated_at = NOW()
-                 WHERE status IN ('new', 'prospect') AND COALESCE(score, 0) >= $1",
+                 WHERE tenant_id = $2 AND status IN ('new', 'prospect') AND COALESCE(score, 0) >= $1",
             )
             .bind(PENDING_APPROVAL_SCORE)
+            .bind(&auth.tenant_id)
             .execute(&state.db)
             .await?;
 

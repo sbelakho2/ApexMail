@@ -1,0 +1,302 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ApexMail CDN — CloudFront distribution for static asset delivery.
+  SCALE-H-05: Serves static assets (CSS, JS, fonts, images) from CloudFront
+  edge locations to reduce origin load and improve global latency.
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: CDN domain name (e.g., cdn.apexmail.ee)
+    Default: cdn.apexmail.ee
+
+  OriginDomain:
+    Type: String
+    Description: Origin server domain name (e.g., api.apexmail.ee)
+    Default: api.apexmail.ee
+
+  AcmCertificateArn:
+    Type: String
+    Description: ARN of the ACM certificate in us-east-1 for the CDN domain
+
+  PriceClass:
+    Type: String
+    Description: CloudFront price class (PriceClass_200 = most regions)
+    Default: PriceClass_200
+    AllowedValues:
+      - PriceClass_100
+      - PriceClass_200
+      - PriceClass_All
+
+Resources:
+  # ── Origin Access Control ──────────────────────────────────────────────────
+  # For S3 origins, use OAC. For custom origins (nginx), use direct origin.
+
+  # ── Cache Policy: Static Assets ────────────────────────────────────────────
+  StaticAssetsCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: ApexMail-Static-Assets
+        Comment: Long-lived cache for immutable static assets
+        DefaultTTL: 86400      # 1 day
+        MaxTTL: 31536000       # 1 year
+        MinTTL: 86400          # 1 day
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  # ── Cache Policy: HTML Pages ───────────────────────────────────────────────
+  HtmlCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: ApexMail-Html-Pages
+        Comment: Short-lived cache for HTML pages with stale-while-revalidate
+        DefaultTTL: 300         # 5 minutes
+        MaxTTL: 300             # 5 minutes
+        MinTTL: 60              # 1 minute
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Accept
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  # ── Origin Request Policy: Dynamic API ─────────────────────────────────────
+  ApiOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: ApexMail-API-Forward-All
+        Comment: Forward all headers, cookies, and query strings to API origin
+        CookiesConfig:
+          CookieBehavior: all
+        HeadersConfig:
+          HeaderBehavior: allViewer
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  # ── Response Headers Policy ────────────────────────────────────────────────
+  SecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: ApexMail-Security-Headers
+        Comment: Security headers for all CDN responses
+        SecurityHeadersConfig:
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 63072000
+            IncludeSubdomains: true
+            Preload: true
+            Override: true
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://api.apexmail.ee; frame-ancestors 'none'"
+            Override: false
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+
+  # ── CloudFront Distribution ────────────────────────────────────────────────
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'ApexMail CDN for ${DomainName}'
+        PriceClass: !Ref PriceClass
+        Aliases:
+          - !Ref DomainName
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+
+        # ── Origins ─────────────────────────────────────────────────────────
+        Origins:
+          - Id: ApexMailOrigin
+            DomainName: !Ref OriginDomain
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSslProtocols:
+                - TLSv1.2
+            ConnectionAttempts: 3
+            ConnectionTimeout: 10
+
+        # ── Cache Behaviors ─────────────────────────────────────────────────
+        # Static assets: long-lived cache
+        CacheBehaviors:
+          # Immutable hashed assets (JS/CSS bundles)
+          - PathPattern: '/assets/*'
+            TargetOriginId: ApexMailOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: !GetAtt StaticAssetsCachePolicy.Id
+            ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+            Compress: true
+
+          # Font files
+          - PathPattern: '/fonts/*'
+            TargetOriginId: ApexMailOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: !GetAtt StaticAssetsCachePolicy.Id
+            ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+            Compress: true
+
+          # Images
+          - PathPattern: '/images/*'
+            TargetOriginId: ApexMailOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: !GetAtt StaticAssetsCachePolicy.Id
+            ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+            Compress: true
+
+          # API endpoints: no caching, forward everything
+          - PathPattern: '/v1/*'
+            TargetOriginId: ApexMailOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - PATCH
+              - POST
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: !Ref AWS::NoValue
+            OriginRequestPolicyId: !GetAtt ApiOriginRequestPolicy.Id
+            ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+
+          # Tracking endpoints: no caching, forward everything
+          - PathPattern: '/t/*'
+            TargetOriginId: ApexMailOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - PATCH
+              - POST
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: !Ref AWS::NoValue
+            OriginRequestPolicyId: !GetAtt ApiOriginRequestPolicy.Id
+            ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+
+          # Enterprise API: no caching
+          - PathPattern: '/api/enterprise/*'
+            TargetOriginId: ApexMailOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - PATCH
+              - POST
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: !Ref AWS::NoValue
+            OriginRequestPolicyId: !GetAtt ApiOriginRequestPolicy.Id
+            ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+
+        # ── Default Cache Behavior ──────────────────────────────────────────
+        # HTML pages: short-lived cache
+        DefaultCacheBehavior:
+          TargetOriginId: ApexMailOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId: !GetAtt HtmlCachePolicy.Id
+          ResponseHeadersPolicyId: !GetAtt SecurityHeadersPolicy.Id
+          Compress: true
+
+        # ── Custom Error Responses ──────────────────────────────────────────
+        CustomErrorResponses:
+          - ErrorCode: 502
+            ErrorCachingMinTTL: 10
+            ResponseCode: 503
+            ResponsePagePath: /503.html
+          - ErrorCode: 503
+            ErrorCachingMinTTL: 10
+            ResponseCode: 503
+            ResponsePagePath: /503.html
+          - ErrorCode: 504
+            ErrorCachingMinTTL: 10
+            ResponseCode: 503
+            ResponsePagePath: /503.html
+
+        # ── Logging ─────────────────────────────────────────────────────────
+        Logging:
+          IncludeCookies: false
+          Bucket: !Sub 'apexmail-cloudfront-logs.s3.amazonaws.com'
+          Prefix: 'cloudfront/'
+
+        # ── Web Application Firewall ────────────────────────────────────────
+        WebACLId: ''  # Set to WAF ACL ARN if using AWS WAF
+
+Outputs:
+  DistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref CloudFrontDistribution
+
+  DistributionDomainName:
+    Description: CloudFront Distribution domain name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  CnameRecord:
+    Description: CNAME record to create in DNS
+    Value: !Sub '${DomainName} -> ${CloudFrontDistribution.DomainName}'

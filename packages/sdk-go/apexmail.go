@@ -628,19 +628,17 @@ func mergeEnvelopeMeta(data json.RawMessage, meta json.RawMessage) json.RawMessa
 	if err := json.Unmarshal(data, &dataObject); err != nil || dataObject == nil {
 		return data
 	}
-	if _, exists := dataObject["pagination"]; exists {
-		return data
-	}
 
+	// Merge all meta fields into data (overwriting only if data doesn't have the key).
+	// This supports any metadata the API returns (pagination, totals, etc.)
+	// without assuming which specific keys exist.
 	var metaObject map[string]json.RawMessage
 	if err := json.Unmarshal(meta, &metaObject); err == nil && metaObject != nil {
-		if pagination, ok := metaObject["pagination"]; ok {
-			dataObject["pagination"] = pagination
-		} else {
-			dataObject["pagination"] = meta
+		for key, val := range metaObject {
+			if _, exists := dataObject[key]; !exists {
+				dataObject[key] = val
+			}
 		}
-	} else {
-		dataObject["pagination"] = meta
 	}
 
 	merged, err := json.Marshal(dataObject)
@@ -690,7 +688,7 @@ func classifyAPIError(err *APIError) error {
 		return &NotFoundError{APIError: err}
 	case err.StatusCode == http.StatusConflict || err.Code == "CONFLICT":
 		return &ConflictError{APIError: err}
-	case err.Code == "VALIDATION_ERROR" || err.Code == "INVALID_INPUT" || err.StatusCode == http.StatusUnprocessableEntity:
+	case err.Code == "VALIDATION_ERROR" || err.Code == "INVALID_INPUT" || err.StatusCode == http.StatusBadRequest:
 		return &ValidationError{APIError: err}
 	case err.StatusCode == http.StatusTooManyRequests || err.Code == "RATE_LIMIT_EXCEEDED" || err.Code == "QUOTA_EXCEEDED":
 		return &RateLimitError{APIError: err}
@@ -1118,7 +1116,7 @@ type UpdateWebhookResponse struct {
 // Update modifies a webhook's URL, event subscriptions, or active status.
 func (a *WebhooksAPI) Update(ctx context.Context, id string, req *UpdateWebhookRequest) (*UpdateWebhookResponse, error) {
 	var resp UpdateWebhookResponse
-	err := a.client.do(ctx, http.MethodPatch, "/v1/webhooks/"+url.PathEscape(id), req, &resp)
+	err := a.client.do(ctx, http.MethodPut, "/v1/webhooks/"+url.PathEscape(id), req, &resp)
 	return &resp, err
 }
 
@@ -1372,9 +1370,9 @@ func (a *SuppressionsAPI) Check(ctx context.Context, email string) (*CheckSuppre
 	return &resp, err
 }
 
-// Delete removes an email from the suppression list.
-func (a *SuppressionsAPI) Delete(ctx context.Context, email string) error {
-	return a.client.do(ctx, http.MethodDelete, "/v1/suppressions/"+url.PathEscape(email), nil, nil)
+// Delete removes a suppression entry by its ID.
+func (a *SuppressionsAPI) Delete(ctx context.Context, id string) error {
+	return a.client.do(ctx, http.MethodDelete, "/v1/suppressions/"+url.PathEscape(id), nil, nil)
 }
 
 // BulkSuppressionsRequest is the request body for bulk suppression changes.
@@ -1552,6 +1550,7 @@ type APIKeyResponse map[string]interface{}
 type ListAPIKeysOptions struct {
 	Limit  int
 	Offset int
+	Cursor string
 }
 
 // ListAPIKeysResponse is a flexible API-key list response payload.
@@ -1579,6 +1578,9 @@ func (a *APIKeysAPI) List(ctx context.Context, opts ...ListAPIKeysOptions) (List
 	query := url.Values{}
 	query.Set("limit", strconv.Itoa(options.Limit))
 	query.Set("offset", strconv.Itoa(options.Offset))
+	if options.Cursor != "" {
+		query.Set("cursor", options.Cursor)
+	}
 	var out ListAPIKeysResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/auth/api-keys?"+query.Encode(), nil, &out)
 	return out, err
@@ -1610,13 +1612,12 @@ func (a *AnalyticsAPI) Get(ctx context.Context, opts ...AnalyticsOptions) (Analy
 	if len(opts) > 0 {
 		options = opts[0]
 	}
+	if options.From == "" || options.To == "" {
+		return nil, fmt.Errorf("apexmail: analytics requires both 'from' and 'to' date parameters")
+	}
 	query := url.Values{}
-	if options.From != "" {
-		query.Set("from", options.From)
-	}
-	if options.To != "" {
-		query.Set("to", options.To)
-	}
+	query.Set("from", options.From)
+	query.Set("to", options.To)
 	if options.GroupBy != "" {
 		query.Set("groupBy", options.GroupBy)
 	}

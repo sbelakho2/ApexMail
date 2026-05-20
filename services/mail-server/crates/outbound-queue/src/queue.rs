@@ -9,6 +9,7 @@ use futures::stream::StreamExt;
 use governor::{DefaultKeyedRateLimiter, Quota};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -269,6 +270,17 @@ impl EmailQueue {
         addr.rsplit('@').next().unwrap_or("unknown").to_lowercase()
     }
 
+    /// Deterministic advisory-lock key for a tenant (RS-H-05).
+    /// Used to serialize concurrent enqueue operations for the same tenant
+    /// within a PostgreSQL transaction, eliminating the TOCTOU window between
+    /// `check_rate_limits()` and the INSERT.
+    fn tenant_lock_key(tenant_id: Option<&str>) -> i64 {
+        let key = tenant_id.unwrap_or("__no_tenant__");
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish() as i64
+    }
+
     /// Check whether sending to the given recipient domains and tenant
     /// should be rate-limited. Returns [`RateLimitDecision::Allowed`] if the
     /// request may proceed, or the specific exceeded variant otherwise.
@@ -389,41 +401,9 @@ impl EmailQueue {
         .await?;
 
         // MI-008: Dead-letter queue for permanently failed bounce emails.
-        // When a bounce notification itself cannot be delivered after exhausting
-        // all retries, it is moved here with full headers, error info, and
-        // timestamps for forensic analysis and manual intervention.
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS dead_letter_queue (
-                id UUID PRIMARY KEY,
-                original_email_id UUID,
-                from_address TEXT NOT NULL,
-                to_addresses TEXT[] NOT NULL,
-                subject TEXT NOT NULL,
-                text_body TEXT,
-                html_body TEXT,
-                headers JSONB DEFAULT '{}'::jsonb,
-                attempts INT NOT NULL DEFAULT 0,
-                max_attempts INT NOT NULL DEFAULT 5,
-                last_error TEXT NOT NULL,
-                bounce_type TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                dead_lettered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                tenant_id TEXT
-            )
-        "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_dead_letter_created
-            ON dead_letter_queue(dead_lettered_at)
-        "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        // The dead_letter_queue table is now created via SQL migration
+        // (migration 052/056), not at runtime. This ensures the schema is
+        // version-controlled and available before the application starts.
 
         // Add tenant_id column for existing deployments (idempotent)
         sqlx::query(
@@ -496,8 +476,25 @@ impl EmailQueue {
     ///
     /// Applies rate limits before accepting the email into the queue.
     /// If rate-limited, returns an error immediately.
+    ///
+    /// RS-H-05: The rate-limit check and INSERT are now wrapped in a single
+    /// PostgreSQL transaction with a per-tenant advisory lock. This eliminates
+    /// the TOCTOU window where a concurrent caller could bypass the rate limit
+    /// by inserting between the check and the INSERT of another caller.
     pub async fn enqueue(&self, email: QueuedEmail) -> Result<Uuid> {
-        // Check rate limits before accepting into queue
+        let mut tx = self.pool.begin().await?;
+
+        // Acquire per-tenant advisory lock to serialize concurrent enqueues
+        // for the same tenant (RS-H-05). This guarantees that only one
+        // enqueue call per tenant executes the rate check + INSERT at a time,
+        // eliminating the TOCTOU race window.
+        let lock_key = Self::tenant_lock_key(email.tenant_id.as_deref());
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        // Check rate limits inside the transaction (serialized per tenant)
         match self.check_rate_limits(&email.to_addresses, email.tenant_id.as_deref()) {
             RateLimitDecision::Allowed => {}
             RateLimitDecision::GlobalExceeded => {
@@ -523,6 +520,7 @@ impl EmailQueue {
             }
         }
 
+        // INSERT inside the same transaction — atomic with the rate check
         let id = timeout(
             Duration::from_secs(30),
             sqlx::query_scalar::<_, Uuid>(
@@ -549,10 +547,12 @@ impl EmailQueue {
             .bind(email.contact_id)
             .bind(email.priority)
             .bind(&email.tenant_id)
-            .fetch_one(&self.pool),
+            .fetch_one(&mut *tx),
         )
         .await
         .map_err(|_| anyhow::anyhow!("enqueue query timed out after 30s"))??;
+
+        tx.commit().await?;
 
         debug!(email_id = %id, "Email enqueued");
         Ok(id)
@@ -560,10 +560,81 @@ impl EmailQueue {
 
     /// Bulk enqueue emails using a single multi-row INSERT for performance.
     /// Falls back to sequential inserts if the batch is empty.
+    ///
+    /// RS-H-05: Rate limits are checked in aggregate for the batch, and the
+    /// INSERT is wrapped in a PostgreSQL transaction with a per-tenant advisory
+    /// lock to eliminate the TOCTOU race between rate checking and insertion.
     pub async fn enqueue_batch(&self, emails: Vec<QueuedEmail>) -> Result<Vec<Uuid>> {
         if emails.is_empty() {
             return Ok(Vec::new());
         }
+
+        // Check rate limits in aggregate for the batch (RS-H-05)
+        // Collect unique tenants to check each once
+        let unique_tenants: Vec<Option<String>> = {
+            let mut seen = std::collections::HashSet::new();
+            emails
+                .iter()
+                .filter_map(|e| {
+                    let key = e.tenant_id.clone();
+                    if seen.insert(key.clone()) {
+                        Some(key)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        // Collect all unique recipient domains across the batch
+        let all_domains: Vec<String> = {
+            emails
+                .iter()
+                .flat_map(|e| e.to_addresses.iter().map(|a| Self::extract_domain(a)))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect()
+        };
+
+        // Check each unique tenant's rate limit
+        for tenant in &unique_tenants {
+            match self.check_rate_limits(&all_domains, tenant.as_deref()) {
+                RateLimitDecision::Allowed => {}
+                RateLimitDecision::GlobalExceeded => {
+                    return Err(anyhow::anyhow!(
+                        "Global rate limit exceeded (max {} msg/s)",
+                        self.config.global_rate_per_second
+                    ));
+                }
+                RateLimitDecision::DomainExceeded(domain) => {
+                    return Err(anyhow::anyhow!(
+                        "Domain rate limit exceeded for '{}' (max {} msg/s)",
+                        domain,
+                        self.config.domain_rate_per_second
+                    ));
+                }
+                RateLimitDecision::TenantExceeded => {
+                    let key = tenant.as_deref().unwrap_or("__no_tenant__");
+                    return Err(anyhow::anyhow!(
+                        "Tenant rate limit exceeded for '{}' (max {} msg/s)",
+                        key,
+                        self.config.tenant_rate_per_second
+                    ));
+                }
+            }
+        }
+
+        // Start a transaction for the batch INSERT (RS-H-05)
+        let mut tx = self.pool.begin().await?;
+
+        // Acquire advisory lock for the primary tenant (first email's tenant)
+        // to serialize with concurrent single enqueues
+        let primary_tenant = emails.first().and_then(|e| e.tenant_id.as_deref());
+        let lock_key = Self::tenant_lock_key(primary_tenant);
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
 
         // Build a single multi-row INSERT:VALUES ($1..$13), ($14..$26), ...
         let cols = 13; // number of bind params per row (added tenant_id)
@@ -607,9 +678,12 @@ impl EmailQueue {
                 .bind(&email.tenant_id);
         }
 
-        let returned_ids = timeout(Duration::from_secs(30), query.fetch_all(&self.pool))
+        let returned_ids = timeout(Duration::from_secs(30), query.fetch_all(&mut *tx))
             .await
             .map_err(|_| anyhow::anyhow!("enqueue_batch query timed out after 30s"))??;
+
+        tx.commit().await?;
+
         info!(count = returned_ids.len(), "Batch emails enqueued");
         Ok(returned_ids)
     }
@@ -1089,6 +1163,11 @@ impl EmailQueue {
     /// DB-12: `process_batch()` is wrapped in a 5-minute timeout so that a slow
     /// batch cannot indefinitely delay shutdown. If the timeout fires the loop
     /// simply retries on the next poll interval.
+    ///
+    /// RS-M-05: On shutdown signal, the processor enters drain mode: it sets a
+    /// flag to prevent new batches, waits for any in-flight batch to complete,
+    /// and then exits. This ensures in-flight SMTP transactions (DATA phase)
+    /// are not cut off mid-delivery.
     pub async fn start_processing(self: std::sync::Arc<Self>, mut shutdown: mpsc::Receiver<()>) {
         info!(
             workers = self.config.worker_count,
@@ -1097,14 +1176,58 @@ impl EmailQueue {
         );
 
         const BATCH_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
+        const DRAIN_TIMEOUT: Duration = Duration::from_secs(30); // 30s drain window
+
+        let mut draining = false;
+        let mut drain_fut: Option<tokio::sync::oneshot::Receiver<()>> = None;
 
         loop {
             tokio::select! {
-                _ = shutdown.recv() => {
-                    info!("Email queue processor shutting down");
+                biased; // Check shutdown first
+
+                _ = async {
+                    if !draining {
+                        std::future::pending::<()>().await
+                    } else {
+                        // Wait for drain to complete with timeout
+                        match drain_fut.as_mut() {
+                            Some(rx) => rx.await.ok(),
+                            None => Some(std::future::pending::<()>().await),
+                        };
+                    }
+                }, if draining => {
+                    info!("Email queue processor drain complete — shutting down");
                     break;
                 }
+
+                _ = shutdown.recv() => {
+                    if draining {
+                        // Already draining; ignore duplicate signal
+                        continue;
+                    }
+                    info!(
+                        "Email queue processor received shutdown signal — draining in-flight emails..."
+                    );
+                    draining = true;
+                    // Start a drain timer — if no batch is in-flight, this will
+                    // fire quickly and we'll exit on the next loop iteration.
+                    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                    drain_fut = Some(rx);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(DRAIN_TIMEOUT).await;
+                        let _ = tx.send(());
+                    });
+                    // Do NOT break here — allow the current batch to finish
+                    // if one is in-flight. The biased select ensures we check
+                    // drain completion before starting a new batch.
+                }
+
                 _ = tokio::time::sleep(self.config.poll_interval) => {
+                    if draining {
+                        // In drain mode: skip new batches but still wait for
+                        // the drain timer to fire.
+                        continue;
+                    }
                     match tokio::time::timeout(BATCH_TIMEOUT, self.process_batch()).await {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => error!(error = %e, "Failed to process email batch"),

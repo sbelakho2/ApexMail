@@ -32,6 +32,9 @@ const LOGIN_LOCKOUT_MAX_SECS: u64 = 24 * 60 * 60;
 const LOGIN_LOCKOUT_ESCALATION_WINDOW_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_API_KEY_EXPIRY_DAYS: i64 = 90;
 const MAX_API_KEY_EXPIRY_DAYS: i64 = 365;
+/// Login IP rate limiting: max login attempts per IP address per window.
+const LOGIN_IP_RATE_LIMIT: i64 = 20;
+const LOGIN_IP_RATE_LIMIT_WINDOW_SECS: u64 = 15 * 60;
 const REGISTER_RATE_LIMIT_WINDOW_SECS: u64 = 10 * 60;
 const REGISTER_RATE_LIMIT_MAX_REQUESTS: i64 = 20;
 const MFA_CHALLENGE_TTL_SECS: u64 = 10 * 60;
@@ -58,8 +61,13 @@ async fn verify_mcaptcha_token(
     http_client: &reqwest::Client,
     mcaptcha_token: Option<&str>,
 ) -> Result<(), ApiError> {
-    // Dev-mode bypass: if either key is "dev" we skip verification entirely.
-    if config.mcaptcha_site_key == "dev" || config.mcaptcha_secret_key == "dev" {
+    // RS-063: Dev-mode bypass gated behind compile-time debug_assertions check.
+    // In release builds, the "dev" key bypass is completely disabled regardless
+    // of configuration, preventing accidental production bypass.
+    if cfg!(debug_assertions) && (config.mcaptcha_site_key == "dev" || config.mcaptcha_secret_key == "dev") {
+        tracing::warn!(
+            "mCaptcha dev-mode bypass active — this must NOT be enabled in production"
+        );
         return Ok(());
     }
 
@@ -437,14 +445,14 @@ fn register_response() -> RegisterResponse {
     }
 }
 
-fn build_action_link(base_url: &str, path: &str, email: &str, token: &str) -> String {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("token", token);
-    serializer.append_pair("email", email);
+fn build_action_link(base_url: &str, path: &str, _email: &str, token: &str) -> String {
+    // CWE-598: Use path-based token instead of query parameters to prevent
+    // sensitive token exposure in server logs, referrer headers, and browser history.
     format!(
-        "{}{path}?{}",
+        "{}{}/{}",
         base_url.trim_end_matches('/'),
-        serializer.finish(),
+        path,
+        token,
     )
 }
 
@@ -1049,6 +1057,7 @@ pub struct ResetPasswordResponse {
 
 async fn login(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
@@ -1069,6 +1078,52 @@ async fn login(
         body.mcaptcha__token.as_deref(),
     )
     .await?;
+
+    // RS-H-03: Per-IP rate limiting — prevents credential-stuffing and brute-force
+    // attacks from a single source, complementing per-account lockout below.
+    let client_ip = connect_info
+        .map(|ConnectInfo(addr)| {
+            extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
+        })
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "login request missing ConnectInfo; using shared rate-limit bucket"
+            );
+            "unknown".to_string()
+        });
+
+    if let Ok(mut conn) = state.redis.get().await {
+        let ip_rate_key = format!("apexmail:login_rate:ip:{client_ip}");
+
+        // Atomic rate-limit check using Lua script to avoid INCR + EXPIRE race condition.
+        let count: i64 = deadpool_redis::redis::Script::new(
+            r#"
+                local ip_key = KEYS[1]
+                local max_ip = tonumber(ARGV[1])
+                local window_secs = tonumber(ARGV[2])
+
+                local ip_count = redis.call('INCR', ip_key)
+                if ip_count == 1 then
+                    redis.call('EXPIRE', ip_key, window_secs)
+                end
+
+                if ip_count > max_ip then
+                    return 1
+                end
+                return 0
+            "#,
+        )
+        .key(&ip_rate_key)
+        .arg(LOGIN_IP_RATE_LIMIT)
+        .arg(LOGIN_IP_RATE_LIMIT_WINDOW_SECS)
+        .invoke_async::<i64>(&mut *conn)
+        .await
+        .unwrap_or(0);
+
+        if count > 0 {
+            return Err(ApiError::RateLimited);
+        }
+    }
 
     let login_identifier = normalized_login_identifier(&body.email);
     if login_lock_ttl(&state.redis, &login_identifier)

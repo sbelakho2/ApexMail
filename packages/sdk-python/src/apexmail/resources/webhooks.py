@@ -177,7 +177,7 @@ class WebhooksResource:
         if not payload:
             raise ValidationError("Update payload must include at least one field")
 
-        data = self._client._request("PATCH", f"/v1/webhooks/{webhook_id}", json=payload)
+        data = self._client._request("PUT", f"/v1/webhooks/{webhook_id}", json=payload)
         return Webhook(**data["webhook"])
 
     def delete(self, webhook_id: str) -> None:
@@ -298,7 +298,7 @@ class AsyncWebhooksResource:
         if not payload:
             raise ValidationError('At least one field must be provided for update')
 
-        data = await self._client._request("PATCH", f"/v1/webhooks/{webhook_id}", json=payload)
+        data = await self._client._request("PUT", f"/v1/webhooks/{webhook_id}", json=payload)
         return Webhook(**data["webhook"])
 
     async def delete(self, webhook_id: str) -> None:

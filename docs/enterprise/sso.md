@@ -227,12 +227,14 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/sso/config/{account_id} \
 
 ## API Reference
 
+All Enterprise SSO endpoints are served under the `/enterprise/v1/sso` prefix.
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/sso/configure` | POST | Configure SSO |
-| `/sso/config/{accountId}` | GET | Get SSO configuration |
-| `/sso/saml/login/{domain}` | GET | Initiate SAML login |
-| `/sso/saml/callback` | POST | Process SAML response |
-| `/sso/oidc/authorize/{domain}` | GET | Initiate OIDC login |
-| `/sso/oidc/callback` | GET | Process OIDC callback |
-| `/sso/logout` | POST | Single logout |
+| `/enterprise/v1/sso/configure` | POST | Configure SSO |
+| `/enterprise/v1/sso/config/{accountId}` | GET | Get SSO configuration |
+| `/enterprise/v1/sso/saml/login/{domain}` | GET | Initiate SAML login |
+| `/enterprise/v1/sso/saml/callback` | POST | Process SAML response |
+| `/enterprise/v1/sso/oidc/authorize/{domain}` | GET | Initiate OIDC login |
+| `/enterprise/v1/sso/oidc/callback` | GET | Process OIDC callback |
+| `/enterprise/v1/sso/logout` | POST | Single logout |

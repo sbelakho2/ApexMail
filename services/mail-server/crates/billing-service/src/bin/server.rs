@@ -5,6 +5,9 @@
 
 use clap::Parser;
 use deadpool_redis::Runtime;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -38,18 +41,33 @@ struct Cli {
     api_base_url: String,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Load .env if present (ignore errors).
-    let _ = dotenvy::dotenv();
-
-    // Logging.
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "billing-service".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .json()
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Load .env if present (ignore errors).
+    let _ = dotenvy::dotenv();
+
+    let _guard = init_tracing();
 
     let cli = Cli::parse();
 

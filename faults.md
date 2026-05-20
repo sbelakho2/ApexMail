@@ -10,12 +10,14 @@
 
 | Severity | Count |
 |----------|-------|
-| 🔴 Critical | 18 |
-| 🟠 High | 12 |
-| 🟡 Medium | 14 |
-| 🟢 Low | 7 |
-| ℹ️ Info | 5 |
-| **Total** | **56** |
+| 🔴 Critical | 65 |
+| 🟠 High | 142 |
+| 🟡 Medium | 202 |
+| 🟢 Low | 117 |
+| ℹ️ Info | 96 |
+| **Total** | **622** |
+
+> **Note:** The original database migration audit (2026-05-12) contained 56 findings. Subsequent audits (§35–§41, 2026-05-12 through 2026-05-17) added 358 findings. The Comprehensive Audit (2026-05-19) adds 208 new findings. Grand total: 622.
 
 ---
 
@@ -1079,3 +1081,1737 @@ This section consolidates findings from four exhaustive audit streams conducted 
 | Documentation (~180+ files) | Root configs, API docs, endpoint docs, enterprise, operations, architecture, security, compliance, ADRs, deployment, tool contracts | 52 | 17+ route path mismatches; license contradiction; rate limit docs contradict; `contacts.md` documents suppressions; PHP SDK docs missing |
 | Load & Performance Testing | load-testing.md, load-tests crate README, perf-tests crate README | 25 | No baselines; no HTTP journey tests; no CI workflow; no k6 browser tests; no Grafana dashboard JSON; no production-scale infra |
 | **Total** | **~330+ files reviewed** | **255** | **See individual sections for detailed remediation items** |
+
+---
+
+## §36.0 — Infrastructure Security, Backend Rust, Observability, Scalability & API Security Findings (2026-05-17)
+
+This section adds findings from five additional exhaustive audit streams conducted on 2026-05-17: Infrastructure Security & Docker, Backend Rust Code Quality, Observability & Monitoring, Scalability & Performance, and API Security & Control Plane.
+
+---
+
+### §36.1 Infrastructure Security & Docker Findings
+
+**Audited:** docker-compose.yml, docker-compose.prod.yml, docker-compose.override.yml, deploy/nginx/, deploy/redis/, deploy/clickhouse/, deploy/prometheus/, deploy/loki/, deploy/tempo/, deploy/otel-collector/, deploy/k8s/, deploy/helm/, deploy/alerting-rules.yml, deploy/alertmanager.yml, deploy/blackbox.yml, deploy/Dockerfile.tracking, deploy/scripts/, deploy/grafana/, .env.production.example.
+**Date:** 2026-05-17
+
+#### Summary
+
+| Severity | Count |
+|----------|-------|
+| 🔴 Critical | 3 |
+| 🟠 High | 10 |
+| 🟡 Medium | 14 |
+| 🟢 Low | 9 |
+| ℹ️ Info | 11 |
+| **Total** | **47** |
+
+#### 🔴 Critical
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| INF-C-01 | dhparam.pem 2048-bit DH group committed to VCS | `deploy/nginx/ssl/dhparam.pem` | Static 2048-bit DH group shared across all deployments is a precomputation target. Attacker with discrete logs for this group can passively decrypt DHE TLS handshakes. Generate unique 4096-bit groups per deployment or use ECDHE-only. |
+| INF-C-02 | Default Grafana admin password in plaintext | `docker-compose.yml` ~L659 | `GF_SECURITY_ADMIN_PASSWORD` defaults to `apexmail-dev-admin`. If Grafana port 3003 is exposed, anyone can log in as admin. Remove default; require explicit setting. |
+| INF-C-03 | Load-test compose hardcoded plaintext credentials | `deploy/load-test-infra/docker-compose.yml` | `POSTGRES_USER: apexmail` / `POSTGRES_PASSWORD: apexmail` and `K6_API_KEY: test-api-key` hardcoded. Could be reused as templates for real deployments. |
+
+#### 🟠 High
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| INF-H-01 | App secrets as plaintext env vars in production | `docker-compose.prod.yml` ~L207-221 | JWT_PRIVATE_KEY_PEM, API_KEY_HASH_SECRET, WEBHOOK_SIGNING_SECRET, SESSION_SECRET, CSRF_SECRET passed via `${VAR:?}` env vars. Docker secrets or HashiCorp Vault should be used for production. |
+| INF-H-02 | Redis no authentication in production | `docker-compose.prod.yml` | Redis service has no `requirepass` or ACL configuration. Any process on the Docker network can connect and read/modify session data, rate limit counters, and cache. |
+| INF-H-03 | ClickHouse default user without password | `docker-compose.prod.yml` | ClickHouse uses default user with no password. Sensitive analytics data (email metrics, billing events) accessible to any process on the network. |
+| INF-H-04 | No Docker network isolation between services | `docker-compose.yml` | All services share a single `apexmail-network`. No segmentation between frontend-facing, backend, database, and monitoring tiers. A compromised container can reach all other services. |
+| INF-H-05 | Nginx SSL configuration allows TLS 1.2 weak ciphers | `deploy/nginx/nginx.conf` | While TLS 1.3 is preferred, TLS 1.2 fallback includes broad cipher list. Should restrict to AEAD ciphers only (`ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384`). |
+| INF-H-06 | Missing securityContext in K8s deployments | `deploy/k8s/` | Several K8s deployment manifests lack `securityContext` with `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, and `drop: ["ALL"]` capabilities. |
+| INF-H-07 | Helm chart missing PodSecurityPolicy/PodSecurityContext | `deploy/helm/apexmail/` | No PodSecurityPolicy or PodSecurityContext defined in Helm templates. Pods may run as root in production clusters. |
+| INF-H-08 | Exposed metrics endpoints without auth | `docker-compose.yml` | Prometheus metrics endpoints on api-server, tracking service, and MTA are accessible without authentication inside the Docker network. No `--web.basic-auth` or bearer token configured. |
+| INF-H-09 | No container resource limits in docker-compose.prod.yml | `docker-compose.prod.yml` | Several services lack `deploy.resources.limits` for CPU and memory. A misbehaving container can consume all host resources (OOM killer risk). |
+| INF-H-10 | deploy/load-secret-env.sh may leak secrets to process list | `deploy/load-secret-env.sh` | Script exports secrets as env vars. On multi-user systems, `/proc/<pid>/environ` is readable. Secrets should be piped to files or use Docker secrets. |
+
+#### 🟡 Medium
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| INF-M-01 | No health check for Redis container | `docker-compose.yml` | Redis service has no `healthcheck` directive. Docker won't detect unhealthy Redis; dependent services may start before Redis is ready. |
+| INF-M-02 | No health check for ClickHouse container | `docker-compose.yml` | ClickHouse has no `healthcheck`. Similarly to Redis, dependent services may fail on startup. |
+| INF-M-03 | ClickHouse logging.xml exposes full query logs | `deploy/clickhouse/logging.xml` | `query_log` enabled with default retention. Sensitive query parameters (API keys, tokens) could be logged. Add `query_thread_log` filtering. |
+| INF-M-04 | Nginx missing HSTS header in development config | `deploy/nginx/nginx.conf` | `Strict-Transport-Security` only set in production server block, not in the development block. Developers using HTTP may not notice. |
+| INF-M-05 | Alertmanager config uses static email receiver | `deploy/alertmanager.yml` | Alertmanager routes all alerts to a single email receiver. No PagerDuty, OpsGenie, or Slack integration for on-call paging. Critical alerts may be missed outside business hours. |
+| INF-M-06 | Grafana provisioning allows anonymous org role Viewer | `deploy/grafana/provisioning/` | Anonymous access enabled with Viewer role. While limited, this exposes dashboard data to unauthenticated users on the network. |
+| INF-M-07 | OTel Collector HTTP receiver has no TLS | `deploy/otel-collector/` | OTel Collector receives traces over plain HTTP. Trace data (containing request paths, user IDs) transmitted unencrypted within the cluster. |
+| INF-M-08 | No image pull policy specified in K8s manifests | `deploy/k8s/` | Default `IfNotPresent` may use stale images. Should use `Always` for production tags or use digest-based pulls. |
+| INF-M-09 | Blackbox exporter probes ICMP without capability | `deploy/blackbox.yml` | ICMP modules require `CAP_NET_RAW` capability which isn't granted in the K8s security context. Probes will fail silently. |
+| INF-M-10 | No Docker image vulnerability scanning configured | `.github/` (missing) | No Trivy, Snyk, or Grype container scanning in CI pipeline. Base images could contain known CVEs. |
+| INF-M-11 | Tracking Dockerfile uses `latest` base tag | `deploy/Dockerfile.tracking` | `FROM rust:latest` — non-reproducible builds. Should pin to a specific version/digest. |
+| INF-M-12 | No rate limiting on Nginx for tracking pixel endpoint | `deploy/nginx/nginx.conf` | Tracking pixel endpoint (`/t/` and `/click/`) has no `limit_req_zone`. A burst of tracking requests can overwhelm the tracking service. |
+| INF-M-13 | Redis maxmemory not configured | `deploy/redis/entrypoint.sh` | No `maxmemory` or `maxmemory-policy` set. Redis can consume unlimited memory under load, causing OOM on the host. |
+| INF-M-14 | No backup strategy for ClickHouse data | `deploy/clickhouse/` | No `clickhouse-backup` or similar tool configured. Loss of analytics data on volume failure. |
+
+#### 🟢 Low
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| INF-L-01 | `.dockerignore` missing `.git` directory | `.dockerignore` | `.git` not excluded — Docker context includes entire git history, slowing builds. |
+| INF-L-02 | docker-compose.override.yml exposes debug ports | `docker-compose.override.yml` | Exposes port 4000 (Swagger UI) and 9229 (Rust debugger). Only for development; ensure not included in production. |
+| INF-L-03 | Nginx server_tokens enabled | `deploy/nginx/nginx.conf` | `server_tokens` not explicitly disabled. Nginx version exposed in error pages and headers. |
+| INF-L-04 | No log rotation configured for Docker services | `docker-compose.prod.yml` | No `logging.driver` with size limits. Containers can fill disk with logs. |
+| INF-L-05 | Loki S3 storage config uses path-style access | `deploy/loki/` | May not work with newer S3-compatible stores that require virtual-hosted-style. |
+| INF-L-06 | Helm chart missing network policies | `deploy/helm/apexmail/` | No `NetworkPolicy` resources defined. All pods can communicate with all other pods by default. |
+| INF-L-07 | Tempo uses in-memory ring for ring-based operations | `deploy/tempo/` | Ring state lost on restart. Should use memberlist KV store for production. |
+| INF-L-08 | No image digest pinning in K8s manifests | `deploy/k8s/` | Image references use tags, not digests. Susceptible to supply-chain tag-mutation attacks. |
+| INF-L-09 | Prometheus retention not tuned for production volume | `deploy/prometheus.yml` | Default 15-day retention may be insufficient for compliance audit trails. |
+
+#### ℹ️ Info
+
+| # | Observation | Component | Details |
+|---|-------------|-----------|---------|
+| INF-I-01 | Good CSP headers in Nginx config | `deploy/nginx/nginx.conf` | Comprehensive CSP with `default-src 'self'`, `frame-ancestors 'none'`, `base-uri 'self'`. |
+| INF-I-02 | ClickHouse exporter implemented | `deploy/clickhouse-exporter/` | Custom Python exporter with Dockerfile — good for metrics. |
+| INF-I-03 | Synthetic monitoring configured | `deploy/synthetic-monitor/` | Probes for health endpoints — good practice. |
+| INF-I-04 | OTel Collector pipeline architecture | `deploy/otel-collector/` | Receivers → processors → exporters pipeline well-structured. |
+| INF-I-05 | Helm chart covers all major services | `deploy/helm/apexmail/` | Comprehensive values.yaml covering API, MTA, tracking, workers, Redis, ClickHouse, monitoring. |
+| INF-I-06 | Prometheus target files well-organized | `deploy/prometheus-targets.d/` | Separate files per service group — good organization. |
+| INF-I-07 | `.gitleaks.toml` and `.pre-commit-config.yaml` | Root config | Secret scanning and pre-commit hooks configured — good security practice. |
+| INF-I-08 | Grafana dashboard provisioning | `deploy/grafana/provisioning/` | Automated dashboard and datasource provisioning configured. |
+| INF-I-09 | Multiple Grafana dashboards provided | `deploy/grafana/dashboards/` | API, infrastructure, mail-flow dashboards available. |
+| INF-I-10 | Prometheus alerting rules structured | `deploy/prometheus/alerts/` | Separate files for API and infrastructure alerts — good organization. |
+| INF-I-11 | Kustomize overlays provided | `deploy/kustomize/` | Base + overlay pattern for different environments — good practice. |
+
+---
+
+### §36.2 Backend Rust Code Quality Findings
+
+**Audited:** All Rust crates in `services/mail-server/crates/` — api-server, submission, outbound-queue, mailstore-core, worker-processors, ui-foundation, apexmail-db, enterprise-service.
+**Date:** 2026-05-17
+
+#### Summary
+
+| Severity | Count |
+|----------|-------|
+| 🔴 Critical | 3 |
+| 🟠 High | 8 |
+| 🟡 Medium | 10 |
+| 🟢 Low | 6 |
+| ℹ️ Info | 4 |
+| **Total** | **31** |
+
+#### 🔴 Critical
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| RS-C-01 | Impersonation endpoints lack admin scope check | `api-server/src/routes/impersonate.rs:52-58,139-141` | `start_impersonation` and `end_impersonation` never extract `AuthUser` or call `require_scopes()`. Any authenticated user can call these. The only protection is an HMAC-signed token. If `impersonation_secret` leaks, all users gain admin impersonation capability. No `require_scopes(&auth, &["*"])` check as in other admin endpoints. |
+| RS-C-02 | Multiple `.unwrap()` calls in request handlers can panic | Multiple crates | `submission/src/session.rs` uses `.unwrap()` on SMTP command parsing. `outbound-queue/src/queue.rs` uses `.unwrap()` on database query results. `mailstore-core/src/storage.rs` uses `.unwrap()` on row column access. Any panic crashes the tokio task and returns 500 without useful error info. |
+| RS-C-03 | Unbounded mpsc channels in worker processors | `worker-processors/src/lib.rs` | Worker processors use `mpsc::unbounded_channel()` for job distribution. Under sustained high load, memory grows without limit. Should use `mpsc::channel(N)` with bounded capacity and backpressure. |
+
+#### 🟠 High
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| RS-H-01 | SQL queries using `format!()` for dynamic table names | `mailstore-core/src/storage.rs` | Dynamic table/mailbox names injected via `format!()` into SQL strings. While most values come from database lookups (not direct user input), this pattern is risky if any path allows user-controlled identifiers. Should use sqlx identifier quoting. |
+| RS-H-02 | Password hashing uses Argon2id but missing memory config validation | `api-server/src/routes/auth.rs` | Argon2id parameters not validated against OWASP recommendations. Default parameters may be too weak for production. Should enforce `m=19456, t=2, p=1` minimum. |
+| RS-H-03 | Missing rate limiting on login attempts at application level | `api-server/src/routes/auth.rs` | Login endpoint relies on infrastructure-level rate limiting (Nginx). Application-level rate limiting (per-IP, per-email) not implemented. Nginx bypass = brute force possible. |
+| RS-H-04 | Session token not invalidated on password change | `api-server/src/routes/auth.rs` | When a user changes their password, existing session tokens remain valid. An attacker with a stolen session can maintain access even after the user resets their password. |
+| RS-H-05 | Email sending rate limit check TOCTOU race condition | `api-server/src/routes/emails.rs` | Rate limit check (SELECT count) and email enqueue (INSERT) are not atomic. Two concurrent requests can both pass the rate limit check before either inserts, allowing 2x the configured limit. |
+| RS-H-06 | Sensitive data logged in debug mode | `api-server/src/routes/auth.rs` | Debug logging includes full email addresses and partial password hashes. Production log level may not always be enforced. Use structured logging with field-level redaction. |
+| RS-H-07 | Webhook delivery has no retry budget | `worker-processors/` | Webhook delivery retries indefinitely with exponential backoff. No maximum total retry duration. Permanently failed webhooks consume worker resources forever. |
+| RS-H-08 | Missing `unsafe` code audit boundary | Multiple crates | `unsafe` blocks present in FFI bindings and byte manipulation. No safety documentation or `SAFETY:` comments explaining invariants. |
+
+#### 🟡 Medium
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| RS-M-01 | Error responses leak internal database details | `api-server/src/error.rs` | Some database error variants are converted directly to 500 responses with full error messages. Should sanitize internal details before returning to client. |
+| RS-M-02 | Missing request body size limits on multipart uploads | `api-server/src/routes/attachments.rs` | No explicit `Content-Length` limit enforcement before reading multipart body. Large uploads can exhaust memory. |
+| RS-M-03 | IMAP IDLE connection timeout too long | `submission/src/session.rs` | IMAP IDLE connections held open for 29 minutes (RFC max). With many concurrent IMAP connections, this consumes file descriptors and database connections. |
+| RS-M-04 | Database connection pool size not tied to worker count | `apexmail-db/src/pool.rs` | Pool max connections is configurable but not automatically adjusted based on worker concurrency. Risk of pool exhaustion or over-provisioning. |
+| RS-M-05 | Missing graceful shutdown for in-flight email sends | `outbound-queue/src/queue.rs` | On SIGTERM, the queue stops immediately. In-flight SMTP transactions are cut off mid-DATA, potentially corrupting email delivery. |
+| RS-M-06 | CORS allowed origins configurable but default too permissive | `api-server/src/app.rs` | Default CORS allows any origin in development. Risk of this being carried to production. |
+| RS-M-07 | Email address parsing doesn't validate against RFC 5322 fully | `api-server/src/routes/emails.rs` | Email validation is basic regex. Does not handle quoted strings, comments, or internationalized email addresses (EAI). |
+| RS-M-08 | Missing idempotency key enforcement on POST endpoints | `api-server/src/routes/` | Idempotency keys accepted but not enforced. Duplicate requests with same key create duplicate resources. |
+| RS-M-09 | ClickHouse batch writer flush interval not optimized | `worker-processors/` | Batch writer flushes every 5 seconds regardless of batch size. Small batches waste ClickHouse write throughput. Should flush based on batch size OR time. |
+| RS-M-10 | API versioning only in URL path, no header-based negotiation | `api-server/src/app.rs` | All routes under `/v1/`. No `Accept` header versioning. Breaking changes require new URL prefix, fragmenting the API surface. |
+
+#### 🟢 Low
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| RS-L-01 | Clippy warnings for unused imports in test modules | Multiple crates | `#[allow(unused_imports)]` used in test modules instead of fixing imports. |
+| RS-L-02 | Inconsistent error type naming across crates | Multiple crates | Some use `AppError`, others `ApiError`, others `StorageError`. Should standardize. |
+| RS-L-03 | Dead code in enterprise-service feature flags | `enterprise-service/src/` | Several feature-flag gated functions have no callers. Should be removed or documented as planned features. |
+| RS-L-04 | Test coverage gaps in mailstore-core | `mailstore-core/` | Mailbox rename, copy, and move operations lack unit tests. Only integration tests cover these paths. |
+| RS-L-05 | Missing `#[non_exhaustive]` on public error enums | `api-server/src/error.rs` | Public error types are exhaustive. Adding new variants is a breaking change. |
+| RS-L-06 | Hardcoded timeout values in HTTP client | `api-server/src/` | HTTP client timeouts hardcoded (30s connect, 60s read). Should be configurable via environment variables. |
+
+#### ℹ️ Info
+
+| # | Observation | Component | Details |
+|---|-------------|-----------|---------|
+| RS-I-01 | Well-structured workspace with clear crate boundaries | `services/mail-server/Cargo.toml` | Clean separation of concerns: api-server, submission, outbound-queue, mailstore-core, worker-processors. |
+| RS-I-02 | sqlx used with compile-time query checking | `apexmail-db/` | `sqlx::query!()` macro used for most queries — catches SQL errors at compile time. |
+| RS-I-03 | Comprehensive middleware stack | `api-server/src/app.rs` | Auth, CORS, compression, request ID, tracing, rate limiting all layered correctly. |
+| RS-I-04 | Good test infrastructure | Multiple crates | Property-based tests (proptest), integration tests, and pixel-parity tests all present. |
+
+---
+
+### §36.3 Observability & Monitoring Findings
+
+**Audited:** deploy/prometheus.yml, deploy/prometheus-targets.d/, deploy/alerting-rules.yml, deploy/alertmanager.yml, deploy/loki/, deploy/tempo/, deploy/otel-collector/, deploy/grafana/, deploy/clickhouse-exporter/, deploy/synthetic-monitor/, deploy/blackbox.yml, deploy/monitoring/.
+**Date:** 2026-05-17
+
+#### Summary
+
+| Severity | Count |
+|----------|-------|
+| 🔴 Critical | 0 |
+| 🟠 High | 5 |
+| 🟡 Medium | 8 |
+| 🟢 Low | 3 |
+| ℹ️ Info | 4 |
+| **Total** | **20** |
+
+#### 🟠 High
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| OBS-H-01 | Comprehensive alert rules not loaded by Prometheus | `deploy/prometheus.yml:11` vs `deploy/prometheus/alerts/` | Prometheus only loads `alerting-rules.yml`. The comprehensive rules in `api-alerts.yml` and `infrastructure-alerts.yml` are **not referenced** in `rule_files` and will never fire. |
+| OBS-H-02 | Certificate and disk alert rules not loaded | `deploy/monitoring/alerts/` | `certificate-expiry.yml` and `disk-space.yml` not referenced in any `rule_files` directive. Certificate expiration will go unnoticed. |
+| OBS-H-03 | No distributed tracing integration in Rust services | `services/mail-server/crates/` | OTel Collector and Tempo are configured to receive traces, but no Rust crate emits spans. The `tracing` crate is used for logging but not `tracing-opentelemetry`. No end-to-end request tracing. |
+| OBS-H-04 | No SLO/SLI dashboards in Grafana | `deploy/grafana/dashboards/` | No SLO dashboard tracking error rate, latency percentiles, or availability against the targets defined in `docs/sla.md` (99.9% uptime). No burn-rate alerts. |
+| OBS-H-05 | Alertmanager routes all alerts to single email | `deploy/alertmanager.yml` | No PagerDuty, OpsGenie, or Slack integration. No severity-based routing. No on-call schedule. Critical alerts go to email only — may be missed outside business hours. |
+
+#### 🟡 Medium
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| OBS-M-01 | No log correlation IDs in Rust services | `services/mail-server/crates/` | Request IDs generated by middleware but not propagated to downstream database queries, SMTP sessions, or worker jobs. Cannot correlate a user request to its full processing chain in logs. |
+| OBS-M-02 | Loki data source not provisioned in Grafana | `deploy/grafana/provisioning/datasources/` | Prometheus datasource provisioned but Loki is not. Log exploration requires manual datasource setup. |
+| OBS-M-03 | No slow query logging for PostgreSQL | `apexmail-db/` | No `log_min_duration_statement` or application-level slow query logging. Performance regressions from N+1 queries cannot be detected from logs. |
+| OBS-M-04 | Synthetic monitor probes only health endpoints | `deploy/synthetic-monitor/` | Only `/health/live` and `/health/ready` probed. No login flow, email send, or domain verification synthetic tests. Critical user journeys have no uptime monitoring. |
+| OBS-M-05 | Missing rate-limit observability | `api-server/src/middleware/` | Rate limiter emits no metrics. Cannot monitor which tenants approach limits, which endpoints are throttled, or overall rate-limit rejection rate. |
+| OBS-M-06 | Blackbox exporter HTTP probes missing for public endpoints | `deploy/blackbox.yml` | Only ICMP checks configured. No HTTP probes for marketing site, API, or web console availability from external perspective. |
+| OBS-M-07 | Tempo search capability not enabled | `deploy/tempo/` | Tempo configured for trace storage but search/query capabilities not enabled. Cannot search traces by tag in Grafana. |
+| OBS-M-08 | No ClickHouse query performance monitoring | `deploy/clickhouse-exporter/` | Custom exporter collects system metrics but not `system.query_log` metrics for slow query detection in ClickHouse. |
+
+#### 🟢 Low
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| OBS-L-01 | Prometheus scrape intervals inconsistent | `deploy/prometheus.yml` | Some targets use 15s, others 30s, others 60s. Standardize on 15s for critical services, 30s for others. |
+| OBS-L-02 | Grafana dashboard annotations not configured | `deploy/grafana/` | No deployment event annotations. Cannot correlate metric changes with deployments. |
+| OBS-L-03 | No log retention policy documented | Operations | Loki retention not documented. May accumulate logs indefinitely or lose compliance-required data. |
+
+#### ℹ️ Info
+
+| # | Observation | Component | Details |
+|---|-------------|-----------|---------|
+| OBS-I-01 | Solid observability foundation | deploy/ | Prometheus + Loki + Tempo + OTel Collector + Grafana is a best-practice stack. |
+| OBS-I-02 | Synthetic monitoring exists | `deploy/synthetic-monitor/` | Good practice — needs expansion to cover more user journeys. |
+| OBS-I-03 | Alert rules well-structured when loaded | `deploy/prometheus/alerts/` | API and infrastructure alert rules are comprehensive and well-thought-out. |
+| OBS-I-04 | Grafana provisioning automated | `deploy/grafana/provisioning/` | Datasources and dashboards auto-provisioned — good DevOps practice. |
+
+---
+
+### §36.4 Scalability & Performance Findings
+
+**Audited:** deploy/helm/apexmail/, deploy/k8s/, deploy/clickhouse/, deploy/redis/, docker-compose.prod.yml, load-tests/, docs/evaluation/load-testing.md, services/mail-server/crates/worker-processors/src/common/config.rs, .env.production.example.
+**Date:** 2026-05-17
+
+#### Summary
+
+| Severity | Count |
+|----------|-------|
+| 🔴 Critical | 0 |
+| 🟠 High | 6 |
+| 🟡 Medium | 7 |
+| 🟢 Low | 3 |
+| ℹ️ Info | 3 |
+| **Total** | **19** |
+
+#### 🟠 High
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| SCALE-H-01 | No Redis Cluster/Sentinel for High Availability | `deploy/redis/entrypoint.sh`, `deploy/helm/apexmail/values.yaml:389-406` | Redis runs as single master with no cluster or sentinel. Holds warmup counters, dedup keys, rate-limit windows, session data. Single-node failure causes warmup counter resets, dedup failures, duplicate sends. |
+| SCALE-H-02 | No PostgreSQL read replicas wired in production | `deploy/helm/apexmail/values.yaml`, `.env.production.example` | `PoolPair` abstraction supports read/write splitting but Helm chart and docker-compose only configure a single primary. Analytics and reporting queries compete with transactional email writes. |
+| SCALE-H-03 | No Horizontal Pod Autoscaler for API server | `deploy/helm/apexmail/templates/` | API server deployment uses static replica count. No HPA based on CPU/memory/request rate. Cannot scale up under traffic spikes. |
+| SCALE-H-04 | Worker queue no backpressure mechanism | `worker-processors/src/common/config.rs` | Worker concurrency is configurable but there's no backpressure when queue depth exceeds worker capacity. Under sustained load, queue grows without bound in PostgreSQL, increasing processing latency. |
+| SCALE-H-05 | No CDN configuration for static assets | `deploy/nginx/nginx.conf` | Static assets (CSS, JS, images) served directly by Nginx. No CDN (CloudFlare, CloudFront) for geographic distribution. Latency for users far from the origin server. |
+| SCALE-H-06 | Docker image not optimized for size | `Dockerfile` (root) | Single-stage Rust build produces large images (~1GB+). No multi-stage build with slim runtime image. Slower pulls, more storage, larger attack surface. |
+
+#### 🟡 Medium
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| SCALE-M-01 | Database connection pool defaults too low for enterprise tier | `.env.production.example` | Default `DATABASE_MAX_CONNECTIONS=20` may be insufficient for enterprise tier with 5M emails/month. Should scale with worker count. |
+| SCALE-M-02 | No response compression for API responses | `api-server/src/app.rs` | API responses served uncompressed. JSON payloads (especially analytics, event lists) can be 10-100KB+. Gzip/Brotli compression would reduce bandwidth 60-80%. |
+| SCALE-M-03 | ClickHouse batch size not tuned for insert throughput | `worker-processors/` | Default batch size of 1000 may be suboptimal. ClickHouse performs best with batches of 10,000-100,000 rows. Should be configurable and tuned. |
+| SCALE-M-04 | No connection pooling for outbound SMTP connections | `outbound-queue/` | Each email send may establish a new SMTP connection. Connection pooling to high-volume destinations (Gmail, Outlook) would reduce latency and resource usage. |
+| SCALE-M-05 | No cache invalidation strategy for domain verification results | `api-server/src/routes/domains.rs` | Domain DNS verification results cached in Redis but no invalidation on DNS change. Stale verification status for up to TTL duration. |
+| SCALE-M-06 | Helm chart missing PodDisruptionBudget | `deploy/helm/apexmail/` | No PDB defined. During K8s node maintenance, all replicas of a service could be evicted simultaneously, causing downtime. |
+| SCALE-M-07 | No database migration rollback strategy | `services/mail-server/migrations/` | No down migrations. Failed migration in production requires manual SQL intervention. |
+
+#### 🟢 Low
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| SCALE-L-01 | Prometheus not configured for remote write | `deploy/prometheus.yml` | No remote write to long-term storage (Thanos, Cortex). Historical metrics beyond local retention lost. |
+| SCALE-L-02 | No Grpc health checking protocol | `deploy/helm/apexmail/` | K8s liveness/readiness probes use HTTP. gRPC health protocol would be more efficient for gRPC services. |
+| SCALE-L-03 | Helm values lack topology spread constraints | `deploy/helm/apexmail/values.yaml` | No `topologySpreadConstraints`. All pods could be scheduled on the same node/zone, reducing availability during zone failures. |
+
+#### ℹ️ Info
+
+| # | Observation | Component | Details |
+|---|-------------|-----------|---------|
+| SCALE-I-01 | Connection pooling implemented | `apexmail-db/src/pool.rs` | `PoolPair` abstraction with read/write splitting support — good foundation. |
+| SCALE-I-02 | Circuit breakers present | `outbound-queue/` | Circuit breaker pattern for SMTP connections — prevents cascade failures. |
+| SCALE-I-03 | HPA defined for workers | `deploy/helm/apexmail/templates/` | Worker HPA configured — good practice. Needs to be extended to API server. |
+
+---
+
+### §36.5 API Security & Control Plane Findings
+
+**Audited:** services/mail-server/crates/api-server/src/ (all files), docs/api/openapi.yaml, docs/security/, docs/api/rate-limits.md, docs/compliance/.
+**Date:** 2026-05-17
+
+#### Summary
+
+| Severity | Count |
+|----------|-------|
+| 🔴 Critical | 0 |
+| 🟠 High | 2 |
+| 🟡 Medium | 7 |
+| 🟢 Low | 4 |
+| ℹ️ Info | 3 |
+| **Total** | **16** |
+
+#### 🟠 High
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| API-H-01 | Password reset token sent via URL query parameter | `api-server/src/routes/forgot_password.rs:~175` | Reset link embeds raw token in URL query: `format!("{}/reset-password?token={}&email={}", ...)`. Tokens cached in browser history, proxy logs, Referer headers. CWE-598. Mitigating: single-use, 1h expiry, stored as SHA-256 hash. |
+| API-H-02 | No account lockout after failed login attempts | `api-server/src/routes/auth.rs` | No progressive lockout or CAPTCHA trigger after N failed login attempts. Depends entirely on infrastructure rate limiting. Bypass of Nginx rate limit = unlimited brute force attempts. |
+
+#### 🟡 Medium
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| API-M-01 | API key visible in URL query parameter on some endpoints | `api-server/src/routes/analytics.rs` | Analytics export accepts API key as `?api_key=` query parameter for browser downloads. Key cached in browser history and server access logs. Should use header-based auth with signed URLs for downloads. |
+| API-M-02 | No MFA enforcement for admin accounts | `api-server/src/routes/auth.rs` | MFA is optional. Admin accounts can operate without MFA. Should enforce MFA for all admin roles per security best practice. |
+| API-M-03 | Webhook signing secret rotation not atomic | `api-server/src/routes/webhooks.rs` | When rotating webhook signing secrets, there's no overlap period. Active deliveries using the old secret will fail signature verification. Should support dual-secret verification during rotation. |
+| API-M-04 | Missing `Access-Control-Max-Age` in CORS preflight | `api-server/src/app.rs` | No `Access-Control-Max-Age` header set. Browsers send preflight OPTIONS request before every cross-origin API call. Should cache preflight for 1 hour. |
+| API-M-05 | No request size limit on JSON body parsing | `api-server/src/app.rs` | No global `Content-Length` limit middleware. A malicious client can send multi-GB JSON bodies. Should add `DefaultBodyLimit` or custom limit. |
+| API-M-06 | JWT refresh token stored in localStorage alternative not documented | `api-server/src/routes/auth.rs` | Refresh token storage strategy not documented. If stored in localStorage (common), vulnerable to XSS. Should use HttpOnly secure cookies. |
+| API-M-07 | SCIM endpoint missing rate limiting | `api-server/src/routes/scim.rs` | SCIM provisioning endpoint can be used to enumerate users. No specific rate limiting beyond global limits. |
+
+#### 🟢 Low
+
+| # | Issue | Component | Description |
+|---|-------|-----------|-------------|
+| API-L-01 | API version only in URL path, no deprecation header | `api-server/src/app.rs` | No `Sunset` or `Deprecation` headers for old API versions. Clients won't know when v1 endpoints are deprecated. |
+| API-L-02 | Missing `X-Content-Type-Options: nosniff` on some responses | `api-server/src/middleware/` | Not consistently applied. Some file download responses may be sniffed as executable content. |
+| API-L-03 | Error response format inconsistent between REST and web | `api-server/src/error.rs` | REST errors return JSON; web errors return HTML. Some error codes (429) have different body formats between endpoints. |
+| API-L-04 | No API key expiration policy enforced | `api-server/src/routes/auth.rs` | API keys can be created without expiration. Long-lived keys increase impact of credential leaks. |
+
+#### ℹ️ Info
+
+| # | Observation | Component | Details |
+|---|-------------|-----------|---------|
+| API-I-01 | Well-layered middleware stack | `api-server/src/app.rs` | Auth, rate limiting, CORS, compression, request ID, tracing all properly ordered. |
+| API-I-02 | RBAC with scope-based authorization | `api-server/src/middleware/auth.rs` | Fine-grained scope system (20 scopes) — well-designed. |
+| API-I-03 | HMAC-SHA256 webhook signature verification | `api-server/src/routes/webhooks.rs` | Industry-standard webhook security implementation. |
+
+---
+
+## §37.0 — Updated Consolidated Summary (2026-05-17)
+
+### Total Findings by Area
+
+| Audit Area | Files Reviewed | Critical | High | Medium | Low | Info | Total |
+|------------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| Database Migrations | 51 SQL files + Rust crates | 18 | 12 | 14 | 7 | 5 | 56 |
+| Frontend UI/UX | 87 screenshots + Rust + Tera templates | 4 | 12 | 18 | 15 | 10 | 59 |
+| SDKs (5 languages) | 5 SDKs + OpenAPI (16,743 lines) | 7 | 15 | 18 | 11 | 12 | 63 |
+| Documentation | ~180+ files | 5 | 14 | 16 | 8 | 9 | 52 |
+| Load & Performance Testing | Load test configs + docs | 3 | 6 | 7 | 4 | 5 | 25 |
+| Infrastructure Security | Docker, K8s, Helm, Nginx configs | 3 | 10 | 14 | 9 | 11 | 47 |
+| Backend Rust Code | All Rust crates | 3 | 8 | 10 | 6 | 4 | 31 |
+| Observability & Monitoring | Prometheus, Grafana, Loki, Tempo, OTel | 0 | 5 | 8 | 3 | 4 | 20 |
+| Scalability & Performance | Helm, K8s, Docker, configs | 0 | 6 | 7 | 3 | 3 | 19 |
+| API Security & Control Plane | API routes, OpenAPI, security docs | 0 | 2 | 7 | 4 | 3 | 16 |
+| **TOTAL** | **~500+ files** | **43** | **90** | **119** | **70** | **66** | **388** |
+
+### Top 10 Remediation Priorities
+
+| Priority | Finding | Area | Severity | Impact |
+|:--------:|---------|------|:--------:|--------|
+| 1 | Impersonation endpoints lack admin scope check (RS-C-01) | Backend Rust | 🔴 | Any authenticated user can impersonate if secret leaks |
+| 2 | Missing `tenants`/`users`/`invoices` tables in migrations (C-02..C-05) | Database | 🔴 | Fresh deployments will fail |
+| 3 | Comprehensive alert rules not loaded by Prometheus (OBS-H-01) | Monitoring | 🟠 | Critical alerts will never fire |
+| 4 | No Redis Cluster/Sentinel for HA (SCALE-H-01) | Scalability | 🟠 | Single point of failure for rate limits, sessions, dedup |
+| 5 | Default Grafana password in plaintext (INF-C-02) | Infrastructure | 🔴 | Full monitoring access |
+| 6 | Password reset token in URL query parameter (API-H-01) | API Security | 🟠 | Token exposure in logs/history |
+| 7 | No distributed tracing in Rust services (OBS-H-03) | Observability | 🟠 | Cannot debug cross-service issues |
+| 8 | Unbounded channels in worker processors (RS-C-03) | Backend Rust | 🔴 | OOM under sustained load |
+| 9 | No PostgreSQL read replicas in production (SCALE-H-02) | Scalability | 🟠 | Analytics queries compete with email sends |
+| 10 | Auth pages missing CSRF tokens (FE-C-02) | Frontend | 🔴 | 403 errors when CSRF enforced |
+
+### Scaling Readiness Assessment
+
+| Component | Current State | Target (thousands of concurrent customers) | Gap |
+|-----------|:------------:|:------------------------------------------:|-----|
+| PostgreSQL | Single primary, no read replicas | Primary + 2 read replicas | Needs read replica wiring + PgBouncer |
+| Redis | Single node, no auth | Redis Cluster (6 nodes) or Sentinel (3 nodes) | Needs cluster config + auth |
+| API Server | Static replicas | HPA (min 3, max 20) | Needs HPA manifest |
+| Worker processors | Unbounded queue | Bounded queue + backpressure + auto-scale | Needs channel refactor |
+| Nginx | Single instance | Load-balanced (2+ instances) | Needs upstream config |
+| ClickHouse | Single node | Cluster (2+ shards) | Needs Zookeeper/ClickHouse Keeper |
+| Object Storage | Not configured | S3-compatible (MinIO/S3) | Needed for email attachments |
+| CDN | Not configured | CloudFlare or CloudFront | Needed for static assets + tracking |
+| Monitoring | Single Prometheus | Prometheus + Thanos/Cortex for long-term | Needs remote write config |
+| Load Testing | No baselines, no HTTP tests | Automated CI pipeline + baselines | Needs full implementation |
+
+---
+
+## §38.0 — Master Remediation Checklist
+
+All 388 findings distilled into actionable checkbox items, prioritized by severity. Check off items as they are resolved.
+
+### 🔴 P0 — Critical (Immediate Action Required)
+
+#### Database Migrations
+- [ ] Create `tenants` table migration (C-02) — 12+ FK references broken without it
+- [ ] Create `users` table migration (C-03) — ALTER TABLE users fails on fresh deploy
+- [ ] Create `invoices` table migration (C-04) — FK and ALTER references broken
+- [ ] Add `raw_headers TEXT` column to `email_queue` (C-01, C-08) — runtime INSERT failure
+- [ ] Fix `audit_logs` column names in migration 051 (C-07/H-11) — `resource_type` → `resource`, `created_at` → `timestamp`
+- [ ] Create `metering_events` table migration (C-06) — indexes target non-existent table
+- [ ] Create `messages` table or fix FK to `mail_messages` (C-05)
+- [ ] Create `domains`, `api_keys`, `webhook_events` tables (C-11, C-12, C-13)
+- [ ] Fix `audit_logs_archive` duplicate PK issue (C-15) — use separate PK or composite
+- [ ] Fix `secrets_archive` UNIQUE constraint blocking multi-version archiving (C-16)
+- [ ] Recreate FK for `email_delivery_log → email_queue` after partitioning (C-17)
+- [ ] Fix migration 002 race condition with LOCK TABLE (C-18)
+- [ ] Add `dead_letter_queue` to migrations instead of runtime CREATE (C-10)
+- [ ] Standardize `tenant_id` type to `VARCHAR(26)` across all tables (H-01)
+
+#### Backend Rust — Security Critical
+- [ ] Add `require_scopes(&["admin"])` to impersonation endpoints (RS-C-01) — `api-server/src/routes/impersonate.rs`
+- [ ] Replace all `.unwrap()` in request handlers with proper error handling (RS-C-02) — session.rs, queue.rs, storage.rs
+- [ ] Replace `mpsc::unbounded_channel()` with `mpsc::channel(N)` + backpressure (RS-C-03)
+
+#### Frontend — Functional Critical
+- [ ] Add CSRF token fields to all POST forms (FE-C-02) — login, signup, forgot-password, reset-password
+- [ ] Fix auth form error container — remove `sr-only` so errors are visible (FE-H-06)
+- [ ] Add dark mode support to marketing site (FE-C-01)
+- [ ] Add active state + `aria-current="page"` to sidebars (FE-C-03, FE-C-04)
+
+#### Documentation — Integration Critical
+- [ ] Fix 17+ OpenAPI route path mismatches vs Rust code (DOC-C-01)
+- [ ] Resolve MIT vs Proprietary license contradiction (DOC-C-02)
+- [ ] Align rate limit documentation — remove "1,000 requests/minute" contradiction (DOC-C-03)
+- [ ] Add PHP SDK to SDK reference docs (DOC-C-04)
+- [ ] Fix `contacts.md` — currently documents suppressions, not contacts (DOC-C-05)
+
+#### SDKs — Compatibility Critical
+- [ ] Implement cursor pagination in all 5 SDKs (SDK-C-03)
+- [ ] Fix template update HTTP method — align OpenAPI PUT vs SDK PATCH (SDK-C-07)
+- [ ] Standardize envelope parsing across all SDKs (SDK-H-06)
+
+#### Infrastructure — Security Critical
+- [ ] Remove committed dhparam.pem, generate per-deployment 4096-bit or use ECDHE-only (INF-C-01)
+- [ ] Remove default Grafana admin password (INF-C-02)
+- [ ] Remove hardcoded credentials from load-test compose (INF-C-03)
+
+#### Load Testing — Reliability Critical
+- [ ] Establish performance baselines in `docs/evaluation/baselines/` (LT-C-01)
+- [ ] Create HTTP journey load tests for API endpoints (LT-C-02)
+- [ ] Create and activate CI load-test workflow (LT-C-03)
+
+---
+
+### 🟠 P1 — High (Address Before Production Launch)
+
+#### Backend Rust
+- [ ] Parameterize dynamic SQL table names with sqlx identifier quoting (RS-H-01)
+- [ ] Validate Argon2id parameters against OWASP recommendations (RS-H-02)
+- [ ] Add application-level login rate limiting per-IP and per-email (RS-H-03)
+- [ ] Invalidate session tokens on password change (RS-H-04)
+- [ ] Fix TOCTOU race in email rate limit check — use atomic DB operation (RS-H-05)
+- [ ] Add field-level redaction for sensitive data in logs (RS-H-06)
+- [ ] Add max retry budget for webhook delivery (RS-H-07)
+- [ ] Add `SAFETY:` documentation to all `unsafe` blocks (RS-H-08)
+
+#### Infrastructure Security
+- [ ] Move production secrets to Docker secrets or Vault (INF-H-01)
+- [ ] Add Redis authentication (`requirepass` or ACL) (INF-H-02)
+- [ ] Add ClickHouse user password (INF-H-03)
+- [ ] Implement Docker network segmentation (INF-H-04)
+- [ ] Restrict TLS 1.2 cipher list to AEAD only (INF-H-05)
+- [ ] Add `securityContext` to all K8s deployments (INF-H-06)
+- [ ] Add PodSecurityContext to Helm chart (INF-H-07)
+- [ ] Add auth to metrics endpoints (INF-H-08)
+- [ ] Add container resource limits to docker-compose.prod.yml (INF-H-09)
+- [ ] Fix `load-secret-env.sh` to avoid leaking secrets via `/proc/` (INF-H-10)
+
+#### Observability
+- [ ] Load `api-alerts.yml` and `infrastructure-alerts.yml` in Prometheus config (OBS-H-01)
+- [ ] Load `certificate-expiry.yml` and `disk-space.yml` alert rules (OBS-H-02)
+- [ ] Integrate `tracing-opentelemetry` in Rust services for distributed tracing (OBS-H-03)
+- [ ] Create SLO/SLI dashboards matching `docs/sla.md` targets (OBS-H-04)
+- [ ] Add PagerDuty/Slack integration to Alertmanager (OBS-H-05)
+
+#### Scalability
+- [ ] Configure Redis Cluster or Sentinel for HA (SCALE-H-01)
+- [ ] Wire PostgreSQL read replicas in Helm/docker-compose (SCALE-H-02)
+- [ ] Add HPA for API server deployment (SCALE-H-03)
+- [ ] Implement worker queue backpressure mechanism (SCALE-H-04)
+- [ ] Configure CDN for static assets (SCALE-H-05)
+- [ ] Convert Dockerfile to multi-stage build for smaller images (SCALE-H-06)
+
+#### API Security
+- [ ] Move password reset token from URL query to POST body (API-H-01)
+- [ ] Implement progressive account lockout after failed logins (API-H-02)
+
+#### Frontend Accessibility
+- [ ] Add aria-labels to dashboard metric cards (FE-H-03)
+- [ ] Add focus trap to cookie consent banner (FE-H-05)
+- [ ] Add keyboard navigation to dropdown menus (FE-H-08)
+- [ ] Add Escape key handler for mobile sidebar (FE-H-07)
+
+#### SDKs
+- [ ] Fix webhook update HTTP method — align SDKs to OpenAPI PATCH (SDK-H-04)
+- [ ] Make analytics `from`/`to` required in all SDKs (SDK-H-02)
+- [ ] Redact API keys in `toString`/`__repr__` across all SDKs (SDK-M-17)
+
+---
+
+### 🟡 P2 — Medium (Address in Next Sprint)
+
+#### Backend Rust
+- [ ] Sanitize error responses to avoid leaking DB details (RS-M-01)
+- [ ] Add request body size limits for multipart uploads (RS-M-02)
+- [ ] Tie database pool size to worker count automatically (RS-M-04)
+- [ ] Implement graceful shutdown for in-flight SMTP sends (RS-M-05)
+- [ ] Restrict CORS origins in production config (RS-M-06)
+- [ ] Implement RFC 5322 + EAI email validation (RS-M-07)
+- [ ] Enforce idempotency keys on POST endpoints (RS-M-08)
+- [ ] Optimize ClickHouse batch flush (size OR time trigger) (RS-M-09)
+
+#### Observability
+- [ ] Propagate request IDs to downstream queries/SMTP/worker jobs (OBS-M-01)
+- [ ] Provision Loki datasource in Grafana (OBS-M-02)
+- [ ] Add slow query logging for PostgreSQL (OBS-M-03)
+- [ ] Expand synthetic monitoring to cover login, email send, domain verify (OBS-M-04)
+- [ ] Add rate-limit rejection metrics (OBS-M-05)
+- [ ] Add HTTP probes to Blackbox exporter for public endpoints (OBS-M-06)
+
+#### Scalability
+- [ ] Scale DB pool defaults for enterprise tier (SCALE-M-01)
+- [ ] Enable response compression (gzip/brotli) for API (SCALE-M-02)
+- [ ] Tune ClickHouse batch size for production throughput (SCALE-M-03)
+- [ ] Add SMTP connection pooling for high-volume destinations (SCALE-M-04)
+- [ ] Add cache invalidation for domain verification results (SCALE-M-05)
+- [ ] Add PodDisruptionBudget to Helm chart (SCALE-M-06)
+- [ ] Create database migration rollback strategy (SCALE-M-07)
+
+#### API Security
+- [ ] Move API key from URL query to signed URLs for analytics export (API-M-01)
+- [ ] Enforce MFA for all admin accounts (API-M-02)
+- [ ] Support dual-secret verification during webhook rotation (API-M-03)
+- [ ] Set `Access-Control-Max-Age` for CORS preflight caching (API-M-04)
+- [ ] Add global JSON body size limit middleware (API-M-05)
+- [ ] Document refresh token storage strategy — use HttpOnly cookies (API-M-06)
+- [ ] Add rate limiting to SCIM endpoint (API-M-07)
+
+#### Infrastructure
+- [ ] Add health checks for Redis and ClickHouse containers (INF-M-01, INF-M-02)
+- [ ] Configure Redis `maxmemory` and eviction policy (INF-M-13)
+- [ ] Add Nginx rate limiting for tracking pixel endpoint (INF-M-12)
+- [ ] Set up ClickHouse backup strategy (INF-M-14)
+- [ ] Pin Dockerfile base tags to specific versions (INF-M-11)
+
+#### Frontend
+- [ ] Add client-side validation to auth forms (FE-H-02)
+- [ ] Fix inconsistent form label styling between login/signup (FE-L-06)
+- [ ] Add billing/payment method management UI (FE-H-11)
+- [ ] Fix empty eyebrow `<span>` in control plane pages (FE-M-04, FE-M-14)
+- [ ] Add `loading="lazy"` to below-fold images (FE-M-15)
+- [ ] Fix verify-email page title/heading copy mismatch (FE-L-14)
+
+#### Documentation
+- [ ] Add PHP SDK documentation (DOC-C-04)
+- [ ] Fix `contacts.md` content to document actual contacts endpoint (DOC-C-05)
+- [ ] Update architecture overview to show all 6+ services (DOC-H-03)
+- [ ] Add "SUPERSEDED" banners to ADR 0003, 0004, 0005 (DOC-H-04)
+- [ ] Fix configuration.md self-contradiction on EMAIL_TRANSPORT_TYPE (DOC-H-08)
+- [ ] Add missing billing, admin, analytics routes to OpenAPI (DOC-H-11..H-14)
+- [ ] Fix HSTS max-age in code to match preload requirement (DOC-L-08)
+
+#### Load Testing
+- [ ] Implement k6 browser-level SSR load tests (LT-H-01)
+- [ ] Set up production-scale load test infrastructure (LT-H-03)
+- [ ] Create Grafana load-testing dashboard JSON (LT-H-05)
+- [ ] Add tracking pixel throughput test (10K rps target) (LT-H-06)
+
+---
+
+### 🟢 P3 — Low (Backlog / Technical Debt)
+
+- [ ] Add `CHECK` constraints on `priority`, `max_attempts`, `status` columns (M-01, M-02, M-06)
+- [ ] Add GIN indexes on JSONB columns used in queries (L-07)
+- [ ] Add `updated_at` triggers to 20+ tables (H-05)
+- [ ] Standardize error type naming across Rust crates (RS-L-02)
+- [ ] Add `#[non_exhaustive]` to public error enums (RS-L-05)
+- [ ] Configure Prometheus remote write for long-term storage (SCALE-L-01)
+- [ ] Add Helm network policies and topology spread constraints (INF-L-06, SCALE-L-03)
+- [ ] Disable Nginx `server_tokens` (INF-L-03)
+- [ ] Add Docker log rotation (INF-L-04)
+- [ ] Pin K8s image references to digests (INF-L-08)
+- [ ] Add back-to-top button on marketing mobile pages (FE-H-12)
+- [ ] Fix marketing font preloads to use woff2 (FE-M-07)
+- [ ] Add deprecation headers to API responses (API-L-01)
+- [ ] Enforce API key expiration policy (API-L-04)
+
+---
+
+## §39.0 — Apex Style Guide Adherence, Machine Specs, Sales System & Stubs Audit (2026-05-17)
+
+### §39.1 Apex Style Guide Adherence
+
+**Canonical reference:** `docs/development/style-system.md` (314 lines)
+**Token sources:** `ui-foundation/assets/globals.css`, `ui-foundation/src/lib.rs`, `marketing-zola/static/css/styles.css`
+**Component standards:** Shell, Buttons (44px min touch), Cards, Inputs, Tables
+
+| # | Issue | Severity | Description |
+|---|-------|:--------:|-------------|
+| STYLE-01 | Marketing site missing Surface tokens (`surface-050`..`surface-950`) | 🟠 | Web console and control plane use the full Surface scale; marketing site uses flat `#ffffff`/`#f4f4f5` — inconsistent depth. |
+| STYLE-02 | Marketing buttons don't enforce 44px min touch target | 🟡 | Style guide requires 44px minimum touch target for all buttons; marketing uses `py-3 px-6` (~36px height). |
+| STYLE-03 | Dark mode missing from marketing (violates `.dark` class + `prefers-color-scheme`) | 🔴 | Style guide mandates `.dark` class support; marketing site has `color-scheme: light` only. |
+| STYLE-04 | Control plane sidebar missing `data-sidebar` attributes per style guide | 🟢 | Shell component standard requires `data-sidebar` on nav elements; implementation uses generic `<nav>`. |
+| STYLE-05 | Inconsistent `--radius-*` token usage between Rust and marketing | 🟡 | Marketing overrides `border-radius` inline; Rust surfaces use `--radius-md` token. Should standardize. |
+| STYLE-06 | Brand gradient (`brand-gradient`) defined but unused in marketing | 🟢 | `brand-gradient: linear-gradient(135deg, #6366f1, #8b5cf6)` defined in tokens but never applied to buttons or headings. |
+| STYLE-07 | Font stack mismatch: marketing uses Inter + Fraunces; Rust uses system-ui | 🟠 | Style guide specifies `--font-sans` and `--font-serif` tokens; marketing loads custom fonts while Rust surfaces use `system-ui`. |
+| STYLE-08 | Error color inconsistency: `--error` vs `red-600` in auth pages | 🟡 | Auth forms use Tailwind `red-600` directly instead of semantic `--error` token from style guide. |
+
+### §39.2 Machine Specs & Performance Context
+
+**Source:** `docs/deployment/automated-setup-guide.md`, `docs/tool-contracts/hetzner.md`, `deploy/helm/apexmail/values.yaml`
+
+| Component | Spec | Reference |
+|-----------|------|-----------|
+| Production Server | Hetzner CAX41 (ARM64, 8 vCPU, 32GB RAM) | `docs/tool-contracts/hetzner.md` |
+| Database Server | Hetzner CAX51 (ARM64, 16 vCPU, 64GB RAM) with local NVMe | `docs/tool-contracts/hetzner.md` |
+| Max Tenants Target | 10,000 concurrent tenants | `docs/sla.md` |
+| Email Throughput | 5M emails/month (Enterprise tier) | `docs/pricing.md` |
+| Tracking Pixel | 10,000 rps target | `docs/evaluation/load-testing.md` |
+
+**Performance Implications (given 8 vCPU / 32GB for app + 16 vCPU / 64GB for DB):**
+
+| Resource | Recommendation | Status |
+|----------|---------------|--------|
+| PostgreSQL `shared_buffers` | 16GB (25% of 64GB) | Not documented |
+| PostgreSQL `max_connections` | 200 (with PgBouncer) | Default 20 in `.env.example` |
+| Redis `maxmemory` | 4GB (12.5% of 32GB) | Not configured (SCALE-M-01, INF-M-13) |
+| API server instances | 3-5 replicas (8 vCPU / 2 per replica) | Static 1 replica (SCALE-H-03) |
+| Worker concurrency | 50 per instance (CPU-bound hashing) | Configurable but default unknown |
+| ClickHouse `max_memory_usage` | 8GB (25% of 32GB) | Not documented |
+
+### §39.3 Control Plane Automated Sales System
+
+**Source:** `api-server/src/routes/sales_autopilot.rs`
+
+The sales autopilot module implements an automated pipeline with lead scoring, drip campaigns, and conversion tracking.
+
+| # | Issue | Severity | Description |
+|---|-------|:--------:|-------------|
+| SALES-01 | Lead scoring weights hardcoded, not configurable per tenant | 🟡 | Weights for email volume, domain count, API usage, support tickets are compile-time constants. Enterprise tenants may need custom scoring. |
+| SALES-02 | Drip campaign emails lack unsubscribe link | 🟠 | Automated drip emails don't include CAN-SPAM compliant unsubscribe mechanism. Legal risk. |
+| SALES-03 | No conversion attribution tracking | 🟡 | No tracking of which drip email or touchpoint led to conversion. ROI measurement impossible. |
+| SALES-04 | Sales Console page missing loading/empty states | 🟠 | Control plane Sales Console (`control_plane_sales_page`) has no loading skeleton or empty state guidance. |
+| SALES-05 | Lead data not paginated — loads all leads at once | 🟡 | Sales Console loads complete lead list without pagination. At 10K tenants, this becomes a performance issue. |
+
+### §39.4 Stubs & Incomplete Service Wiring
+
+**Source:** Searched all Rust crates for `TODO`, `FIXME`, `HACK`, `unimplemented!`, `todo!`
+
+| # | Issue | Severity | File | Description |
+|---|-------|:--------:|------|-------------|
+| STUB-01 | `todo!()` in enterprise features | 🟠 | `enterprise-service/src/features.rs:142` | Feature flag evaluation for "advanced_analytics" returns `todo!()` — will panic if accessed. |
+| STUB-02 | `todo!()` in billing contract renewal | 🟠 | `api-server/src/routes/billing.rs:367` | Contract renewal handler contains `todo!()` — will panic if called. |
+| STUB-03 | `unimplemented!()` in GDPR export | 🔴 | `api-server/src/routes/gdpr.rs:89` | `export_user_data()` contains `unimplemented!()` — will panic at runtime. GDPR compliance incomplete. |
+| STUB-04 | 14 `TODO` comments in api-server | 🟡 | Multiple files | Deferred work in auth (MFA enforcement), analytics (real-time streaming), webhooks (batch operations). |
+| STUB-05 | `FIXME` in outbound queue SMTP retry | 🟠 | `outbound-queue/src/smtp.rs:234` | "FIXME: retry logic doesn't account for 421 enhance your calm" — missing rate-limit-aware retry. |
+| STUB-06 | Tracking service OpenTelemetry stubs | 🟡 | `api-server/src/routes/tracking.rs` | Tracing spans created but not exported (no `tracing-opentelemetry` integration, matches OBS-H-03). |
+| STUB-07 | Health check returns static values | 🟢 | `api-server/src/routes/health.rs` | "ready" check always returns `{"status": "ok"}` without checking DB/Redis connectivity. Misleading during outages. |
+
+---
+
+## §40.0 — Application State Coverage Audit (2026-05-17)
+
+**Audited:** 72 distinct page/view functions in `leptos_views.rs` + 6 shell components in `shell.rs`
+**Date:** 2026-05-17
+
+### State Coverage Key
+- ✅ = Present
+- ❌ = Missing
+- ➖ = Not applicable (static content)
+- ⚠️ = Partial (primitive exists but not wired)
+
+### Critical Missing States (Top Findings)
+
+| # | Page | Missing States | Severity | Impact |
+|---|------|---------------|:--------:|--------|
+| STATE-01 | `web_dashboard_page` | Loading, Error, Edge | 🟠 | Shows (0,0,0,0) metrics during load; no error feedback; long metric names overflow cards |
+| STATE-02 | `web_analytics_page` | Loading, Error | 🟠 | No skeleton while charts load; no retry on chart data failure |
+| STATE-03 | `web_domains_page` | Loading, Empty, Error, Edge | 🔴 | Most complex page has zero state handling — blank during load, no guidance when empty, no error feedback |
+| STATE-04 | `web_campaigns_page` | Loading, Empty, Error | 🟠 | Campaign list has no loading skeleton; empty list shows blank; failed fetch shows nothing |
+| STATE-05 | `web_contacts_page` | Loading, Empty, Error, Edge | 🔴 | Contact list identical to domains — zero state handling |
+| STATE-06 | `web_templates_page` | Loading, Empty, Error | 🟠 | Template editor loads with no preview skeleton; empty template list has no guidance |
+| STATE-07 | `web_settings_page` | Error, Edge | 🟡 | Settings form has no error display for save failures; long API key names overflow |
+| STATE-08 | `control_plane_dashboard_page` | Loading, Error | 🟠 | Admin dashboard shows hardcoded (0,0,0,0) metrics; no error state for failed health checks |
+| STATE-09 | `control_plane_tenants_page` | Loading, Empty, Error, Edge | 🔴 | Tenant management has zero state handling — critical for admin operations |
+| STATE-10 | `control_plane_billing_plans_page` | Loading, Error | 🟡 | Billing plans page has no loading state; shows static pricing without loading indicator |
+| STATE-11 | `control_plane_alert_rules_page` | Loading, Empty, Edge | 🟠 | Alert rules page shows "0 critical / 0 warning" but no empty state guidance or loading skeleton |
+| STATE-12 | `control_plane_sales_page` | Loading, Empty, Error | 🟠 | Sales Console has no loading skeleton, empty lead list guidance, or error feedback |
+| STATE-13 | Auth: `login_page` | Error (visible) | 🔴 | Error container is `sr-only` — errors invisible to sighted users (matches FE-H-06) |
+| STATE-14 | Auth: `signup_page` | Error (visible) | 🔴 | Same `sr-only` error container issue as login |
+| STATE-15 | Auth: `forgot_password_page` | Success, Error (visible) | 🔴 | No confirmation after submission; error container invisible |
+| STATE-16 | Auth: `reset_password_page` | Success, Error (visible) | 🔴 | No password reset confirmation; error container invisible |
+
+### Application State Coverage Summary
+
+| Surface | Pages | Loading | Empty | Error | Edge | Success |
+|---------|:-----:|:-------:|:-----:|:-----:|:----:|:-------:|
+| Web App | 34 | 2/34 (6%) | 3/34 (9%) | 1/34 (3%) | 0/34 (0%) | 4/34 (12%) |
+| Control Plane | 14 | 1/14 (7%) | 1/14 (7%) | 0/14 (0%) | 0/14 (0%) | 2/14 (14%) |
+| Auth Pages | 5 | ➖ | ➖ | 0/5 (0%) | 0/5 (0%) | 1/5 (20%) |
+| Marketing | 19 | ➖ | ➖ | ➖ | 0/19 (0%) | ➖ |
+| **Total** | **72** | **3/53 (6%)** | **4/53 (8%)** | **1/53 (2%)** | **0/72 (0%)** | **7/53 (13%)** |
+
+**Conclusion:** Only 6% of pages with async data have loading states, 8% have empty states, and 2% have error states. This is a **critical UX gap** affecting user trust and intuitiveness across the entire application.
+
+---
+
+## §41.0 — Final Consolidated Summary (2026-05-17)
+
+### Grand Total: 388 + 26 = 414 Findings
+
+| Audit Area | 🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Low | ℹ️ Info | Total |
+|------------|:----------:|:-------:|:---------:|:------:|:-------:|:-----:|
+| Database Migrations | 18 | 12 | 14 | 7 | 5 | 56 |
+| Frontend UI/UX | 4 | 12 | 18 | 15 | 10 | 59 |
+| SDKs (5 languages) | 7 | 15 | 18 | 11 | 12 | 63 |
+| Documentation | 5 | 14 | 16 | 8 | 9 | 52 |
+| Load & Performance Testing | 3 | 6 | 7 | 4 | 5 | 25 |
+| Infrastructure Security | 3 | 10 | 14 | 9 | 11 | 47 |
+| Backend Rust Code | 3 | 8 | 10 | 6 | 4 | 31 |
+| Observability & Monitoring | 0 | 5 | 8 | 3 | 4 | 20 |
+| Scalability & Performance | 0 | 6 | 7 | 3 | 3 | 19 |
+| API Security & Control Plane | 0 | 2 | 7 | 4 | 3 | 16 |
+| Apex Style / Machine Specs / Sales / Stubs | 1 | 4 | 8 | 2 | 0 | 15 |
+| Application State Coverage | 4 | 6 | 1 | 0 | 0 | 11 |
+| **GRAND TOTAL** | **48** | **100** | **128** | **72** | **66** | **414** |
+
+### Updated Remediation Checklist — Additional P0/P1 Items
+
+#### 🔴 P0 — Additional Critical Items
+- [ ] Fix `unimplemented!()` in GDPR export route (STUB-03) — `api-server/src/routes/gdpr.rs:89` — runtime panic
+- [ ] Add loading/empty/error states to `web_domains_page` (STATE-03) — most complex page has zero state handling
+- [ ] Add loading/empty/error states to `web_contacts_page` (STATE-05)
+- [ ] Add loading/empty/error states to `control_plane_tenants_page` (STATE-09)
+- [ ] Fix auth error containers to be visible (STATE-13, 14, 15, 16) — already tracked as FE-H-06
+
+#### 🟠 P1 — Additional High Items
+- [ ] Replace `todo!()` in enterprise feature flag evaluation (STUB-01) — will panic at runtime
+- [ ] Replace `todo!()` in billing contract renewal (STUB-02) — will panic at runtime
+- [ ] Add CAN-SPAM unsubscribe link to drip campaign emails (SALES-02) — legal risk
+- [ ] Add loading states to web dashboard and analytics pages (STATE-01, 02)
+- [ ] Add loading/empty/error states to campaigns, templates, settings pages (STATE-04, 06, 07)
+- [ ] Fix health check to verify DB/Redis connectivity instead of static "ok" (STUB-07)
+- [ ] Align marketing font stack with Rust surfaces per style guide (STYLE-07)
+
+
+---
+
+## Comprehensive Audit — 2026-05-19
+
+This section adds 208 new findings from seven exhaustive audit streams conducted on 2026-05-19: Backend Rust Code (RS-050–RS-085), Database & Migration (DB-100–DB-126), Security & Infrastructure (SEC-100–SEC-125, INF-100–INF-105), Frontend UI/UX & Accessibility (UI-100–UI-136), API/Control Plane/Sales Autopilot (API-100–API-123), SDK (SDK-100–SDK-125), and Performance & Scalability (PERF-100–PERF-125).
+
+### New Findings Summary
+
+| Category | 🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Low | ℹ️ Info | Total |
+|----------|:----------:|:-------:|:---------:|:------:|:-------:|:-----:|
+| Backend Rust Code (RS-050–085) | 2 | 7 | 13 | 6 | 8 | 36 |
+| Database & Migration (DB-100–126) | 3 | 6 | 9 | 5 | 4 | 27 |
+| Security & Infrastructure (SEC/INF) | 4 | 7 | 10 | 5 | 6 | 32 |
+| Frontend UI/UX & Accessibility (UI-100–136) | 3 | 8 | 12 | 9 | 5 | 37 |
+| API/Control Plane/Sales Autopilot (API-100–123) | 3 | 5 | 9 | 4 | 3 | 24 |
+| SDK (SDK-100–125) | 2 | 6 | 9 | 7 | 2 | 26 |
+| Performance & Scalability (PERF-100–125) | 0 | 3 | 12 | 9 | 2 | 26 |
+| **New Total** | **17** | **42** | **74** | **45** | **30** | **208** |
+
+---
+
+### 1. Backend Rust Code (RS-050 through RS-085)
+
+#### Findings Table
+
+| ID | Severity | Title | File | Status |
+|----|:--------:|-------|------|:------:|
+| RS-050 | 🔴 | Admin secrets endpoints lack tenant_id scoping | api-server/routes/admin/secrets.rs:91 | ☐ Open |
+| RS-051 | 🔴 | Billing plan creation/update endpoints lack authorization | billing-service/routes.rs:535 | ☐ Open |
+| RS-052 | 🟠 | TenantId extractor trusts x-tenant-id header without auth binding | sales-autopilot/routes.rs:70 | ☐ Open |
+| RS-053 | 🟠 | Billing tenant-scoped endpoints accept arbitrary tenant_id | billing-service/routes.rs:435 | ☐ Open |
+| RS-054 | 🟠 | peek_for_tenant() consumes rate limit tokens on Redis fallback | rate-limiter/redis_limiter.rs:189 | ☐ Open |
+| RS-055 | 🟠 | validated_column() uses assert!() — DoS vector in production | api-server/routes/admin/revenue.rs:34 | ☐ Open |
+| RS-056 | 🟠 | std::sync::RwLock for circuit_breakers in async context | worker-processors/webhook/processor.rs:6 | ☐ Open |
+| RS-057 | 🟠 | std::sync::Mutex for recent_outcomes in async email processor | worker-processors/email/processor.rs:11 | ☐ Open |
+| RS-058 | 🟠 | Webhook test endpoint has TOCTOU SSRF window | api-server/routes/webhooks.rs:286 | ☐ Open |
+| RS-059 | 🟡 | Integer truncation in yearly-to-monthly price conversion | billing-service/routes.rs:122 | ☐ Open |
+| RS-060 | 🟡 | GDPR erasure may miss PII in additional tables | compliance/gdpr_automation.rs:295 | ☐ Open |
+| RS-061 | 🟡 | peek() acquires write lock unnecessarily | rate-limiter/sliding_window.rs:119 | ☐ Open |
+| RS-062 | 🟡 | DB-first then Redis counter can lead to counter drift | billing-service/usage.rs:61 | ☐ Open |
+| RS-063 | 🟡 | mCaptcha dev-mode bypass can be exploited if misconfigured | api-server/routes/auth.rs:59 | ☐ Open |
+| RS-064 | 🟡 | constant_time_eq() leaks length information | api-server/routes/session.rs:160 | ☐ Open |
+| RS-065 | 🟡 | Proxy allows HTTP in non-production — SSRF risk | api-server/routes/admin/proxy.rs:91 | ☐ Open |
+| RS-066 | 🟡 | delete_tenant_records() can cause long-running transactions | api-server/routes/admin/tenants.rs:51 | ☐ Open |
+| RS-067 | 🟡 | Rate limit check consumes tokens even if enqueue fails | outbound-queue/queue.rs:287 | ☐ Open |
+| RS-068 | 🟡 | Service token comparison returns generic 401; /health/details not excluded | observability-service/routes.rs:92 | ☐ Open |
+| RS-069 | 🟡 | N+1 INSERT pattern in insert_message_and_queue() | api-server/routes/messages.rs:285 | ☐ Open |
+| RS-070 | 🟡 | Session cookie SameSite attribute inconsistency | api-server/routes/auth.rs:876 | ☐ Open |
+| RS-071 | 🟡 | unwrap_or_default() on serialization silently produces empty signature | api-server/routes/webhooks.rs:338 | ☐ Open |
+| RS-072 | 🟢 | Password hash scheme detection leaks information via error messages | api-server/routes/auth.rs:129 | ☐ Open |
+| RS-073 | 🟢 | html_escape() used for email body but not all user-controlled strings | api-server/routes/helpers.rs | ☐ Open |
+| RS-074 | 🟢 | Secret rotation doesn't actually rotate the encrypted value | api-server/routes/admin/secrets.rs:254 | ☐ Open |
+| RS-075 | 🟢 | .expect() in EmailQueue::new() can panic on valid config | outbound-queue/queue.rs:200 | ☐ Open |
+| RS-076 | 🟢 | Domain verification query uses fetch_one which panics on missing domain | api-server/routes/messages.rs:240 | ☐ Open |
+| RS-077 | 🟢 | Rate tracker eviction sorts all entries on every cleanup cycle | smtp-edge/session.rs:112 | ☐ Open |
+| RS-078 | ℹ️ | Admin scope check test only verifies string presence | api-server/routes/admin/mod.rs:37 | ☐ Open |
+| RS-079 | ℹ️ | constant_time_compare compares hex-encoded hashes | compliance/gdpr_automation.rs:115 | ☐ Open |
+| RS-080 | ℹ️ | session_issue_time_after_revocation uses .unwrap_or(now) | api-server/routes/auth.rs:920 | ☐ Open |
+| RS-081 | ℹ️ | Tenant-scoped query test uses static file analysis | api-server/routes/mod.rs:44 | ☐ Open |
+| RS-082 | ℹ️ | pending_successes uses std::sync::Mutex with blocking flush | worker-processors/webhook/processor.rs:31 | ☐ Open |
+| RS-083 | ℹ️ | Client IP parsing uses unwrap_or(addr.ip()) fallback | api-server/app.rs:87 | ☐ Open |
+| RS-084 | ℹ️ | Deadletter retention constant uses mixed arithmetic types | billing-service/stripe_webhooks.rs:29 | ☐ Open |
+| RS-085 | ℹ️ | Redis INCR + EXPIRE race condition in enrichment rate limiter | sales-autopilot/routes.rs:455 | ☐ Open |
+
+#### Detailed Descriptions
+
+**RS-050 🔴 Admin secrets endpoints lack tenant_id scoping — cross-tenant data exposure**
+Admin secrets endpoints at `api-server/routes/admin/secrets.rs:91` do not scope queries by `tenant_id`. An authenticated admin can read or modify secrets belonging to other tenants. This is a cross-tenant data exposure vulnerability requiring immediate remediation by adding `tenant_id` filtering to all secret queries.
+
+**RS-051 🔴 Billing plan creation/update endpoints lack authorization beyond service token**
+Billing service plan creation and update endpoints at `billing-service/routes.rs:535` only verify the presence of a service token without checking admin scopes. Any service with a valid token can create or modify billing plans, potentially leading to unauthorized plan manipulation.
+
+**RS-052 🟠 TenantId extractor trusts x-tenant-id header without authorization binding**
+The `TenantId` extractor in `sales-autopilot/routes.rs:70` extracts the tenant ID from the `x-tenant-id` header without verifying that the authenticated user belongs to that tenant. An attacker can set an arbitrary tenant ID to access cross-tenant data.
+
+**RS-053 🟠 Billing tenant-scoped endpoints accept arbitrary tenant_id without access control**
+Billing service endpoints at `billing-service/routes.rs:435` accept a `tenant_id` parameter without verifying the caller's authorization for that tenant. Combined with RS-052, this enables cross-tenant billing data access.
+
+**RS-054 🟠 peek_for_tenant() consumes rate limit tokens on Redis fallback**
+`rate-limiter/redis_limiter.rs:189` — When Redis is unavailable and the system falls back to the in-memory limiter, `peek_for_tenant()` inadvertently consumes rate limit tokens. A Redis outage could cause all tenants to be rate-limited prematurely.
+
+**RS-055 🟠 validated_column() uses assert!() — DoS vector in production**
+`api-server/routes/admin/revenue.rs:34` uses `assert!()` for column validation. In production, a failed assertion causes a panic and process crash. This is a denial-of-service vector — an attacker sending unexpected column names can crash the server.
+
+**RS-056 🟠 std::sync::RwLock for circuit_breakers in async context**
+`worker-processors/webhook/processor.rs:6` uses `std::sync::RwLock` for circuit breaker state in an async context. Holding a std RwLock across `.await` points can cause deadlocks. Should use `tokio::sync::RwLock` instead.
+
+**RS-057 🟠 std::sync::Mutex for recent_outcomes in async email processor**
+`worker-processors/email/processor.rs:11` uses `std::sync::Mutex` for tracking recent outcomes. Same issue as RS-056 — blocking mutex in async context risks deadlocks and thread starvation under load.
+
+**RS-058 🟠 Webhook test endpoint has TOCTOU SSRF window**
+`api-server/routes/webhooks.rs:286` — The webhook test endpoint validates a URL and then makes an HTTP request to it. Between validation and request execution, the DNS record could change (Time-of-Check-Time-of-Use), allowing SSRF to internal services.
+
+**RS-059 🟡 Integer truncation in yearly-to-monthly price conversion**
+`billing-service/routes.rs:122` — Converting yearly prices to monthly by integer division truncates the result. A $99/year plan becomes $8/month ($96/year) instead of $8.25/month. Revenue loss accumulates across all subscribers.
+
+**RS-060 🟡 GDPR erasure may miss PII in additional tables**
+`compliance/gdpr_automation.rs:295` — The GDPR erasure function enumerates tables to clean but may miss PII stored in tables added after the erasure logic was written (e.g., `ent_support_tickets`, `bounce_domain_reputation`). Compliance gap.
+
+**RS-061 🟡 peek() acquires write lock unnecessarily**
+`rate-limiter/sliding_window.rs:119` — The `peek()` method (read-only operation) acquires a write lock on the sliding window state. Under high concurrency, this causes unnecessary contention. Should use a read lock.
+
+**RS-062 🟡 DB-first then Redis counter can lead to counter drift**
+`billing-service/usage.rs:61` — Usage counters are first incremented in the database, then in Redis. If the Redis write fails, the DB counter advances but the cache is stale. Subsequent reads from Redis return incorrect counts.
+
+**RS-063 🟡 mCaptcha dev-mode bypass can be exploited if misconfigured**
+`api-server/routes/auth.rs:59` — mCaptcha verification has a development-mode bypass. If the `MCAPTCHA_SITE_KEY` env var is accidentally left empty or set to the dev value in production, CAPTCHA protection is completely bypassed.
+
+**RS-064 🟡 constant_time_eq() leaks length information**
+`api-server/routes/session.rs:160` — The `constant_time_eq()` function returns early if lengths differ, leaking length information. While the impact is limited, a proper constant-time comparison should compare regardless of length.
+
+**RS-065 🟡 Proxy allows HTTP in non-production — SSRF risk**
+`api-server/routes/admin/proxy.rs:91` — The admin proxy allows HTTP (not just HTTPS) connections in non-production environments. If a staging environment is accessible, this can be exploited for SSRF attacks against internal services.
+
+**RS-066 🟡 delete_tenant_records() can cause long-running transactions**
+`api-server/routes/admin/tenants.rs:51` — Tenant deletion runs in a single transaction that deletes from many tables. For tenants with large datasets, this can hold locks for extended periods, blocking other operations.
+
+**RS-067 🟡 Rate limit check consumes tokens even if enqueue fails**
+`outbound-queue/queue.rs:287` — The rate limit check decrements the counter before attempting to enqueue the message. If enqueue fails (e.g., DB error), the consumed tokens are not restored, effectively reducing the tenant's rate limit.
+
+**RS-068 🟡 Service token comparison returns generic 401; /health/details not excluded from auth**
+`observability-service/routes.rs:92` — Service token comparison returns a generic 401 without distinguishing between missing and invalid tokens. Additionally, `/health/details` endpoint requires authentication, preventing unauthenticated health monitoring.
+
+**RS-069 🟡 N+1 INSERT pattern in insert_message_and_queue()**
+`api-server/routes/messages.rs:285` — The `insert_message_and_queue()` function performs separate INSERT statements for the message and each queue entry instead of using a batch insert or CTE. Under high send volume, this causes excessive database round-trips.
+
+**RS-070 🟡 Session cookie SameSite attribute inconsistency**
+`api-server/routes/auth.rs:876` — Session cookies are set with `SameSite=Lax` in some code paths and `SameSite=Strict` in others. Inconsistent SameSite attributes can cause unexpected session behavior across different browsers.
+
+**RS-071 🟡 unwrap_or_default() on serialization silently produces empty signature**
+`api-server/routes/webhooks.rs:338` — When serializing webhook signatures, `unwrap_or_default()` is called on the signing result. If signing fails, an empty signature is produced and sent, which will fail verification on the receiver's end without any error logging.
+
+**RS-072 🟢 Password hash scheme detection leaks information via error messages**
+`api-server/routes/auth.rs:129` — Error messages during password hash scheme detection reveal which hashing algorithm was expected. An attacker can use this information to determine the hash configuration.
+
+**RS-073 🟢 html_escape() used for email body but not all user-controlled strings**
+`api-server/routes/helpers.rs` — The `html_escape()` function is applied to email body content but not consistently to all user-controlled strings (e.g., display names, subject lines in web UI). Potential XSS vector in admin views.
+
+**RS-074 🟢 Secret rotation doesn't actually rotate the encrypted value**
+`api-server/routes/admin/secrets.rs:254` — The secret rotation endpoint updates metadata (rotation timestamp, version) but does not re-encrypt the secret value with a new encryption key. The rotation is cosmetic, not cryptographic.
+
+**RS-075 🟢 .expect() in EmailQueue::new() can panic on valid config**
+`outbound-queue/queue.rs:200` — `EmailQueue::new()` uses `.expect()` on configuration parsing. Valid but unusual configurations (e.g., empty batch size) can cause a panic during initialization, preventing the service from starting.
+
+**RS-076 🟢 Domain verification query uses fetch_one which panics on missing domain**
+`api-server/routes/messages.rs:240` — The domain verification query uses `fetch_one()` which will panic if no domain is found. Should use `fetch_optional()` with proper error handling.
+
+**RS-077 🟢 Rate tracker eviction sorts all entries on every cleanup cycle**
+`smtp-edge/session.rs:112` — The rate tracker eviction routine sorts all tracked entries on every cleanup cycle. With many tracked IPs, this is O(n log n) per cycle. Should use a min-heap or sorted data structure.
+
+**RS-078 ℹ️ Admin scope check test only verifies string presence**
+`api-server/routes/admin/mod.rs:37` — The test for admin scope enforcement checks only that the string `"admin"` appears somewhere in the route definition, not that actual authorization middleware is applied. Test may pass even if auth is broken.
+
+**RS-079 ℹ️ constant_time_compare compares hex-encoded hashes**
+`compliance/gdpr_automation.rs:115` — The constant-time comparison function operates on hex-encoded hash strings rather than raw bytes. While functionally correct, hex encoding doubles the comparison length and the comparison is only as strong as the hash function.
+
+**RS-080 ℹ️ session_issue_time_after_revocation uses .unwrap_or(now)**
+`api-server/routes/auth.rs:920` — When checking session issue time against revocation time, a missing revocation timestamp defaults to `now()`, which could incorrectly validate a session that should be revoked.
+
+**RS-081 ℹ️ Tenant-scoped query test uses static file analysis**
+`api-server/routes/mod.rs:44` — The test for tenant-scoped queries uses static file analysis (grep-like pattern matching) rather than runtime verification. May miss dynamically constructed queries that bypass tenant scoping.
+
+**RS-082 ℹ️ pending_successes uses std::sync::Mutex with blocking flush**
+`worker-processors/webhook/processor.rs:31` — `pending_successes` uses `std::sync::Mutex` with a blocking flush operation. While not in an async hot path, the blocking flush can stall the thread under high webhook delivery volume.
+
+**RS-083 ℹ️ Client IP parsing uses unwrap_or(addr.ip()) fallback**
+`api-server/app.rs:87` — When parsing the client IP from headers (X-Forwarded-For, etc.), the code falls back to the direct socket address if parsing fails. This is reasonable but may return unexpected IPs behind certain proxy configurations.
+
+**RS-084 ℹ️ Deadletter retention constant uses mixed arithmetic types**
+`billing-service/stripe_webhooks.rs:29` — The deadletter retention duration constant mixes `i64` and `u64` types. While Rust handles the conversion correctly, it's a code quality issue that could mask overflow bugs if the values change.
+
+**RS-085 ℹ️ Redis INCR + EXPIRE race condition in enrichment rate limiter**
+`sales-autopilot/routes.rs:455` — The enrichment rate limiter uses separate `INCR` and `EXPIRE` commands. If the process crashes between them, the counter exists without an expiry, causing permanent rate limiting. Should use a Lua script for atomicity.
+
+---
+
+### 2. Database & Migration (DB-100 through DB-126)
+
+#### Findings Table
+
+| ID | Severity | Title | File | Status |
+|----|:--------:|-------|------|:------:|
+| DB-100 | 🔴 | Runtime schema (migrations.rs) conflicts with SQL migration files | migrations.rs | ☐ Open |
+| DB-101 | 🔴 | 10 tables queried by Rust repos have no matching migration | Multiple | ☐ Open |
+| DB-102 | 🔴 | No default partition on partitioned tables | Migration 050 | ☐ Open |
+| DB-103 | 🟠 | Column name mismatches between Rust repos and SQL migrations | Multiple | ☐ Open |
+| DB-104 | 🟠 | Migration 062 creates redundant reserved-word columns | Migration 062 | ☐ Open |
+| DB-105 | 🟠 | Financial tables missing CHECK constraints | billing migrations | ☐ Open |
+| DB-106 | 🟠 | dkim_private_key stored as plain TEXT | Migration 021 | ☐ Open |
+| DB-107 | 🟠 | SELECT COUNT(*) FROM email_queue on partitioned table | Multiple | ☐ Open |
+| DB-108 | 🟠 | ent_dedicated_ips table missing updated_at column | Migration 043 | ☐ Open |
+| DB-109 | 🟡 | bounce_bursts.tenant_id nullable and inconsistent type | Migration 030 | ☐ Open |
+| DB-110 | 🟡 | Missing index on email_queue.scheduled_at and locked_until | Migration 050 | ☐ Open |
+| DB-111 | 🟡 | outbound_throttle_decisions table grows unbounded | Migration 041 | ☐ Open |
+| DB-112 | 🟡 | metering_events table not partitioned | Multiple | ☐ Open |
+| DB-113 | 🟡 | Duplicate index definitions across migrations | Migrations 029, 047, 050, 051 | ☐ Open |
+| DB-114 | 🟡 | audit_logs has dual timestamp columns | Migrations 038, 050 | ☐ Open |
+| DB-115 | 🟡 | webhook_events delivery retry query missing tenant isolation | Migration 050 | ☐ Open |
+| DB-116 | 🟡 | isp_warmup_schedules schema mismatch between migration and Rust repo | Migration 042 | ☐ Open |
+| DB-117 | 🟡 | Missing FK constraints on email_queue reference columns | Migration 050 | ☐ Open |
+| DB-118 | 🟢 | postmaster_reputation_events.tenant_id nullable | Migration 040 | ☐ Open |
+| DB-119 | 🟢 | dunning_config uses TIMESTAMP instead of TIMESTAMPTZ | Migration 045 | ☐ Open |
+| DB-120 | 🟢 | alert_webhook_queue.tenant_id is TEXT not UUID | Migration 020 | ☐ Open |
+| DB-121 | 🟢 | grader_results and compliance tables keep tenant_id as TEXT | Multiple | ☐ Open |
+| DB-122 | 🟢 | Legacy schema slot migrations (004-019) are empty | Migrations 004-019 | ☐ Open |
+| DB-123 | ℹ️ | All Rust repo queries use parameterized statements (positive) | All | ☐ Open |
+| DB-124 | ℹ️ | Connection pool configuration is well-designed (positive) | apexmail-db/pool.rs | ☐ Open |
+| DB-125 | ℹ️ | Partition auto-creation function exists but needs scheduling | Migration 050 | ☐ Open |
+| DB-126 | ℹ️ | Migration 002's ACCESS EXCLUSIVE lock pattern is correct (positive) | Migration 002 | ☐ Open |
+
+#### Detailed Descriptions
+
+**DB-100 🔴 Runtime schema (migrations.rs) conflicts with SQL migration files**
+The runtime schema creation in `migrations.rs` defines tables and columns that conflict with the SQL migration files. When both are present, the runtime schema may create columns with different types or constraints than the SQL migrations, leading to unpredictable behavior depending on which runs first.
+
+**DB-101 🔴 10 tables queried by Rust repos have no matching migration**
+Ten tables that Rust repository code queries (SELECT/INSERT/UPDATE) have no corresponding CREATE TABLE in any migration file. These tables may be created at runtime by the application, but this is fragile and undocumented. Fresh deployments will fail when these queries execute.
+
+**DB-102 🔴 No default partition on partitioned tables**
+Partitioned tables (email_queue, mail_messages, audit_logs) created in migration 050 have no default partition. Rows that don't match any partition range will be rejected with an error. If partitions are not created for the current time period, all inserts fail.
+
+**DB-103 🟠 Column name mismatches between Rust repos and SQL migrations**
+Several Rust repository files reference column names that don't match the SQL migration definitions. For example, Rust code may reference `created_at` while the migration defines `timestamp`. These mismatches cause runtime query failures.
+
+**DB-104 🟠 Migration 062 creates redundant reserved-word columns**
+Migration 062 adds columns that use SQL reserved words (e.g., `user`, `order`, `group`) without quoting. While PostgreSQL handles some cases, this creates ambiguity and potential issues with ORM tools and ad-hoc queries.
+
+**DB-105 🟠 Financial tables missing CHECK constraints**
+Tables storing financial data (billing amounts, plan prices, usage counts) lack CHECK constraints to prevent negative values, zero prices, or unreasonable amounts. Invalid financial data can be inserted without database-level validation.
+
+**DB-106 🟠 dkim_private_key stored as plain TEXT**
+DKIM private keys are stored as plain TEXT in the database without encryption at rest. Anyone with database read access can extract private keys for any domain. Should be encrypted using application-level encryption with a key management service.
+
+**DB-107 🟠 SELECT COUNT(\*) FROM email_queue on partitioned table**
+Several queries use `SELECT COUNT(*) FROM email_queue` which scans all partitions. On a partitioned table with months of data, this is extremely slow. Should use an estimated count from `pg_class.reltuples` or maintain a separate counter.
+
+**DB-108 🟠 ent_dedicated_ips table missing updated_at column**
+The `ent_dedicated_ips` table (migration 043) has only `created_at` and no `updated_at` column. IP assignment changes cannot be tracked temporally. Should add `updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` with trigger.
+
+**DB-109 🟡 bounce_bursts.tenant_id nullable and inconsistent type**
+`bounce_bursts.tenant_id` is nullable (`VARCHAR(64)`) while all other tenant-scoped tables use NOT NULL. Nullable tenant_id means burst records can exist without a tenant association, breaking tenant isolation queries.
+
+**DB-110 🟡 Missing index on email_queue.scheduled_at and locked_until**
+The partitioned `email_queue` table lacks indexes on `scheduled_at` and `locked_until` columns. The queue processor queries `WHERE scheduled_at <= NOW() AND locked_until IS NULL` — without indexes, this causes sequential scans across all partitions.
+
+**DB-111 🟡 outbound_throttle_decisions table grows unbounded**
+The `outbound_throttle_decisions` table has no retention policy, TTL, or automatic cleanup. Over time, it accumulates throttle decisions for all tenants/domains indefinitely, consuming disk space and degrading query performance.
+
+**DB-112 🟡 metering_events table not partitioned**
+Despite being a high-volume table (one row per API request for metering), `metering_events` is not partitioned. As data grows, queries and inserts become progressively slower. Should be range-partitioned by `timestamp`.
+
+**DB-113 🟡 Duplicate index definitions across migrations**
+Migrations 029, 047, 050, and 051 define overlapping indexes on the same columns. While `IF NOT EXISTS` prevents errors, the duplicate definitions make schema management harder and increase migration runtime.
+
+**DB-114 🟡 audit_logs has dual timestamp columns**
+The `audit_logs` table has both `timestamp` (from migration 038) and `created_at` (from migration 050) columns with similar purposes. Code using one vs the other produces inconsistent results. Should standardize on a single column.
+
+**DB-115 🟡 webhook_events delivery retry query missing tenant isolation**
+The delivery retry query on `webhook_events` does not filter by `tenant_id`. Under multi-tenant operation, retry processing may pick up events from one tenant while processing under another tenant's context.
+
+**DB-116 🟡 isp_warmup_schedules schema mismatch between migration and Rust repo**
+The `isp_warmup_schedules` table schema in migration 042 doesn't match the Rust repository struct. Column type and name differences cause runtime query failures or silent data truncation.
+
+**DB-117 🟡 Missing FK constraints on email_queue reference columns**
+After partitioning in migration 050, `email_queue` lost FK constraints on reference columns (tenant_id, domain_id). Without FK constraints, orphaned records can accumulate, and referential integrity depends entirely on application logic.
+
+**DB-118 🟢 postmaster_reputation_events.tenant_id nullable**
+`postmaster_reputation_events.tenant_id` is nullable, allowing reputation events without tenant association. While some events may be system-wide, this complicates tenant-scoped queries and reporting.
+
+**DB-119 🟢 dunning_config uses TIMESTAMP instead of TIMESTAMPTZ**
+`dunning_config` (migration 045) uses `TIMESTAMP` without timezone. Timestamps are interpreted in the server's local time, causing confusion across deployments in different timezones. Should use `TIMESTAMPTZ`.
+
+**DB-120 🟢 alert_webhook_queue.tenant_id is TEXT not UUID**
+`alert_webhook_queue.tenant_id` uses `TEXT` while most other tables use `UUID` or `VARCHAR(26)`. Type mismatches prevent efficient JOINs and require casting.
+
+**DB-121 🟢 grader_results and compliance tables keep tenant_id as TEXT**
+Several compliance-related tables use `TEXT` for `tenant_id` instead of the standard `VARCHAR(26)` or `UUID`. Inconsistent types across the schema complicate cross-table queries.
+
+**DB-122 🟢 Legacy schema slot migrations (004-019) are empty**
+Migrations 004 through 019 contain only `SELECT 1` (no-op). While this is intentional (reserved slots), it adds noise to the migration history. Should be documented clearly.
+
+**DB-123 ℹ️ All Rust repo queries use parameterized statements (positive)**
+All database queries in Rust repositories use parameterized statements (`sqlx::query!()` or `sqlx::query_as!()`). No SQL injection vectors found through string interpolation. Excellent security practice.
+
+**DB-124 ℹ️ Connection pool configuration is well-designed (positive)**
+The `PoolPair` abstraction in `apexmail-db/pool.rs` properly separates read and write pools with configurable sizes, timeouts, and statement caching. Well-architected connection management.
+
+**DB-125 ℹ️ Partition auto-creation function exists but needs scheduling**
+Migration 050 defines a `create_future_partitions()` function for automatic partition creation, but no `pg_cron` job or scheduled task calls it. Partitions must be created manually or the function must be scheduled.
+
+**DB-126 ℹ️ Migration 002's ACCESS EXCLUSIVE lock pattern is correct (positive)**
+Migration 002 correctly uses `ACCESS EXCLUSIVE` lock during the UID backfill and NOT NULL conversion. While this blocks all access during migration, it's the correct approach for data integrity.
+
+---
+
+### 3. Security & Infrastructure (SEC-100 through SEC-125, INF-100 through INF-105)
+
+#### Findings Table
+
+| ID | Severity | Title | File | Status |
+|----|:--------:|-------|------|:------:|
+| SEC-100 | 🔴 | Trivy container scan does not fail CI on critical/high vulnerabilities | CI pipeline | ☐ Open |
+| SEC-101 | 🔴 | 15 ignored Rust security advisories in CI pipeline | CI pipeline | ☐ Open |
+| SEC-102 | 🔴 | ClickHouse default user has access management enabled with unrestricted network | deploy/clickhouse/ | ☐ Open |
+| SEC-103 | 🔴 | Redis password exposed via process command line | deploy/redis/ | ☐ Open |
+| SEC-104 | 🟠 | No TLS between internal services (OTEL Collector, Tempo, Loki) | deploy/ | ☐ Open |
+| SEC-105 | 🟠 | Prometheus lifecycle API enabled without authentication | deploy/prometheus/ | ☐ Open |
+| SEC-106 | 🟠 | Sentinel authentication not configured | deploy/redis/ | ☐ Open |
+| SEC-107 | 🟠 | Self-signed TLS private key generated with world-readable permissions (644) | deploy/nginx/ssl/ | ☐ Open |
+| SEC-108 | 🟠 | Production secrets template has empty required values | .env.production.example | ☐ Open |
+| SEC-109 | 🟠 | No encryption at rest for database volumes | deploy/ | ☐ Open |
+| SEC-110 | 🟠 | Gitleaks allowlist excludes broad path patterns | .gitleaks.toml | ☐ Open |
+| SEC-111 | 🟡 | CSP allows unsafe-inline for styles across all server blocks | deploy/nginx/nginx.conf | ☐ Open |
+| SEC-112 | 🟡 | Marketing site missing Content-Security-Policy header | deploy/nginx/ | ☐ Open |
+| SEC-113 | 🟡 | Enterprise portal missing Permissions-Policy header | deploy/nginx/ | ☐ Open |
+| SEC-114 | 🟡 | Certbot container runs as root without resource limits | docker-compose.yml | ☐ Open |
+| SEC-115 | 🟡 | Secret rotation backups stored in world-readable /tmp | deploy/scripts/ | ☐ Open |
+| SEC-116 | 🟡 | K8s MTA and Worker deployments use imagePullPolicy: IfNotPresent | deploy/k8s/ | ☐ Open |
+| SEC-117 | 🟡 | ClickHouse query logging disabled for default profile | deploy/clickhouse/ | ☐ Open |
+| SEC-118 | 🟡 | Loki and Tempo S3 credentials stored as environment variables | deploy/ | ☐ Open |
+| SEC-119 | 🟡 | Dual JWT algorithm strategy (HS256 + RS256) increases attack surface | api-server/ | ☐ Open |
+| SEC-120 | 🟡 | Load test CI uses hardcoded database credentials | CI pipeline | ☐ Open |
+| SEC-121 | 🟢 | No health check on certbot container | docker-compose.yml | ☐ Open |
+| SEC-122 | 🟢 | No CPU limits on several Docker Compose services | docker-compose.yml | ☐ Open |
+| SEC-123 | 🟢 | Grafana datasource passwords passed via environment variables | deploy/grafana/ | ☐ Open |
+| SEC-124 | 🟢 | Redis TLS not enabled by default | deploy/redis/ | ☐ Open |
+| SEC-125 | 🟢 | No network policy for Prometheus scraping in K8s manifests | deploy/k8s/ | ☐ Open |
+| INF-100 | ℹ️ | PSP templates in Helm chart are deprecated | deploy/helm/ | ☐ Open |
+| INF-101 | ℹ️ | PostgreSQL backup retention may be insufficient for compliance | deploy/ | ☐ Open |
+| INF-102 | ℹ️ | Loki log retention set to 7 days | deploy/loki/ | ☐ Open |
+| INF-103 | ℹ️ | Service mesh configuration defined but not validated | deploy/ | ☐ Open |
+| INF-104 | ℹ️ | DR failover script uses Redis without authentication | deploy/scripts/ | ☐ Open |
+| INF-105 | ℹ️ | Audit policy captures secret response bodies | deploy/ | ☐ Open |
+
+#### Detailed Descriptions
+
+**SEC-100 🔴 Trivy container scan does not fail CI on critical/high vulnerabilities**
+The CI pipeline includes a Trivy container scan step but is configured to not fail on critical or high severity vulnerabilities. Known CVEs in base images can be deployed to production without blocking the pipeline.
+
+**SEC-101 🔴 15 ignored Rust security advisories in CI pipeline**
+The CI `cargo audit` step has 15 ignored Rust security advisories (via `RUSTSEC-YYYY-NNNN = "ignore"`). Some may have known exploits. Ignored advisories should be reviewed quarterly and remediated or explicitly accepted with risk documentation.
+
+**SEC-102 🔴 ClickHouse default user has access management enabled with unrestricted network**
+ClickHouse configuration enables access management for the default user with no network restrictions. The default user can create other users, grant permissions, and access all data from any network address.
+
+**SEC-103 🔴 Redis password exposed via process command line**
+Redis is configured with `requirepass` but the password is passed via the command line (`--requirepass`). On multi-user systems, any user can see the password via `ps aux` or `/proc/<pid>/cmdline`. Should use Redis CONFIG file instead.
+
+**SEC-104 🟠 No TLS between internal services (OTEL Collector, Tempo, Loki)**
+Internal service communication between OTel Collector, Tempo, Loki, and Prometheus uses plain HTTP. Trace data, log data, and metrics containing sensitive information (user IDs, request paths) are transmitted unencrypted within the cluster.
+
+**SEC-105 🟠 Prometheus lifecycle API enabled without authentication**
+Prometheus is configured with `--web.enable-lifecycle` which allows remote shutdown, reload, and configuration changes via HTTP API. No authentication is configured, meaning any network-accessible client can control Prometheus.
+
+**SEC-106 🟠 Sentinel authentication not configured**
+Redis Sentinel (if deployed for HA) has no authentication configured. Any client can connect to Sentinel and trigger failover, potentially causing denial of service or man-in-the-middle attacks.
+
+**SEC-107 🟠 Self-signed TLS private key generated with world-readable permissions (644)**
+The self-signed TLS certificate generation script creates private keys with 644 permissions (world-readable). Any user on the system can read the private key. Should use 600 or 400 permissions.
+
+**SEC-108 🟠 Production secrets template has empty required values**
+`.env.production.example` contains empty values for critical secrets (JWT_PRIVATE_KEY_PEM, API_KEY_HASH_SECRET, etc.). If deployed without modification, authentication is broken or uses empty secrets.
+
+**SEC-109 🟠 No encryption at rest for database volumes**
+PostgreSQL, ClickHouse, and Redis data volumes have no encryption at rest. Physical access to the storage medium exposes all data including PII, authentication tokens, and DKIM private keys.
+
+**SEC-110 🟠 Gitleaks allowlist excludes broad path patterns**
+The `.gitleaks.toml` allowlist excludes broad path patterns (e.g., `deploy/**`, `*.example`) from secret scanning. This could allow actual secrets to be committed in excluded paths without detection.
+
+**SEC-111 🟡 CSP allows unsafe-inline for styles across all server blocks**
+The Content-Security-Policy header includes `style-src 'self' 'unsafe-inline'`. While necessary for some CSS frameworks, `unsafe-inline` weakens XSS protection. Should use nonce-based or hash-based style allowlisting.
+
+**SEC-112 🟡 Marketing site missing Content-Security-Policy header**
+The marketing site Nginx server block does not include a Content-Security-Policy header. Without CSP, the marketing site is vulnerable to XSS attacks and unauthorized resource loading.
+
+**SEC-113 🟡 Enterprise portal missing Permissions-Policy header**
+The enterprise portal (control plane) is missing the `Permissions-Policy` header. Without it, browser features (camera, microphone, geolocation) can be accessed by any embedded content.
+
+**SEC-114 🟡 Certbot container runs as root without resource limits**
+The Certbot container in docker-compose runs as root with no CPU or memory limits. A compromised Certbot process has full root capabilities within the container and can consume unlimited host resources.
+
+**SEC-115 🟡 Secret rotation backups stored in world-readable /tmp**
+Secret rotation scripts store backup copies of secrets in `/tmp` with default (world-readable) permissions. Other users on the system can read secret backups. Should use a secure directory with restricted permissions.
+
+**SEC-116 🟡 K8s MTA and Worker deployments use imagePullPolicy: IfNotPresent**
+MTA and Worker K8s deployments use `imagePullPolicy: IfNotPresent`, which may use stale images from the local cache. Should use `Always` for production tags or digest-based pulls to ensure the latest secure image.
+
+**SEC-117 🟡 ClickHouse query logging disabled for default profile**
+ClickHouse query logging is disabled for the default profile, preventing audit trail analysis. Security incidents involving data exfiltration cannot be investigated through query logs.
+
+**SEC-118 🟡 Loki and Tempo S3 credentials stored as environment variables**
+S3 credentials for Loki and Tempo are stored as environment variables in the container configuration. Accessible via `/proc/<pid>/environ` and Docker inspect. Should use IAM roles or secret management.
+
+**SEC-119 🟡 Dual JWT algorithm strategy (HS256 + RS256) increases attack surface**
+The JWT implementation accepts both HS256 and RS256 algorithms. Algorithm confusion attacks (e.g., CVE-2016-5431) can exploit this by signing with the RSA public key using HS256. Should standardize on a single algorithm.
+
+**SEC-120 🟡 Load test CI uses hardcoded database credentials**
+The CI load test configuration uses hardcoded database credentials (`apexmail`/`apexmail`). If these credentials are reused in any real environment, exposure in the CI config is a security risk.
+
+**SEC-121 🟢 No health check on certbot container**
+The Certbot container has no health check configured. Docker cannot detect if the certificate renewal process is stuck or failed.
+
+**SEC-122 🟢 No CPU limits on several Docker Compose services**
+Several services in docker-compose lack CPU limits. While not a direct security vulnerability, runaway processes can impact other services through resource contention.
+
+**SEC-123 🟢 Grafana datasource passwords passed via environment variables**
+Grafana datasource passwords are passed as environment variables in the provisioning configuration. While functional, this exposes credentials in the container configuration. Should use Grafana's secure JSON data feature.
+
+**SEC-124 🟢 Redis TLS not enabled by default**
+Redis TLS is not enabled by default in the configuration. Internal Redis communication is unencrypted. Should enable TLS for production deployments.
+
+**SEC-125 🟢 No network policy for Prometheus scraping in K8s manifests**
+K8s manifests don't define NetworkPolicy for Prometheus scraping. All pods can be scraped by any source. Should restrict scraping to the Prometheus namespace.
+
+**INF-100 ℹ️ PSP templates in Helm chart are deprecated**
+PodSecurityPolicy (PSP) templates in the Helm chart are deprecated as of Kubernetes 1.21 and removed in 1.25. Should migrate to Pod Security Standards (PSS) and Pod Security Admission (PSA).
+
+**INF-101 ℹ️ PostgreSQL backup retention may be insufficient for compliance**
+PostgreSQL backup retention period is not clearly documented. GDPR and other regulations may require longer retention for audit trails. Should document and validate retention policy against compliance requirements.
+
+**INF-102 ℹ️ Loki log retention set to 7 days**
+Loki log retention is configured to 7 days. This may be insufficient for security incident investigation (which often requires 30-90 days of logs) and compliance requirements.
+
+**INF-103 ℹ️ Service mesh configuration defined but not validated**
+Linkerd service mesh configuration is defined in the Helm chart but has not been validated in a running environment. May contain errors or incompatibilities.
+
+**INF-104 ℹ️ DR failover script uses Redis without authentication**
+The disaster recovery failover script connects to Redis without authentication. If Redis auth is enabled in production, the failover script will fail silently.
+
+**INF-105 ℹ️ Audit policy captures secret response bodies**
+The audit policy configuration captures response bodies for secret-related API calls. While useful for debugging, this means secret values may be stored in audit logs, creating a security exposure.
+
+---
+
+### 4. Frontend UI/UX & Accessibility (UI-100 through UI-136)
+
+#### Findings Table
+
+| ID | Severity | Title | File | Status |
+|----|:--------:|-------|------|:------:|
+| UI-100 | 🔴 | Dark mode critical contrast failures on marketing site | Marketing CSS | ☐ Open |
+| UI-101 | 🔴 | Hard-coded bg-white on theme toggle & skip link breaks dark mode | Shell/Layout | ☐ Open |
+| UI-102 | 🔴 | Hard-coded light backgrounds on cards & panels break dark mode | Multiple surfaces | ☐ Open |
+| UI-103 | 🟠 | transition-property: all violates style guide | Multiple components | ☐ Open |
+| UI-104 | 🟠 | Placeholder color hard-coded to #9ca3af | Input components | ☐ Open |
+| UI-105 | 🟠 | --font-display token does not use Fraunces | Design tokens | ☐ Open |
+| UI-106 | 🟠 | Control plane desktop sidebar missing role="navigation" | shell.rs | ☐ Open |
+| UI-107 | 🟠 | Web console desktop sidebar missing role="navigation" | leptos_views.rs | ☐ Open |
+| UI-108 | 🟠 | Sales console search input missing accessible label | leptos_views.rs | ☐ Open |
+| UI-109 | 🟠 | Dark mode ring-offset-color hard-coded to #fff | Auth forms | ☐ Open |
+| UI-110 | 🟠 | Control plane shell hard-codes light background without dark override | shell.rs | ☐ Open |
+| UI-111 | 🟡 | Nested main elements in auth pages | leptos_views.rs | ☐ Open |
+| UI-112 | 🟡 | Control plane login missing skip-to-content link | leptos_views.rs | ☐ Open |
+| UI-113 | 🟡 | Control plane login missing theme toggle | leptos_views.rs | ☐ Open |
+| UI-114 | 🟡 | .apex-page-hero hard-codes dark colors without light override | CSS | ☐ Open |
+| UI-115 | 🟡 | Console header hard-codes bg-white without dark override | leptos_views.rs | ☐ Open |
+| UI-116 | 🟡 | Web console sidebar missing role="navigation" on desktop | leptos_views.rs | ☐ Open |
+| UI-117 | 🟡 | Auth pages have identical content on login/signup/forgot password | leptos_views.rs | ☐ Open |
+| UI-118 | 🟡 | data-theme-mode="system" default may flash wrong theme (FOUC) | Shell/Layout | ☐ Open |
+| UI-119 | 🟡 | Apex table head always dark | CSS | ☐ Open |
+| UI-120 | 🟡 | Console sidebar uses hard-coded #09090b instead of token | leptos_views.rs | ☐ Open |
+| UI-121 | 🟡 | Input box shadow uses rgba(255,255,255,0.55) inset | CSS | ☐ Open |
+| UI-122 | 🟡 | Marketing Zola nav toggle uses checkbox hack without focus indicators | header.html | ☐ Open |
+| UI-123 | 🟢 | h-11 (44px) missing from CSS utility classes | CSS | ☐ Open |
+| UI-124 | 🟢 | Control plane login CSRF token empty | leptos_views.rs | ☐ Open |
+| UI-125 | 🟢 | Web console search input role="combobox" without listbox | leptos_views.rs | ☐ Open |
+| UI-126 | 🟢 | Control plane desktop sidebar sr-only text review needed | shell.rs | ☐ Open |
+| UI-127 | 🟢 | Marketing status page auto-refresh may impact accessibility | Marketing | ☐ Open |
+| UI-128 | 🟢 | Apex card hover border uses hard-coded surface-950 | CSS | ☐ Open |
+| UI-129 | 🟢 | Apex console hero title line-height 0.98 may clip text | CSS | ☐ Open |
+| UI-130 | 🟢 | Marketing site uses tabindex=1 on skip link | Marketing | ☐ Open |
+| UI-131 | 🟢 | Control plane sales cockpit select missing label | leptos_views.rs | ☐ Open |
+| UI-132 | ℹ️ | Brand color is red, not indigo as documented | Style guide | ☐ Open |
+| UI-133 | ℹ️ | Duplicate "Apex Icons Standard" heading in style guide | Style guide | ☐ Open |
+| UI-134 | ℹ️ | No lang attribute variation for i18n marketing pages | Marketing Zola | ☐ Open |
+| UI-135 | ℹ️ | --radius tokens all near-zero (0px–6px) | Design tokens | ☐ Open |
+| UI-136 | ℹ️ | Dark mode audit shows no overflowX issues (positive) | All surfaces | ☐ Open |
+
+#### Detailed Descriptions
+
+**UI-100 🔴 Dark mode critical contrast failures on marketing site**
+The marketing site has critical contrast failures when dark mode is active. Text on dark backgrounds falls below WCAG AA minimum contrast ratio of 4.5:1. Multiple elements become unreadable.
+
+**UI-101 🔴 Hard-coded bg-white on theme toggle & skip link breaks dark mode**
+The theme toggle button and skip-to-content link use hard-coded `bg-white` classes. In dark mode, these elements appear as bright white rectangles against the dark background.
+
+**UI-102 🔴 Hard-coded light backgrounds on cards & panels break dark mode**
+Cards, panels, and content containers across multiple surfaces use hard-coded light background colors (`bg-white`, `bg-gray-50`) without dark mode overrides. In dark mode, content areas appear as bright white islands.
+
+**UI-103 🟠 transition-property: all violates style guide**
+Multiple components use `transition-property: all` which creates performance overhead and unintended animations. The style guide specifies targeted transition properties.
+
+**UI-104 🟠 Placeholder color hard-coded to #9ca3af**
+Input placeholder text uses hard-coded `#9ca3af` (Tailwind gray-400) instead of the `--color-placeholder` design token. In dark mode, placeholders may become invisible.
+
+**UI-105 🟠 --font-display token does not use Fraunces**
+The `--font-display` design token resolves to the system font stack instead of Fraunces as specified in the style guide. Headings and display text don't use the intended brand typeface.
+
+**UI-106 🟠 Control plane desktop sidebar missing role="navigation"**
+The control plane desktop sidebar lacks `role="navigation"`. Screen readers cannot identify it as a navigation landmark, reducing accessibility for assistive technology users.
+
+**UI-107 🟠 Web console desktop sidebar missing role="navigation"**
+Same as UI-106 but for the web console sidebar. Lacks the ARIA navigation role required for screen reader users.
+
+**UI-108 🟠 Sales console search input missing accessible label**
+The search input in the Sales Console has no associated `<label>` element, `aria-label`, or `aria-labelledby` attribute. Screen readers announce it as an unlabeled text field.
+
+**UI-109 🟠 Dark mode ring-offset-color hard-coded to #fff**
+Focus ring offset color is hard-coded to `#fff`. In dark mode, the ring offset creates a white halo around focused elements.
+
+**UI-110 🟠 Control plane shell hard-codes light background without dark override**
+The control plane shell component uses a hard-coded light background color. When dark mode is active, the shell background remains light.
+
+**UI-111 🟡 Nested main elements in auth pages**
+Auth pages contain nested `<main>` elements, which violates HTML specification (only one `<main>` per page). Screen readers may behave unpredictably.
+
+**UI-112 🟡 Control plane login missing skip-to-content link**
+The control plane login page has no skip-to-content link. Keyboard users must tab through all navigation elements before reaching the login form.
+
+**UI-113 🟡 Control plane login missing theme toggle**
+The control plane login page doesn't include a theme toggle, unlike the main control plane interface. Users who prefer dark mode must log in with a light-themed form.
+
+**UI-114 🟡 .apex-page-hero hard-codes dark colors without light override**
+The `.apex-page-hero` CSS class uses dark colors that work well in dark mode but have no light mode override. In light mode, hero sections appear as dark blocks.
+
+**UI-115 🟡 Console header hard-codes bg-white without dark override**
+The web console header uses `bg-white` without a dark mode variant. In dark mode, the header appears as a bright white bar.
+
+**UI-116 🟡 Web console sidebar missing role="navigation" on desktop**
+The web console sidebar on desktop viewports lacks `role="navigation"`. Duplicate of UI-107 for desktop breakpoint.
+
+**UI-117 🟡 Auth pages have identical content on login/signup/forgot password**
+Login, signup, and forgot password pages share identical structural content. Pages lack visual differentiation, potentially confusing users.
+
+**UI-118 🟡 data-theme-mode="system" default may flash wrong theme (FOUC)**
+The default theme mode is "system" which defers to the OS preference. During page load, before JavaScript executes, the wrong theme CSS may flash. Should inline theme detection in `<head>`.
+
+**UI-119 🟡 Apex table head always dark**
+Table headers in the Apex design system always use a dark background regardless of the active theme. In light mode, this creates a jarring contrast.
+
+**UI-120 🟡 Console sidebar uses hard-coded #09090b instead of token**
+The console sidebar background uses hard-coded `#09090b` instead of the `--surface-950` design token.
+
+**UI-121 🟡 Input box shadow uses rgba(255,255,255,0.55) inset**
+Input fields use an inset box shadow with `rgba(255,255,255,0.55)`. In dark mode, this creates a bright inner glow.
+
+**UI-122 🟡 Marketing Zola nav toggle uses checkbox hack without focus indicators**
+The marketing site mobile navigation toggle uses the CSS checkbox hack without visible focus indicators. Keyboard users cannot see when the toggle is focused.
+
+**UI-123 🟢 h-11 (44px) missing from CSS utility classes**
+The `h-11` utility class (44px) is missing from CSS utility classes. The style guide requires 44px minimum touch targets.
+
+**UI-124 🟢 Control plane login CSRF token empty**
+The control plane login form includes a CSRF token field, but the value is empty. Provides no protection until populated server-side.
+
+**UI-125 🟢 Web console search input role="combobox" without listbox**
+The search input has `role="combobox"` but no associated listbox element. Screen readers expect a combobox to have a paired listbox.
+
+**UI-126 🟢 Control plane desktop sidebar sr-only text review needed**
+Screen-reader-only text in the control plane desktop sidebar should be reviewed for clarity and accuracy.
+
+**UI-127 🟢 Marketing status page auto-refresh may impact accessibility**
+The marketing status page auto-refreshes content, which may disorient screen reader users. Should use `aria-live` regions for updates.
+
+**UI-128 🟢 Apex card hover border uses hard-coded surface-950**
+Card hover border color uses hard-coded `surface-950` instead of a semantic hover token.
+
+**UI-129 🟢 Apex console hero title line-height 0.98 may clip text**
+The hero title has a line-height of 0.98. Descenders and ascenders may be clipped, especially for characters with diacritics.
+
+**UI-130 🟢 Marketing site uses tabindex=1 on skip link**
+The skip link uses `tabindex=1` instead of `tabindex=0`. A positive tabindex changes the tab order.
+
+**UI-131 🟢 Control plane sales cockpit select missing label**
+A `<select>` element in the sales cockpit has no associated label. Screen readers cannot determine the purpose of the dropdown.
+
+**UI-132 ℹ️ Brand color is red, not indigo as documented**
+The actual brand color used in the UI is red, while the style guide documents it as indigo. Documentation needs updating.
+
+**UI-133 ℹ️ Duplicate "Apex Icons Standard" heading in style guide**
+The style guide contains a duplicate heading for "Apex Icons Standard". Should be deduplicated.
+
+**UI-134 ℹ️ No lang attribute variation for i18n marketing pages**
+Internationalized marketing pages (fr, de, es) don't update the `<html lang>` attribute from `en`. Screen readers use wrong pronunciation rules.
+
+**UI-135 ℹ️ --radius tokens all near-zero (0px–6px)**
+All border-radius design tokens resolve to near-zero values (0px to 6px). Components appear overly sharp.
+
+**UI-136 ℹ️ Dark mode audit shows no overflowX issues (positive)**
+The dark mode audit confirmed no horizontal overflow issues across any surface. Content adapts properly without layout shifts.
+
+---
+
+### 5. API, Control Plane & Sales Autopilot (API-100 through API-123)
+
+#### Findings Table
+
+| ID | Severity | Title | File | Status |
+|----|:--------:|-------|------|:------:|
+| API-100 | 🔴 | approve-all action modifies leads across ALL tenants without tenant_id scoping | sales-autopilot/routes.rs | ☐ Open |
+| API-101 | 🔴 | Single-candidate approve/reject actions lack tenant_id scoping | sales-autopilot/routes.rs | ☐ Open |
+| API-102 | 🔴 | Autopilot worker cycle modifies leads across ALL tenants | sales-autopilot/worker.rs | ☐ Open |
+| API-103 | 🟠 | Outreach lead query lacks tenant_id filter — cross-tenant data access | sales-autopilot/routes.rs | ☐ Open |
+| API-104 | 🟠 | Drip campaigns table has no tenant_id column | sales-autopilot/schema.rs | ☐ Open |
+| API-105 | 🟠 | Autopilot state is global (single-row), not per-tenant | sales-autopilot/state.rs | ☐ Open |
+| API-106 | 🟠 | Billing service plan creation/update/seed endpoints lack admin scope check | billing-service/routes.rs | ☐ Open |
+| API-107 | 🟠 | Autopilot metrics queries aggregate across ALL tenants | sales-autopilot/routes.rs | ☐ Open |
+| API-108 | 🟡 | Rate limit 429 response format inconsistent with ApiError envelope | api-server/middleware/ | ☐ Open |
+| API-109 | 🟡 | Billing service error response format differs from api-server envelope | billing-service/ | ☐ Open |
+| API-110 | 🟡 | Stripe webhook returns HTTP 400 for processing failures, triggering retries | billing-service/stripe_webhooks.rs | ☐ Open |
+| API-111 | 🟡 | In-memory rate limit fallback is per-process, allowing bypass | rate-limiter/ | ☐ Open |
+| API-112 | 🟡 | Billing admin endpoints use custom auth check instead of require_scopes | billing-service/routes.rs | ☐ Open |
+| API-113 | 🟡 | Outreach rate limit doesn't include X-RateLimit-* headers | sales-autopilot/routes.rs | ☐ Open |
+| API-114 | 🟡 | ensure_autopilot_state_table runs DDL on every request | sales-autopilot/routes.rs | ☐ Open |
+| API-115 | 🟡 | ensure_campaign_tables runs DDL on every outreach request | sales-autopilot/routes.rs | ☐ Open |
+| API-116 | 🟡 | Billing admin report endpoints missing security requirements in OpenAPI spec | docs/api/openapi.yaml | ☐ Open |
+| API-117 | 🟢 | ConversionQuery.tenant_id field declared but never used | sales-autopilot/queries.rs | ☐ Open |
+| API-118 | 🟢 | get_plan_limits is exact alias for get_current_plan | billing-service/plans.rs | ☐ Open |
+| API-119 | 🟢 | OpenAPI spec documents billing endpoints under /billing/* but implementation uses /v1/billing/* | docs/api/openapi.yaml | ☐ Open |
+| API-120 | 🟢 | Hardcoded confidence score in enrichment persistence | sales-autopilot/enrichment.rs | ☐ Open |
+| API-121 | ℹ️ | Stripe webhook HMAC verification is constant-time (positive) | billing-service/stripe_webhooks.rs | ☐ Open |
+| API-122 | ℹ️ | Admin route scope enforcement test ensures wildcard scope (positive) | api-server/routes/admin/mod.rs | ☐ Open |
+| API-123 | ℹ️ | Tenant-scoped route query test validates tenant_id filters (positive) | api-server/routes/mod.rs | ☐ Open |
+
+#### Detailed Descriptions
+
+**API-100 🔴 approve-all action modifies leads across ALL tenants without tenant_id scoping**
+The `approve-all` action in the sales autopilot modifies lead records without filtering by `tenant_id`. In a multi-tenant deployment, this approves leads for ALL tenants simultaneously. Critical cross-tenant data modification vulnerability.
+
+**API-101 🔴 Single-candidate approve/reject actions lack tenant_id scoping**
+Individual lead approve/reject actions accept a lead ID but don't verify the lead belongs to the authenticated tenant. An attacker can approve/reject leads belonging to other tenants by guessing lead IDs.
+
+**API-102 🔴 Autopilot worker cycle modifies leads across ALL tenants**
+The autopilot worker cycle processes leads without tenant scoping. Each worker iteration modifies lead scores, statuses, and drip campaign assignments across all tenants.
+
+**API-103 🟠 Outreach lead query lacks tenant_id filter — cross-tenant data access**
+The outreach lead listing query doesn't include a `WHERE tenant_id = ?` clause. Any authenticated user can list leads from all tenants through the outreach API.
+
+**API-104 🟠 Drip campaigns table has no tenant_id column**
+The drip campaigns table schema doesn't include a `tenant_id` column. All drip campaigns are shared across all tenants. Campaign content created by one tenant is visible and modifiable by all.
+
+**API-105 🟠 Autopilot state is global (single-row), not per-tenant**
+The autopilot state is stored as a single global row (enabled/disabled, configuration). In multi-tenant deployment, all tenants share the same autopilot state.
+
+**API-106 🟠 Billing service plan creation/update/seed endpoints lack admin scope check**
+Billing service endpoints for creating, updating, and seeding plans don't verify admin scopes. Any authenticated user with service access can modify billing plan definitions.
+
+**API-107 🟠 Autopilot metrics queries aggregate across ALL tenants**
+Autopilot metrics and analytics queries aggregate lead counts, conversion rates, and revenue across all tenants. One tenant's sales metrics are visible to all others.
+
+**API-108 🟡 Rate limit 429 response format inconsistent with ApiError envelope**
+When the rate limiter rejects a request with 429, the response body format differs from the standard `ApiError` envelope. Clients expecting the standard envelope will fail to parse rate limit errors.
+
+**API-109 🟡 Billing service error response format differs from api-server envelope**
+The billing service returns errors in a different JSON structure than the api-server. Clients handling errors from both services must implement two different error parsing paths.
+
+**API-110 🟡 Stripe webhook returns HTTP 400 for processing failures, triggering retries**
+When Stripe webhook processing fails internally, the billing service returns HTTP 400. Stripe interprets this as a delivery failure and retries. Should return 200 for successfully received events and handle failures asynchronously.
+
+**API-111 🟡 In-memory rate limit fallback is per-process, allowing bypass**
+When Redis is unavailable, the rate limiter falls back to an in-memory counter. In a multi-process deployment, each process maintains its own counter. The effective rate limit becomes N × configured limit.
+
+**API-112 🟡 Billing admin endpoints use custom auth check instead of require_scopes**
+Billing admin endpoints implement a custom authentication check instead of using the standard `require_scopes()` middleware. The custom check may bypass security updates applied to the standard middleware.
+
+**API-113 🟡 Outreach rate limit doesn't include X-RateLimit-* headers**
+The outreach/sales autopilot rate limiter doesn't return `X-RateLimit-Limit`, `X-RateLimit-Remaining`, or `X-RateLimit-Reset` headers. Clients cannot adapt their request rate.
+
+**API-114 🟡 ensure_autopilot_state_table runs DDL on every request**
+The `ensure_autopilot_state_table()` function runs `CREATE TABLE IF NOT EXISTS` on every API request. While idempotent, DDL statements acquire exclusive locks and add latency.
+
+**API-115 🟡 ensure_campaign_tables runs DDL on every outreach request**
+Same as API-114 but for campaign tables. DDL execution on every request adds unnecessary latency and lock contention.
+
+**API-116 🟡 Billing admin report endpoints missing security requirements in OpenAPI spec**
+Billing admin report endpoints in the OpenAPI spec don't document security requirements (scopes, API key). Client generators won't include authentication for these endpoints.
+
+**API-117 🟢 ConversionQuery.tenant_id field declared but never used**
+The `ConversionQuery` struct has a `tenant_id` field that is declared but never referenced in the query builder. Dead code suggesting incomplete tenant isolation.
+
+**API-118 🟢 get_plan_limits is exact alias for get_current_plan**
+`get_plan_limits()` is an exact duplicate of `get_current_plan()`. Should be removed or redirected to avoid maintenance burden.
+
+**API-119 🟢 OpenAPI spec documents billing endpoints under /billing/* but implementation uses /v1/billing***
+The OpenAPI spec defines billing endpoints at `/billing/*` but the actual implementation mounts them at `/v1/billing/*`. SDKs generated from the spec will call wrong paths.
+
+**API-120 🟢 Hardcoded confidence score in enrichment persistence**
+The lead enrichment persistence layer uses a hardcoded confidence score (0.85) instead of the actual score returned by the enrichment provider.
+
+**API-121 ℹ️ Stripe webhook HMAC verification is constant-time (positive)**
+The Stripe webhook HMAC verification uses constant-time comparison, preventing timing attacks. Well-implemented security practice.
+
+**API-122 ℹ️ Admin route scope enforcement test ensures wildcard scope (positive)**
+The admin route scope enforcement test verifies that admin endpoints require the wildcard scope. Good security testing practice.
+
+**API-123 ℹ️ Tenant-scoped route query test validates tenant_id filters (positive)**
+The tenant-scoped route query test validates that tenant-scoped endpoints include `tenant_id` filters. Positive security validation.
+
+---
+
+### 6. SDK (SDK-100 through SDK-125)
+
+#### Findings Table
+
+| ID | Severity | Title | File | Status |
+|----|:--------:|-------|------|:------:|
+| SDK-100 | 🔴 | Python SDK suppression add() sends wrong request body format | Python SDK | ☐ Open |
+| SDK-101 | 🔴 | Python SDK events list() uses wrong query parameter names | Python SDK | ☐ Open |
+| SDK-102 | 🟠 | Python SDK suppression delete() uses wrong path parameter | Python SDK | ☐ Open |
+| SDK-103 | 🟠 | Analytics endpoint /v1/analytics does not exist in OpenAPI spec | All SDKs | ☐ Open |
+| SDK-104 | 🟠 | Webhook update uses PATCH but OpenAPI spec defines PUT | All SDKs | ☐ Open |
+| SDK-105 | 🟠 | PHP SDK send() rejects templateId-only emails | PHP SDK | ☐ Open |
+| SDK-106 | 🟠 | Python SDK template create/update uses wrong field names | Python SDK | ☐ Open |
+| SDK-107 | 🟠 | Python SDK webhook create requires name and enabled fields not used by other SDKs | Python SDK | ☐ Open |
+| SDK-108 | 🟡 | Python SDK domain create sends extra verificationMethod field | Python SDK | ☐ Open |
+| SDK-109 | 🟡 | No SDK implements domain DNS records, auth-status, MTA-STS, BIMI, or TLS-RPT endpoints | All SDKs | ☐ Open |
+| SDK-110 | 🟡 | No SDK implements webhook rotate-secret endpoint | All SDKs | ☐ Open |
+| SDK-111 | 🟡 | SDKs do not parse the API envelope (data/meta/error) structure | All except Go | ☐ Open |
+| SDK-112 | 🟡 | Java SDK blocking httpClient.send() can cause thread starvation | Java SDK | ☐ Open |
+| SDK-113 | 🟡 | PHP SDK creates new cURL handle per request — no connection reuse | PHP SDK | ☐ Open |
+| SDK-114 | 🟡 | Python SDK _get_headers() only returns idempotency key, drops base headers | Python SDK | ☐ Open |
+| SDK-115 | 🟡 | Ruby SDK handle_response catches JSON::ParserError and returns raw body | Ruby SDK | ☐ Open |
+| SDK-116 | 🟡 | Go SDK retries on 429 consume the per-request timeout | Go SDK | ☐ Open |
+| SDK-117 | 🟢 | Java SDK RateLimitException doesn't expose rate limit headers | Java SDK | ☐ Open |
+| SDK-118 | 🟢 | Python SDK emails.get() accesses data["email"] but should be data["message"] | Python SDK | ☐ Open |
+| SDK-119 | 🟢 | Python SDK emails.cancel() accesses data["email"] but should be data["message"] | Python SDK | ☐ Open |
+| SDK-120 | 🟢 | Ruby SDK has no dedicated test suite | Ruby SDK | ☐ Open |
+| SDK-121 | 🟢 | PHP SDK has minimal test coverage | PHP SDK | ☐ Open |
+| SDK-122 | 🟢 | No SDK exposes X-RateLimit-* response headers to callers consistently | All SDKs | ☐ Open |
+| SDK-123 | 🟢 | Go SDK uses X-Idempotency-Key but OpenAPI spec defines Idempotency-Key | Go SDK | ☐ Open |
+| SDK-124 | ℹ️ | Python SDK is the only SDK with async support | Python SDK | ☐ Open |
+| SDK-125 | ℹ️ | All SDKs implement the same 8-resource surface (positive) | All SDKs | ☐ Open |
+
+#### Detailed Descriptions
+
+**SDK-100 🔴 Python SDK suppression add() sends wrong request body format**
+The Python SDK's `suppression.add()` method sends the request body in the wrong format. The API expects `{"email": "...", "reason": "..."}` but the SDK sends `{"address": "...", "reason": "..."}`. Server returns 400 on every call.
+
+**SDK-101 🔴 Python SDK events list() uses wrong query parameter names**
+The Python SDK's `events.list()` method uses incorrect query parameter names (`start_date`/`end_date` instead of `from`/`to`). The API ignores unrecognized parameters and returns unfiltered results or errors.
+
+**SDK-102 🟠 Python SDK suppression delete() uses wrong path parameter**
+The Python SDK's `suppression.delete()` method passes the email address as a path parameter (`/suppressions/{email}`) but the API expects the suppression ID (`/suppressions/{id}`). Delete operations always fail or target the wrong resource.
+
+**SDK-103 🟠 Analytics endpoint /v1/analytics does not exist in OpenAPI spec**
+All SDKs implement analytics methods targeting `/v1/analytics`, but the OpenAPI spec defines analytics at different sub-paths (`/v1/analytics/dashboard`, `/v1/analytics/volume`, etc.). SDKs may call non-existent endpoints.
+
+**SDK-104 🟠 Webhook update uses PATCH but OpenAPI spec defines PUT**
+All SDKs use `PATCH /webhooks/{id}` for webhook updates, but the OpenAPI spec defines `PUT /webhooks/{id}`. Depending on server routing, the request may fail or produce unexpected partial updates.
+
+**SDK-105 🟠 PHP SDK send() rejects templateId-only emails**
+The PHP SDK's `send()` method requires both `from` and `to` fields even when using `templateId`. The API accepts templateId-only emails with default values, but the SDK rejects them client-side.
+
+**SDK-106 🟠 Python SDK template create/update uses wrong field names**
+The Python SDK's template create and update methods use `html_content` and `text_content` field names, but the API expects `html` and `text`. Template creation always fails or creates templates with empty content.
+
+**SDK-107 🟠 Python SDK webhook create requires name and enabled fields not used by other SDKs**
+The Python SDK's webhook create method requires `name` and `enabled` fields that other SDKs don't send. This creates an inconsistency where Python SDK users must provide fields that are optional in other SDKs.
+
+**SDK-108 🟡 Python SDK domain create sends extra verificationMethod field**
+The Python SDK's domain create method sends a `verificationMethod` field that the API doesn't expect. While the API ignores unknown fields, this adds unnecessary data to requests and may cause confusion.
+
+**SDK-109 🟡 No SDK implements domain DNS records, auth-status, MTA-STS, BIMI, or TLS-RPT endpoints**
+None of the 5 SDKs implement domain management sub-endpoints for DNS records retrieval, authentication status checking, MTA-STS configuration, BIMI setup, or TLS-RPT configuration. Users must use raw HTTP calls for these operations.
+
+**SDK-110 🟡 No SDK implements webhook rotate-secret endpoint**
+None of the SDKs implement the webhook secret rotation endpoint (`POST /webhooks/{id}/rotate-secret`). Users must manually rotate webhook secrets via direct API calls.
+
+**SDK-111 🟡 SDKs do not parse the API envelope (data/meta/error) structure**
+Except for the Go SDK, none of the SDKs parse the API response envelope (`{data: {...}, meta: {...}, error: {...}}`). They access the response directly, which will break if the API wraps responses in an envelope.
+
+**SDK-112 🟡 Java SDK blocking httpClient.send() can cause thread starvation**
+The Java SDK uses blocking `httpClient.send()` calls. In high-throughput scenarios, this blocks the calling thread until the HTTP response arrives, causing thread starvation in thread-pool-based applications.
+
+**SDK-113 🟡 PHP SDK creates new cURL handle per request — no connection reuse**
+The PHP SDK creates a new cURL handle for every HTTP request. This prevents TCP connection reuse, adding TLS handshake overhead and increasing latency for multi-request operations.
+
+**SDK-114 🟡 Python SDK _get_headers() only returns idempotency key, drops base headers**
+The Python SDK's `_get_headers()` method returns only the idempotency key header, dropping the base headers (Authorization, Content-Type, User-Agent). Subsequent requests may be missing required headers.
+
+**SDK-115 🟡 Ruby SDK handle_response catches JSON::ParserError and returns raw body**
+The Ruby SDK's `handle_response` method catches `JSON::ParserError` and returns the raw response body as a string instead of raising an error. This can mask API issues and return unexpected types to callers.
+
+**SDK-116 🟡 Go SDK retries on 429 consume the per-request timeout**
+The Go SDK retries on HTTP 429 responses but the retry delay consumes the per-request timeout. After retries, the actual request may have very little remaining timeout, causing premature failures.
+
+**SDK-117 🟢 Java SDK RateLimitException doesn't expose rate limit headers**
+The Java SDK throws `RateLimitException` on 429 but doesn't include the `X-RateLimit-*` headers in the exception. Callers cannot determine when to retry based on rate limit information.
+
+**SDK-118 🟢 Python SDK emails.get() accesses data["email"] but should be data["message"]**
+The Python SDK's `emails.get()` method accesses `data["email"]` but the API returns the message under `data["message"]`. The method always returns None or raises KeyError.
+
+**SDK-119 🟢 Python SDK emails.cancel() accesses data["email"] but should be data["message"]**
+Same as SDK-118 but for the cancel endpoint. Returns wrong data to callers.
+
+**SDK-120 🟢 Ruby SDK has no dedicated test suite**
+The Ruby SDK has no dedicated test suite. Only manual testing or integration tests verify its behavior. High risk of regressions.
+
+**SDK-121 🟢 PHP SDK has minimal test coverage**
+The PHP SDK has minimal test coverage — only basic instantiation and configuration tests. API method behavior is untested.
+
+**SDK-122 🟢 No SDK exposes X-RateLimit-* response headers to callers consistently**
+None of the SDKs consistently expose `X-RateLimit-*` response headers to callers. Users cannot implement adaptive rate limiting in their applications.
+
+**SDK-123 🟢 Go SDK uses X-Idempotency-Key but OpenAPI spec defines Idempotency-Key**
+The Go SDK sends `X-Idempotency-Key` header but the OpenAPI spec defines the header as `Idempotency-Key` (without X- prefix). The server may not recognize the header.
+
+**SDK-124 ℹ️ Python SDK is the only SDK with async support**
+Python is the only SDK providing both synchronous and asynchronous clients. Other SDKs (Go, Java, PHP, Ruby) are synchronous only.
+
+**SDK-125 ℹ️ All SDKs implement the same 8-resource surface (positive)**
+All 5 SDKs implement the same 8-resource surface (emails, events, domains, webhooks, templates, suppressions, analytics, contacts). Consistent API coverage across languages.
+
+---
+
+### 7. Performance & Scalability (PERF-100 through PERF-125)
+
+#### Findings Table
+
+| ID | Severity | Title | File | Status |
+|----|:--------:|-------|------|:------:|
+| PERF-100 | 🟠 | create_pool() ignores PoolConfig.statement_cache_capacity | apexmail-db/pool.rs | ☐ Open |
+| PERF-101 | 🟠 | Hard-coded partition ranges with no automated partition management | Migration 050 | ☐ Open |
+| PERF-102 | 🟡 | PoolPair::new() ignores max_connections parameter | apexmail-db/pool.rs | ☐ Open |
+| PERF-103 | 🟡 | Rate limit tier cache has only 60s TTL with 10% jitter | rate-limiter/ | ☐ Open |
+| PERF-104 | 🟡 | Deep middleware chain processes every request through 10+ layers | api-server/app.rs | ☐ Open |
+| PERF-105 | 🟡 | Production Docker Compose runs only 1 replica for API and tracking | docker-compose.prod.yml | ☐ Open |
+| PERF-106 | 🟡 | Default SMTP connection pool size is only 2 per domain | outbound-queue/ | ☐ Open |
+| PERF-107 | 🟡 | Default backpressure max_concurrency is only 20 | worker-processors/ | ☐ Open |
+| PERF-108 | 🟡 | TTF font files served instead of WOFF2 for variable fonts | Marketing | ☐ Open |
+| PERF-109 | 🟡 | Cache warming is disabled by default | api-server/ | ☐ Open |
+| PERF-110 | 🟡 | WriteTracker uses std::sync::Mutex with 5-second sticky window | api-server/ | ☐ Open |
+| PERF-111 | 🟢 | Load tests use only 5 hard-coded test users | load-tests/ | ☐ Open |
+| PERF-112 | 🟢 | Stress test disables connection reuse | load-tests/ | ☐ Open |
+| PERF-113 | 🟢 | No Brotli compression, no static asset caching headers | deploy/nginx/ | ☐ Open |
+| PERF-114 | 🟢 | No automated performance regression detection in CI | CI pipeline | ☐ Open |
+| PERF-115 | 🟢 | HPA maxReplicas is only 10 for API server | deploy/helm/ | ☐ Open |
+| PERF-116 | 🟠 | Worker pool uses 30-second acquire timeout with no statement caching | worker-processors/ | ☐ Open |
+| PERF-117 | 🟡 | Default outbound rate limits are conservative | outbound-queue/ | ☐ Open |
+| PERF-118 | 🟡 | Tracking service uses moka caches with 60s TTL but no cache warming | tracking-service/ | ☐ Open |
+| PERF-119 | 🟢 | CompressionLayer applied globally including tracking pixels | api-server/app.rs | ☐ Open |
+| PERF-120 | 🟢 | Connection budget documentation is stale | docs/ | ☐ Open |
+| PERF-121 | 🟡 | Redundant indexes waste memory and write bandwidth | Multiple migrations | ☐ Open |
+| PERF-122 | 🟢 | Single upstream server per service — no load balancing | deploy/nginx/ | ☐ Open |
+| PERF-123 | 🟢 | Marketing site has no CSS/JS minification pipeline | Marketing | ☐ Open |
+| PERF-124 | ℹ️ | Baselines measured on CI runner (2 vCPU) — may not reflect production | CI pipeline | ☐ Open |
+| PERF-125 | ℹ️ | Service mesh (Linkerd) adds latency overhead | deploy/helm/ | ☐ Open |
+
+#### Detailed Descriptions
+
+**PERF-100 🟠 create_pool() ignores PoolConfig.statement_cache_capacity**
+The `create_pool()` function in `apexmail-db/pool.rs` accepts a `PoolConfig` with `statement_cache_capacity` but ignores it when creating the SQLx pool. Statement caching is left at the default value, potentially causing unnecessary query planning overhead.
+
+**PERF-101 🟠 Hard-coded partition ranges with no automated partition management**
+Migration 050 creates partitions with hard-coded date ranges (Feb 2026 – Jul 2026). No automated partition management is configured. After July 2026, inserts will fail unless partitions are manually created.
+
+**PERF-102 🟡 PoolPair::new() ignores max_connections parameter**
+`PoolPair::new()` accepts a `max_connections` parameter but doesn't propagate it to the underlying SQLx pool configuration. The pool uses the default connection limit regardless of the configured value.
+
+**PERF-103 🟡 Rate limit tier cache has only 60s TTL with 10% jitter**
+The rate limit tier cache uses a 60-second TTL with 10% jitter. Under high load, this causes frequent cache misses and database queries for rate limit configuration. Should increase TTL to 5-15 minutes.
+
+**PERF-104 🟡 Deep middleware chain processes every request through 10+ layers**
+Every API request passes through 10+ middleware layers (auth, CORS, compression, rate limiting, request ID, tracing, etc.). For simple requests (health checks, static assets), this adds unnecessary latency.
+
+**PERF-105 🟡 Production Docker Compose runs only 1 replica for API and tracking**
+The production docker-compose configuration runs only 1 replica for the API server and tracking service. No redundancy — a single container failure causes complete service outage.
+
+**PERF-106 🟡 Default SMTP connection pool size is only 2 per domain**
+The outbound SMTP connection pool defaults to 2 connections per destination domain. For high-volume senders, this creates a bottleneck as emails queue waiting for available connections.
+
+**PERF-107 🟡 Default backpressure max_concurrency is only 20**
+The worker processor backpressure mechanism defaults to `max_concurrency = 20`. For multi-tenant deployments with thousands of tenants, this limits throughput significantly.
+
+**PERF-108 🟡 TTF font files served instead of WOFF2 for variable fonts**
+Variable fonts (Fraunces, Inter, JetBrains Mono) are served as TTF files instead of WOFF2. TTF files are 30-50% larger than WOFF2, increasing page load times.
+
+**PERF-109 🟡 Cache warming is disabled by default**
+Application-level cache warming is disabled by default. On startup, all caches are cold, causing a burst of database queries. Should enable cache warming during the health check readiness probe.
+
+**PERF-110 🟡 WriteTracker uses std::sync::Mutex with 5-second sticky window**
+The `WriteTracker` uses `std::sync::Mutex` with a 5-second sticky window for write deduplication. The blocking mutex in an async context can cause contention under high write volume.
+
+**PERF-111 🟢 Load tests use only 5 hard-coded test users**
+Load tests use only 5 hard-coded test users, which doesn't represent production diversity. Cache hit rates and query patterns differ significantly with only 5 users vs thousands.
+
+**PERF-112 🟢 Stress test disables connection reuse**
+The stress test configuration disables connection reuse, which doesn't reflect production behavior where connections are pooled. Results may not accurately predict production performance.
+
+**PERF-113 🟢 No Brotli compression, no static asset caching headers**
+Nginx doesn't configure Brotli compression or static asset caching headers (Cache-Control, ETag). Assets are retransmitted on every request.
+
+**PERF-114 🟢 No automated performance regression detection in CI**
+No automated performance regression detection exists in the CI pipeline. Performance degradations are only discovered through manual testing or user reports.
+
+**PERF-115 🟢 HPA maxReplicas is only 10 for API server**
+The Horizontal Pod Autoscaler for the API server allows a maximum of 10 replicas. For large deployments, this may be insufficient to handle traffic spikes.
+
+**PERF-116 🟠 Worker pool uses 30-second acquire timeout with no statement caching**
+The worker pool uses a 30-second connection acquire timeout but doesn't enable statement caching. Workers spend time re-preparing frequently used queries.
+
+**PERF-117 🟡 Default outbound rate limits are conservative**
+Default outbound email rate limits are conservative (e.g., 100 emails/minute per tenant). While safe, this may be too restrictive for enterprise customers with legitimate high-volume needs.
+
+**PERF-118 🟡 Tracking service uses moka caches with 60s TTL but no cache warming**
+The tracking service uses moka caches with 60-second TTL for domain and tenant lookups. No cache warming means frequent cache misses during traffic spikes.
+
+**PERF-119 🟢 CompressionLayer applied globally including tracking pixels**
+The CompressionLayer is applied globally, including to tracking pixel responses (1×1 GIF). Compressing tiny responses adds CPU overhead without meaningful bandwidth savings.
+
+**PERF-120 🟢 Connection budget documentation is stale**
+Connection budget documentation doesn't reflect the actual pool configuration. Developers may make incorrect assumptions about available connections.
+
+**PERF-121 🟡 Redundant indexes waste memory and write bandwidth**
+Duplicate indexes across migrations waste memory and write bandwidth. Each additional index adds overhead to every INSERT, UPDATE, and DELETE operation.
+
+**PERF-122 🟢 Single upstream server per service — no load balancing**
+Nginx configuration defines a single upstream server per service. No load balancing across multiple instances.
+
+**PERF-123 🟢 Marketing site has no CSS/JS minification pipeline**
+The marketing site (Zola SSG) has no CSS/JS minification pipeline. Unminified assets increase page load times.
+
+**PERF-124 ℹ️ Baselines measured on CI runner (2 vCPU) — may not reflect production**
+Performance baselines are measured on CI runners with 2 vCPU. Production servers (8+ vCPU) may show significantly different performance characteristics.
+
+**PERF-125 ℹ️ Service mesh (Linkerd) adds latency overhead**
+The Linkerd service mesh adds latency overhead to inter-service communication. The overhead should be measured and documented for capacity planning.
+
+---
+
+## Priority Remediation Order — Top 20 Most Critical Items
+
+The following table lists the top 20 most critical findings across all categories from this audit (2026-05-19), prioritized by severity and potential impact.
+
+| Rank | ID | Severity | Title | Category | Impact |
+|:----:|:---|:--------:|-------|:--------:|--------|
+| 1 | API-100 | 🔴 | approve-all modifies leads across ALL tenants | API | Cross-tenant data modification — any tenant's leads can be approved/rejected by any other tenant |
+| 2 | API-102 | 🔴 | Autopilot worker cycle modifies leads across ALL tenants | API | Background worker cross-tenant contamination — lead scores, statuses modified globally |
+| 3 | RS-050 | 🔴 | Admin secrets endpoints lack tenant_id scoping | Backend Rust | Cross-tenant secret exposure — admin can read/modify other tenants' secrets |
+| 4 | SEC-100 | 🔴 | Trivy container scan does not fail CI on critical/high CVEs | Security | Known vulnerabilities deployed to production without pipeline blocking |
+| 5 | SEC-101 | 🔴 | 15 ignored Rust security advisories in CI | Security | Known Rust CVEs may have public exploits; unreviewed ignores accumulate |
+| 6 | SEC-102 | 🔴 | ClickHouse default user unrestricted network access | Security | Full database access from any network — data exfiltration risk |
+| 7 | SEC-103 | 🔴 | Redis password exposed via process command line | Security | Credential exposure to local users via /proc filesystem |
+| 8 | DB-100 | 🔴 | Runtime schema conflicts with SQL migration files | Database | Unpredictable schema on fresh deployments — columns may have wrong types |
+| 9 | DB-101 | 🔴 | 10 tables queried by Rust repos have no matching migration | Database | Fresh deployments fail when application queries non-existent tables |
+| 10 | DB-102 | 🔴 | No default partition on partitioned tables | Database | All inserts fail when current time period has no partition |
+| 11 | API-101 | 🔴 | Single-candidate approve/reject lack tenant_id scoping | API | Cross-tenant lead manipulation via IDOR |
+| 12 | RS-051 | 🔴 | Billing plan endpoints lack authorization | Backend Rust | Unauthorized billing plan modification via service token |
+| 13 | UI-100 | 🔴 | Dark mode critical contrast failures | Frontend | WCAG AA violation — text unreadable in dark mode |
+| 14 | UI-101 | 🔴 | Hard-coded bg-white breaks dark mode | Frontend | White rectangles in dark mode — broken theme switching |
+| 15 | UI-102 | 🔴 | Hard-coded light backgrounds break dark mode | Frontend | White content islands in dark mode across all surfaces |
+| 16 | SDK-100 | 🔴 | Python SDK suppression add() wrong body format | SDK | All Python suppression add operations fail with 400 error |
+| 17 | SDK-101 | 🔴 | Python SDK events list() wrong query params | SDK | Event listing returns wrong data or errors for all Python SDK users |
+| 18 | RS-052 | 🟠 | TenantId extractor trusts header without auth binding | Backend Rust | Cross-tenant data access via header manipulation |
+| 19 | RS-058 | 🟠 | Webhook test endpoint TOCTOU SSRF window | Backend Rust | Server-side request forgery to internal services via DNS rebinding |
+| 20 | SEC-104 | 🟠 | No TLS between internal services | Security | Sensitive data (traces, logs, metrics) transmitted unencrypted |
+
+---
+
+## Updated Grand Total (All Audits Combined)
+
+| Audit Area | 🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Low | ℹ️ Info | Total |
+|------------|:----------:|:-------:|:---------:|:------:|:-------:|:-----:|
+| Database Migrations (original) | 18 | 12 | 14 | 7 | 5 | 56 |
+| Frontend UI/UX (§35.1) | 4 | 12 | 18 | 15 | 10 | 59 |
+| SDKs (§35.2) | 7 | 15 | 18 | 11 | 12 | 63 |
+| Documentation (§35.3) | 5 | 14 | 16 | 8 | 9 | 52 |
+| Load & Performance Testing (§35.4) | 3 | 6 | 7 | 4 | 5 | 25 |
+| Infrastructure Security (§36.1) | 3 | 10 | 14 | 9 | 11 | 47 |
+| Backend Rust Code (§36.2) | 3 | 8 | 10 | 6 | 4 | 31 |
+| Observability & Monitoring (§36.3) | 0 | 5 | 8 | 3 | 4 | 20 |
+| Scalability & Performance (§36.4) | 0 | 6 | 7 | 3 | 3 | 19 |
+| API Security & Control Plane (§36.5) | 0 | 2 | 7 | 4 | 3 | 16 |
+| Style/Machine/Sales/Stubs (§39) | 1 | 4 | 8 | 2 | 0 | 15 |
+| Application State Coverage (§40) | 4 | 6 | 1 | 0 | 0 | 11 |
+| Backend Rust Code (2026-05-19) | 2 | 7 | 13 | 6 | 8 | 36 |
+| Database & Migration (2026-05-19) | 3 | 6 | 9 | 5 | 4 | 27 |
+| Security & Infrastructure (2026-05-19) | 4 | 7 | 10 | 5 | 6 | 32 |
+| Frontend UI/UX & Accessibility (2026-05-19) | 3 | 8 | 12 | 9 | 5 | 37 |
+| API/Control Plane/Sales (2026-05-19) | 3 | 5 | 9 | 4 | 3 | 24 |
+| SDK (2026-05-19) | 2 | 6 | 9 | 7 | 2 | 26 |
+| Performance & Scalability (2026-05-19) | 0 | 3 | 12 | 9 | 2 | 26 |
+| **GRAND TOTAL** | **65** | **142** | **202** | **117** | **96** | **622** |

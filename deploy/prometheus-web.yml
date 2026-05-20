@@ -1,0 +1,25 @@
+# =============================================================================
+# Prometheus Web Configuration
+# =============================================================================
+# Provides HTTP basic authentication for the Prometheus web interface and API.
+# The password hash is generated using:
+#   htpasswd -nbBC 10 admin <your-password>  | cut -d: -f2
+#
+# Usage in docker-compose.yml:
+#   prometheus:
+#     command:
+#       - '--web.config.file=/etc/prometheus/web.yml'
+#     volumes:
+#       - ./deploy/prometheus-web.yml:/etc/prometheus/web.yml:ro
+# =============================================================================
+
+# Basic authentication for Prometheus web UI and API
+# Uncomment and configure with your own credentials:
+# basic_auth_users:
+#   admin: $2y$10$...  # bcrypt hash of your password
+
+# TLS configuration for Prometheus web interface
+# Uncomment and configure with proper certificates:
+# tls_server_config:
+#   cert_file: /etc/prometheus/certs/tls.crt
+#   key_file: /etc/prometheus/certs/tls.key

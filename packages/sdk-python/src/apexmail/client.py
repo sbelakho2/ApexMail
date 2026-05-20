@@ -90,7 +90,7 @@ class BaseClient:
                     "HTTP is only allowed for localhost."
                 )
 
-        self._api_key_bytes = bytearray(api_key.encode("utf-8"))
+        self._api_key = api_key
         self.base_url = normalized_base_url
         self.timeout = timeout
         self.max_retries = max_retries
@@ -103,24 +103,19 @@ class BaseClient:
             "User-Agent": "apexmail-python/1.0.0",
         }
 
-    # SECURITY FIX: Mask API key in repr to prevent accidental logging
     def close(self) -> None:
-    	"""Clear sensitive API key data from memory.
-   
-    	Overriding subclasses MUST call super().close() to ensure the
-    	bytearray-backed API key is cleared.
-    	"""
-    	self._api_key_bytes.clear()
-   
+        """Clear sensitive API key data from memory."""
+        self._api_key = ""
+
     def __repr__(self) -> str:
-    	key = self.api_key
-    	masked_key = f"{key[:4]}\u2026\u2026{key[-4:]}"
-    	return f"{self.__class__.__name__}(api_key='{masked_key}', base_url='{self.base_url}')"
+        key = self.api_key
+        masked_key = f"{key[:4]}\u2026\u2026{key[-4:]}"
+        return f"{self.__class__.__name__}(api_key='{masked_key}', base_url='{self.base_url}')"
 
     @property
     def api_key(self) -> str:
         """Access API key (use with caution)."""
-        return self._api_key_bytes.decode("utf-8")
+        return self._api_key
 
     def _get_headers(self, idempotency_key: Optional[str] = None) -> dict[str, str]:
         if idempotency_key:
@@ -166,7 +161,11 @@ class BaseClient:
             return {}
         if response.status_code == 200 or response.status_code == 201:
             self._ensure_response_size(response)
-            return response.json()
+            data = response.json()
+            # SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
+            if isinstance(data, dict) and "data" in data:
+                return data["data"]
+            return data
 
         try:
             error_data = response.json()
@@ -206,16 +205,64 @@ class BaseClient:
         else:
             raise ApexMailError(message=message, code=code, status_code=response.status_code)
 
+    def _retry_delay(self, response: httpx.Response, attempt: int) -> Optional[float]:
+        """Calculate delay if request should be retried, or None if not.
+
+        Returns the delay in seconds if the response status code is retryable
+        and the attempt is not the final one, or None to indicate no retry.
+        """
+        if response.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries:
+            delay = self._calculate_backoff(attempt)
+            if response.status_code == 429:
+                retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
+                if retry_after is not None:
+                    delay = max(delay, retry_after)
+            return delay
+        return None
+
+    def _check_total_timeout(self, started_at: float) -> None:
+        """Raise ApexMailError if the total retry timeout has been exceeded."""
+        if (time.monotonic() - started_at) > self.total_retry_timeout:
+            raise ApexMailError(
+                message="Total retry timeout exceeded",
+                code="TOTAL_TIMEOUT",
+                status_code=408,
+            )
+
+    def _build_timeout_error(self, attempt: int, last_exception: Optional[Exception]) -> None:
+        """Raise appropriate error after exhausting retries on timeout/network errors.
+
+        This is a shared helper called only after all retry attempts have been exhausted.
+        """
+        if last_exception:
+            raise last_exception
+        raise ApexMailError(message="Request failed", code="UNKNOWN", status_code=0)
+
+    def _build_exception_from_httpx_error(self, e: Exception, attempt: int) -> Exception:
+        """Build an ApexMailError from a httpx transport exception."""
+        if isinstance(e, httpx.TimeoutException):
+            return ApexMailError(
+                message="Request timed out",
+                code="TIMEOUT_ERROR",
+                status_code=408,
+            )
+        if isinstance(e, httpx.NetworkError):
+            return ApexMailError(
+                message=f"Network error: {e}",
+                code="NETWORK_ERROR",
+                status_code=0,
+            )
+        return ApexMailError(message=f"Request failed: {e}", code="UNKNOWN", status_code=0)
+
 
 class ApexMail(BaseClient):
     """
     Synchronous ApexMail API client.
 
     FIX-500-466: The sync and async clients share a common BaseClient for
-    initialization, validation, headers, and error handling. The remaining
-    duplication (retry loops in _request) is inherent to Python's sync/async
-    duality and cannot be easily deduplicated without a code generator
-    (e.g. unasync). This is a known acceptable pattern.
+    initialization, validation, headers, and error handling. Helper methods
+    for retry logic (timeout checks, backoff, error building) have been
+    extracted to the base class to minimize duplication in the _request methods.
 
     Usage:
         client = ApexMail(api_key="YOUR_API_KEY")
@@ -277,12 +324,7 @@ class ApexMail(BaseClient):
         started_at = time.monotonic()
         
         for attempt in range(self.max_retries + 1):
-            if (time.monotonic() - started_at) > self.total_retry_timeout:
-                raise ApexMailError(
-                    message="Total retry timeout exceeded",
-                    code="TOTAL_TIMEOUT",
-                    status_code=408,
-                )
+            self._check_total_timeout(started_at)
             try:
                 response = self._client.request(
                     method=method,
@@ -292,45 +334,21 @@ class ApexMail(BaseClient):
                     headers=headers,
                 )
                 
-                # Retry on retryable status codes
-                if response.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries:
-                    # Compute quadratic backoff: baseDelay * attempt²
-                    delay = self._calculate_backoff(attempt)
-                    if response.status_code == 429:
-                        # Honor Retry-After header using max(retryAfter, quadraticBackoff)
-                        retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
-                        if retry_after is not None:
-                            delay = max(delay, retry_after)
+                delay = self._retry_delay(response, attempt)
+                if delay is not None:
                     self._sleep(delay)
                     continue
                     
                 return self._handle_response(response)
                 
-            except httpx.TimeoutException as e:
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
                 last_exception = e
                 if attempt < self.max_retries:
                     self._sleep(self._calculate_backoff(attempt))
                     continue
-                raise ApexMailError(
-                    message="Request timed out",
-                    code="TIMEOUT_ERROR",
-                    status_code=408,
-                ) from e
-            except httpx.NetworkError as e:
-                last_exception = e
-                if attempt < self.max_retries:
-                    self._sleep(self._calculate_backoff(attempt))
-                    continue
-                raise ApexMailError(
-                    message=f"Network error: {e}",
-                    code="NETWORK_ERROR",
-                    status_code=0,
-                ) from e
+                raise self._build_exception_from_httpx_error(e, attempt) from e
         
-        # Should not reach here, but handle edge case
-        if last_exception:
-            raise last_exception
-        raise ApexMailError(message="Request failed", code="UNKNOWN", status_code=0)
+        self._build_timeout_error(attempt, last_exception)
 
     def close(self) -> None:
         """Close the HTTP client and clear sensitive data from memory."""
@@ -413,12 +431,7 @@ class AsyncApexMail(BaseClient):
         started_at = time.monotonic()
         
         for attempt in range(self.max_retries + 1):
-            if (time.monotonic() - started_at) > self.total_retry_timeout:
-                raise ApexMailError(
-                    message="Total retry timeout exceeded",
-                    code="TOTAL_TIMEOUT",
-                    status_code=408,
-                )
+            self._check_total_timeout(started_at)
             try:
                 response = await self._client.request(
                     method=method,
@@ -428,45 +441,21 @@ class AsyncApexMail(BaseClient):
                     headers=headers,
                 )
                 
-                # Retry on retryable status codes
-                if response.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries:
-                    # Compute quadratic backoff: baseDelay * attempt²
-                    delay = self._calculate_backoff(attempt)
-                    if response.status_code == 429:
-                        # Honor Retry-After header using max(retryAfter, quadraticBackoff)
-                        retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
-                        if retry_after is not None:
-                            delay = max(delay, retry_after)
+                delay = self._retry_delay(response, attempt)
+                if delay is not None:
                     await asyncio.sleep(delay)
                     continue
                     
                 return self._handle_response(response)
                 
-            except httpx.TimeoutException as e:
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
                 last_exception = e
                 if attempt < self.max_retries:
                     await asyncio.sleep(self._calculate_backoff(attempt))
                     continue
-                raise ApexMailError(
-                    message="Request timed out",
-                    code="TIMEOUT_ERROR",
-                    status_code=408,
-                ) from e
-            except httpx.NetworkError as e:
-                last_exception = e
-                if attempt < self.max_retries:
-                    await asyncio.sleep(self._calculate_backoff(attempt))
-                    continue
-                raise ApexMailError(
-                    message=f"Network error: {e}",
-                    code="NETWORK_ERROR",
-                    status_code=0,
-                ) from e
+                raise self._build_exception_from_httpx_error(e, attempt) from e
         
-        # Should not reach here, but handle edge case
-        if last_exception:
-            raise last_exception
-        raise ApexMailError(message="Request failed", code="UNKNOWN", status_code=0)
+        self._build_timeout_error(attempt, last_exception)
 
     async def close(self) -> None:
         """Close the HTTP client and clear sensitive data from memory."""

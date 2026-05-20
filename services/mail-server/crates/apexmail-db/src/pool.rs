@@ -68,6 +68,34 @@ fn normalized_min_connections(max_connections: u32, requested_min_connections: u
     requested_min_connections.min(max_connections)
 }
 
+/// Compute a database pool size based on the number of available CPU cores
+/// (workers). The formula is `max(4, num_cpus * 2)` which ensures:
+///
+/// - Small instances (1-2 cores) get at least 4 connections.
+/// - Standard instances (4-8 cores) get 8-16 connections — sufficient for most
+///   CRUD workloads without overwhelming the database.
+/// - Large instances (16+ cores) get 32+ connections, scaling linearly with
+///   concurrency while still leaving headroom for the DB server.
+///
+/// This should be called at startup to set [`PoolConfig::max_connections`] when
+/// the operator has not explicitly configured a value. Override via env var using
+/// [`crate::set_max_connections`] or by passing an explicit `max_connections`
+/// parameter to [`create_pool`].
+///
+/// # Example
+///
+/// ```ignore
+/// use apexmail_db::pool::pool_size_for_workers;
+/// let size = pool_size_for_workers(); // e.g. 8 on a 4-core machine
+/// let pool = create_pool("postgres://...", size).await?;
+/// ```
+pub fn pool_size_for_workers() -> u32 {
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    std::cmp::max(4, (num_cpus as u32).saturating_mul(2))
+}
+
 /// Type alias for the database pool.
 pub type DatabasePool = PgPool;
 
@@ -259,19 +287,17 @@ pub async fn create_pool(
 
     // DB-09: acquire_timeout=10s aligned with worker pool recommendation;
     // test_before_acquire(true) prevents handing out stale connections.
-    // DB-10: To configure statement caching, use PgConnectOptions:
-    //   let opts = PgConnectOptions::new()
-    //       .statement_cache_capacity(100_usize);
-    //   let pool = PgPoolOptions::new()
-    //       .max_connections(max_connections)
-    //       .connect_with(opts)
-    //       .await?;
+    // DB-10: Statement caching enabled via PgConnectOptions to avoid
+    // re-preparation roundtrips for repeated queries (PERF-100).
     // DB-18: Pool metrics should be exported by the service binary that owns the
     // pool. For example, in the API server main.rs:
     //   metrics::describe_gauge!("db_pool_size", "Number of pool connections");
     //   metrics::gauge!("db_pool_size", pool.max_connections() as f64);
     //   metrics::gauge!("db_pool_active", pool.num_active() as f64);
     //   metrics::gauge!("db_pool_idle", pool.num_idle() as f64);
+    let connect_opts = database_url
+        .parse::<PgConnectOptions>()?
+        .statement_cache_capacity(100);
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
         .min_connections(min_connections)
@@ -281,7 +307,7 @@ pub async fn create_pool(
         .test_before_acquire(true)
         .idle_timeout(Duration::from_secs(300))
         .max_lifetime(Duration::from_secs(1800))
-        .connect(database_url)
+        .connect_with(connect_opts)
         .await?;
 
     info!(

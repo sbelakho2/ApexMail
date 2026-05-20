@@ -18,7 +18,7 @@
 //! 6. On disconnect, the Redis subscription is dropped automatically.
 //!
 //! Security:
-//! - Token is validated with HMAC-SHA256 signature check (same signing key as API).
+//! - Token is validated with RS256 (asymmetric JWT — SEC-119).
 //! - Token must have `stream` scope.
 //! - Maximum connection duration:1 hour (server-side timeout).
 //! - Rate-limited to 5 concurrent SSE connections per tenant.
@@ -35,7 +35,7 @@ use axum::{
     },
 };
 use futures::stream::Stream;
-use hmac::Mac;
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
@@ -366,45 +366,21 @@ async fn decrement_conn_count(pool: &deadpool_redis::Pool, key: &str) {
     }
 }
 
-/// Validate the SSE stream JWT token.
-/// We use a lightweight HMAC-SHA256 check here rather than pulling in the full
-/// jsonwebtoken crate (which is an api-server dependency). The token format is:/// base64url(header).base64url(payload).base64url(signature)
-/// The signing key is derived from the tracking service's `TRACKING_SECRET_KEY`
-/// via HKDF or direct HMAC — matching what the API server issues.
+/// Validate the SSE stream JWT token using RS256 (SEC-119).
+/// All JWTs in the system use RS256 (asymmetric) to prevent algorithm confusion
+/// attacks. The public key is loaded from JWT_PUBLIC_KEY_PEM at startup.
 fn validate_stream_token(token: &str, state: &AppState) -> Result<StreamClaims, String> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return Err("Invalid token format".into());
-    }
+    let decoding_key = DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes())
+        .map_err(|e| format!("Invalid JWT public key configuration: {e}"))?;
 
-    // Decode and verify signature
-    let signing_input = format!("{}.{}", parts[0], parts[1]);
-    let signature_bytes =
-        base64_url_decode(parts[2]).map_err(|_| "Invalid token signature encoding")?;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_exp = true;
+    validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
 
-    let key = state.config.secret_key.as_bytes();
-    let mut mac =
-        hmac::Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| "Internal key error")?;
-    hmac::Mac::update(&mut mac, signing_input.as_bytes());
+    let token_data = decode::<StreamClaims>(token, &decoding_key, &validation)
+        .map_err(|e| format!("Invalid stream token: {e}"))?;
 
-    mac.verify_slice(&signature_bytes)
-        .map_err(|_| "Invalid token signature")?;
-
-    // Decode claims payload
-    let payload_bytes =
-        base64_url_decode(parts[1]).map_err(|_| "Invalid token payload encoding")?;
-    let claims: StreamClaims =
-        serde_json::from_slice(&payload_bytes).map_err(|_| "Invalid token claims")?;
-
-    // Check expiry
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    if claims.exp < now {
-        return Err("Token expired".into());
-    }
+    let claims = token_data.claims;
 
     // Check scope
     if !claims.scopes.iter().any(|s| s == "stream" || s == "*") {
@@ -416,14 +392,6 @@ fn validate_stream_token(token: &str, state: &AppState) -> Result<StreamClaims, 
     }
 
     Ok(claims)
-}
-
-/// Decode a base64url-encoded string (no padding variant).
-fn base64_url_decode(input: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(input)
-        .map_err(|e| format!("base64url decode: {e}"))
 }
 
 #[cfg(test)]

@@ -6,6 +6,9 @@
 # Usage:
 #   docker compose -f deploy/load-test-infra/docker-compose.yml up -d
 #   docker compose -f deploy/load-test-infra/docker-compose.yml down
+#
+# All credentials are read from environment variables. Copy .env.example to
+# .env and customise before running.
 # =============================================================================
 
 version: '3.9'
@@ -16,16 +19,16 @@ services:
     image: postgres:16-alpine
     container_name: apexmail-lt-postgres
     environment:
-      POSTGRES_DB: apexmail_loadtest
-      POSTGRES_USER: apexmail
-      POSTGRES_PASSWORD: apexmail
+      POSTGRES_DB: ${POSTGRES_DB:-apexmail_loadtest}
+      POSTGRES_USER: ${POSTGRES_USER:-apexmail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U apexmail -d apexmail_loadtest"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apexmail} -d ${POSTGRES_DB:-apexmail_loadtest}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -42,13 +45,13 @@ services:
   redis:
     image: redis:7-alpine
     container_name: apexmail-lt-redis
-    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --requirepass "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -61,11 +64,12 @@ services:
   # ── Mailpit (Mock SMTP) ───────────────────────────────────────────────────
   # Captures all outgoing emails during load tests. Web UI at http://localhost:8025
   mailpit:
-    image: axllent/mailpit:latest
+    # SECURITY: Pin to specific version for reproducible builds
+    image: axllent/mailpit:v1.21
     container_name: apexmail-lt-mailpit
     ports:
-      - "1025:1025"     # SMTP server
-      - "8025:8025"     # Web UI
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"     # SMTP server
+      - "${MAILPIT_WEB_PORT:-8025}:8025"       # Web UI
     environment:
       MP_MAX_MESSAGES: 500000
       MP_SMTP_AUTH_ACCEPT_ANY: "true"
@@ -85,15 +89,16 @@ services:
 
   # ── k6 (optional, for running tests in container) ─────────────────────────
   k6:
-    image: grafana/k6:latest
+    # SECURITY: Pin to specific version for reproducible builds
+    image: grafana/k6:0.54.0
     container_name: apexmail-lt-k6
     profiles:
       - runner
     environment:
-      K6_API_BASE: http://host.docker.internal:3000
-      K6_API_KEY: test-api-key
-      K6_TRACKING_BASE: http://host.docker.internal:3000
-      K6_OUT: influxdb=http://influxdb:8086/k6
+      K6_API_BASE: ${K6_API_BASE:-http://host.docker.internal:3000}
+      K6_API_KEY: ${K6_API_KEY:?Set K6_API_KEY in .env}
+      K6_TRACKING_BASE: ${K6_TRACKING_BASE:-http://host.docker.internal:3000}
+      K6_OUT: ${K6_OUT:-}
     volumes:
       - ../../services/mail-server/crates/load-tests/tests/k6:/tests
     command: run /tests/api-load-test.js

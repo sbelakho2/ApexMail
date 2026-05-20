@@ -46,7 +46,7 @@ class Webhooks
      */
     public function update(string $id, array $params): array
     {
-        return $this->client->request('PATCH', '/v1/webhooks/' . urlencode($id), $params);
+        return $this->client->request('PUT', '/v1/webhooks/' . urlencode($id), $params);
     }
 
     /** Delete a webhook. */

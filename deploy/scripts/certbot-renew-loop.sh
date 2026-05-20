@@ -24,8 +24,9 @@ cat > /usr/local/bin/apexmail-deploy-hook.sh <<'HOOK'
 set -eu
 LIVE_DIR="/etc/letsencrypt/live/apexmail.ee"
 OUT_DIR="/etc/letsencrypt"
+# SECURITY (SEC-107): Private key is 600 (owner-only) to prevent unauthorized reads.
 install -m 644 "$LIVE_DIR/fullchain.pem" "$OUT_DIR/fullchain.pem"
-install -m 644 "$LIVE_DIR/privkey.pem"   "$OUT_DIR/privkey.pem"
+install -m 600 "$LIVE_DIR/privkey.pem"   "$OUT_DIR/privkey.pem"
 install -m 644 "$LIVE_DIR/chain.pem"     "$OUT_DIR/ca-chain.pem"
 echo "[certbot] deploy-hook installed new cert at $OUT_DIR ($(date -u +%FT%TZ))"
 HOOK

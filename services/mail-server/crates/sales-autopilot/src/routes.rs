@@ -24,10 +24,11 @@ use uuid::Uuid;
 use crate::{
     calendar::CalendarService,
     campaigns::CampaignManager,
+    config::SalesConfig,
     crm::CrmBackend,
     enrichment::EnrichmentService,
     inbox::InboxManager,
-    types::{LeadStatus, SalesError},
+    types::{CreateConversionBody, LeadStatus, SalesError},
 };
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,8 @@ pub struct AppState {
     pub calendar: CalendarService,
     pub inbox: InboxManager,
     pub service_token: String,
+    /// Sales autopilot configuration.
+    pub config: SalesConfig,
     /// In-memory rate limit fallback used when Redis is unavailable.
     pub rate_limit_fallback: Arc<Mutex<HashMap<String, RateLimitEntry>>>,
 }
@@ -284,6 +287,45 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
 
+    // ── Conversion tracking (SALES-03) ───────────────────────────────────
+    sqlx::query(
+        r#"
+            CREATE TABLE IF NOT EXISTS sales_conversions (
+                id UUID PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                campaign_id UUID NOT NULL,
+                lead_id UUID NOT NULL,
+                revenue DOUBLE PRECISION NOT NULL DEFAULT 0,
+                description TEXT NOT NULL DEFAULT '',
+                converted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        "#,
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_sales_conversions_tenant_id ON sales_conversions(tenant_id)",
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_sales_conversions_campaign_id ON sales_conversions(campaign_id)",
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_sales_conversions_lead_id ON sales_conversions(lead_id)",
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
     Ok(())
 }
 
@@ -304,6 +346,8 @@ pub fn router(state: AppState) -> Router {
         .route("/campaigns/{id}/pause", post(pause_campaign))
         .route("/calendar", get(list_calendar))
         .route("/inbox", get(list_inbox))
+        // Conversion tracking (SALES-03)
+        .route("/conversions", get(list_conversions).post(create_conversion))
         .with_state(shared.clone())
         .layer(DefaultBodyLimit::max(256 * 1024)) // 256 KB
         .layer(TraceLayer::new_for_http())
@@ -576,7 +620,7 @@ async fn create_lead(
         // score from the enrichment data. If enrichment fails (e.g. no API
         // configured), we compute a minimal default score of 10 so the
         // scoring pipeline is live and observable.
-        let score = compute_lead_score(&state.enrichment, &lead.email, &lead.company).await;
+        let score = compute_lead_score(&state.enrichment, &lead.email, &lead.company, &state.config).await;
         if let Err(e) = state.crm.set_lead_score(lead.id, score, &tenant_id).await {
             tracing::warn!(error = %e, lead_id = %lead.id, "failed to set lead score (non-fatal)");
         }
@@ -603,11 +647,33 @@ async fn create_lead(
 ///
 /// When enrichment is unavailable (mock disabled, no API), returns a
 /// baseline score of 10 so the pipeline is visibly active.
+/// Compute a lead score (0–100) from enrichment data.
+///
+/// Uses the `CrmService::score_lead(engagement, company_size, recency)`
+/// function. At lead creation time, engagement data is unavailable, so we
+/// derive the score from company firmographics (industry + employee count).
+///
+/// Scoring dimensions:
+/// - If enrichment provides a known industry → 30 base points
+/// - If enrichment provides employee size → 20 base points
+/// - If enrichment succeeds at all → 10 base points
+///   Combined with a default recency score of 30 (new lead).
+///
+/// When enrichment is unavailable (mock disabled, no API), returns a
+/// baseline score of 10 so the pipeline is visibly active.
+///
+/// Uses configurable weights from `SalesConfig::lead_scoring` (SALES-01).
 async fn compute_lead_score(
     enrichment: &EnrichmentService,
     email: &str,
     _company_name: &str,
+    config: &SalesConfig,
 ) -> u8 {
+    // Extract configurable scoring weights (SALES-01).
+    let ew = config.lead_scoring.engagement_weight;
+    let csw = config.lead_scoring.company_size_weight;
+    let rw = config.lead_scoring.recency_weight;
+
     // Attempt enrichment. This is best-effort — failure is non-fatal.
     let company = enrichment.enrich_lead(email).await.ok();
 
@@ -628,7 +694,7 @@ async fn compute_lead_score(
         // engagement: if we have a known industry, assume moderate engagement
         let engagement = if c.industry != "Unknown" { 0.5 } else { 0.3 };
 
-        crate::crm::CrmService::score_lead(engagement, company_size, recency)
+        crate::crm::CrmService::score_lead_with_weights(engagement, company_size, recency, ew, csw, rw)
     } else {
         // No enrichment data available. Return a baseline score of 10
         // so the scoring pipeline is visibly live (SA-1).
@@ -842,6 +908,178 @@ async fn enrich(
 
         json_response(&company)
     }.instrument(span).await
+}
+
+// -- Conversions (SALES-03) -------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConversionQuery {
+    #[serde(default)]
+    campaign_id: Option<Uuid>,
+    #[serde(default)]
+    lead_id: Option<Uuid>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+    #[serde(default)]
+    tenant_id: Option<String>,
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+struct ConversionRow {
+    id: Uuid,
+    tenant_id: String,
+    campaign_id: Uuid,
+    lead_id: Uuid,
+    revenue: f64,
+    description: String,
+    converted_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<ConversionRow> for Conversion {
+    fn from(row: ConversionRow) -> Self {
+        Self {
+            id: row.id,
+            tenant_id: row.tenant_id,
+            campaign_id: row.campaign_id,
+            lead_id: row.lead_id,
+            revenue: row.revenue,
+            description: row.description,
+            converted_at: row.converted_at,
+        }
+    }
+}
+
+use crate::types::Conversion;
+
+async fn create_conversion(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Json(body): Json<CreateConversionBody>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!("create_conversion", tenant_id = %tenant_id, operation = "create_conversion");
+    async move {
+        // Verify the campaign exists and belongs to this tenant
+        let campaign_exists: bool = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sales_campaigns WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(body.campaign_id)
+        .bind(&tenant_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?
+            > 0;
+        if !campaign_exists {
+            return Err(SalesError::CampaignNotFound(body.campaign_id));
+        }
+
+        // Verify the lead exists and belongs to this tenant
+        let lead_exists: bool = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sales_leads WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(body.lead_id)
+        .bind(&tenant_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?
+            > 0;
+        if !lead_exists {
+            return Err(SalesError::LeadNotFound(body.lead_id));
+        }
+
+        let conversion_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_conversions (id, tenant_id, campaign_id, lead_id, revenue, description, converted_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(conversion_id)
+        .bind(&tenant_id)
+        .bind(body.campaign_id)
+        .bind(body.lead_id)
+        .bind(body.revenue)
+        .bind(&body.description)
+        .bind(chrono::Utc::now())
+        .execute(&state.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        // Update the lead status to Converted
+        let _ = state.crm.update_lead_status(body.lead_id, LeadStatus::Converted, &tenant_id).await;
+
+        let conversion = Conversion {
+            id: conversion_id,
+            tenant_id,
+            campaign_id: body.campaign_id,
+            lead_id: body.lead_id,
+            revenue: body.revenue,
+            description: body.description,
+            converted_at: chrono::Utc::now(),
+        };
+        json_response(&conversion)
+    }
+    .instrument(span)
+    .await
+}
+
+async fn list_conversions(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Query(q): Query<ConversionQuery>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let (limit, offset) = normalize_pagination(q.limit, q.offset, 100, 500);
+    let span = tracing::info_span!("list_conversions", tenant_id = %tenant_id, operation = "list_conversions");
+    async move {
+        let rows: Vec<ConversionRow> = if let Some(cid) = q.campaign_id {
+            sqlx::query_as::<_, ConversionRow>(
+                "SELECT id, tenant_id, campaign_id, lead_id, revenue, description, converted_at \
+                 FROM sales_conversions \
+                 WHERE tenant_id = $1 AND campaign_id = $2 \
+                 ORDER BY converted_at DESC LIMIT $3 OFFSET $4",
+            )
+            .bind(&tenant_id)
+            .bind(cid)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?
+        } else if let Some(lid) = q.lead_id {
+            sqlx::query_as::<_, ConversionRow>(
+                "SELECT id, tenant_id, campaign_id, lead_id, revenue, description, converted_at \
+                 FROM sales_conversions \
+                 WHERE tenant_id = $1 AND lead_id = $2 \
+                 ORDER BY converted_at DESC LIMIT $3 OFFSET $4",
+            )
+            .bind(&tenant_id)
+            .bind(lid)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?
+        } else {
+            sqlx::query_as::<_, ConversionRow>(
+                "SELECT id, tenant_id, campaign_id, lead_id, revenue, description, converted_at \
+                 FROM sales_conversions \
+                 WHERE tenant_id = $1 \
+                 ORDER BY converted_at DESC LIMIT $2 OFFSET $3",
+            )
+            .bind(&tenant_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?
+        };
+
+        let conversions: Vec<Conversion> = rows.into_iter().map(Conversion::from).collect();
+        json_response(&conversions)
+    }
+    .instrument(span)
+    .await
 }
 
 // -- Campaigns --------------------------------------------------------------

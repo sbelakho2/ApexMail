@@ -39,13 +39,15 @@ X-API-Key: am_live_xxxxxxxxxxxxx
 
 ```json
 {
-  "id": "lst_9a8b7c6d5e4f",
-  "name": "Newsletter Subscribers",
-  "description": "Monthly product newsletter",
-  "optInMode": "double_opt_in",
-  "subscriberCount": 0,
-  "createdAt": "2025-06-01T10:30:00Z",
-  "updatedAt": "2025-06-01T10:30:00Z"
+  "data": {
+    "id": "lst_9a8b7c6d5e4f",
+    "name": "Newsletter Subscribers",
+    "description": "Monthly product newsletter",
+    "optInMode": "double_opt_in",
+    "subscriberCount": 0,
+    "createdAt": "2025-06-01T10:30:00Z",
+    "updatedAt": "2025-06-01T10:30:00Z"
+  }
 }
 ```
 

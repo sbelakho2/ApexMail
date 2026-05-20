@@ -13,6 +13,9 @@ pub mod smtp_sender;
 
 use anyhow::Result;
 use clap::Parser;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::Server;
@@ -72,18 +75,33 @@ struct Cli {
     log_level: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    // Initialize logging
+fn init_tracing(log_level: &str) -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "outbound-queue".to_string(),
+            ..OtlpConfig::default()
+        };
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(e) => tracing::warn!("OTLP tracing disabled: {e}"),
+        }
+    }
+    // Fallback: structured JSON logging
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .json()
         .init();
+    None
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    let _guard = init_tracing(&cli.log_level);
 
     info!("Starting Outbound Queue Service");
     info!("Listen address: {}", cli.listen);

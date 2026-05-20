@@ -167,6 +167,23 @@ pub struct Config {
     pub mcaptcha_enabled: bool,
     /// mCaptcha verification endpoint URL.
     pub mcaptcha_verify_url: String,
+
+    // ── HTTP Client ─────────────────────────────────────────
+    /// Timeout in seconds for the internal HTTP client used for outbound
+    /// requests (webhooks, enrichment, etc.). Default: 30.
+    pub http_client_timeout_secs: u64,
+
+    // ── Internal TLS (SEC-104) ──────────────────────────────
+    /// Whether to require TLS for internal service-to-service communication
+    /// (traces, logs, metrics, inter-service API calls).
+    /// When enabled, services present mutual TLS certificates.
+    pub internal_tls_enabled: bool,
+    /// Path to the CA certificate PEM file for verifying internal service certs.
+    pub internal_tls_ca_cert_path: Option<String>,
+    /// Path to the client certificate PEM file for mTLS.
+    pub internal_tls_client_cert_path: Option<String>,
+    /// Path to the client private key PEM file for mTLS.
+    pub internal_tls_client_key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,8 +523,10 @@ impl Config {
             Ok(value) => parse_csv(&value),
             Err(_) => default_cors_origins(environment, &base_url),
         };
+        // SCALE-M-01: Increased default from 20 to 50 for production workloads.
+        // Set DB_MAX_CONNECTIONS per-service to control connection pool budget.
         let db_max_connections =
-            parse_u32("DB_MAX_CONNECTIONS", &env_or("DB_MAX_CONNECTIONS", "20"))?;
+            parse_u32("DB_MAX_CONNECTIONS", &env_or("DB_MAX_CONNECTIONS", "50"))?;
         let redis_pool_default =
             std::cmp::max(32usize, (db_max_connections as usize).saturating_mul(2));
         let redis_pool_default_str = redis_pool_default.to_string();
@@ -779,6 +798,27 @@ impl Config {
             mcaptcha_secret_key,
             mcaptcha_enabled,
             mcaptcha_verify_url,
+
+            http_client_timeout_secs: parse_u64(
+                "HTTP_CLIENT_TIMEOUT_SECONDS",
+                &env_or("HTTP_CLIENT_TIMEOUT_SECONDS", "30"),
+            )?,
+
+            // SEC-104: Internal TLS for service-to-service communication.
+            // When INTERNAL_TLS_ENABLED=true, all internal traffic (traces,
+            // logs, metrics, inter-service API) must use mutual TLS.
+            internal_tls_enabled: env_or("INTERNAL_TLS_ENABLED", "false")
+                .parse()
+                .unwrap_or(false),
+            internal_tls_ca_cert_path: env::var("INTERNAL_TLS_CA_CERT_PATH")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            internal_tls_client_cert_path: env::var("INTERNAL_TLS_CLIENT_CERT_PATH")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            internal_tls_client_key_path: env::var("INTERNAL_TLS_CLIENT_KEY_PATH")
+                .ok()
+                .filter(|s| !s.is_empty()),
         };
 
         // Production security checks

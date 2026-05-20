@@ -20,12 +20,13 @@ public final class Analytics {
     }
 
     public Map<String, Object> get(Map<String, Object> options) {
-        String query = options != null && !options.isEmpty() ? "?" + buildQuery(options) : "";
+        if (options == null
+                || options.get("from") == null || options.get("from").toString().isEmpty()
+                || options.get("to") == null || options.get("to").toString().isEmpty()) {
+            throw new IllegalArgumentException("Analytics requires both 'from' and 'to' date parameters");
+        }
+        String query = "?" + buildQuery(options);
         return client.request("GET", "/v1/analytics" + query, null, new TypeReference<Map<String, Object>>() {});
-    }
-
-    public Map<String, Object> get() {
-        return get(null);
     }
 
     private static String buildQuery(Map<String, Object> params) {

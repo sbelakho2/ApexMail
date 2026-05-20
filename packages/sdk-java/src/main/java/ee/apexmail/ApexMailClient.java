@@ -255,7 +255,9 @@ public final class ApexMailClient implements AutoCloseable {
                     if (responseType == Void.class || responseBody == null || responseBody.isBlank()) {
                         return null;
                     }
-                    return objectMapper.readValue(responseBody, responseType);
+                    // SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
+                    String unwrapped = unwrapEnvelope(responseBody);
+                    return objectMapper.readValue(unwrapped, responseType);
                 }
 
                 Map<String, Object> parsed = parseErrorBody(responseBody);
@@ -312,7 +314,9 @@ public final class ApexMailClient implements AutoCloseable {
                     if (responseBody == null || responseBody.isBlank()) {
                         return null;
                     }
-                    return objectMapper.readValue(responseBody, responseType);
+                    // SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
+                    String unwrapped = unwrapEnvelope(responseBody);
+                    return objectMapper.readValue(unwrapped, responseType);
                 }
 
                 Map<String, Object> parsed = parseErrorBody(responseBody);
@@ -336,6 +340,27 @@ public final class ApexMailClient implements AutoCloseable {
                 throw new ApexMailException("Request interrupted", e);
             }
         }
+    }
+
+    /**
+     * Unwrap the API envelope if present. If the response is a JSON object
+     * containing a "data" key, return the serialized "data" value.
+     * Otherwise, return the original response body unchanged.
+     */
+    private String unwrapEnvelope(String responseBody) {
+        try {
+            Map<String, Object> parsed = objectMapper.readValue(responseBody, new TypeReference<Map<String, Object>>() {});
+            if (parsed.containsKey("data")) {
+                Object data = parsed.get("data");
+                if (data != null) {
+                    return objectMapper.writeValueAsString(data);
+                }
+                return responseBody; // data is null, return as-is
+            }
+        } catch (Exception ignored) {
+            // Not a JSON object or parse error — return as-is
+        }
+        return responseBody;
     }
 
     private Map<String, Object> parseErrorBody(String responseBody) {

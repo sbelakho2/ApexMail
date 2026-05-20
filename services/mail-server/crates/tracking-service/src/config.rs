@@ -17,6 +17,9 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     pub metrics: MetricsConfig,
     pub secret_key: zeroize::Zeroizing<String>,
+    /// RSA public key (PEM) for verifying RS256 JWTs (stream tokens).
+    /// SECURITY (SEC-119): All JWTs use RS256 — no HS256.
+    pub jwt_public_key_pem: String,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +246,8 @@ pub fn load() -> Result<Config> {
             port: metrics_port,
         },
         secret_key: zeroize::Zeroizing::new(secret_key),
+        jwt_public_key_pem: std::env::var("JWT_PUBLIC_KEY_PEM")
+            .context("JWT_PUBLIC_KEY_PEM environment variable is required for RS256 stream token verification")?,
     })
 }
 

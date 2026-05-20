@@ -352,11 +352,15 @@ Signatures use HMAC-SHA256 over the `timestamp.payload` format. The `X-ApexMail-
 
 ## Rate Limits
 
-| Scope | Limit |
-|-------|-------|
+Rate limits are **plan-based** and vary by subscription tier. See the [dedicated rate limits documentation](./rate-limits.md) for per-plan throughput tiers.
+
+| Scope | Typical Starter Limit |
+|-------|-----------------------|
 | API requests | 100 requests/second per API key |
 | Batch sends | 10 requests/second per API key |
 | Event stream (SSE) | 5 concurrent connections per API key |
+
+> **Note:** The limits above reflect the **Starter** plan. Free plans have lower limits (10 req/s), while Growth, Scale, and Enterprise plans support higher throughput (up to 5000 req/s). Always check the `X-RateLimit-Limit` response header for your actual rate limit.
 
 Rate limit information is returned in response headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`). SDKs surface this data through their rate-limit error types when limits are exceeded.
 

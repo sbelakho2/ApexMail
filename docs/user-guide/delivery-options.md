@@ -54,7 +54,7 @@ Available from the **Pro** plan (as add-on) and **Growth**+ plans (included). De
 - **DMARC**: Same as above.
 - **Bounce handling**: Handled via SMTP DSN (Delivery Status Notifications) parsed by our worker.
 - **IP reputation**: Monitored via DNSBL checks against 10 blocklist zones.
-- **45-day warmup**: New IPs follow a graduated warmup schedule. Excess traffic overflows to SES automatically.
+- **60-day warmup**: New IPs follow a graduated warmup schedule. Excess traffic overflows to SES automatically.
 
 ### DNS Records
 
@@ -66,7 +66,7 @@ Available from the **Pro** plan (as add-on) and **Growth**+ plans (included). De
 
 ### Warmup Schedule
 
-New dedicated IPs start with limited daily volume and gradually increase over 45 days:
+New dedicated IPs start with limited daily volume and gradually increase over 60 days:
 
 | Period | Daily Limit |
 |--------|-------------|
@@ -74,7 +74,10 @@ New dedicated IPs start with limited daily volume and gradually increase over 45
 | Day 8-14 | 1,000-2,500 |
 | Day 15-28 | 5,000-10,000 |
 | Day 29-44 | 25,000-50,000 |
-| Day 45+ | Unlimited |
+| Day 45-49 | 75,000 |
+| Day 50-54 | 100,000 |
+| Day 55-59 | 250,000 |
+| Day 60+ | Unlimited |
 
 During warmup, any excess traffic automatically goes through SES shared sending — your deliverability is never blocked.
 

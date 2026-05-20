@@ -20,7 +20,8 @@ use super::types::{
     SendResult, WarmupLimits,
 };
 use crate::common::{
-    CircuitBreaker, CircuitBreakerConfig, EmailConfig, ProcessorError, ProcessorResult, RedisPool,
+    Backpressure, BackpressureConfig, CircuitBreaker, CircuitBreakerConfig, EmailConfig,
+    ProcessorError, ProcessorResult, RedisPool,
 };
 
 /// Maximum suppression cache size.
@@ -64,6 +65,9 @@ pub struct EmailProcessor {
     // Error rate tracking
     recent_outcomes: Mutex<Vec<(SendOutcome, Instant)>>,
     error_cooldown_until: AtomicI64,
+
+    // SCALE-H-04: Backpressure / load shedding
+    backpressure: Arc<Backpressure>,
 }
 
 impl EmailProcessor {
@@ -78,6 +82,12 @@ impl EmailProcessor {
             success_threshold: 3,
             window_duration: Duration::from_secs(120),
         });
+
+        let backpressure = Arc::new(Backpressure::new(BackpressureConfig {
+            max_concurrency: config.base.concurrency,
+            max_backlog: 10_000,
+            ..Default::default()
+        }));
 
         Ok(Self {
             db,
@@ -103,6 +113,7 @@ impl EmailProcessor {
             smtp_circuit_breaker,
             recent_outcomes: Mutex::new(Vec::new()),
             error_cooldown_until: AtomicI64::new(0),
+            backpressure,
         })
     }
 
@@ -151,10 +162,16 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// Main poll loop.
+    /// Main poll loop with backpressure-based load shedding.
+    ///
+    /// SCALE-H-04: Uses [`Backpressure`] for load shedding when the queue
+    /// backlog exceeds the threshold, and tracks available capacity via the
+    /// backpressure semaphore.  The actual job processing concurrency is
+    /// still managed by the existing `active_jobs` atomic, but the semaphore
+    /// provides an additional hard cap and a load-shedding cooldown.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
-            // Check error rate cooldown
+            // ── Error rate cooldown ────────────────────────────
             let cooldown_until = self.error_cooldown_until.load(Ordering::SeqCst);
             let now = Utc::now().timestamp_millis();
             if now < cooldown_until {
@@ -167,7 +184,19 @@ impl EmailProcessor {
                 continue;
             }
 
-            // Check capacity
+            // ── SCALE-H-04: Load shedding check ───────────────
+            if self.backpressure.is_shedding() {
+                warn!(
+                    backlog = self.backpressure.backlog(),
+                    in_flight = self.backpressure.in_flight(),
+                    available = self.backpressure.available(),
+                    "Load shedding active — pausing poll loop"
+                );
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
+            // ── Available capacity ─────────────────────────────
             let available_slots = self
                 .config
                 .base
@@ -178,15 +207,20 @@ impl EmailProcessor {
                 continue;
             }
 
-            // Fetch jobs
+            // ── Fetch jobs ────────────────────────────────────
             match self.fetch_jobs(available_slots).await {
                 Ok(jobs) if jobs.is_empty() => {
+                    // SCALE-H-04: Observe zero backlog when queue is empty
+                    self.backpressure.observe_backlog(0);
                     tokio::select! {
                         _ = sleep(self.config.base.poll_interval) => {}
                         _ = self.shutdown_notify.notified() => break,
                     }
                 }
                 Ok(jobs) => {
+                    // SCALE-H-04: Observe backlog depth for load shedding
+                    self.backpressure.observe_backlog(jobs.len() as u64);
+
                     // Batch suppression check
                     let suppressions = self.batch_suppression_check(&jobs).await;
 

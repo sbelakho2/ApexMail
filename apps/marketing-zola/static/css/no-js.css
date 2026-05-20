@@ -90,7 +90,7 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   min-height: 120px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: rgb(var(--surface-50));
   border: 1px solid rgb(var(--surface-200));
   animation: pulse 1.5s ease-in-out infinite;

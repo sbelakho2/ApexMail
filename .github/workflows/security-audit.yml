@@ -32,6 +32,15 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      # =========================================================================
+      # SEC-101: Ignored Security Advisories
+      # =========================================================================
+      # Each ignored advisory MUST have a justification and a re-evaluation date.
+      # Do NOT add new --ignore flags without a corresponding comment.
+      #
+      # Review cadence: Every sprint (2 weeks) or when a fix becomes available.
+      # =========================================================================
+
       - name: Run cargo audit
         working-directory: services/mail-server
         run: |
@@ -52,6 +61,52 @@ jobs:
             --ignore RUSTSEC-2023-0086 \
             --ignore RUSTSEC-2026-0002 \
             2>&1 | tee cargo-audit-report.txt
+
+      # =========================================================================
+      # IGNORED ADVISORY JUSTIFICATIONS
+      # =========================================================================
+      # The following advisories are temporarily ignored. Each entry must include:
+      #   - Advisory ID
+      #   - Affected crate & version
+      #   - Vulnerability type
+      #   - Reason for ignoring (no fix available / fix requires major migration)
+      #   - Re-evaluation date
+      #
+      # RUSTSEC-2026-0119: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2024-0437: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2023-0071: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2026-0098: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2026-0099: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2026-0104: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2025-0141: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2025-0057: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2024-0384: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2024-0436: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2024-0370: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2025-0134: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2024-0320: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2023-0086: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      # RUSTSEC-2026-0002: [TODO: document affected crate, vulnerability type,
+      #   and reason for ignoring. Re-evaluate by 2026-06-01]
+      #
+      # IMPORTANT: Run `cargo audit` locally to see the full advisory details.
+      # To remove an ignore: update the affected dependency to a patched version,
+      # then remove the corresponding --ignore flag.
+      # =========================================================================
 
       - name: Upload audit report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -1424,8 +1424,7 @@ async fn get_dunning_state(
     )
     .bind(tenant_id)
     .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
+    .await?;
 
     Ok(Some(LegacyDunningStateDto {
         tenant_id: row.0,
@@ -3443,8 +3442,7 @@ async fn admin_get_tenant_details(
         sqlx::query_scalar("SELECT COUNT(*)::bigint FROM invoices WHERE tenant_id = $1")
             .bind(&tenant_id)
             .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+            .await?;
     let recent_invoices: Vec<LegacyInvoiceDto> =
         query_invoice_list_rows_with_legacy_fallback(&state.db, &tenant_id, 10, 0)
             .await?
@@ -3755,8 +3753,7 @@ async fn admin_reset_dunning(
     )
     .bind(&tenant_id)
     .fetch_one(&mut *tx)
-    .await
-    .unwrap_or(0);
+    .await?;
 
     sqlx::query(
         r#"
