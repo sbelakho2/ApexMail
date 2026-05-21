@@ -28,7 +28,7 @@ parking_lot = { workspace = true }
 dashmap = { workspace = true }
 ipnetwork = { workspace = true }
 url = { workspace = true }
-jsonwebtoken = "9.3"
+jsonwebtoken = "10.4"
 nanoid = "0.4"
 regex = { workspace = true }
 sqlx = { workspace = true }
