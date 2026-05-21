@@ -91,7 +91,7 @@ dotenvy.workspace = true
 rustls-pemfile = "2"
 x509-parser = "0.16"
 quick-xml = "0.36"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
