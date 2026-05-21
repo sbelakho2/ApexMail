@@ -79,7 +79,7 @@ nonzero_ext.workspace = true
 # Email protocols (for email processor)
 mail-builder.workspace = true
 mail-auth.workspace = true
-mail-send = "0.4"
+mail-send = "0.6"
 tokio-rustls = "0.26"
 rustls.workspace = true
 hex = "0.4"
