@@ -105,7 +105,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 
 # OpenTelemetry (distributed tracing)
 opentelemetry = { version = "0.24", features = ["trace"] }
