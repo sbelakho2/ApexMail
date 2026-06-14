@@ -27,6 +27,37 @@ fn ui_icon(name: &str, class_name: &str) -> String {
 pub(crate) const WEB_ROOT_HTML_CLASSES: &str = "__variable_712c26 __variable_60443c";
 pub(crate) const WEB_ROOT_BODY_CLASSES: &str = "font-apex antialiased text-[16px] leading-[1.55]";
 
+/// Returns an inline `<script>` block that provides theme bootstrapping and
+/// toggle interactivity for both the Web Dashboard and Control Plane shells.
+///
+/// The bootstrap portion runs immediately in `<head>` to prevent a flash of
+/// incorrect theme before CSS loads. It reads the user's saved preference from
+/// localStorage (key: "apexmail-ui:theme", matching `shell::theme_storage_key`)
+/// and applies the `.dark` class to `document.documentElement` if dark mode is
+/// active.
+///
+/// The toggle handler registers a click delegate on `[data-theme-toggle]`
+/// buttons that cycles through system → dark → light → system modes, updating
+/// localStorage and the `.dark` class accordingly. The `aria-pressed` attribute
+/// on the toggle button is updated to reflect the current mode.
+///
+/// The script tag will receive a CSP nonce via `inject_script_nonce` in
+/// `browser_html_response`, so it executes safely under the browser CSP.
+pub fn theme_script() -> String {
+    // Minified JS that bootstraps theme from localStorage on load and handles
+    // click toggling for any [data-theme-toggle] buttons in the shell header.
+    // localStorage key: "apexmail-ui:theme" — values: "dark", "light", or absent (system).
+    //
+    // The CSS uses both `.dark` class overrides AND a media query:
+    //   @media (prefers-color-scheme: dark) { :root:not(.light) { ... } }
+    // When the OS is in dark mode, the media query applies dark variables even if
+    // `.dark` class is absent. To switch to light mode, we must add a `.light`
+    // class to <html>, which negates `:not(.light)` and prevents the media query
+    // from matching.
+    let script = r#"(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();"#;
+    format!("<script>{script}</script>")
+}
+
 /// Pixel-identical reproduction of the web root layout contract.
 /// CSP is provided by the HTTP response header set in `browser_html_response`,
 /// so no `<meta>` CSP tag is rendered here — this avoids conflicting policies.
@@ -36,11 +67,13 @@ pub fn web_root_layout(child_html: &str) -> String {
 <html lang=\"en\" class=\"{html_classes}\">\
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail</title>\
 <meta name=\"description\" content=\"Modern email infrastructure for developers\">\
+{theme_script}\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\"></head>\
     <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main></body>\
 </html>",
         html_classes = WEB_ROOT_HTML_CLASSES,
         body_classes = WEB_ROOT_BODY_CLASSES,
+        theme_script = theme_script(),
         child_html = child_html,
     )
 }
@@ -54,9 +87,11 @@ pub fn control_plane_root_layout(child_html: &str) -> String {
 <html lang=\"en\">\
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail Control Plane</title>\
 <meta name=\"description\" content=\"ApexMail administration and monitoring\">\
+{theme_script}\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\"></head>\
 <body class=\"antialiased bg-background text-surface-950\">{child_html}</body>\
 </html>",
+        theme_script = theme_script(),
         child_html = child_html,
     )
 }
@@ -1411,8 +1446,26 @@ pub fn web_verify_email_page_with_state(
 
 /// Dashboard overview page with summary cards.
 pub fn web_dashboard_page() -> String {
+    let loading_state = format!(
+        "<section data-view-state=\"loading\" hidden aria-busy=\"true\">{}</section>",
+        AsyncState::Loading {
+            label: "Loading dashboard metrics",
+            source_label: Some("analytics"),
+        }
+        .render_html()
+    );
+    let error_state = format!(
+        "<section data-view-state=\"error\" hidden>{}</section>",
+        AsyncState::Error {
+            title: "Dashboard data unavailable",
+            description: "Metrics could not be loaded. Retry after checking connectivity to analytics services.",
+            retry_label: Some("Retry"),
+        }
+        .render_html()
+    );
     format!(
-        "<div class=\"space-y-6\">\
+        "<div class=\"space-y-6\">{loading_state}\
+<section data-view-state=\"ready\" class=\"space-y-6\">\
 <section class=\"apex-page-hero apex-console-hero\"><div><p class=\"apex-eyebrow\"><span>Delivery Command</span></p><h1 class=\"apex-hero-title\">Dashboard.</h1><p class=\"apex-hero-copy\">Campaign telemetry, inbox quality, and delivery risk in one sharp operator view.</p></div><div class=\"apex-hero-stat-grid\"><div><span>API</span><strong>Ready</strong></div><div><span>Webhooks</span><strong>P95</strong></div><div><span>Domains</span><strong>Clean</strong></div></div></section>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {card_sent}{card_delivered}{card_opened}{card_bounced}\
@@ -1420,13 +1473,24 @@ pub fn web_dashboard_page() -> String {
 <div class=\"grid gap-6 md:grid-cols-2\">\
 <div class=\"apex-panel apex-chart-card rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Send Volume</h3>{chart}</div>\
 <div class=\"apex-panel apex-chart-card rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Delivery Rate</h3>{area}</div>\
-</div></div>",
+</div></section>\
+{error_state}\
+<section data-view-state=\"empty\" hidden>{empty_state}</section></div>",
         card_sent = format!("<article aria-label=\"Emails Sent: 0 in the last 30 days\">{}</article>", Card { title: "Emails Sent", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
         card_delivered = format!("<article aria-label=\"Delivered: 0 emails with 99.8% rate\">{}</article>", Card { title: "Delivered", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">99.8% rate</p>", variant: "default", padding: "default", interactive: false }.render_html()),
         card_opened = format!("<article aria-label=\"Opened: 0 emails with 42.3% rate\">{}</article>", Card { title: "Opened", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">42.3% rate</p>", variant: "default", padding: "default", interactive: false }.render_html()),
         card_bounced = format!("<article aria-label=\"Bounced: 0 emails with 0.2% rate\">{}</article>", Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">0.2% rate</p>", variant: "default", padding: "default", interactive: false }.render_html()),
         chart = ApexBarChart { title: None, description: None, last_updated_label: None, height: 256, bars: vec![], data_count: 0, layout: "vertical", empty_state_reason: "No data" }.render_html(),
         area = ApexAreaChart { title: None, description: None, last_updated_label: None, height: 256, areas: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
+        loading_state = loading_state,
+        error_state = error_state,
+        empty_state = EmptyState {
+            title: "No dashboard metrics yet",
+            description: Some("Metrics appear after your first sends and events are ingested."),
+            icon_markup: None,
+            action_label: Some("Go to Campaigns"),
+        }
+        .render_html(),
     )
 }
 
@@ -1586,8 +1650,14 @@ pub fn web_campaigns_page() -> String {
     }
     .render_html();
     let breadcrumbs = render_page_breadcrumbs("Campaigns");
+    let error_state = AsyncState::Error {
+        title: "Campaign list unavailable",
+        description: "Campaign data failed to load. Retry after verifying API connectivity.",
+        retry_label: Some("Retry"),
+    }
+    .render_html();
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Keep campaign lists responsive, searchable, and resumable without losing your current page.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"campaign-delete-confirmation\">{delete_dialog}</div></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Keep campaign lists responsive, searchable, and resumable without losing your current page.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section><div hidden id=\"campaign-delete-confirmation\">{delete_dialog}</div></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "campaign-search",
@@ -1602,6 +1672,7 @@ pub fn web_campaigns_page() -> String {
         table = table.render_html(),
         pagination = pagination,
         empty = EmptyState { title: "No campaigns yet", description: Some("Create your first email campaign"), icon_markup: None, action_label: Some("Create Campaign") }.render_html(),
+        error_state = error_state,
         delete_dialog = delete_dialog,
     )
 }
@@ -2034,14 +2105,21 @@ pub fn web_templates_page() -> String {
         ],
         rows: vec![],
     };
+    let error_state = AsyncState::Error {
+        title: "Template library unavailable",
+        description: "Templates failed to load. Retry after the templates service recovers.",
+        retry_label: Some("Retry"),
+    }
+    .render_html();
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Templates</h1>\
 <a href=\"/templates/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">New Template</a></div>\
-{loading}{table}{empty}</div>",
+{loading}<section data-view-state=\"ready\">{table}</section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section></div>",
         loading = render_table_loading_state("Loading templates", "api", 3),
         table = table.render_html(),
         empty = EmptyState { title: "No templates yet", description: Some("Create reusable email templates"), icon_markup: None, action_label: Some("Create Template") }.render_html(),
+        error_state = error_state,
     )
 }
 
@@ -2223,19 +2301,46 @@ pub fn web_inbox_placement_detail_page() -> String {
 
 /// Analytics page.
 pub fn web_analytics_page() -> String {
+    let loading_state = format!(
+        "<section data-view-state=\"loading\" hidden aria-busy=\"true\">{}</section>",
+        AsyncState::Loading {
+            label: "Loading analytics",
+            source_label: Some("events"),
+        }
+        .render_html()
+    );
+    let error_state = format!(
+        "<section data-view-state=\"error\" hidden>{}</section>",
+        AsyncState::Error {
+            title: "Analytics unavailable",
+            description: "Analytics data could not be loaded. Retry after checking event ingestion services.",
+            retry_label: Some("Retry"),
+        }
+        .render_html()
+    );
     format!(
-        "<div class=\"space-y-6\">\
+        "<div class=\"space-y-6\">{loading_state}\
+<section data-view-state=\"ready\" class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Analytics</h1>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {card_sent}{card_opens}{card_clicks}{card_unsubs}\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Engagement Over Time</h3><div class=\"h-64\">{chart}</div></div>\
-</div>",
+</section>{error_state}<section data-view-state=\"empty\" hidden>{empty_state}</section></div>",
         card_sent = Card { title: "Total Sent", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         card_opens = Card { title: "Unique Opens", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         card_clicks = Card { title: "Unique Clicks", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         card_unsubs = Card { title: "Unsubscribes", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
+        loading_state = loading_state,
+        error_state = error_state,
+        empty_state = EmptyState {
+            title: "No analytics events yet",
+            description: Some("Analytics will populate once campaigns generate opens, clicks, and unsubscribes."),
+            icon_markup: None,
+            action_label: Some("View Campaigns"),
+        }
+        .render_html(),
     )
 }
 
@@ -2376,7 +2481,23 @@ pub fn web_domains_new_page() -> String {
 
 /// Settings overview page.
 pub fn web_settings_page() -> String {
-    "<div class=\"space-y-6\">\
+    let loading_state = format!(
+        "<section data-view-state=\"loading\" hidden aria-busy=\"true\">{}</section>",
+        AsyncState::Loading {
+            label: "Loading settings",
+            source_label: Some("config"),
+        }
+        .render_html()
+    );
+    let error_state = AsyncState::Error {
+        title: "Settings unavailable",
+        description: "Settings could not be loaded. Retry after verifying account and billing services.",
+        retry_label: Some("Retry"),
+    }
+    .render_html();
+    format!(
+        "<div class=\"space-y-6\">{loading_state}\
+<section data-view-state=\"ready\" class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Settings</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
 <a href=\"/settings/api-keys\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">API Keys</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage your API keys</p></a>\
@@ -2385,7 +2506,17 @@ pub fn web_settings_page() -> String {
 <a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage dedicated sending IPs</p></a>\
 <a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Configure event webhooks</p></a>\
 <a href=\"/settings/profile\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Profile</h3><p class=\"text-sm text-muted-foreground mt-1\">Your account settings</p></a>\
-</nav></div>".to_string()
+</nav></section><section data-view-state=\"empty\" hidden>{empty_state}</section><section data-view-state=\"error\" hidden>{error_state}</section></div>",
+        loading_state = loading_state,
+        empty_state = EmptyState {
+            title: "No settings available",
+            description: Some("Settings modules will appear after your workspace is provisioned."),
+            icon_markup: None,
+            action_label: Some("Refresh"),
+        }
+        .render_html(),
+        error_state = error_state,
+    )
 }
 
 /// API keys settings page.
