@@ -1,0 +1,8 @@
+{# ── Shared translation macro ── #}
+{%- macro t(section, key, fallback) -%}
+  {%- if i18n_data and i18n_data[l] and i18n_data[l][section] and i18n_data[l][section][key] -%}
+    {{- i18n_data[l][section][key] | safe -}}
+  {%- else -%}
+    {{- fallback | safe -}}
+  {%- endif -%}
+{%- endmacro t -%}
