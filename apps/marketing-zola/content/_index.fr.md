@@ -1,8 +1,9 @@
 +++
-title = "ApexMail - API d'email professionnelle pour developpeurs"
-description = "API d'email professionnelle avec workflows de conformite, suivi de livraison et APIs orientees developpeur. Hebergee dans l'UE, conforme RGPD, avec options de deploiement prive Enterprise."
-template = "home.html"
+title = "Tarifs | API Email Transactionnelle et SMTP | ApexMail"
+template = "pricing.html"
+description = "Tarifs ApexMail : Gratuit (30 000 emails/mois), Développeur (50K/29 €), Pro (150K/89 €), Croissance (500K/229 €), Business (2M/699 €), Enterprise (5M/3 000 €). Hébergé dans l'UE, remise annuelle disponible."
 
 [extra]
-og_image = "/images/og-home.png"
+og_image = "/images/og-pricing.png"
+pricing_as_of = "2026-07-29"
 +++

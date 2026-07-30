@@ -1,6 +1,20 @@
 # Automations API
 
+> **Base path:** `/v1/automations`
+> **Required scopes:** `automations:read` (GET), `automations:write` (POST / PUT / DELETE)
+> **Rate limit:** 60 requests/minute per API key
+> **Idempotency:** Supported via `Idempotency-Key` header for POST endpoints
+> **Content-Type:** `application/json`
+
 The Automations API allows you to create and manage automated email workflows.
+
+## Authentication
+
+Include your API key in the `X-API-Key` header:
+
+```
+X-API-Key: am_live_...
+```
 
 ## Endpoints
 
@@ -306,3 +320,22 @@ X-API-Key: {{api_key}}
 | `NOT_FOUND` | 404 | Automation doesn't exist |
 | `VALIDATION_ERROR` | 422 | Invalid trigger, action, or condition configuration |
 | `INVALID_STATE` | 400 | Action not allowed for current automation status |
+| `UNAUTHORIZED` | 401 | API key is missing or invalid |
+| `INSUFFICIENT_SCOPE` | 403 | API key does not have the required scope |
+| `RATE_LIMIT_EXCEEDED` | 429 | Too many requests |
+
+---
+
+## Related Webhooks
+
+Automation events are delivered via webhooks:
+
+| Event | Description |
+|-------|-------------|
+| `automation.triggered` | An automation workflow was triggered |
+| `automation.action.executed` | An individual action within an automation completed |
+| `automation.completed` | An automation workflow completed all actions |
+| `automation.failed` | An automation action failed |
+| `automation.paused` | Automation was paused (manually or on error) |
+
+See the [Webhooks Reference](../webhooks.md) for configuration and signature verification.

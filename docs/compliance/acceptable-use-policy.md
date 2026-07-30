@@ -2,7 +2,7 @@
 
 > **Classification:** Internal Policy / Customer-Facing (summary published in ToS)
 > **Owner:** Trust & Safety, Bel Consulting OÜ
-> **Legal Entity:** Bel Consulting OÜ, Registry Code 16192499, Tallinn, Estonia
+> **Legal Entity:** Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
 > **Last Reviewed:** 2026-02-09
 > **Review Cycle:** Semi-annually
 

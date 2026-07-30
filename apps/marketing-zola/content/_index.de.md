@@ -1,5 +1,5 @@
 +++
-title = "ApexMail - E-Mail-API fur Entwickler"
+title = "ApexMail - E-Mail-API für Entwickler"
 description = "Enterprise-E-Mail-API mit Compliance-Workflows, Zustellungsverfolgung und entwicklerfreundlichen APIs. EU-gehostet, DSGVO-konform, mit privaten Enterprise-Bereitstellungsoptionen."
 template = "home.html"
 

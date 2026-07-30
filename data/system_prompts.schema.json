@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://apexmail.ee/schemas/system-prompts.json",
+  "title": "ApexMail System Prompts",
+  "description": "Schema for data/system_prompts.json — the shared system prompt catalog referenced by compact training, validation, and test JSONL records.",
+  "type": "object",
+  "required": ["schemaVersion", "prompts"],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "description": "Version of this schema (currently 1).",
+      "enum": [1]
+    },
+    "prompts": {
+      "type": "object",
+      "description": "Map of prompt ID to system prompt content.",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/definitions/SystemPrompt"
+      }
+    }
+  },
+  "definitions": {
+    "SystemPrompt": {
+      "type": "object",
+      "description": "A single system prompt entry identified by its hash or ID.",
+      "required": ["content"],
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "The system prompt text content, typically in ChatML format.",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "description": "SHA-256 hex digest of the content field for integrity verification.",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

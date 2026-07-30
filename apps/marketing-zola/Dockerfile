@@ -15,10 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Zola v0.19.2 only publishes a Linux x86_64 binary. Pin the builder stage to
-# linux/amd64 so local Apple Silicon builds and CI builds use the same toolchain.
+# Pin the builder stage to linux/amd64 so local Apple Silicon builds and CI
+# builds use the same toolchain.
 RUN set -eux; \
-        curl -sL "https://github.com/getzola/zola/releases/download/v0.19.2/zola-v0.19.2-x86_64-unknown-linux-gnu.tar.gz" \
+        curl -sL "https://github.com/getzola/zola/releases/download/v0.22.1/zola-v0.22.1-x86_64-unknown-linux-gnu.tar.gz" \
             | tar xz -C /usr/local/bin; \
         curl -sLo /usr/local/bin/tailwindcss \
             "https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-linux-x64"; \

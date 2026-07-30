@@ -1,0 +1,481 @@
+{# ── ApexMail Pricing Calculator ────────────────────────────────── #}
+{# Aligned with billing engine plan boundaries (auth-server).            #}
+{# Inputs: monthly messages, peak daily, dedicated IPs, sending domains, #}
+{#         team users, support level, deployment model.                  #}
+{# Outputs: recommended plan, included volume, overage, IP cost,         #}
+{#          setup fee, monthly total, annual total, effective per‑1K,    #}
+{#          next-plan crossover.                                         #}
+
+<section class="py-16 lg:py-24 bg-white relative overflow-hidden" id="apexmail-calculator" aria-labelledby="calculator-heading">
+  <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+
+    <div class="text-center mb-12">
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-brand-50 text-brand-700 border border-brand-100/50 text-xs font-bold tracking-widest uppercase mb-4">
+        <div class="w-2 h-2 bg-brand-500" aria-hidden="true"></div>
+        Interactive Calculator
+      </div>
+      <h2 id="calculator-heading" class="text-3xl lg:text-4xl font-bold text-surface-950 mb-4 tracking-tight">
+        Calculate Your <span class="text-brand-500">ApexMail Cost</span>
+      </h2>
+      <p class="text-base text-surface-500 leading-relaxed max-w-xl mx-auto">
+        Adjust your volume and options below. All plan boundaries tested against the billing engine.
+      </p>
+    </div>
+
+    <div class="apex-card p-6 sm:p-8 lg:p-10 border-surface-200/50 shadow-premium">
+
+      {# ── Inputs ──────────────────────────────────────────── #}
+      <div class="space-y-8">
+
+        {# Monthly volume slider + text input #}
+        <div>
+          <label for="calc-volume" class="block text-[10px] font-bold text-surface-950 tracking-[0.2em] uppercase mb-2">
+            Monthly email volume
+          </label>
+          <div class="flex items-center gap-4">
+            <input type="range"
+                   id="calc-volume-slider"
+                   min="0" max="10000000" step="1000" value="50000"
+                   class="flex-1 h-1.5 bg-surface-200 rounded-sm appearance-none cursor-pointer accent-brand-500"
+                   aria-label="Monthly email volume slider" />
+            <input type="number"
+                   id="calc-volume"
+                   min="0" max="100000000" step="1000"
+                   value="50000"
+                   class="w-36 rounded-sm border border-surface-200 bg-surface-50 px-3 py-2 text-sm text-surface-950 font-bold tabular-nums text-right focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                   aria-label="Monthly email volume exact number" />
+          </div>
+          <div class="flex justify-between text-[10px] font-bold text-surface-400 mt-1.5">
+            <span>0</span><span>1M</span><span>2.5M</span><span>5M</span><span>7.5M</span><span>10M</span>
+          </div>
+        </div>
+
+        {# Peak daily volume #}
+        <div>
+          <label for="calc-peak-daily" class="block text-[10px] font-bold text-surface-950 tracking-[0.2em] uppercase mb-2">
+            Peak daily volume
+          </label>
+          <input type="number"
+                 id="calc-peak-daily"
+                 min="0" max="50000000" step="1000" value="2500"
+                 class="w-44 rounded-sm border border-surface-200 bg-surface-50 px-3 py-2 text-sm text-surface-950 font-bold tabular-nums focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                 aria-label="Peak daily email volume" />
+          <p class="text-[11px] text-surface-400 mt-1 leading-relaxed">Used to estimate burst capacity needs. Typically monthly &divide; 20.</p>
+        </div>
+
+        {# Sending domains, Team users, Dedicated IPs row #}
+        <div class="grid sm:grid-cols-3 gap-6">
+          <div>
+            <label for="calc-domains" class="block text-[10px] font-bold text-surface-950 tracking-[0.2em] uppercase mb-2">
+              Sending domains
+            </label>
+            <input type="number"
+                   id="calc-domains"
+                   min="1" max="1000" step="1" value="2"
+                   class="w-32 rounded-sm border border-surface-200 bg-surface-50 px-3 py-2 text-sm text-surface-950 font-bold tabular-nums focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                   aria-label="Number of sending domains" />
+          </div>
+          <div>
+            <label for="calc-team-users" class="block text-[10px] font-bold text-surface-950 tracking-[0.2em] uppercase mb-2">
+              Team users
+            </label>
+            <input type="number"
+                   id="calc-team-users"
+                   min="1" max="5000" step="1" value="3"
+                   class="w-32 rounded-sm border border-surface-200 bg-surface-50 px-3 py-2 text-sm text-surface-950 font-bold tabular-nums focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                   aria-label="Number of team users" />
+          </div>
+          <div>
+            <label for="calc-dedicated-ips" class="block text-[10px] font-bold text-surface-950 tracking-[0.2em] uppercase mb-2">
+              Dedicated IPs
+            </label>
+            <input type="number"
+                   id="calc-dedicated-ips"
+                   min="0" max="100" step="1" value="0"
+                   class="w-32 rounded-sm border border-surface-200 bg-surface-50 px-3 py-2 text-sm text-surface-950 font-bold tabular-nums focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+                   aria-label="Number of dedicated IPs" />
+          </div>
+        </div>
+
+        {# Support level + Deployment model + Billing cycle row #}
+        <div class="grid sm:grid-cols-3 gap-6">
+          <div>
+            <label for="calc-support" class="block text-[10px] font-bold text-surface-950 tracking-[0.2em] uppercase mb-2">
+              Support level
+            </label>
+            <select id="calc-support"
+                    class="w-full rounded-sm border border-surface-200 bg-surface-50 px-3 py-2 text-sm text-surface-950 font-bold focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500">
+              <option value="community">Community</option>
+              <option value="email" selected>Email (24–48h)</option>
+              <option value="priority">Priority</option>
+              <option value="dedicated">Dedicated CSM</option>
+            </select>
+          </div>
+          <div>
+            <label for="calc-deployment" class="block text-[10px] font-bold text-surface-950 tracking-[0.2em] uppercase mb-2">
+              Deployment model
+            </label>
+            <select id="calc-deployment"
+                    class="w-full rounded-sm border border-surface-200 bg-surface-50 px-3 py-2 text-sm text-surface-950 font-bold focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500">
+              <option value="shared" selected>Shared cloud</option>
+              <option value="private">Private cloud</option>
+              <option value="byoc">BYOC</option>
+            </select>
+          </div>
+          <div class="flex flex-col justify-end">
+            <span class="block text-[10px] font-bold text-surface-950 tracking-[0.2em] uppercase mb-2">Billing cycle</span>
+            <div class="inline-flex rounded-sm border border-surface-200 overflow-hidden" role="radiogroup" aria-label="Billing cycle">
+              <button type="button" id="calc-monthly-btn"
+                      class="px-4 py-2 text-xs font-bold tracking-widest uppercase bg-surface-950 text-white transition-colors"
+                      data-period="monthly" role="radio" aria-checked="true">Monthly</button>
+              <button type="button" id="calc-annual-btn"
+                      class="px-4 py-2 text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-surface-950 transition-colors"
+                      data-period="annual" role="radio" aria-checked="false">Annual (&minus;10%)</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# ── Results ──────────────────────────────────────────── #}
+      <div class="mt-10 pt-10 border-t border-surface-200">
+        <h3 class="text-[10px] font-bold text-surface-950 tracking-[0.2em] uppercase mb-6">Your estimate</h3>
+        <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4" id="calc-results">
+          <noscript>
+            <div class="bg-surface-50 border border-surface-200 rounded-sm p-4 text-center">
+              <p class="text-xs text-surface-500">Enable JavaScript for the interactive calculator.</p>
+            </div>
+          </noscript>
+        </div>
+        <div id="calc-next-plan" class="mt-6 p-4 bg-surface-50 border border-surface-200 rounded-sm text-[12px] text-surface-600 leading-relaxed" hidden>
+          <span id="calc-next-plan-text"></span>
+        </div>
+        <div id="calc-warnings" class="mt-4 p-4 bg-warning-50/30 border border-warning-200 rounded-sm text-[12px] text-warning-700 leading-relaxed" hidden>
+          <span id="calc-warnings-text"></span>
+        </div>
+      </div>
+
+      {# ── Methodology note ──────────────────────────────────── #}
+      <div class="mt-8 pt-6 border-t border-surface-200">
+        <p class="text-[10px] text-surface-400 leading-relaxed">
+          Plan boundaries drawn from the billing engine: Free (30,000/mo), Starter (50K/mo), Pro (150K/mo), Growth (500K/mo), Scale (2M/mo), Enterprise (5M/mo).
+          Dedicated IPs &euro;30/mo each &mdash; Pro supports add-on IPs (not included); Growth includes 1; Scale includes 3; Enterprise includes 10.
+          Shared-cloud plans have no setup fee. Private Cloud (dedicated tenant) from &euro;4,000/mo + &euro;10,000 setup. BYOC from &euro;6,500/mo + &euro;20,000 setup.
+          Enterprise requires an annual contract. All totals exclude VAT.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script nonce="{{ config.extra.csp_nonce | default(value='static-build') }}">
+(function () {
+  'use strict';
+
+  var plans = [
+    { name: 'Free',         monthlyPrice: 0,    annualPricePerMonth: 0,    includedVolume: 30000,   overagePer1K: null, includedIPs: 0,  includedDomains: 1,  includedUsers: 1,  support: 'community', setupFee: 0 },
+    { name: 'Starter',      monthlyPrice: 25,   annualPricePerMonth: 22.5, includedVolume: 50000,   overagePer1K: 0.80, includedIPs: 0,  includedDomains: 5,  includedUsers: 5,  support: 'email',    setupFee: 0 },
+    { name: 'Pro',          monthlyPrice: 65,   annualPricePerMonth: 58.5, includedVolume: 150000,  overagePer1K: 0.60, includedIPs: 0,  includedDomains: 25, includedUsers: 10, support: 'email',    setupFee: 0 },
+    { name: 'Growth',       monthlyPrice: 150,  annualPricePerMonth: 135,  includedVolume: 500000,  overagePer1K: 0.40, includedIPs: 1,  includedDomains: 100, includedUsers: 25, support: 'email',    setupFee: 0 },
+    { name: 'Scale',        monthlyPrice: 350,  annualPricePerMonth: 315,  includedVolume: 2000000, overagePer1K: 0.30, includedIPs: 3,  includedDomains: 999, includedUsers: 50, support: 'priority', setupFee: 0 },
+    { name: 'Enterprise',   monthlyPrice: 3000, annualPricePerMonth: 2700, includedVolume: 5000000, overagePer1K: 0.22, includedIPs: 10, includedDomains: 999, includedUsers: 999, support: 'dedicated', setupFee: 0 }
+  ];
+
+  var DEPLOYMENT_SETUP = { shared: 0, private: 10000, byoc: 20000 };
+  var DEPLOYMENT_MONTHLY = { shared: 0, private: 4000, byoc: 6500 };
+  var IP_COST = 30;
+
+  function fmtEUR(n) {
+    if (typeof n !== 'number' || Number.isNaN(n)) return '\u2014';
+    return '\u20AC' + n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  }
+  function fmtEUR2(n) {
+    if (typeof n !== 'number' || Number.isNaN(n)) return '\u2014';
+    return '\u20AC' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function fmtPricePer1K(n) {
+    if (typeof n !== 'number' || Number.isNaN(n) || n === 0) return '\u2014';
+    return '\u20AC' + n.toFixed(2);
+  }
+  function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+  function recommendPlan(volume) {
+    for (var i = 0; i < plans.length; i++) {
+      if (volume <= plans[i].includedVolume) return i;
+    }
+    return plans.length - 1;
+  }
+
+  function calcDedicatedIPCost(plan, requestedIPs) {
+    if (requestedIPs <= plan.includedIPs) return 0;
+    var extraIPs = requestedIPs - plan.includedIPs;
+    return extraIPs * IP_COST;
+  }
+
+  function calcOverage(plan, volume) {
+    if (plan.overagePer1K === null) return 0;
+    var over = Math.max(0, volume - plan.includedVolume);
+    return Math.round(over / 1000) * plan.overagePer1K;
+  }
+
+  function calcSetupFee(deployment) {
+    return DEPLOYMENT_SETUP[deployment] || 0;
+  }
+
+  function findNextPlan(planIndex) {
+    if (planIndex >= plans.length - 1) return null;
+    return plans[planIndex + 1];
+  }
+
+  function calcNextPlanCrossover(planIndex, volume, isAnnual, ipCost, setupFee) {
+    if (planIndex >= plans.length - 1) return null;
+    var current = plans[planIndex];
+    var next = plans[planIndex + 1];
+    var currentBase = isAnnual ? current.annualPricePerMonth : current.monthlyPrice;
+    var nextBase = isAnnual ? next.annualPricePerMonth : next.monthlyPrice;
+    var currentOverage = calcOverage(current, volume);
+    var currentTotal = currentBase + currentOverage + ipCost;
+
+    var nextOverageAtCurrentVolume = calcOverage(next, volume);
+    var nextIPCost = calcDedicatedIPCost(next, requestedIPs());
+    var nextTotal = nextBase + nextOverageAtCurrentVolume + nextIPCost;
+
+    if (nextTotal < currentTotal && volume <= next.includedVolume * 1.5) {
+      return { volume: next.includedVolume + 1000, save: currentTotal - nextTotal };
+    }
+
+    var breakEvenVolume = null;
+    if (current.overagePer1K !== null) {
+      for (var v = current.includedVolume + 1000; v <= next.includedVolume + 100000; v += 1000) {
+        var cO = calcOverage(current, v);
+        var nO = calcOverage(next, v);
+        var cT = currentBase + cO + ipCost;
+        var nT = nextBase + nO + nextIPCost;
+        if (nT <= cT) {
+          breakEvenVolume = v;
+          break;
+        }
+      }
+    }
+
+    return { volume: breakEvenVolume || (next.includedVolume + 1000), save: null };
+  }
+
+  function domainsOk(plan, domains) { return domains <= plan.includedDomains; }
+  function usersOk(plan, users) { return users <= plan.includedUsers; }
+  function supportOk(plan, support) {
+    var ranks = { community: 0, email: 1, priority: 2, dedicated: 3 };
+    return (ranks[plan.support] || 0) >= (ranks[support] || 0);
+  }
+
+  var g = {};
+  function el(id) { return document.getElementById(id); }
+
+  function requestedIPs() { return clamp(parseInt(el('calc-dedicated-ips').value, 10) || 0, 0, 100); }
+  function requestedDomains() { return clamp(parseInt(el('calc-domains').value, 10) || 1, 1, 1000); }
+  function requestedUsers() { return clamp(parseInt(el('calc-team-users').value, 10) || 1, 1, 5000); }
+  function requestedSupport() { return el('calc-support').value; }
+  function requestedDeployment() { return el('calc-deployment').value; }
+
+  function validateConstraints(planIndex, domains, users, support) {
+    var warnings = [];
+    var plan = plans[planIndex];
+    if (!domainsOk(plan, domains)) warnings.push('Domains (' + domains + ') exceed ' + plan.name + ' limit (' + plan.includedDomains + '). Upgrade to a higher tier.');
+    if (!usersOk(plan, users)) warnings.push('Team users (' + users + ') exceed ' + plan.name + ' limit (' + plan.includedUsers + '). Upgrade to a higher tier.');
+    if (!supportOk(plan, support)) warnings.push('Support level "' + support + '" requires a higher plan (' + plan.name + ' provides "' + plan.support + '").');
+    return warnings;
+  }
+
+  function render(volume, isAnnual, ipReq, domains, users, support, deployment) {
+    var planIndex = recommendPlan(volume);
+    var plan = plans[planIndex];
+
+    // Upgrade plan if constraints require it
+    while (planIndex < plans.length - 1 &&
+           (!domainsOk(plan, domains) || !usersOk(plan, users) || !supportOk(plan, support))) {
+      planIndex++;
+      plan = plans[planIndex];
+    }
+
+    var basePrice = isAnnual ? plan.annualPricePerMonth : plan.monthlyPrice;
+    var overageCost = calcOverage(plan, volume);
+    var ipCost = calcDedicatedIPCost(plan, ipReq);
+    var setupFee = calcSetupFee(deployment);
+    var deploymentMonthly = DEPLOYMENT_MONTHLY[deployment] || 0;
+    var monthlyTotal = basePrice + overageCost + ipCost + deploymentMonthly;
+    var annualTotal = monthlyTotal * 12 + setupFee;
+    var effectivePer1K = volume > 0 ? (monthlyTotal / volume * 1000) : 0;
+    var overageVolume = Math.max(0, volume - plan.includedVolume);
+
+    el('calc-result-plan').textContent = plan.name;
+    el('calc-result-included').textContent = plan.includedVolume.toLocaleString();
+    el('calc-result-overage').textContent = overageVolume.toLocaleString();
+    el('calc-result-base').textContent = fmtEUR(basePrice) + '/mo';
+    el('calc-result-ip').textContent = ipCost > 0 ? fmtEUR(ipCost) + '/mo' : '\u20AC0';
+    el('calc-result-setup').textContent = setupFee > 0 ? fmtEUR(setupFee) + ' one-time' : '\u20AC0';
+    el('calc-result-monthly').textContent = fmtEUR2(monthlyTotal) + '/mo';
+    el('calc-result-annual').textContent = fmtEUR2(annualTotal) + '/yr';
+    el('calc-result-per1k').textContent = fmtPricePer1K(effectivePer1K);
+    el('calc-result-domains').textContent = plan.includedDomains >= 999 ? 'Unlimited' : String(plan.includedDomains);
+    el('calc-result-users').textContent = plan.includedUsers >= 999 ? 'Unlimited' : String(plan.includedUsers);
+    el('calc-result-support').textContent = plan.support;
+
+    if (overageCost > 0) {
+      el('calc-result-overage-val').textContent = fmtEUR2(overageCost) + '/mo';
+      el('calc-result-overage-val').parentElement.removeAttribute('hidden');
+    } else {
+      el('calc-result-overage-val').parentElement.setAttribute('hidden', '');
+    }
+
+    // Next-plan crossover
+    var nextPlanEl = el('calc-next-plan');
+    var nextPlanText = el('calc-next-plan-text');
+    var crossover = calcNextPlanCrossover(planIndex, volume, isAnnual, ipCost, setupFee);
+
+    if (crossover && crossover.volume > volume) {
+      var next = plans[planIndex + 1];
+      var msg = 'Upgrade to ' + next.name + ' at ~' + crossover.volume.toLocaleString() + ' emails/month. ';
+      msg += next.name + ' base: ' + fmtEUR(isAnnual ? next.annualPricePerMonth : next.monthlyPrice) + '/mo with ' + next.includedVolume.toLocaleString() + ' included.';
+      if (crossover.save !== null && crossover.save > 0) {
+        msg += ' Estimated savings: ' + fmtEUR2(crossover.save) + '/mo at crossover volume.';
+      }
+      nextPlanText.textContent = msg;
+      nextPlanEl.removeAttribute('hidden');
+    } else if (planIndex === plans.length - 1 && volume > plan.includedVolume) {
+      nextPlanText.textContent = 'Volume exceeds ' + plan.includedVolume.toLocaleString() + '/month. Contact sales for Enterprise custom pricing, Dedicated Tenant, or BYOC options.';
+      nextPlanEl.removeAttribute('hidden');
+    } else if (planIndex === plans.length - 1) {
+      nextPlanText.textContent = 'Enterprise plan covers ' + plan.includedVolume.toLocaleString() + ' emails/mo with 10 included IPs, unlimited domains/users, and named CSM. Contact sales for custom scoping.';
+      nextPlanEl.removeAttribute('hidden');
+    } else {
+      nextPlanEl.setAttribute('hidden', '');
+    }
+
+    // Warnings
+    var warnEl = el('calc-warnings');
+    var warnText = el('calc-warnings-text');
+    var warnings = validateConstraints(planIndex, domains, users, support);
+
+    if (deployment === 'private' || deployment === 'byoc') {
+      var depLabel = deployment === 'private' ? 'Private Cloud' : 'BYOC';
+      var depMonthly = fmtEUR(DEPLOYMENT_MONTHLY[deployment] || 0);
+      warnings.push(depLabel + ' deployment requires an Enterprise annual contract. Setup: ' + fmtEUR(setupFee) + ' one-time, platform fee: ' + depMonthly + '/mo.');
+    }
+
+    if (warnings.length > 0) {
+      warnText.textContent = warnings.join(' ');
+      warnEl.removeAttribute('hidden');
+    } else {
+      warnEl.setAttribute('hidden', '');
+    }
+  }
+
+  var state = { volume: 50000, isAnnual: false, dedicatedIPs: 0, domains: 2, users: 3, support: 'email', deployment: 'shared' };
+
+  function syncAll() {
+    update();
+  }
+  function syncFromSlider() { state.volume = parseInt(el('calc-volume-slider').value, 10); el('calc-volume').value = state.volume; update(); }
+  function syncFromInput() { state.volume = clamp(parseInt(el('calc-volume').value, 10) || 0, 0, 100000000); el('calc-volume-slider').value = state.volume; update(); }
+  function syncDedicatedIPs() { state.dedicatedIPs = requestedIPs(); update(); }
+  function syncDomains() { state.domains = requestedDomains(); update(); }
+  function syncUsers() { state.users = requestedUsers(); update(); }
+  function syncSupport() { state.support = requestedSupport(); update(); }
+  function syncDeployment() { state.deployment = requestedDeployment(); update(); }
+  function syncPeakDaily() {
+    var peak = clamp(parseInt(el('calc-peak-daily').value, 10) || 0, 0, 50000000);
+    state.volume = Math.max(state.volume, peak * 20);
+    el('calc-volume').value = state.volume;
+    el('calc-volume-slider').value = state.volume;
+    update();
+  }
+
+  function setPeriod(isAnnual) {
+    state.isAnnual = isAnnual;
+    if (isAnnual) {
+      el('calc-monthly-btn').className = 'px-4 py-2 text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-surface-950 transition-colors';
+      el('calc-monthly-btn').setAttribute('aria-checked', 'false');
+      el('calc-annual-btn').className = 'px-4 py-2 text-xs font-bold tracking-widest uppercase bg-surface-950 text-white transition-colors';
+      el('calc-annual-btn').setAttribute('aria-checked', 'true');
+    } else {
+      el('calc-monthly-btn').className = 'px-4 py-2 text-xs font-bold tracking-widest uppercase bg-surface-950 text-white transition-colors';
+      el('calc-monthly-btn').setAttribute('aria-checked', 'true');
+      el('calc-annual-btn').className = 'px-4 py-2 text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-surface-950 transition-colors';
+      el('calc-annual-btn').setAttribute('aria-checked', 'false');
+    }
+    update();
+  }
+
+  function update() {
+    render(state.volume, state.isAnnual, requestedIPs(), requestedDomains(), requestedUsers(), requestedSupport(), requestedDeployment());
+  }
+
+  el('calc-volume-slider').addEventListener('input', syncFromSlider);
+  el('calc-volume').addEventListener('change', syncFromInput);
+  el('calc-volume').addEventListener('input', function () { state.volume = clamp(parseInt(el('calc-volume').value, 10) || 0, 0, 100000000); });
+  el('calc-dedicated-ips').addEventListener('input', syncDedicatedIPs);
+  el('calc-domains').addEventListener('input', syncDomains);
+  el('calc-team-users').addEventListener('input', syncUsers);
+  el('calc-support').addEventListener('change', syncSupport);
+  el('calc-deployment').addEventListener('change', syncDeployment);
+  el('calc-peak-daily').addEventListener('change', syncPeakDaily);
+  el('calc-monthly-btn').addEventListener('click', function () { setPeriod(false); });
+  el('calc-annual-btn').addEventListener('click', function () { setPeriod(true); });
+
+  initResultsDOM();
+  update();
+
+  function initResultsDOM() {
+    var results = el('calc-results');
+    results.innerHTML =
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Recommended plan</span>' +
+        '<span id="calc-result-plan" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Included volume</span>' +
+        '<span id="calc-result-included" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Expected overage</span>' +
+        '<span id="calc-result-overage" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+        ' <span id="calc-result-overage-val" class="text-[11px] font-bold text-brand-600 tabular-nums" hidden></span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Base price</span>' +
+        '<span id="calc-result-base" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Dedicated IP fees</span>' +
+        '<span id="calc-result-ip" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Setup fee</span>' +
+        '<span id="calc-result-setup" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Est. monthly total</span>' +
+        '<span id="calc-result-monthly" class="text-lg font-bold text-brand-500 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4 sm:col-span-2 lg:col-span-1">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Est. annual total (incl. setup)</span>' +
+        '<span id="calc-result-annual" class="text-lg font-bold text-brand-600 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4 sm:col-span-2 lg:col-span-1">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Effective per 1,000</span>' +
+        '<span id="calc-result-per1k" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Included domains</span>' +
+        '<span id="calc-result-domains" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Included users</span>' +
+        '<span id="calc-result-users" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+      '</div>' +
+      '<div class="bg-surface-50 border border-surface-200 rounded-sm p-4">' +
+        '<span class="block text-[10px] font-bold text-surface-400 tracking-[0.15em] uppercase mb-1">Support tier</span>' +
+        '<span id="calc-result-support" class="text-lg font-bold text-surface-950 tabular-nums">\u2014</span>' +
+      '</div>';
+  }
+})();
+</script>

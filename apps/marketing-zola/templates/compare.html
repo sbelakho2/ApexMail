@@ -1,6 +1,13 @@
 {# Compare page template #}
 {% extends "base.html" %}
 
+{% block title %}{{ page.title }}{% endblock title %}
+{% block description %}{{ page.description }}{% endblock description %}
+{% block og_title %}{{ page.title }}{% endblock og_title %}
+{% block og_description %}{{ page.description }}{% endblock og_description %}
+{% block twitter_title %}{{ page.title }}{% endblock twitter_title %}
+{% block twitter_description %}{{ page.description }}{% endblock twitter_description %}
+
 {% block content %}
 {% include "partials/compare/hero.html" %}
 {% include "partials/compare/table.html" %}

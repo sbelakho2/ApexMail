@@ -1,0 +1,1071 @@
+openapi: "3.1.0"
+info:
+  title: ApexMail API
+  description: "Transactional email API for sending, tracking, and managing email delivery through EU-hosted infrastructure. All requests require HTTPS and an API key."
+  version: "1.0.0"
+  contact:
+    name: ApexMail Support
+    email: support@apexmail.ee
+    url: https://apexmail.ee/contact/
+  license:
+    name: Proprietary
+    url: https://apexmail.ee/terms/
+
+servers:
+  - url: https://api.apexmail.ee/v1
+    description: Production API
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /messages:
+    post:
+      operationId: sendMessage
+      summary: Send an email
+      description: Queues a transactional or campaign email for delivery.
+      tags: [Messages]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "201":
+          description: Message queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/BodyTooLarge"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    get:
+      operationId: listMessages
+      summary: List messages
+      description: Retrieves recent messages for your tenant, newest first.
+      tags: [Messages]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, processed, sent, delivered, bounced, complained, failed]
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: tag
+          in: query
+          schema:
+            type: string
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Paginated message list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /messages/batch:
+    post:
+      operationId: sendBatchMessages
+      summary: Batch send emails
+      description: Sends up to 1,000 individual messages in a single request.
+      tags: [Messages]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchSendRequest"
+      responses:
+        "201":
+          description: Batch queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /messages/{id}:
+    get:
+      operationId: getMessage
+      summary: Get message details
+      description: Retrieves the full status and delivery event timeline for a single message.
+      tags: [Messages]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^msg_[a-zA-Z0-9]+$"
+      responses:
+        "200":
+          description: Message details with event timeline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageDetailResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /messages/{id}/cancel:
+    post:
+      operationId: cancelMessage
+      summary: Cancel scheduled message
+      description: Cancels a scheduled (not yet queued) message.
+      tags: [Messages]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^msg_[a-zA-Z0-9]+$"
+      responses:
+        "200":
+          description: Message cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+
+  /events:
+    get:
+      operationId: listEvents
+      summary: List events
+      description: Retrieves delivery, open, click, bounce, complaint, and suppression events.
+      tags: [Events]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [queued, processed, sent, accepted, deferred, delivered, soft_bounced, hard_bounced, rejected, blocked, complained, unsubscribed, opened, clicked, suppressed]
+        - name: message_id
+          in: query
+          schema:
+            type: string
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: recipient
+          in: query
+          schema:
+            type: string
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Paginated event list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /domains:
+    get:
+      operationId: listDomains
+      summary: List domains
+      description: Lists all sending domains for your tenant.
+      tags: [Domains]
+      responses:
+        "200":
+          description: Domain list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainListResponse"
+    post:
+      operationId: addDomain
+      summary: Add domain
+      description: Registers a new sending domain and returns DNS verification records.
+      tags: [Domains]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domain]
+              properties:
+                domain:
+                  type: string
+                  minLength: 4
+                  maxLength: 253
+      responses:
+        "201":
+          description: Domain registered
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /domains/{id}:
+    delete:
+      operationId: deleteDomain
+      summary: Delete domain
+      description: Removes a sending domain.
+      tags: [Domains]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Domain deleted
+
+  /domains/{id}/verify:
+    post:
+      operationId: verifyDomain
+      summary: Verify domain
+      description: Triggers DNS verification for a pending domain.
+      tags: [Domains]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Domain verified
+
+  /suppressions:
+    get:
+      operationId: listSuppressions
+      summary: List suppressions
+      tags: [Suppressions]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: recipient
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [bounce, complaint, unsubscribe, manual]
+        - name: domain
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Suppression list
+    post:
+      operationId: addSuppression
+      summary: Add suppression
+      tags: [Suppressions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuppressionRequest"
+      responses:
+        "201":
+          description: Suppression added
+
+  /suppressions/{recipient}:
+    delete:
+      operationId: removeSuppression
+      summary: Remove suppression
+      tags: [Suppressions]
+      parameters:
+        - name: recipient
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Suppression removed
+
+  /webhooks:
+    get:
+      operationId: listWebhooks
+      summary: List webhook endpoints
+      tags: [Webhooks]
+      responses:
+        "200":
+          description: Webhook list
+    post:
+      operationId: createWebhook
+      summary: Create webhook endpoint
+      tags: [Webhooks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookRequest"
+      responses:
+        "201":
+          description: Webhook created
+
+  /webhooks/{id}:
+    delete:
+      operationId: deleteWebhook
+      summary: Delete webhook endpoint
+      tags: [Webhooks]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Webhook deleted
+
+  /api-keys:
+    get:
+      operationId: listApiKeys
+      summary: List API keys
+      tags: [API Keys]
+      responses:
+        "200":
+          description: API key list
+    post:
+      operationId: createApiKey
+      summary: Create API key
+      tags: [API Keys]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiKeyRequest"
+      responses:
+        "201":
+          description: API key created
+
+  /api-keys/{id}:
+    delete:
+      operationId: revokeApiKey
+      summary: Revoke API key
+      tags: [API Keys]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: API key revoked
+
+  /team:
+    get:
+      operationId: listTeamMembers
+      summary: List team members
+      tags: [Team]
+      responses:
+        "200":
+          description: Team member list
+
+  /team/invite:
+    post:
+      operationId: inviteTeamMember
+      summary: Invite team member
+      tags: [Team]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InviteMemberRequest"
+      responses:
+        "201":
+          description: Invitation sent
+
+  /analytics/summary:
+    get:
+      operationId: getAnalyticsSummary
+      summary: Account analytics summary
+      tags: [Analytics]
+      parameters:
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: domain
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Analytics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+
+  /ips:
+    get:
+      operationId: listDedicatedIps
+      summary: List dedicated IPs
+      tags: [Dedicated IPs]
+      responses:
+        "200":
+          description: Dedicated IP list
+
+  /ips/pools:
+    get:
+      operationId: listIpPools
+      summary: List IP pools
+      tags: [Dedicated IPs]
+      responses:
+        "200":
+          description: IP pool list
+
+  /account:
+    get:
+      operationId: getAccount
+      summary: Get account information
+      tags: [Account]
+      responses:
+        "200":
+          description: Account details with usage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountResponse"
+
+  /grader/check:
+    post:
+      operationId: graderDomainCheck
+      summary: Domain-only email grader check (public)
+      tags: [Email Grader]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domain]
+              properties:
+                domain:
+                  type: string
+                selectors:
+                  type: array
+                  items:
+                    type: string
+                  default: ["default", "google", "selector1"]
+      responses:
+        "200":
+          description: Grader score
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /grader/submit:
+    post:
+      operationId: graderSubmitEmail
+      summary: Submit email for full grading (authenticated)
+      tags: [Email Grader]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to, subject]
+              properties:
+                from:
+                  type: string
+                to:
+                  type: array
+                  items:
+                    type: string
+                subject:
+                  type: string
+                body_text:
+                  type: string
+                headers:
+                  type: object
+                selectors:
+                  type: array
+                  items:
+                    type: string
+                sender_ip:
+                  type: string
+                helo_hostname:
+                  type: string
+                mail_from:
+                  type: string
+      responses:
+        "200":
+          description: Submission accepted
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: "API key from your dashboard at Settings → API Keys"
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema:
+        type: string
+        maxLength: 255
+      description: Unique key for idempotent requests. Retrying with the same key returns the original response.
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+
+  schemas:
+    SendMessageRequest:
+      type: object
+      required: [from, to, subject]
+      properties:
+        from:
+          type: string
+          format: email
+          minLength: 1
+          maxLength: 320
+        to:
+          type: array
+          items:
+            type: string
+            format: email
+          minItems: 1
+          maxItems: 1000
+        cc:
+          type: array
+          items:
+            type: string
+            format: email
+          maxItems: 50
+        bcc:
+          type: array
+          items:
+            type: string
+            format: email
+          maxItems: 50
+        reply_to:
+          type: string
+          format: email
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 998
+        text:
+          type: string
+          maxLength: 5242880
+        html:
+          type: string
+          maxLength: 5242880
+        type:
+          type: string
+          enum: [transactional, campaign]
+          default: transactional
+        send_at:
+          type: string
+          format: date-time
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/Attachment"
+          maxItems: 10
+        headers:
+          type: object
+          maxProperties: 20
+        tags:
+          type: array
+          items:
+            type: string
+          maxItems: 10
+        metadata:
+          type: object
+          maxProperties: 50
+        template_id:
+          type: string
+        template_data:
+          type: object
+
+    Attachment:
+      type: object
+      required: [filename, content]
+      properties:
+        filename:
+          type: string
+        content:
+          type: string
+          description: Base64-encoded file content
+        content_type:
+          type: string
+        content_id:
+          type: string
+
+    MessageResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          pattern: "^msg_[a-zA-Z0-9]+$"
+        status:
+          type: string
+          enum: [queued]
+        from:
+          type: string
+        to:
+          type: array
+          items:
+            type: string
+        subject:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        scheduled_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    MessageDetailResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        from:
+          type: string
+        to:
+          type: array
+          items:
+            type: string
+        subject:
+          type: string
+        type:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageEvent"
+
+    MessageEvent:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [queued, processed, sent, accepted, deferred, delivered, soft_bounced, hard_bounced, rejected, blocked, complained, unsubscribed, opened, clicked, suppressed]
+        timestamp:
+          type: string
+          format: date-time
+        detail:
+          type: object
+
+    BatchSendRequest:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/SendMessageRequest"
+          minItems: 1
+          maxItems: 1000
+
+    BatchResponse:
+      type: object
+      properties:
+        batch_id:
+          type: string
+        messages:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              status:
+                type: string
+        created_at:
+          type: string
+          format: date-time
+
+    CancelResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [cancelled]
+        cancelled_at:
+          type: string
+          format: date-time
+
+    MessageListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageResponse"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    EventListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageEvent"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    DomainListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              domain:
+                type: string
+              status:
+                type: string
+                enum: [pending_verification, verified, failed]
+              spf:
+                type: object
+                properties:
+                  status:
+                    type: string
+              dkim:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    selector:
+                      type: string
+                    status:
+                      type: string
+              created_at:
+                type: string
+                format: date-time
+
+    SuppressionRequest:
+      type: object
+      required: [recipient, type]
+      properties:
+        recipient:
+          type: string
+          format: email
+        type:
+          type: string
+          enum: [bounce, complaint, unsubscribe, manual]
+        domain:
+          type: string
+        reason:
+          type: string
+
+    CreateWebhookRequest:
+      type: object
+      required: [url, events, secret]
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: "^https://"
+        events:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        secret:
+          type: string
+          minLength: 32
+        description:
+          type: string
+        enabled:
+          type: boolean
+          default: true
+
+    CreateApiKeyRequest:
+      type: object
+      required: [name, scopes]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        scopes:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        expires_at:
+          type: string
+          format: date-time
+
+    InviteMemberRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, developer, viewer]
+        subaccount_ids:
+          type: array
+          items:
+            type: string
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            from:
+              type: string
+              format: date-time
+            to:
+              type: string
+              format: date-time
+        totals:
+          type: object
+          properties:
+            sent:
+              type: integer
+            delivered:
+              type: integer
+            bounced:
+              type: integer
+            complaints:
+              type: integer
+        rates:
+          type: object
+          properties:
+            delivery:
+              type: number
+            bounce:
+              type: number
+            complaint:
+              type: number
+
+    AccountResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        plan:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        usage:
+          type: object
+          properties:
+            current_period:
+              type: object
+            emails_sent:
+              type: integer
+            emails_limit:
+              type: integer
+            domains_count:
+              type: integer
+            domains_limit:
+              type: integer
+
+    Pagination:
+      type: object
+      properties:
+        has_more:
+          type: boolean
+        next_cursor:
+          type: string
+        total:
+          type: integer
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+            request_id:
+              type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Insufficient scope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BodyTooLarge:
+      description: Request body too large
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unprocessable:
+      description: Cannot process request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+tags:
+  - name: Messages
+    description: Send, retrieve, and manage email messages
+  - name: Events
+    description: Query delivery and engagement events
+  - name: Domains
+    description: Manage sending domains and DNS verification
+  - name: Suppressions
+    description: Manage suppression lists (bounces, complaints, unsubscribes)
+  - name: Webhooks
+    description: Configure webhook endpoints for event delivery
+  - name: API Keys
+    description: Manage API keys and scopes
+  - name: Team
+    description: Manage team members and roles
+  - name: Analytics
+    description: Delivery metrics and reporting
+  - name: Dedicated IPs
+    description: Manage dedicated IPs and IP pools
+  - name: Account
+    description: Account information and usage
+  - name: Email Grader
+    description: Email deliverability scoring and analysis

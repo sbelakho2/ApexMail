@@ -1,6 +1,20 @@
 # Billing API
 
+> **Base path:** `/v1/billing`
+> **Required scopes:** `billing:read` (GET), `billing:write` (POST)
+> **Rate limit:** Tier-based (see [Rate Limits](../rate-limits.md))
+> **Idempotency:** Supported for payment and checkout endpoints
+> **Content-Type:** `application/json`
+
 The Billing API manages plans, usage tracking, invoices, subscriptions, and billing administration.
+
+## Authentication
+
+Include your API key in the `X-API-Key` header:
+
+```
+X-API-Key: am_live_...
+```
 
 ## Endpoints
 
@@ -345,7 +359,7 @@ Content-Type: application/json
 |-------|-------|
 | Company | Bel Consulting OÜ (trading as ApexMail) |
 | Address | Sakala 7-2, Tallinn 10141, Estonia |
-| Registry Code | 16192499 |
+| Registry Code | 16588745 |
 | VAT Number | EE102951727 |
 | Billing Email | billing@apexmail.ee |
 | Bank | Swedbank AS (BIC: HABAEE2X) |

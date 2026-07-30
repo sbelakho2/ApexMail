@@ -1,5 +1,10 @@
 # Dedicated IPs API
 
+> **Base path:** `/v1/dedicated-ips`
+> **Required scopes:** `dedicated_ips:read` (GET), `dedicated_ips:write` (POST / DELETE)
+> **Rate limit:** 30 requests/minute per API key
+> **Content-Type:** `application/json`
+
 The Dedicated IPs API provides full lifecycle management for dedicated sending IP addresses, including allocation, warmup, monitoring, and release.
 
 > **Note**: Dedicated IPs are provisioned via Hetzner Cloud floating IPs. SES handles shared-pool sending only. This feature requires a plan with `dedicated_ip = true`.

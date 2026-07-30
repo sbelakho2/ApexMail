@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ApexMail — Service Status</title>
+<style>
+  :root {
+    --ok: #22c55e;
+    --degraded: #f59e0b;
+    --down: #ef4444;
+    --unknown: #6b7280;
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+  .container { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; }
+  header { text-align: center; padding: 2rem 0; border-bottom: 1px solid #334155; margin-bottom: 2rem; }
+  header h1 { font-size: 1.75rem; font-weight: 600; }
+  .status-banner { display: inline-block; padding: 0.5rem 1.5rem; border-radius: 9999px; font-weight: 600; font-size: 0.875rem; margin-top: 0.75rem; }
+  .status-banner.ok { background: #166534; color: #86efac; }
+  .status-banner.degraded { background: #78350f; color: #fcd34d; }
+  .status-banner.down { background: #7f1d1d; color: #fca5a5; }
+  .status-banner.unknown { background: #1e293b; color: #94a3b8; }
+  .updated { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+  .card { background: var(--card); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid #334155; }
+  .card .name { font-weight: 600; font-size: 1rem; }
+  .card .endpoint { font-size: 0.75rem; color: var(--text-muted); margin: 0.25rem 0 0.5rem; font-family: monospace; }
+  .card .metrics { display: flex; justify-content: space-between; align-items: center; }
+  .card .badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+  .badge.ok { background: #166534; color: #86efac; }
+  .badge.degraded { background: #78350f; color: #fcd34d; }
+  .badge.down { background: #7f1d1d; color: #fca5a5; }
+  .badge.unknown { background: #1e293b; color: #94a3b8; }
+  .card .response { font-size: 0.75rem; color: var(--text-muted); }
+  .card .uptime { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; }
+  .progress-bg { background: #334155; border-radius: 9999px; height: 6px; margin-top: 0.5rem; overflow: hidden; }
+  .progress-fill { height: 100%; border-radius: 9999px; }
+  .progress-fill.good { background: var(--ok); }
+  .progress-fill.warn { background: var(--degraded); }
+  .progress-fill.bad { background: var(--down); }
+  section { margin-bottom: 2rem; }
+  section h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1rem; border-bottom: 1px solid #334155; padding-bottom: 0.5rem; }
+  .incident { background: var(--card); border-radius: 0.5rem; padding: 1rem; border: 1px solid #334155; margin-bottom: 0.75rem; }
+  .incident .title { font-weight: 600; }
+  .incident .meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; }
+  .incident .desc { font-size: 0.875rem; margin-top: 0.5rem; }
+  .sev { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.7rem; font-weight: 700; margin-right: 0.5rem; }
+  .sev.critical { background: #7f1d1d; color: #fca5a5; }
+  .sev.high { background: #78350f; color: #fcd34d; }
+  .sev.medium { background: #1e3a5f; color: #93c5fd; }
+  .sev.low { background: #334155; color: #94a3b8; }
+  .empty { text-align: center; color: var(--text-muted); padding: 2rem; }
+  footer { text-align: center; font-size: 0.75rem; color: var(--text-muted); padding: 2rem 0; border-top: 1px solid #334155; }
+  footer a { color: #93c5fd; text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+  .disclaimer { background: #1e293b; border: 1px solid #475569; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1.5rem; font-size: 0.8rem; color: #94a3b8; }
+  .disclaimer strong { color: #fcd34d; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>ApexMail Service Status</h1>
+    <div class="status-banner unknown" id="overall-banner">Loading status...</div>
+    <div class="updated" id="last-updated">Last updated: --</div>
+  </header>
+
+  <div class="disclaimer" id="data-source-note">
+    <strong>Note:</strong> This page fetches live monitoring data. If no data is available, component status cannot be determined. No operational claims are made without current probe data.
+  </div>
+
+  <section>
+    <h2>Core Services</h2>
+    <div class="grid" id="core-services"></div>
+  </section>
+
+  <section>
+    <h2>Email Infrastructure</h2>
+    <div class="grid" id="email-services"></div>
+  </section>
+
+  <section>
+    <h2>Platform Services</h2>
+    <div class="grid" id="platform-services"></div>
+  </section>
+
+  <section>
+    <h2>Recent Incidents</h2>
+    <div id="incidents"></div>
+  </section>
+
+  <section>
+    <h2>90-Day Uptime History</h2>
+    <div id="uptime-summary"></div>
+  </section>
+
+  <footer>
+    <p><a href="/incident-policy">Incident Response Policy</a> &middot;
+       <a href="mailto:support@apexmail.ee">support@apexmail.ee</a> &middot;
+       <a href="https://apexmail.ee/trust">Trust Center</a> &middot;
+       <a href="/subscribe">Subscribe to Updates</a> &middot;
+       <a href="/feed.xml">RSS Feed</a></p>
+    <p>Probe data updated every 60 seconds from check_services.sh (Helsinki, Frankfurt, Amsterdam). This status page is hosted independently from the primary ApexMail application infrastructure. It uses its own DNS record, web server, certificate, and deployment pipeline. The primary application API, database, authentication service, and deployment system are not required for this page to remain reachable.</p>
+  </footer>
+</div>
+
+<script>
+var DATA_URL = '/data.json';
+
+function badge(status) {
+  var cls = { ok: 'ok', fail: 'down', unknown: 'degraded' }[status] || 'degraded';
+  var label = { ok: 'Operational', fail: 'Down', unknown: 'Unknown' }[status] || 'Degraded';
+  return '<span class="badge ' + cls + '">' + label + '</span>';
+}
+
+function progress(uptime) {
+  var cls = uptime >= 99.9 ? 'good' : uptime >= 99.0 ? 'warn' : 'bad';
+  return '<div class="progress-bg"><div class="progress-fill ' + cls + '" style="width:' + uptime + '%"></div></div>';
+}
+
+function renderCard(card) {
+  var rt = (card.response_ms || 0).toFixed(0);
+  var up = card.uptime_90d_pct || 0;
+  return '<div class="card">' +
+    '<div class="name">' + card.service + '</div>' +
+    '<div class="endpoint">' + card.endpoint + '</div>' +
+    '<div class="metrics">' + badge(card.status) + '<span class="response">' + rt + 'ms</span></div>' +
+    '<div class="uptime">90-day uptime: ' + up + '%</div>' +
+    progress(up) +
+    '</div>';
+}
+
+function renderIncident(inc) {
+  var sevCls = { Critical: 'critical', High: 'high', Medium: 'medium', Low: 'low' }[inc.severity] || 'low';
+  return '<div class="incident">' +
+    '<span class="sev ' + sevCls + '">' + inc.severity + '</span>' +
+    '<span class="title">' + inc.title + '</span>' +
+    '<div class="meta">' + inc.date + ' &middot; ' + inc.status + ' &middot; Duration: ' + inc.duration + '</div>' +
+    '<div class="desc">' + inc.description + '</div>' +
+    '</div>';
+}
+
+async function fetchData() {
+  try {
+    var resp = await fetch(DATA_URL);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return await resp.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+function renderUnavailable() {
+  document.getElementById('overall-banner').textContent = 'Status Data Unavailable';
+  document.getElementById('overall-banner').className = 'status-banner unknown';
+  document.getElementById('last-updated').textContent = 'Cannot reach monitoring probes. Status data is temporarily unavailable.';
+  var empty = '<div class="empty">Live status cannot be determined right now. Please try again shortly or contact <a href="mailto:support@apexmail.ee">support@apexmail.ee</a>.</div>';
+  document.getElementById('core-services').innerHTML = empty;
+  document.getElementById('email-services').innerHTML = empty;
+  document.getElementById('platform-services').innerHTML = empty;
+  document.getElementById('incidents').innerHTML = empty;
+  document.getElementById('uptime-summary').innerHTML = empty;
+}
+
+function render(data) {
+  var banner = document.getElementById('overall-banner');
+  var updated = document.getElementById('last-updated');
+
+  if (!data) {
+    renderUnavailable();
+    return;
+  }
+
+  updated.textContent = 'Last updated: ' + (data.checked_at || 'unknown') + ' UTC';
+
+  var overall = data.overall_status || 'degraded';
+  if (overall === 'ok') {
+    banner.textContent = 'All Systems Operational';
+    banner.className = 'status-banner ok';
+  } else if (overall === 'degraded') {
+    banner.textContent = 'Some Systems Degraded';
+    banner.className = 'status-banner degraded';
+  } else {
+    banner.textContent = 'Major Service Disruption';
+    banner.className = 'status-banner down';
+  }
+
+  var probes = data.probes || [];
+  var core = probes.filter(function(p) { return ['REST API', 'Auth Service', 'Dashboard', 'Support Portal'].indexOf(p.service) !== -1; });
+  var email = probes.filter(function(p) { return ['SMTP Relay', 'Message Queue', 'Inbound Email', 'Domain Service'].indexOf(p.service) !== -1; });
+  var platform = probes.filter(function(p) { return ['Template Service', 'Analytics', 'Email Grader', 'Dedicated IP'].indexOf(p.service) !== -1; });
+
+  document.getElementById('core-services').innerHTML = core.length ? core.map(renderCard).join('') : '<div class="empty">No component data available</div>';
+  document.getElementById('email-services').innerHTML = email.length ? email.map(renderCard).join('') : '<div class="empty">No component data available</div>';
+  document.getElementById('platform-services').innerHTML = platform.length ? platform.map(renderCard).join('') : '<div class="empty">No component data available</div>';
+
+  var incidents = data.incidents || [];
+  document.getElementById('incidents').innerHTML = incidents.length
+    ? incidents.map(renderIncident).join('')
+    : '<div class="empty">No recent incidents loaded</div>';
+
+  var summary = data.uptime_summary || probes;
+  document.getElementById('uptime-summary').innerHTML = summary.length
+    ? summary.map(renderCard).join('')
+    : '<div class="empty">No history data available</div>';
+}
+
+window.addEventListener('DOMContentLoaded', async function() {
+  var data = await fetchData();
+  if (!data) {
+    renderUnavailable();
+    return;
+  }
+  render(data);
+});
+</script>
+</body>
+</html>

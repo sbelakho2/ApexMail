@@ -4,53 +4,39 @@
 {% block content %}
 {% include "partials/home/hero.html" %}
 {% include "partials/home/features.html" %}
-
-{# API Console (static showcase) #}
 <section class="py-24 bg-surface-950">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="bg-surface-900 border border-surface-800 rounded-sm overflow-hidden">
-      {% include "partials/generated/api-console-island.html" %}
+      {% include "partials/generated/api-explorer-island.html" %}
     </div>
   </div>
 </section>
-
 {% include "partials/home/comparison.html" %}
 {% include "partials/home/security.html" %}
-
-<!-- Email Grader CTA -->
 <section class="py-24 bg-white border-y border-surface-200">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="flex flex-col md:flex-row items-center gap-12">
       <div class="flex-1 text-left">
-        <span class="inline-block px-2 py-0.5 text-[10px] font-bold tracking-widest text-brand-500 border border-brand-200 rounded-sm mb-6 uppercase">System Feature</span>
-        <h2 class="text-4xl md:text-5xl font-bold text-surface-950 mb-6 tracking-tighter">Email Deliverability Grader</h2>
-        <p class="text-lg text-surface-600 max-w-xl mb-8">Get a deterministic letter grade with deliverability checks of your DNS, authentication, content, and reputation. Free for all ApexMail customers.</p>
+        <span class="inline-block px-2 py-0.5 text-[10px] font-bold tracking-widest text-brand-500 border border-brand-200 rounded-sm mb-6 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_eyebrow"] %}{{ i18n_data[l]["home"]["email_grader_eyebrow"] }}{% else %}System Feature{% endif %}</span>
+        <h2 class="text-4xl md:text-5xl font-bold text-surface-950 mb-6 tracking-tighter">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_heading"] %}{{ i18n_data[l]["home"]["email_grader_heading"] }}{% else %}Email Deliverability Grader{% endif %}</h2>
+        <p class="text-lg text-surface-600 max-w-xl mb-8">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_desc"] %}{{ i18n_data[l]["home"]["email_grader_desc"] }}{% else %}Get a deterministic letter grade with deliverability checks of your DNS, authentication, content, and reputation. Free for all ApexMail customers.{% endif %}</p>
         <div class="flex flex-col sm:flex-row gap-4">
-          <a href="/docs/api/grader/" class="btn-accent uppercase">
-            Try the API
-          </a>
-          <a href="/features/#email-grader" class="btn-secondary uppercase">
-            Learn more
-          </a>
+          <a href="/docs/api/grader/" class="btn-accent uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_cta"] %}{{ i18n_data[l]["home"]["email_grader_cta"] }}{% else %}Try the API{% endif %}</a>
+          <a href="/features/#email-grader" class="btn-secondary uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_learn"] %}{{ i18n_data[l]["home"]["email_grader_learn"] }}{% else %}Learn more{% endif %}</a>
         </div>
       </div>
       <div class="flex-1 w-full">
         <div class="aspect-video bg-surface-100 border border-surface-200 rounded-sm flex items-center justify-center p-8">
           <div class="w-full h-full border border-surface-200 bg-white p-6 flex flex-col justify-center">
-             <div class="text-[64px] font-bold text-brand-500 mb-2">A+</div>
-             <div class="text-xs font-bold tracking-widest text-surface-400">Deterministic Grade</div>
+            <div class="text-[64px] font-bold text-brand-500 mb-2">A+</div>
+            <div class="text-xs font-bold tracking-widest text-surface-400">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_grade"] %}{{ i18n_data[l]["home"]["email_grader_grade"] }}{% else %}Deterministic Grade{% endif %}</div>
           </div>
         </div>
       </div>
     </div>
   </div>
 </section>
-
-{# Pricing Calculator (static comparison table) #}
 {% include "partials/generated/pricing-calculator-island.html" %}
-
-{# Testimonials (CSS scroll-snap) #}
 {% include "partials/generated/testimonials-island.html" %}
-
 {% include "partials/home/cta.html" %}
 {% endblock content %}

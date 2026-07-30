@@ -49,4 +49,4 @@ Das Deaktivieren essenzieller Cookies kann die ordnungsgemäße Funktion der Ape
 
 ## 6. Kontakt
 
-Wenn Sie Fragen zu dieser Cookie-Richtlinie haben, kontaktieren Sie uns bitte unter {{ config.extra.support_email }}.
+Wenn Sie Fragen zu dieser Cookie-Richtlinie haben, kontaktieren Sie uns bitte unter support@apexmail.ee.

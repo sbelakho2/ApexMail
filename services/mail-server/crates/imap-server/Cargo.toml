@@ -1,0 +1,29 @@
+[package]
+name = "imap-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "imap-server"
+path = "src/main.rs"
+
+[dependencies]
+mail-proto = { path = "../mail-proto" }
+
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-pemfile = "2"
+tonic.workspace = true
+prost.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+chrono.workspace = true
+base64.workspace = true
+mail-parser.workspace = true
+argon2.workspace = true
+futures.workspace = true

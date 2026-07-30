@@ -1,6 +1,20 @@
 # Lists API
 
+> **Base path:** `/v1/lists`
+> **Required scopes:** `lists:read` (GET), `lists:write` (POST/PUT/DELETE)
+> **Rate limit:** 60 requests/minute per API key
+> **Idempotency:** Supported via `Idempotency-Key` header for POST endpoints
+> **Content-Type:** `application/json`
+
 Audience list management endpoints for organizing contacts into targeted groups.
+
+## Authentication
+
+Include your API key in the `X-API-Key` header:
+
+```
+X-API-Key: am_live_...
+```
 
 ## Endpoints
 
@@ -14,8 +28,6 @@ Audience list management endpoints for organizing contacts into targeted groups.
 | `GET` | `/v1/lists/:id/subscribers` | List subscribers in a list |
 | `POST` | `/v1/lists/:id/subscribers` | Add subscribers to a list |
 | `DELETE` | `/v1/lists/:id/subscribers` | Remove subscribers from a list |
-
-**Scope required:** `lists:read` (GET), `lists:write` (POST/PUT/DELETE)
 
 ---
 

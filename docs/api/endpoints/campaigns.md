@@ -1,6 +1,20 @@
 # Campaigns API
 
+> **Base path:** `/v1/campaigns`
+> **Required scopes:** `campaigns:read` (GET), `campaigns:write` (POST / PATCH / DELETE)
+> **Rate limit:** 60 requests/minute per API key
+> **Idempotency:** Supported via `Idempotency-Key` header for POST endpoints
+> **Content-Type:** `application/json`
+
 The Campaigns API allows you to create and manage email marketing campaigns.
+
+## Authentication
+
+Include your API key in the `X-API-Key` header:
+
+```
+X-API-Key: am_live_...
+```
 
 ## Endpoints
 
@@ -617,3 +631,12 @@ Campaign events are delivered via webhooks:
 | `INVALID_STATE` | 400 | Action not allowed for current campaign status |
 | `VALIDATION_ERROR` | 422 | Request body failed schema validation |
 | `DOMAIN_NOT_VERIFIED` | 400 | Sender domain not verified |
+| `UNAUTHORIZED` | 401 | API key is missing or invalid |
+| `INSUFFICIENT_SCOPE` | 403 | API key does not have the required scope |
+| `RATE_LIMIT_EXCEEDED` | 429 | Too many requests |
+
+---
+
+## Related Webhooks
+
+All campaign lifecycle events are delivered via the [Webhooks system](../webhooks.md). Key events include `campaign.created`, `campaign.scheduled`, `campaign.started`, `campaign.paused`, `campaign.resumed`, `campaign.completed`, and `campaign.canceled`. See the webhook reference above for full payload schemas.

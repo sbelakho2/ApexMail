@@ -11,8 +11,5 @@
 /status              https://status.apexmail.ee         302
 /status/*            https://status.apexmail.ee         302
 
-# Compare index → default comparison page (temporary 302)
-/compare             /compare/sendgrid                  302
-
 # Inbox Placement page moved from /docs/ to top-level (2026-05-11)
 /docs/inbox-placement  /inbox-placement/  302

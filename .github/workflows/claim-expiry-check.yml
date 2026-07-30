@@ -1,0 +1,53 @@
+name: Claim Expiry Check
+
+on:
+  pull_request:
+    paths:
+      - 'services/mail-server/crates/compliance/src/claims_registry.rs'
+      - 'tools/check_claim_expiry.py'
+      - '.github/workflows/claim-expiry-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'services/mail-server/crates/compliance/src/claims_registry.rs'
+      - 'tools/check_claim_expiry.py'
+      - '.github/workflows/claim-expiry-check.yml'
+  schedule:
+    - cron: '0 7 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  claim-expiry:
+    name: Check Claims for Expiry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Run claim expiry check
+        run: python3 tools/check_claim_expiry.py --warn-days 30
+
+  stale-claims-report:
+    name: Generate Stale Claims Report
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Generate monthly stale-claims report
+        run: |
+          echo "=== Monthly Stale Claims Report — $(date +%Y-%m-%d) ==="
+          python3 tools/check_claim_expiry.py --warn-days 30 > reports/stale-claims-$(date +%Y-%m).txt 2>&1 || true
+          cat reports/stale-claims-$(date +%Y-%m).txt || true
+      - name: Upload stale claims report
+        uses: actions/upload-artifact@fe9530cd28e02193eced3282e22f38e03d99fa02
+        with:
+          name: stale-claims-report
+          path: reports/stale-claims-*.txt
+          retention-days: 90

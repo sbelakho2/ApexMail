@@ -4,30 +4,31 @@
 <section class="py-20 lg:py-32 bg-surface-100">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="animate-in text-center mb-20">
-      <h2 class="text-3xl lg:text-4xl font-bold text-surface-950 mb-4">Deep Dive Into Key Features</h2>
-      <p class="text-lg text-surface-600 max-w-2xl mx-auto">See how ApexMail makes complex email infrastructure simple.</p>
+      <h2 class="text-3xl lg:text-4xl font-bold text-surface-950 mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["details_heading"] %}{{ i18n_data[l]["features"]["details_heading"] }}{% else %}Deep Dive Into Key Features{% endif %}</h2>
+      <p class="text-lg text-surface-600 max-w-2xl mx-auto">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["details_subtitle"] %}{{ i18n_data[l]["features"]["details_subtitle"] }}{% else %}See how ApexMail makes complex email infrastructure simple.{% endif %}</p>
     </div>
 
     <div class="space-y-32">
       {# ── Developer-First API ── #}
       <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
         <div>
-          <span class="text-sm font-bold text-surface-950 mb-2 block">Build in Minutes</span>
-          <h3 class="text-2xl lg:text-3xl font-bold text-surface-950 mb-4">Developer-First API</h3>
-          <p class="text-lg text-surface-600 mb-6">Our RESTful API is designed for developers who value simplicity and power. Consistent SDKs, comprehensive docs, and clear request feedback.</p>
+          <span class="text-sm font-bold text-surface-950 mb-2 block">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_label"] %}{{ i18n_data[l]["features"]["detail_api_label"] }}{% else %}Build in Minutes{% endif %}</span>
+          <h3 class="text-2xl lg:text-3xl font-bold text-surface-950 mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_title"] %}{{ i18n_data[l]["features"]["detail_api_title"] }}{% else %}Developer-First API{% endif %}</h3>
+          <p class="text-lg text-surface-600 mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_desc"] %}{{ i18n_data[l]["features"]["detail_api_desc"] }}{% else %}Our RESTful API is designed for developers who value simplicity and power. Consistent SDKs, comprehensive docs, and clear request feedback.{% endif %}</p>
           <ul class="space-y-3 mb-8">
-            {% set api_benefits = ["Quickstart path for your first send", "Idempotency keys for safe retries", "Webhook signatures for security", "Batch sending up to 100 messages", "Delivery status updates"] %}
-            {% for b in api_benefits %}
+            {% set api_benefits_labels = ["detail_api_benefit_1", "detail_api_benefit_2", "detail_api_benefit_3", "detail_api_benefit_4", "detail_api_benefit_5"] %}
+            {% set api_benefits_defaults = ["Quickstart path for your first send", "Idempotency keys for safe retries", "Webhook signatures for security", "Batch sending up to 100 messages", "Delivery status updates"] %}
+            {% for label in api_benefits_labels %}
             <li class="flex items-start gap-3">
               <span class="w-5 h-5 rounded-sm bg-brand-100 flex items-center justify-center flex-shrink-0 mt-0.5">
                 <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
               </span>
-              <span class="text-surface-700">{{ b }}</span>
+              <span class="text-surface-700">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][label] %}{{ i18n_data[l]["features"][label] }}{% else %}{{ api_benefits_defaults[loop.index0] }}{% endif %}</span>
             </li>
             {% endfor %}
           </ul>
           <a href="/docs/api/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
-            Read API Docs
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_api_cta"] %}{{ i18n_data[l]["features"]["detail_api_cta"] }}{% else %}Read API Docs{% endif %}
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
         </div>
@@ -63,22 +64,23 @@ print(status.status)  # 'delivered'</code></pre>
       {# ── Built-In Compliance ── #}
       <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
         <div class="lg:order-2">
-          <span class="text-sm font-bold text-surface-950 mb-2 block">GDPR &amp; HIPAA</span>
-          <h3 class="text-2xl lg:text-3xl font-bold text-surface-950 mb-4">Built-In Compliance</h3>
-          <p class="text-lg text-surface-600 mb-6">Compliance workflows are built into the platform. Data subject requests, consent records, encrypted storage, and audit trails are available through APIs and enterprise operations.</p>
+          <span class="text-sm font-bold text-surface-950 mb-2 block">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_label"] %}{{ i18n_data[l]["features"]["detail_compliance_label"] }}{% else %}GDPR &amp; HIPAA{% endif %}</span>
+          <h3 class="text-2xl lg:text-3xl font-bold text-surface-950 mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_title"] %}{{ i18n_data[l]["features"]["detail_compliance_title"] }}{% else %}Built-In Compliance{% endif %}</h3>
+          <p class="text-lg text-surface-600 mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_desc"] %}{{ i18n_data[l]["features"]["detail_compliance_desc"] }}{% else %}Compliance workflows are built into the platform. Data subject requests, consent records, encrypted storage, and audit trails are available through APIs and enterprise operations.{% endif %}</p>
           <ul class="space-y-3 mb-8">
-            {% set comp_benefits = ["GDPR data export and erasure workflows", "Consent tracking", "HIPAA BAA workflow on Enterprise", "Residency requirements scoped during review", "Complete audit logs"] %}
-            {% for b in comp_benefits %}
+            {% set comp_benefits_labels = ["detail_compliance_benefit_1", "detail_compliance_benefit_2", "detail_compliance_benefit_3", "detail_compliance_benefit_4", "detail_compliance_benefit_5"] %}
+            {% set comp_benefits_defaults = ["GDPR data export and erasure workflows", "Consent tracking", "HIPAA BAA workflow on Enterprise", "Residency requirements scoped during review", "Complete audit logs"] %}
+            {% for label in comp_benefits_labels %}
             <li class="flex items-start gap-3">
               <span class="w-5 h-5 rounded-sm bg-brand-100 flex items-center justify-center flex-shrink-0 mt-0.5">
                 <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
               </span>
-              <span class="text-surface-700">{{ b }}</span>
+              <span class="text-surface-700">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][label] %}{{ i18n_data[l]["features"][label] }}{% else %}{{ comp_benefits_defaults[loop.index0] }}{% endif %}</span>
             </li>
             {% endfor %}
           </ul>
           <a href="/compliance/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
-            Learn About Compliance
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_cta"] %}{{ i18n_data[l]["features"]["detail_compliance_cta"] }}{% else %}Learn About Compliance{% endif %}
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
         </div>
@@ -116,22 +118,23 @@ await apexmail.compliance.consent.record({
       {# ── Deliverability Insights ── #}
       <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
         <div>
-          <span class="text-sm font-bold text-surface-950 mb-2 block">Delivery Intelligence</span>
-          <h3 class="text-2xl lg:text-3xl font-bold text-surface-950 mb-4">Deliverability Insights</h3>
-          <p class="text-lg text-surface-600 mb-6">Use engagement timing analysis, inbox-placement results, and content diagnostics to improve campaigns without hiding decisions behind black-box automation.</p>
+          <span class="text-sm font-bold text-surface-950 mb-2 block">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_label"] %}{{ i18n_data[l]["features"]["detail_insights_label"] }}{% else %}Delivery Intelligence{% endif %}</span>
+          <h3 class="text-2xl lg:text-3xl font-bold text-surface-950 mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_title"] %}{{ i18n_data[l]["features"]["detail_insights_title"] }}{% else %}Deliverability Insights{% endif %}</h3>
+          <p class="text-lg text-surface-600 mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_desc"] %}{{ i18n_data[l]["features"]["detail_insights_desc"] }}{% else %}Use engagement timing analysis, inbox-placement results, and content diagnostics to improve campaigns without hiding decisions behind black-box automation.{% endif %}</p>
           <ul class="space-y-3 mb-8">
-            {% set ai_benefits = ["Send-time recommendations for campaign planning", "Engagement trend analysis", "Inbox placement scoring and deliverability insights", "Re-engagement signals from event history"] %}
-            {% for b in ai_benefits %}
+            {% set insight_benefits_labels = ["detail_insights_benefit_1", "detail_insights_benefit_2", "detail_insights_benefit_3", "detail_insights_benefit_4"] %}
+            {% set insight_benefits_defaults = ["Send-time recommendations for campaign planning", "Engagement trend analysis", "Inbox placement scoring and deliverability insights", "Re-engagement signals from event history"] %}
+            {% for label in insight_benefits_labels %}
             <li class="flex items-start gap-3">
               <span class="w-5 h-5 rounded-sm bg-brand-100 flex items-center justify-center flex-shrink-0 mt-0.5">
                 <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
               </span>
-              <span class="text-surface-700">{{ b }}</span>
+              <span class="text-surface-700">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][label] %}{{ i18n_data[l]["features"][label] }}{% else %}{{ insight_benefits_defaults[loop.index0] }}{% endif %}</span>
             </li>
             {% endfor %}
           </ul>
           <a href="/docs/analytics/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
-            View Analytics Docs
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_insights_cta"] %}{{ i18n_data[l]["features"]["detail_insights_cta"] }}{% else %}View Analytics Docs{% endif %}
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
         </div>
@@ -168,29 +171,29 @@ console.log(events); // delivered, opened, clicked...</code></pre>
       <!-- Email Grader -->
       <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
         <div>
-          <span class="text-sm font-semibold text-brand-500 tracking-wider">New</span>
-          <h2 class="text-3xl font-bold text-surface-900 mt-2 mb-4">Email Grader</h2>
-          <p class="text-lg text-surface-600 mb-6">Analyze your email infrastructure and content against industry best practices. Get a comprehensive deliverability score with specific, prioritized recommendations.</p>
+          <span class="text-sm font-semibold text-brand-500 tracking-wider">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_new"] %}{{ i18n_data[l]["features"]["grader_new"] }}{% else %}New{% endif %}</span>
+          <h2 class="text-3xl font-bold text-surface-900 mt-2 mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_title"] %}{{ i18n_data[l]["features"]["grader_title"] }}{% else %}Email Grader{% endif %}</h2>
+          <p class="text-lg text-surface-600 mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_desc"] %}{{ i18n_data[l]["features"]["grader_desc"] }}{% else %}Analyze your email infrastructure and content against industry best practices. Get a comprehensive deliverability score with specific, prioritized recommendations.{% endif %}</p>
           <ul class="space-y-3 mb-8">
             <li class="flex items-start gap-3">
               <svg class="w-5 h-5 text-success-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-              <span class="text-surface-700"><strong>DNS Health Check</strong> — MX, SPF, DKIM, DMARC record analysis with configuration recommendations</span>
+              <span class="text-surface-700"><strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_check_1_title"] %}{{ i18n_data[l]["features"]["grader_check_1_title"] }}{% else %}DNS Health Check{% endif %}</strong> — {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_check_1_desc"] %}{{ i18n_data[l]["features"]["grader_check_1_desc"] }}{% else %}MX, SPF, DKIM, DMARC record analysis with configuration recommendations{% endif %}</span>
             </li>
             <li class="flex items-start gap-3">
               <svg class="w-5 h-5 text-success-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-              <span class="text-surface-700"><strong>Authentication Strength</strong> — SPF alignment, DKIM key strength, DMARC policy enforcement grading</span>
+              <span class="text-surface-700"><strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_check_2_title"] %}{{ i18n_data[l]["features"]["grader_check_2_title"] }}{% else %}Authentication Strength{% endif %}</strong> — {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_check_2_desc"] %}{{ i18n_data[l]["features"]["grader_check_2_desc"] }}{% else %}SPF alignment, DKIM key strength, DMARC policy enforcement grading{% endif %}</span>
             </li>
             <li class="flex items-start gap-3">
               <svg class="w-5 h-5 text-success-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-              <span class="text-surface-700"><strong>Content Analysis</strong> — Spam trigger detection, phishing indicators, and content quality scoring</span>
+              <span class="text-surface-700"><strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_check_3_title"] %}{{ i18n_data[l]["features"]["grader_check_3_title"] }}{% else %}Content Analysis{% endif %}</strong> — {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_check_3_desc"] %}{{ i18n_data[l]["features"]["grader_check_3_desc"] }}{% else %}Spam trigger detection, phishing indicators, and content quality scoring{% endif %}</span>
             </li>
             <li class="flex items-start gap-3">
               <svg class="w-5 h-5 text-success-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-              <span class="text-surface-700"><strong>Reputation Monitoring</strong> — Domain blocklist checks with confidence-weighted scoring</span>
+              <span class="text-surface-700"><strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_check_4_title"] %}{{ i18n_data[l]["features"]["grader_check_4_title"] }}{% else %}Reputation Monitoring{% endif %}</strong> — {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_check_4_desc"] %}{{ i18n_data[l]["features"]["grader_check_4_desc"] }}{% else %}Domain blocklist checks with confidence-weighted scoring{% endif %}</span>
             </li>
           </ul>
           <a href="/docs/api/grader/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
-            View API reference
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["grader_cta"] %}{{ i18n_data[l]["features"]["grader_cta"] }}{% else %}View API reference{% endif %}
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
           </a>
         </div>
@@ -221,32 +224,32 @@ console.log(events); // delivered, opened, clicked...</code></pre>
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
                 </svg>
               </div>
-              <h3 class="text-2xl font-bold text-surface-950">Inbox Placement Testing</h3>
+              <h3 class="text-2xl font-bold text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_title"] %}{{ i18n_data[l]["features"]["inbox_title"] }}{% else %}Inbox Placement Testing{% endif %}</h3>
             </div>
             <p class="text-surface-600 mb-6 leading-relaxed">
-              Know exactly where your emails land before your campaign goes live. Our Inbox Placement Testing sends test messages to a managed network of seed accounts across every major provider and reports back with per-provider placement data, authentication pass rates, and actionable optimization recommendations.
+              {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_desc"] %}{{ i18n_data[l]["features"]["inbox_desc"] }}{% else %}Know exactly where your emails land before your campaign goes live. Our Inbox Placement Testing sends test messages to a managed network of seed accounts across every major provider and reports back with per-provider placement data, authentication pass rates, and actionable optimization recommendations.{% endif %}
             </p>
-            <h4 class="font-semibold text-surface-950 mb-3">Key Capabilities</h4>
+            <h4 class="font-semibold text-surface-950 mb-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_capabilities"] %}{{ i18n_data[l]["features"]["inbox_capabilities"] }}{% else %}Key Capabilities{% endif %}</h4>
             <ul class="space-y-3 mb-8">
               <li class="flex items-start gap-3">
                 <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
-                <span class="text-sm text-surface-600"><strong>Seed List Management</strong> — Provision and manage seed accounts across Gmail, Outlook, Yahoo, iCloud, AOL, and Zoho with automatic health monitoring.</span>
+                <span class="text-sm text-surface-600"><strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_1_title"] %}{{ i18n_data[l]["features"]["inbox_cap_1_title"] }}{% else %}Seed List Management{% endif %}</strong> — {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_1_desc"] %}{{ i18n_data[l]["features"]["inbox_cap_1_desc"] }}{% else %}Provision and manage seed accounts across Gmail, Outlook, Yahoo, iCloud, AOL, and Zoho with automatic health monitoring.{% endif %}</span>
               </li>
               <li class="flex items-start gap-3">
                 <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
-                <span class="text-sm text-surface-600"><strong>Provider Testing</strong> — Simultaneously test deliverability across 6 providers with automated SMTP sending and IMAP-based delivery verification.</span>
+                <span class="text-sm text-surface-600"><strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_2_title"] %}{{ i18n_data[l]["features"]["inbox_cap_2_title"] }}{% else %}Provider Testing{% endif %}</strong> — {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_2_desc"] %}{{ i18n_data[l]["features"]["inbox_cap_2_desc"] }}{% else %}Simultaneously test deliverability across 6 providers with automated SMTP sending and IMAP-based delivery verification.{% endif %}</span>
               </li>
               <li class="flex items-start gap-3">
                 <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
-                <span class="text-sm text-surface-600"><strong>Placement Scoring</strong> — Composite score weighing inbox rate (50%), promotions (10%), spam penalty (15%), absent penalty (10%), auth pass rate (10%), and delivery speed (5%).</span>
+                <span class="text-sm text-surface-600"><strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_3_title"] %}{{ i18n_data[l]["features"]["inbox_cap_3_title"] }}{% else %}Placement Scoring{% endif %}</strong> — {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_3_desc"] %}{{ i18n_data[l]["features"]["inbox_cap_3_desc"] }}{% else %}Composite score weighing inbox rate (50%), promotions (10%), spam penalty (15%), absent penalty (10%), auth pass rate (10%), and delivery speed (5%).{% endif %}</span>
               </li>
               <li class="flex items-start gap-3">
                 <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
-                <span class="text-sm text-surface-600"><strong>Retention Analytics</strong> — Historical trend analysis with per-provider breakdowns to track deliverability improvements over time.</span>
+                <span class="text-sm text-surface-600"><strong>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_4_title"] %}{{ i18n_data[l]["features"]["inbox_cap_4_title"] }}{% else %}Retention Analytics{% endif %}</strong> — {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cap_4_desc"] %}{{ i18n_data[l]["features"]["inbox_cap_4_desc"] }}{% else %}Historical trend analysis with per-provider breakdowns to track deliverability improvements over time.{% endif %}</span>
               </li>
             </ul>
             <a href="/inbox-placement/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
-              Explore the API
+              {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["inbox_cta"] %}{{ i18n_data[l]["features"]["inbox_cta"] }}{% else %}Explore the API{% endif %}
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
             </a>
           </div>

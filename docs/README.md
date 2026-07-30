@@ -206,7 +206,7 @@ ApexMail is a brand of **Bel Consulting OÜ**, Estonia.
 
 - **Company**: Bel Consulting OÜ
 - **Address**: Sakala 7-2, 10141 Tallinn, Estonia
-- **Registry Code**: 16192499
+- **Registry Code**: 16588745
 - **VAT Number**: EE102951727
 - **Email**: support@apexmail.ee
 - **Website**: https://apexmail.ee

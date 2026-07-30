@@ -1,73 +1,66 @@
-{# ── CTA Section ──────────────────────────────────────────────── #}
-{# Converted from home/CTASection.tsx                             #}
-
+{# CTA Section #}
 <section class="py-20 lg:py-32 relative overflow-hidden bg-white">
   <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="animate-in text-center">
       <h2 class="mb-6">
-        <span class="text-surface-950">Ready to Ship</span>
+        <span class="text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["heading_1"] %}{{ i18n_data[l]["cta"]["heading_1"] }}{% else %}Ready to Ship{% endif %}</span>
         <br />
-        <span class="text-brand-500">Better Email?</span>
+        <span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["heading_2"] %}{{ i18n_data[l]["cta"]["heading_2"] }}{% else %}Better Email?{% endif %}</span>
       </h2>
-
       <p class="text-xl text-surface-600 max-w-2xl mx-auto mb-10 leading-relaxed font-medium">
-        ApexMail provides reliable, compliance-ready email infrastructure
-        for mission-critical applications. Start free, scale as you grow.
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["subtitle"] %}{{ i18n_data[l]["cta"]["subtitle"] }}{% else %}ApexMail provides reliable, compliance-ready email infrastructure for mission-critical applications. Start free, scale as you grow.{% endif %}
       </p>
-
       <div class="grid sm:grid-cols-2 gap-x-8 gap-y-4 max-w-2xl mx-auto mb-12">
         <div class="animate-in flex items-center gap-3 text-left">
           <div class="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
           </div>
-          <span class="text-surface-600 text-[14px] font-bold tracking-wide">Send your first email in &lt; 60 seconds</span>
+          <span class="text-surface-600 text-[14px] font-bold tracking-wide">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["feature_test"] %}{{ i18n_data[l]["cta"]["feature_test"] }}{% else %}Send your first email in minutes (after domain verification){% endif %}</span>
         </div>
         <div class="animate-in flex items-center gap-3 text-left">
           <div class="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           </div>
-          <span class="text-surface-600 text-[14px] font-bold tracking-wide">30,000 free emails every month, forever</span>
+          <span class="text-surface-600 text-[14px] font-bold tracking-wide">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["feature_free"] %}{{ i18n_data[l]["cta"]["feature_free"] }}{% else %}30,000 free emails every month, forever{% endif %}</span>
         </div>
         <div class="animate-in flex items-center gap-3 text-left">
           <div class="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           </div>
-          <span class="text-surface-600 text-[14px] font-bold tracking-wide">No credit card required to start</span>
+          <span class="text-surface-600 text-[14px] font-bold tracking-wide">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["feature_no_cc"] %}{{ i18n_data[l]["cta"]["feature_no_cc"] }}{% else %}No credit card required to start{% endif %}</span>
         </div>
         <div class="animate-in flex items-center gap-3 text-left">
           <div class="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
           </div>
-          <span class="text-surface-600 text-[14px] font-bold tracking-wide">Free migration assistance available</span>
+          <span class="text-surface-600 text-[14px] font-bold tracking-wide">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["feature_migration"] %}{{ i18n_data[l]["cta"]["feature_migration"] }}{% else %}Free migration assistance available{% endif %}</span>
         </div>
       </div>
-
       <div class="animate-in delay-400 flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
         <a href="{{ config.extra.app_url }}/signup" class="btn-primary px-8 py-4 text-base w-full sm:w-auto uppercase">
-          Get Started Free
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Get Started Free{% endif %}
           <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
         <a href="/private-cloud/" class="btn-secondary px-8 py-4 text-base w-full sm:w-auto uppercase">
-          Book Architecture Review
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_enterprise"] %}{{ i18n_data[l]["cta"]["cta_enterprise"] }}{% else %}Book Architecture Review{% endif %}
         </a>
       </div>
-
       <div class="animate-in delay-500 flex flex-wrap items-center justify-center gap-6 text-[14px] font-bold tracking-widest text-surface-600">
         <span class="flex items-center gap-2">
           <span class="w-1.5 h-1.5 rounded-sm bg-success-500"></span>
-          99.9% Uptime SLA (Scale+)
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_uptime"] %}{{ i18n_data[l]["cta"]["trust_uptime"] }}{% else %}99.9% Uptime SLA (Scale+){% endif %}
         </span>
         <span class="flex items-center gap-2">
           <span class="w-1.5 h-1.5 rounded-sm bg-brand-500"></span>
-          SOC 2 Controls (Enterprise)
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_soc2"] %}{{ i18n_data[l]["cta"]["trust_soc2"] }}{% else %}SOC 2 Controls (Enterprise){% endif %}
         </span>
         <span class="flex items-center gap-2">
           <span class="w-1.5 h-1.5 rounded-sm bg-brand-500"></span>
-          GDPR Compliant
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_gdpr"] %}{{ i18n_data[l]["cta"]["trust_gdpr"] }}{% else %}GDPR-Aligned{% endif %}
         </span>
         <span class="flex items-center gap-2">
           <span class="w-1.5 h-1.5 rounded-sm bg-surface-400"></span>
-          Priority Support (Growth+)
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_support"] %}{{ i18n_data[l]["cta"]["trust_support"] }}{% else %}Priority Support (Growth+){% endif %}
         </span>
       </div>
     </div>

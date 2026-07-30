@@ -1,0 +1,27 @@
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    uid: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      tracesToLogs:
+        datasourceUid: Loki
+        tags: ['service.name', 'service.namespace', 'instance']
+        mappedTags: [{key: 'service.name', value: 'service_name'}]
+        spanStartTimeShift: '-1h'
+        spanEndTimeShift: '1h'
+        filterByTraceID: true
+        filterBySpanID: false
+      serviceMap:
+        datasourceUid: Prometheus
+        tags: ['service.name', 'service.namespace', 'instance']
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      lokiSearch:
+        datasourceUid: Loki
+    editable: false

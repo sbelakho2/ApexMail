@@ -12,7 +12,7 @@ last_updated = "2026-05-02"
 Bel Consulting OÜ (trading as ApexMail) ("we", "us") is committed to protecting your privacy. This policy explains how we collect, use, and safeguard personal data when you use our services, in compliance with Regulation (EU) 2016/679 (General Data Protection Regulation) and the Estonian Personal Data Protection Act (Isikuandmete kaitse seadus).
 
 **Data Controller:** Bel Consulting OÜ, Sakala 7-2, 10141 Tallinn, Estonia.
-**Registry code:** 16192499
+**Registry code:** 16588745
 **VAT number:** EE102951727
 
 ## 2. Data We Collect
@@ -27,7 +27,18 @@ We process data under GDPR Article 6(1)(b) (contract performance), Article 6(1)(
 
 ## 4. Data Storage
 
-All data is stored in EU data centres (Tallinn, Estonia). We do not transfer data outside the EEA without adequate safeguards.
+Core infrastructure data is stored in Hetzner data centers in Germany and Finland. Account and billing data may also be stored in these locations. For a complete breakdown of all data categories and their locations, see our [Data Locations](/data-locations/) page.
+
+### Summary Location Matrix
+
+| Data Category | Primary Location | Backup / Replica | Processing |
+|---|---|---|---|
+| Core email infrastructure (messages, delivery metadata, account data) | Hetzner, Germany (Falkenstein/Nuremberg) | Hetzner, Finland (Tuusula) | EEA only |
+| OAuth authentication tokens | Google LLC / GitHub, Inc. (US entities, SCCs) | Provider-managed | US (SCCs) |
+| Payment and billing records | Stripe, Inc. (US, SCCs) | Provider-managed (India for support) | US/India (SCCs) |
+| Support tickets | Hetzner, Germany | Hetzner, Finland | EEA only |
+
+We do not transfer personal data outside the EEA without adequate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
 
 ## 5. Data Retention
 

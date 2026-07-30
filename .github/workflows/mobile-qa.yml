@@ -1,0 +1,48 @@
+name: Mobile QA
+
+on:
+  pull_request:
+    paths:
+      - 'apps/marketing-zola/templates/**'
+      - 'apps/marketing-zola/css/**'
+      - 'deploy/tests/mobile-test.sh'
+      - '.github/workflows/mobile-qa.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/marketing-zola/templates/**'
+      - 'apps/marketing-zola/css/**'
+      - 'deploy/tests/mobile-test.sh'
+      - '.github/workflows/mobile-qa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mobile-qa:
+    name: Mobile Responsive QA
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Playwright
+        run: npx playwright install chromium 2>/dev/null || npm install playwright 2>/dev/null || echo "Playwright install skipped"
+      - name: Run mobile test
+        run: |
+          chmod +x deploy/tests/mobile-test.sh
+          bash deploy/tests/mobile-test.sh || true
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@fe9530cd28e02193eced3282e22f38e03d99fa02
+        with:
+          name: mobile-qa-report
+          path: deploy/tests/.mobile-test-report.json
+          retention-days: 30

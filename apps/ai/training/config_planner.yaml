@@ -1,0 +1,77 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ApexMail AI — Planner QLoRA Training Configuration
+# Model: Qwen 2.5-1.5B-Instruct (20× faster than 7B for classification)
+# Hardware: 1× NVIDIA A100 40GB (~$8-15 on vast.ai, ~30 min)
+# ──────────────────────────────────────────────────────────────────────────────
+
+model:
+  base: "models/Qwen2.5-1.5B-Instruct"
+  revision: "main"
+  trust_remote_code: false
+  torch_dtype: "bfloat16"
+  attn_implementation: "sdpa"
+
+quantisation:
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_use_double_quant: false    # 1.5B doesn't benefit from double quant
+
+lora:
+  r: 32                                 # 1.5B needs less rank than 7B
+  alpha: 64
+  dropout: 0.05
+  bias: "none"
+  task_type: "CAUSAL_LM"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+
+training:
+  num_train_epochs: 5                    # More epochs for small model + small dataset
+  per_device_train_batch_size: 4         # 1.5B fits larger batches
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 2         # effective batch = 4 * 2 = 8
+  learning_rate: 3.0e-4                 # Higher LR for smaller model
+  lr_scheduler_type: "cosine_with_restarts"
+  warmup_ratio: 0.10                    # Longer warmup for better stability
+  weight_decay: 0.01
+  gradient_checkpointing: false         # Not needed for 1.5B
+  optim: "adamw_8bit"
+  bf16: true
+  max_seq_length: 2048                   # Planner only needs 2K context
+  packing: false
+  logging_steps: 10
+  eval_strategy: "steps"
+  eval_steps: 50                         # Evaluate more frequently
+  save_strategy: "steps"
+  save_steps: 50
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  report_to: "none"
+  seed: 42
+  dataloader_num_workers: 2
+
+dataset:
+  train_files:
+    - "data/train.jsonl"
+    - "data/augmented_planner_structured_output_train.jsonl"
+  val_files:
+    - "data/val.jsonl"
+    - "data/augmented_planner_structured_output_val.jsonl"
+
+paths:
+  output_dir: "output_planner"
+  logs_dir: "logs_planner"
+
+evaluation:
+  golden_set: "data/golden_qa.jsonl"
+  intent_accuracy_target: 0.95
+  entity_f1_target: 0.90
+  max_new_tokens: 128                    # Planner output is short JSON
+  temperature: 0.1
+  top_p: 0.9

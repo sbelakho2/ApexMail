@@ -1,6 +1,19 @@
 # Support API
 
+> **Base path:** `/v1/support`
+> **Required scopes:** `support:read` (GET), `support:write` (POST/PUT)
+> **Rate limit:** 30 requests/minute per API key
+> **Content-Type:** `application/json`
+
 Manage support tickets and communicate with the ApexMail support team programmatically.
+
+## Authentication
+
+Include your API key in the `X-API-Key` header:
+
+```
+X-API-Key: am_live_...
+```
 
 ## Endpoints
 
@@ -12,8 +25,6 @@ Manage support tickets and communicate with the ApexMail support team programmat
 | `PUT` | `/v1/support/tickets/:id` | Update a ticket (status, priority) |
 | `GET` | `/v1/support/tickets/:id/messages` | List messages on a ticket |
 | `POST` | `/v1/support/tickets/:id/messages` | Add a message to a ticket |
-
-**Scope required:** `support:read` (GET), `support:write` (POST/PUT)
 
 ---
 
@@ -217,5 +228,20 @@ X-API-Key: am_live_xxxxxxxxxxxxx
 | HTTP Status | Code | Meaning |
 |-------------|------|---------|
 | `400` | `validation_error` | Invalid request body |
+| `401` | `UNAUTHORIZED` | API key is missing or invalid |
+| `403` | `INSUFFICIENT_SCOPE` | API key does not have the required scope |
 | `404` | `not_found` | Ticket or message not found |
 | `429` | `rate_limit_exceeded` | Too many requests |
+
+---
+
+## Related Webhooks
+
+Support ticket events are delivered via webhooks. See the [Webhooks Reference](../webhooks.md) for configuration:
+
+| Event | Description |
+|-------|-------------|
+| `support.ticket.created` | A new ticket was opened |
+| `support.ticket.updated` | Ticket status or priority changed |
+| `support.ticket.closed` | Ticket was resolved or closed |
+| `support.message.added` | A new message was posted on a ticket |

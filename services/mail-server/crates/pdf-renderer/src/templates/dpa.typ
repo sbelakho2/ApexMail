@@ -13,9 +13,10 @@
 //   "data_categories": ["Email addresses", "First/last names", "IP addresses", "Engagement data"],
 //   "processing_purposes": ["Email delivery", "Analytics", "Bounce processing", "Compliance monitoring"],
 //   "sub_processors": [
-//     { "name": "Hetzner Online GmbH", "purpose": "Infrastructure hosting", "location": "Germany" },
-//     { "name": "Cloudflare, Inc.", "purpose": "CDN and DDoS protection", "location": "USA (EU data region)" },
-//     { "name": "LHV Pank", "purpose": "Payment processing", "location": "Estonia" }
+//     { "name": "Hetzner Online GmbH", "purpose": "Core infrastructure (compute, storage)", "location": "Germany/Finland (EEA)" },
+//     { "name": "Google LLC", "purpose": "Optional OAuth authentication", "location": "Global (US entity, SCCs)" },
+//     { "name": "GitHub, Inc.", "purpose": "Optional OAuth authentication", "location": "Global (US entity, SCCs)" },
+//     { "name": "Stripe, Inc.", "purpose": "Payment processing", "location": "US/India (SCCs)" }
 //   ],
 //   "data_retention_days": 365,
 //   "dpa_version": "2.1"
@@ -25,7 +26,7 @@
 
 #set document(
   title: "Data Processing Agreement — " + data.controller.company,
-  author: "ApexMail OÜ",
+  author: "Bel Consulting OÜ",
 )
 
 #set page(
@@ -34,11 +35,11 @@
   header: context {
     if counter(page).get().first() > 1 [
       #set text(size: 8pt, fill: luma(140))
-      #grid(
-        columns: (1fr, 1fr),
-        [Data Processing Agreement — v#data.dpa_version],
-        align(right)[ApexMail OÜ & #data.controller.company],
-      )
+  #grid(
+    columns: (1fr, 1fr),
+    [Data Processing Agreement — v#data.dpa_version],
+    align(right)[Bel Consulting OÜ & #data.controller.company],
+  )
       #line(length: 100%, stroke: 0.3pt + luma(200))
     ]
   },
@@ -85,7 +86,7 @@
   #v(12pt)
   #text(size: 14pt)[and]
   #v(12pt)
-  #text(weight: "bold", size: 16pt)[ApexMail OÜ]
+  #text(weight: "bold", size: 16pt)[Bel Consulting OÜ]
   #text(size: 11pt)[(the "Processor")]
   #v(24pt)
   #text(size: 11pt)[
@@ -102,7 +103,7 @@
 
 = Definitions and Scope
 
-This Data Processing Agreement ("DPA") is entered into between *#data.controller.company* ("Controller") and *ApexMail OÜ*, a company incorporated under the laws of Estonia (registry code 16789012), with its registered office at Tornimäe 5, 10145 Tallinn, Estonia ("Processor").
+This Data Processing Agreement ("DPA") is entered into between *#data.controller.company* ("Controller") and *Bel Consulting OÜ* (trading as ApexMail), a company incorporated under the laws of Estonia (registry code 16588745, VAT EE102951727), with its registered office at Sakala tn 7-2, 10141 Tallinn, Estonia ("Processor").
 
 This DPA supplements the Terms of Service and governs the processing of personal data by the Processor on behalf of the Controller in connection with the ApexMail email delivery platform.
 
@@ -172,7 +173,7 @@ The Processor shall:
 The Processor implements the following security measures:
 
 == Encryption
-- All data in transit is encrypted using TLS 1.3.
+- All data in transit is encrypted using TLS 1.2 or higher (TLS 1.3 preferred where supported).
 - All data at rest is encrypted using AES-256-GCM.
 - DKIM signing keys are generated and stored using RSA-2048 or Ed25519.
 
@@ -205,7 +206,7 @@ The Processor implements the following security measures:
 
 = Sub-processors
 
-The Controller hereby provides general written authorisation for the Processor to engage the following sub-processors:
+The current authorised subprocessors are maintained in the ApexMail Subprocessor Register at https://apexmail.ee/subprocessors/, which is incorporated into this DPA by reference. At the date of this DPA, the authorised sub-processors include:
 
 #table(
   columns: (1fr, 1fr, auto),
@@ -223,7 +224,7 @@ The Controller hereby provides general written authorisation for the Processor t
 
 #v(8pt)
 
-The Processor shall inform the Controller of any intended changes concerning the addition or replacement of sub-processors, giving the Controller the opportunity to object to such changes.
+The Processor shall inform the Controller of any intended changes concerning the addition or replacement of sub-processors at least 30 days in advance, giving the Controller the opportunity to object to such changes on reasonable data protection grounds. The Subprocessor Register shall remain the authoritative source for the current list.
 
 // ---------------------------------------------------------------------------
 // 6. Breach Notification (Art. 33)
@@ -231,7 +232,9 @@ The Processor shall inform the Controller of any intended changes concerning the
 
 = Personal Data Breach Notification (Article 33 GDPR)
 
-The Processor shall notify the Controller without undue delay, and in any event within *24 hours*, after becoming aware of a personal data breach. The notification shall include:
+The Processor shall notify the Controller *without undue delay* after becoming aware of a personal data breach. ApexMail contractually targets an initial notification within 48 hours, based on the information reasonably available at that time.
+
+Under GDPR Article 33, the Controller bears the 72-hour supervisory-authority deadline; the Processor's obligation is to notify the Controller without undue delay. The notification shall include:
 
 + The nature of the personal data breach, including where possible the categories and approximate number of data subjects and records concerned.
 + The name and contact details of the Processor's data protection officer or other contact point.
@@ -292,7 +295,7 @@ This DPA has been executed in two copies, one for each party.
   [
     *For the Processor:*
     #v(8pt)
-    ApexMail OÜ
+    Bel Consulting OÜ (trading as ApexMail)
     #v(40pt)
     #line(length: 90%, stroke: 0.5pt)
     #v(4pt)

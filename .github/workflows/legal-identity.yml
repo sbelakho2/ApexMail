@@ -1,0 +1,110 @@
+name: Legal Identity Validation
+
+on:
+  pull_request:
+    paths:
+      - '**/*.html'
+      - '**/*.md'
+      - '**/*.rs'
+      - 'apps/marketing-zola/**'
+      - 'tools/validate_legal_identity.py'
+      - '.github/workflows/legal-identity.yml'
+  push:
+    branches: [main]
+    paths:
+      - '**/*.html'
+      - '**/*.md'
+      - '**/*.rs'
+      - 'apps/marketing-zola/**'
+      - 'tools/validate_legal_identity.py'
+      - '.github/workflows/legal-identity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  legal-identity:
+    name: Legal Identity Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Build Zola site
+        working-directory: apps/marketing-zola
+        run: |
+          echo "Building Zola site for legal identity validation..."
+          if command -v zola &>/dev/null; then
+            zola build
+          else
+            echo "Zola not installed — downloading..."
+            ZOLA_VERSION="0.19.1"
+            curl -sSL "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/zola-v${ZOLA_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz
+            ./zola build
+          fi
+
+      - name: Validate legal identity in built HTML
+        run: |
+          echo "=== ApexMail Legal Identity Validation ==="
+          python3 tools/validate_legal_identity.py --build-dir apps/marketing-zola/public
+
+  forbidden-patterns:
+    name: Forbidden Pattern Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Run forbidden pattern checks
+        run: bash tools/check-forbidden-patterns.sh
+
+  rust-legal-entity:
+    name: Verify Rust Legal Entity Constants
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Verify legal entity constants are defined
+        run: |
+          echo "=== Verifying Rust legal entity constants ==="
+          LEGAL_RS="services/mail-server/crates/compliance/src/legal_entity.rs"
+
+          required=(
+            "LEGAL_NAME"
+            "TRADING_NAME"
+            "REGISTRY_CODE"
+            "VAT_NUMBER"
+            "ADDRESS"
+            "COUNTRY"
+            "COUNTRY_CODE"
+            "JURISDICTION"
+            "GOVERNING_LAW"
+            "SUPPORT_EMAIL"
+            "PRIVACY_EMAIL"
+            "SECURITY_EMAIL"
+            "BILLING_EMAIL"
+            "DPO_CONTACT"
+            "COPYRIGHT_ENTITY"
+            "COPYRIGHT_START_YEAR"
+            "FOUNDING_DATE"
+          )
+
+          FAILED=0
+          for field in "${required[@]}"; do
+            if grep -q "pub const ${field}:" "$LEGAL_RS"; then
+              echo "  OK: $field"
+            else
+              echo "  MISSING: $field"
+              FAILED=1
+            fi
+          done
+
+          if [[ $FAILED -eq 1 ]]; then
+            echo "FAILED: Required legal entity constants missing"
+            exit 1
+          fi
+          echo "PASSED: All required legal entity constants present"

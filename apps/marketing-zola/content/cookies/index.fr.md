@@ -49,4 +49,4 @@ La désactivation des cookies essentiels peut empêcher le bon fonctionnement de
 
 ## 6. Contact
 
-Si vous avez des questions concernant cette politique de cookies, veuillez nous contacter à l'adresse {{ config.extra.support_email }}.
+Si vous avez des questions concernant cette politique de cookies, veuillez nous contacter à l'adresse support@apexmail.ee.

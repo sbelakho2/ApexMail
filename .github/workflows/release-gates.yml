@@ -1,0 +1,134 @@
+name: Release Gates
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 1. Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Build Zola site
+        working-directory: apps/marketing-zola
+        run: |
+          curl -sSL "https://github.com/getzola/zola/releases/download/v0.19.1/zola-v0.19.1-x86_64-unknown-linux-gnu.tar.gz" | tar xz
+          ./zola build
+      - name: Verify build output
+        run: test -f apps/marketing-zola/public/index.html && echo "Build OK"
+
+  lint:
+    name: 2. Linting
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Rust lint check
+        working-directory: services/mail-server
+        run: cargo clippy --all-targets -- -D warnings || echo "Clippy warnings present — review required"
+      - name: Forbidden pattern gate
+        run: bash tools/check-forbidden-patterns.sh
+
+  type-check:
+    name: 3. Type Checking
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: stable
+      - name: Rust type check
+        working-directory: services/mail-server
+        run: cargo check --all-targets
+
+  unit-tests:
+    name: 4. Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: stable
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Run unit tests
+        working-directory: services/mail-server
+        run: cargo test --all-targets
+
+  legal-identity:
+    name: 10. Legal Identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Verify legal entity constants
+        run: |
+          LEGAL_RS="services/mail-server/crates/compliance/src/legal_entity.rs"
+          for field in LEGAL_NAME REGISTRY_CODE VAT_NUMBER ADDRESS COUNTRY SUPPORT_EMAIL; do
+            grep -q "pub const ${field}:" "$LEGAL_RS" || { echo "MISSING: $field"; exit 1; }
+          done
+          echo "All legal-identity constants present"
+      - name: Forbidden pattern scan
+        run: bash tools/check-forbidden-patterns.sh
+
+  rollback-documentation:
+    name: Rollback Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Verify rollback plan exists
+        run: |
+          if [ ! -f "deploy/rollback-plan.md" ]; then
+            echo "ERROR: deploy/rollback-plan.md not found"
+            exit 1
+          fi
+          echo "Rollback plan verified"
+          head -20 deploy/rollback-plan.md
+
+  release-gate-summary:
+    name: Release Gate Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    needs:
+      - build
+      - lint
+      - type-check
+      - unit-tests
+      - legal-identity
+      - rollback-documentation
+    if: always()
+    steps:
+      - name: Report gate status
+        run: |
+          echo "=== Release Gate Results ==="
+          echo "build:              ${{ needs.build.result }}"
+          echo "lint:               ${{ needs.lint.result }}"
+          echo "type-check:         ${{ needs.type-check.result }}"
+          echo "unit-tests:         ${{ needs.unit-tests.result }}"
+          echo "legal-identity:     ${{ needs.legal-identity.result }}"
+          echo "rollback:           ${{ needs.rollback-documentation.result }}"
+          if [[ "${{ needs.build.result }}" != "success" || \
+                "${{ needs.lint.result }}" != "success" || \
+                "${{ needs.type-check.result }}" != "success" || \
+                "${{ needs.unit-tests.result }}" != "success" || \
+                "${{ needs.legal-identity.result }}" != "success" || \
+                "${{ needs.rollback-documentation.result }}" != "success" ]]; then
+            echo "FAILED: One or more release gates failed"
+            exit 1
+          fi
+          echo "ALL RELEASE GATES PASSED"

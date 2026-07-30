@@ -1,0 +1,173 @@
+{
+  "version": "1.0",
+  "taxonomy": "ApexMail Funnel Events",
+  "events": [
+    {
+      "name": "homepage_viewed",
+      "trigger": "Page view on /",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "referrer", "utm_source", "utm_medium", "utm_campaign", "device_category"],
+      "category": "acquisition"
+    },
+    {
+      "name": "pricing_viewed",
+      "trigger": "Page view on /pricing/",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "referrer", "device_category"],
+      "category": "consideration"
+    },
+    {
+      "name": "documentation_viewed",
+      "trigger": "Page view on /docs/ or /docs/*",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "referrer", "device_category"],
+      "category": "consideration"
+    },
+    {
+      "name": "sdk_viewed",
+      "trigger": "Page view on /docs/sdks/",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "sdk_language", "device_category"],
+      "category": "consideration"
+    },
+    {
+      "name": "signup_started",
+      "trigger": "Button click or navigation to /signup",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "referrer", "device_category"],
+      "category": "activation"
+    },
+    {
+      "name": "signup_completed",
+      "trigger": "Successful account creation",
+      "fields": ["user_id", "session_id", "timestamp", "auth_method", "plan", "utm_source", "utm_medium", "utm_campaign", "device_category"],
+      "category": "activation"
+    },
+    {
+      "name": "email_verified",
+      "trigger": "Email confirmation completed",
+      "fields": ["user_id", "session_id", "timestamp", "time_to_verify_seconds"],
+      "category": "activation"
+    },
+    {
+      "name": "domain_added",
+      "trigger": "Sending domain added to account",
+      "fields": ["user_id", "session_id", "timestamp", "domain"],
+      "category": "activation"
+    },
+    {
+      "name": "domain_verified",
+      "trigger": "Domain DNS verification completed",
+      "fields": ["user_id", "session_id", "timestamp", "domain", "time_to_verify_hours"],
+      "category": "activation"
+    },
+    {
+      "name": "api_key_created",
+      "trigger": "API key generated",
+      "fields": ["user_id", "session_id", "timestamp", "key_type"],
+      "category": "activation"
+    },
+    {
+      "name": "first_send_attempted",
+      "trigger": "First API call or SMTP send",
+      "fields": ["user_id", "session_id", "timestamp", "send_method", "sdk_language"],
+      "category": "activation"
+    },
+    {
+      "name": "first_send_accepted",
+      "trigger": "First send accepted by API",
+      "fields": ["user_id", "session_id", "timestamp"],
+      "category": "activation"
+    },
+    {
+      "name": "first_send_delivered",
+      "trigger": "First message delivery event received",
+      "fields": ["user_id", "session_id", "timestamp", "time_to_deliver_ms"],
+      "category": "activation"
+    },
+    {
+      "name": "paid_plan_selected",
+      "trigger": "Paid plan chosen in billing",
+      "fields": ["user_id", "session_id", "timestamp", "plan", "billing_period", "volume_tier"],
+      "category": "conversion"
+    },
+    {
+      "name": "checkout_started",
+      "trigger": "Billing checkout initiated",
+      "fields": ["user_id", "session_id", "timestamp", "plan", "billing_period", "amount", "currency"],
+      "category": "conversion"
+    },
+    {
+      "name": "subscription_completed",
+      "trigger": "Payment confirmed, subscription active",
+      "fields": ["user_id", "session_id", "timestamp", "plan", "billing_period", "amount", "currency", "payment_method"],
+      "category": "conversion"
+    },
+    {
+      "name": "enterprise_form_started",
+      "trigger": "Enterprise lead form opened",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "form_type"],
+      "category": "conversion"
+    },
+    {
+      "name": "enterprise_form_submitted",
+      "trigger": "Enterprise lead form submitted",
+      "fields": ["anonymous_id", "session_id", "timestamp", "company", "country", "monthly_volume", "compliance_requirement", "deployment_preference"],
+      "category": "conversion"
+    },
+    {
+      "name": "private_cloud_form_submitted",
+      "trigger": "Private Cloud inquiry submitted",
+      "fields": ["anonymous_id", "session_id", "timestamp", "company", "country", "deployment_preference", "required_region"],
+      "category": "conversion"
+    },
+    {
+      "name": "cta_start_free_click",
+      "trigger": "Click on 'Start Free' CTA",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "cta_location", "device_category"],
+      "category": "engagement"
+    },
+    {
+      "name": "cta_view_pricing_click",
+      "trigger": "Click on 'View Pricing' CTA",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "cta_location", "device_category"],
+      "category": "engagement"
+    },
+    {
+      "name": "cta_read_docs_click",
+      "trigger": "Click on 'Read Documentation' CTA",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "cta_location", "device_category"],
+      "category": "engagement"
+    },
+    {
+      "name": "cta_contact_sales_click",
+      "trigger": "Click on 'Contact Sales' CTA",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "cta_location", "device_category"],
+      "category": "engagement"
+    },
+    {
+      "name": "cta_private_cloud_click",
+      "trigger": "Click on Private Cloud inquiry CTA",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "cta_location", "device_category"],
+      "category": "engagement"
+    },
+    {
+      "name": "cta_migration_click",
+      "trigger": "Click on migration-related CTA",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "cta_location", "device_category"],
+      "category": "engagement"
+    },
+    {
+      "name": "cta_compare_plans_click",
+      "trigger": "Click on plan comparison CTA",
+      "fields": ["anonymous_id", "session_id", "timestamp", "page", "cta_location", "device_category"],
+      "category": "engagement"
+    }
+  ],
+  "privacy_validation": {
+    "cookies_required": ["apexmail_cookie_consent"],
+    "analytics_host": "analytics.apexmail.ee",
+    "ip_collection": "anonymized",
+    "user_id_format": "hashed",
+    "retention_days": 730,
+    "consent_required_before_load": true,
+    "opt_out_endpoint": "/analytics/opt-out",
+    "dpa_coverage": true,
+    "subprocessor_listed": true
+  }
+}

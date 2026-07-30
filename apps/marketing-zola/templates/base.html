@@ -1,3 +1,8 @@
+{# ── I18n data loaded into template context ── #}
+{# Uses the dedicated data/i18n.json for structured translations.          #}
+{# l is the active language code (e.g. "en", "de"), always defined here.   #}
+{%- set i18n_data = load_data(path="data/i18n.json", format="json", required=false) -%}
+{%- set l = lang | default(value=config.default_language) -%}
 <!DOCTYPE html>
 <html lang="{{ lang | default(value=config.default_language) }}" dir="ltr" id="top" data-theme="apex" class="scroll-smooth">
 <head>
@@ -6,25 +11,18 @@
   <meta name="color-scheme" content="light dark" />
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
   <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
-  {# ── Dark Mode Detection (prevents white flash) ───── #}
   <script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %}>
     (function(){var e=localStorage.getItem('apexmail-theme');if(e==='dark'||(!e&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark')}})();
   </script>
-
   {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
   {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.ttf", cachebust=true) %}
   {% set fraunces_font_url = get_url(path="fonts/Fraunces-Variable.ttf", cachebust=true) %}
   {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
   {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
   {% set site_js_url = get_url(path="js/apexmail-site.js", cachebust=true) %}
-
   <title>{% block title %}{{ config.title }}{% endblock title %}</title>
   <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}" />
-
-  {# ── Canonical & SEO ──────────────────────────────── #}
   {% block canonical_tag %}<link rel="canonical" href="{{ current_url | default(value=config.base_url) }}" />{% endblock canonical_tag %}
-  {# ── Hreflang language alternates ────────────────── #}
-  {# Collect configured language codes from the languages map and include the default. #}
   {% set_global supported_langs = [config.default_language] %}
   {% for lcode, lang_cfg in config.languages %}
     {% set_global supported_langs = supported_langs | concat(with=[lcode]) %}
@@ -38,8 +36,6 @@
   <meta name="keywords" content="email API, transactional email, email infrastructure, GDPR compliant email, HIPAA-ready enterprise email, email deliverability, enterprise email, developer email API" />
   <meta name="author" content="{{ config.extra.author }}" />
   <meta name="publisher" content="{{ config.extra.author }}" />
-
-  {# ── Open Graph ────────────────────────────────────── #}
   <meta property="og:type" content="website" />
   <meta property="og:locale" content="en_US" />
   <meta property="og:url" content="{{ current_url | default(value=config.base_url) }}" />
@@ -50,28 +46,18 @@
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta property="og:image:alt" content="{% block og_image_alt %}{{ config.extra.site_name }} — Enterprise Email API{% endblock og_image_alt %}" />
-
-  {# ── Twitter Card ──────────────────────────────────── #}
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="{% block twitter_title %}{{ config.title }}{% endblock twitter_title %}" />
   <meta name="twitter:description" content="{% block twitter_description %}{{ config.description }}{% endblock twitter_description %}" />
   <meta name="twitter:image" content="{{ config.base_url }}{{ config.extra.og_image }}" />
   <meta name="twitter:creator" content="{{ config.extra.twitter_handle }}" />
-
-  {# ── Favicons ──────────────────────────────────────── #}
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <link rel="manifest" href="/manifest.json" />
-
-  {# ── Font Preloads ────────────────────────────────── #}
   <link rel="preload" href="{{ inter_font_url }}" as="font" type="font/woff2" crossorigin />
-
-  {# ── CSS ───────────────────────────────────────────── #}
   {% set giallo_css_url = get_url(path="giallo.css", cachebust=true) %}
   <link rel="stylesheet" href="{{ styles_css_url }}" />
   <link rel="stylesheet" href="{{ no_js_css_url }}" />
   <link rel="stylesheet" href="{{ giallo_css_url }}" />
-
-  {# ── Organization JSON-LD ─────────────────────────── #}
   <script type="application/ld+json" {% if csp_nonce %}nonce="{{ csp_nonce }}"{% endif %}>
   {
     "@context": "https://schema.org",
@@ -86,50 +72,28 @@
     ]
   }
   </script>
-
-  {# ── Page-Specific Head Blocks ────────────────────── #}
   {% block head %}{% endblock head %}
-
-  {# ── Analytics / Tracking Pixel ────────────────────── #}
   {% include "partials/analytics.html" %}
-
 </head>
 <body class="antialiased min-h-screen safe-area-inset-bottom flex flex-col">
-  <a href="#main-content" id="skip-to-content" class="skip-to-content top-0" tabindex="1">Skip to main content</a>
-
-  {# ── Hidden state inputs for CSS-only interactivity ──── #}
-  {# The checkbox pattern provides a no-JS fallback for mobile menu. #}
-  {# JS enhancement (in apexmail-site.js) adds keyboard support.     #}
-  {# Uses off-screen positioning instead of sr-only to maintain      #}
-  {# keyboard focusability (clip-based sr-only can break Tab focus). #}
+  <a href="#main-content" id="skip-to-content" class="skip-to-content top-0" tabindex="1">{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["skip_to_main"] %}{{ i18n_data[l]["a11y"]["skip_to_main"] }}{% else %}Skip to main content{% endif %}</a>
   <input type="checkbox" id="nav-toggle" class="nav-toggle-input" aria-label="Toggle navigation menu" />
-
-  {# ── Header ─────────────────────────────────────────── #}
   {% include "partials/header.html" %}
-
-  {# ── Main Content ──────────────────────────────────── #}
   <main id="main-content" class="flex-1 scroll-mt-16 lg:scroll-mt-20" tabindex="-1">
     {% block content %}{% endblock content %}
   </main>
-
-  {# ── Footer ────────────────────────────────────────── #}
   {% include "partials/footer.html" %}
-
-  {# ── Cookie Consent ─────────────────────────────────── #}
   {% include "partials/cookie-consent.html" %}
-
-  {# ── Back to Top ─────────────────────────────────────── #}
   <a
     href="#top"
     id="back-to-top"
     class="fixed bottom-6 right-6 z-50 rounded-sm bg-surface-950 p-3 text-white border border-surface-800 transition-opacity hover:bg-surface-800 focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2"
-    aria-label="Back to top"
+    aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['back_to_top'] %}{{ i18n_data[l]['a11y']['back_to_top'] }}{% else %}Back to top{% endif %}"
   >
     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path fill-rule="evenodd" d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z" clip-rule="evenodd" />
     </svg>
   </a>
-
   <script src="{{ site_js_url }}" defer></script>
 </body>
 </html>

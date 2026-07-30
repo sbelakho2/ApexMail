@@ -23,6 +23,7 @@ members = [
     "crates/rate-limiter",
     "crates/dns-resolver",
     "crates/api-server",
+    "crates/auth-server",
     "crates/billing-service",
     "crates/billing-common",
     "crates/devex-service",

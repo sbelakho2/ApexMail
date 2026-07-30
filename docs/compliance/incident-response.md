@@ -2,7 +2,7 @@
 
 > **Classification:** Internal Policy — Confidential
 > **Owner:** Engineering Lead, Bel Consulting OÜ
-> **Legal Entity:** Bel Consulting OÜ, Registry Code 16192499, Tallinn, Estonia
+> **Legal Entity:** Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
 > **Last Reviewed:** 2026-02-09
 > **Review Cycle:** Annually, and after every P1/P2 incident
 

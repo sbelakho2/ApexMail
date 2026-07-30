@@ -1,0 +1,62 @@
+name: Supply Chain — cargo-vet
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # Weekly on Monday at 08:00 UTC
+  push:
+    branches:
+      - main
+    paths:
+      - 'services/mail-server/Cargo.toml'
+      - 'services/mail-server/Cargo.lock'
+      - 'services/mail-server/crates/**/Cargo.toml'
+      - 'services/mail-server/supply-chain/**'
+      - '.github/workflows/cargo-vet.yml'
+  pull_request:
+    paths:
+      - 'services/mail-server/Cargo.toml'
+      - 'services/mail-server/Cargo.lock'
+      - 'services/mail-server/crates/**/Cargo.toml'
+      - 'services/mail-server/supply-chain/**'
+      - '.github/workflows/cargo-vet.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  vet:
+    name: cargo vet — Supply Chain Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Install cargo-vet
+        run: cargo install cargo-vet --locked
+
+      - name: Check supply-chain directory exists
+        id: check-vet-config
+        working-directory: services/mail-server
+        run: |
+          if [ -f supply-chain/config.toml ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::cargo-vet supply-chain/config.toml not found. Run 'cargo vet init' locally."
+          fi
+
+      - name: Run cargo vet
+        if: steps.check-vet-config.outputs.configured == 'true'
+        working-directory: services/mail-server
+        run: cargo vet --locked

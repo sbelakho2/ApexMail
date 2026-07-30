@@ -49,4 +49,4 @@ La desactivación de las cookies esenciales puede impedir que la consola de Apex
 
 ## 6. Contacto
 
-Si tiene preguntas sobre esta política de cookies, contáctenos en {{ config.extra.support_email }}.
+Si tiene preguntas sobre esta política de cookies, contáctenos en support@apexmail.ee.

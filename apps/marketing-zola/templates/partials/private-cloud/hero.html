@@ -8,16 +8,14 @@
       <div>
         <div class="inline-flex items-center gap-2 px-4 py-2 rounded-sm bg-brand-100 text-brand-700 text-sm font-semibold mb-6 animate-in uppercase">
           <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="0"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
-          Enterprise Infrastructure
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_badge"] %}{{ i18n_data[l]["private_cloud"]["hero_badge"] }}{% else %}Enterprise Infrastructure{% endif %}
         </div>
         <h1 class="animate-in delay-100 text-4xl md:text-5xl font-bold text-surface-950 tracking-tight mb-6">
-          Your Email.<br />
-          <span class="text-brand-500">Your Cloud.</span>
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_title_1"] %}{{ i18n_data[l]["private_cloud"]["hero_title_1"] }}{% else %}Your Email.{% endif %}<br />
+          <span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_title_2"] %}{{ i18n_data[l]["private_cloud"]["hero_title_2"] }}{% else %}Your Cloud.{% endif %}</span>
         </h1>
         <p class="animate-in delay-200 text-lg text-surface-600 leading-relaxed mb-8">
-          Enterprise includes private deployment lifecycle management for single-tenant,
-          dedicated, hybrid, and on-premise models. We track region, isolation, health,
-          dedicated IPs, and BYOIP verification from design through launch.
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_subtitle"] %}{{ i18n_data[l]["private_cloud"]["hero_subtitle"] }}{% else %}Enterprise includes private deployment lifecycle management for single-tenant, dedicated, hybrid, and on-premise models. We track region, isolation, health, dedicated IPs, and BYOIP verification from design through launch.{% endif %}
         </p>
 
         <div class="animate-in delay-300 space-y-4">
@@ -26,8 +24,8 @@
               <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </div>
             <div>
-              <div class="font-semibold text-surface-950">Single-Tenant Isolation</div>
-              <div class="text-sm text-surface-500">Dedicated tenancy options scoped for your risk profile</div>
+              <div class="font-semibold text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_title"] }}{% else %}Single-Tenant Isolation{% endif %}</div>
+              <div class="text-sm text-surface-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_1_desc"] }}{% else %}Dedicated tenancy options scoped for your risk profile{% endif %}</div>
             </div>
           </div>
           <div class="flex items-start gap-3">
@@ -35,8 +33,8 @@
               <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </div>
             <div>
-              <div class="font-semibold text-surface-950">Deployment Lifecycle</div>
-              <div class="text-sm text-surface-500">Region, sizing, health checks, and status tracked before launch</div>
+              <div class="font-semibold text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_title"] }}{% else %}Deployment Lifecycle{% endif %}</div>
+              <div class="text-sm text-surface-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_2_desc"] }}{% else %}Region, sizing, health checks, and status tracked before launch{% endif %}</div>
             </div>
           </div>
           <div class="flex items-start gap-3">
@@ -44,8 +42,8 @@
               <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </div>
             <div>
-              <div class="font-semibold text-surface-950">BYOIP &amp; Dedicated IPs</div>
-              <div class="text-sm text-surface-500">Dedicated sending IPs with CIDR verification and reputation tracking</div>
+              <div class="font-semibold text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_title"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_title"] }}{% else %}BYOIP &amp; Dedicated IPs{% endif %}</div>
+              <div class="text-sm text-surface-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] %}{{ i18n_data[l]["private_cloud"]["hero_benefit_3_desc"] }}{% else %}Dedicated sending IPs with CIDR verification and reputation tracking{% endif %}</div>
             </div>
           </div>
         </div>
@@ -54,15 +52,15 @@
       {# Right: VPC Architecture Diagram #}
       <div class="animate-in delay-300 relative">
         <div class="bg-white border border-surface-200 rounded-sm p-6">
-          <div class="text-xs font-semibold text-surface-400 tracking-wider mb-4">Reference Deployment Architecture</div>
+          <div class="text-xs font-semibold text-surface-400 tracking-wider mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["architecture_label"] %}{{ i18n_data[l]["private_cloud"]["architecture_label"] }}{% else %}Reference Deployment Architecture{% endif %}</div>
 
           {# Region label #}
           <div class="border-2 border-dashed border-brand-200 rounded-sm p-4 relative">
-            <span class="absolute -top-3 left-4 bg-white px-2 text-xs font-semibold text-surface-950">Customer-selected cloud region</span>
+            <span class="absolute -top-3 left-4 bg-white px-2 text-xs font-semibold text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["region_label"] %}{{ i18n_data[l]["private_cloud"]["region_label"] }}{% else %}Customer-selected cloud region{% endif %}</span>
 
             {# Private Subnet #}
             <div class="bg-surface-100 border border-surface-200 rounded-sm p-4 mb-3">
-              <div class="text-xs font-semibold text-surface-500 mb-3">Private Subnet</div>
+              <div class="text-xs font-semibold text-surface-500 mb-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["private_subnet"] %}{{ i18n_data[l]["private_cloud"]["private_subnet"] }}{% else %}Private Subnet{% endif %}</div>
               <div class="grid grid-cols-3 gap-2">
                 {% set private_services = ["MTA Cluster", "Queue Workers", "Analytics DB"] %}
                 {% for svc in private_services %}
@@ -78,7 +76,7 @@
 
             {# Public Subnet #}
             <div class="bg-brand-50/50 border border-brand-200 rounded-sm p-4">
-              <div class="text-xs font-semibold text-surface-950 mb-3">Public Subnet</div>
+              <div class="text-xs font-semibold text-surface-950 mb-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["public_subnet"] %}{{ i18n_data[l]["private_cloud"]["public_subnet"] }}{% else %}Public Subnet{% endif %}</div>
               <div class="grid grid-cols-3 gap-2">
                 {% set public_services = ["API Gateway", "Load Balancer", "DNS Resolver"] %}
                 {% for svc in public_services %}
@@ -97,7 +95,7 @@
           <div class="mt-4 flex items-center justify-between p-3 bg-success-50 border border-success-200 rounded-sm">
             <div class="flex items-center gap-2">
               <div class="w-2 h-2 rounded-sm bg-success-500 animate-pulse"></div>
-              <span class="text-sm font-medium text-success-700">Dedicated IP Pool</span>
+              <span class="text-sm font-medium text-success-700">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["dedicated_ip_pool"] %}{{ i18n_data[l]["private_cloud"]["dedicated_ip_pool"] }}{% else %}Dedicated IP Pool{% endif %}</span>
             </div>
             <span class="text-xs text-success-600 font-mono">192.168.x.x/24</span>
           </div>

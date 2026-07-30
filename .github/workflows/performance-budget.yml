@@ -1,0 +1,46 @@
+name: Performance Budget
+
+on:
+  pull_request:
+    paths:
+      - 'apps/marketing-zola/**'
+      - 'deploy/tests/performance-budget.sh'
+      - '.github/workflows/performance-budget.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/marketing-zola/**'
+      - 'deploy/tests/performance-budget.sh'
+      - '.github/workflows/performance-budget.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  performance-budget:
+    name: Lighthouse Performance Budgets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Lighthouse
+        run: npm install -g lighthouse
+      - name: Run performance budget check
+        run: |
+          chmod +x deploy/tests/performance-budget.sh
+          bash deploy/tests/performance-budget.sh
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@fe9530cd28e02193eced3282e22f38e03d99fa02
+        with:
+          name: performance-budget-report
+          path: deploy/tests/.performance-budget-report.json
+          retention-days: 30

@@ -4,7 +4,7 @@ description = "ApexMail Terms of Service — the agreement governing your use of
 template = "prose.html"
 
 [extra]
-last_updated = "2026-05-02"
+last_updated = "2026-07-30"
 +++
 
 ## 1. Introduction
@@ -13,7 +13,7 @@ These Terms of Service ("Terms") govern your access to and use of the ApexMail e
 
 **Company details:**
 - **Legal name:** Bel Consulting OÜ
-- **Registry code:** 16192499
+- **Registry code:** 16588745
 - **VAT number:** EE102951727
 - **Registered address:** Sakala 7-2, 10141 Tallinn, Estonia
 - **Contact email:** support@apexmail.ee
@@ -80,7 +80,7 @@ In accordance with Article 16(m) of Directive 2011/83/EU, the right of withdrawa
 
 ## 9. SLA
 
-Scale and Enterprise plan customers are covered by our [Service Level Agreement](/sla/). Other plans are provided on a best-effort basis with no guaranteed uptime commitment unless otherwise agreed in writing.
+Business and Enterprise plan customers are covered by our [Service Level Agreement](/sla/). Other plans are provided on a best-effort basis with no guaranteed uptime commitment unless otherwise agreed in writing.
 
 ## 10. Limitation of Liability
 
@@ -96,9 +96,13 @@ These Terms are governed by the laws of the Republic of Estonia.
 
 Any disputes arising under these Terms shall first be submitted to the Harju County Court, Tallinn, Estonia.
 
-### 11.3 Online Dispute Resolution (ODR)
+### 11.3 Consumer Complaints
 
-Pursuant to Regulation (EU) No 524/2013, EU consumers may submit complaints to the European Commission's Online Dispute Resolution platform at **https://ec.europa.eu/consumers/odr/**.
+**Internal complaint procedure.** Complaints may be submitted directly to Bel Consulting OÜ at hello@apexmail.ee. We will acknowledge receipt within 5 business days and respond substantively within 30 days.
+
+**Estonian Consumer Disputes Committee.** If you are a Consumer and your complaint is not resolved through our internal procedure, you may refer the dispute to the Estonian Consumer Disputes Committee (Tarbijakaebuste komisjon, Endla 10a, 10142 Tallinn, https://komisjon.ee). The Committee is the independent out-of-court body for qualifying consumer disputes involving an Estonian trader. Referral is voluntary and does not affect your right to bring proceedings before the courts.
+
+**Court proceedings.** Any disputes arising under these Terms shall first be submitted to the Harju County Court, Tallinn, Estonia. Governing law: Estonian law. Nothing in this section limits your rights as a Consumer under mandatory EU or Estonian law.
 
 ### 11.4 Supervisory Authority
 

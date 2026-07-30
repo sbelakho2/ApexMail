@@ -18,7 +18,7 @@ services:
     # SECURITY: Pin to specific digest for reproducible builds
     # Update digest after verified image build:
     #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/sbelakho2/apexmail/marketing:latest
-    image: ghcr.io/sbelakho2/apexmail/marketing:v1.0.0
+    image: ghcr.io/sbelakho2/apexmail/marketing:v1.0.1
     restart: unless-stopped
     read_only: true
     tmpfs:

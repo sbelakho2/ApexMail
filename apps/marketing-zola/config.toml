@@ -57,7 +57,7 @@ github_url = "https://github.com/apexmail/apexmail"
 docs_url = "https://apexmail.ee/docs"
 app_url = "https://app.apexmail.ee"
 api_url = "https://api.apexmail.ee"
-pricing_as_of = "2026-05-09"
+pricing_as_of = "2026-07-30"
 asset_cdn_base_url = "https://cdn.apexmail.ee"
 
 # ── Analytics (Plausible-compatible) ─────────────────────────
@@ -85,6 +85,20 @@ primary = false
 value = "all"
 analytics = true
 primary = true
+
+
+[extra.company]
+product_name = "ApexMail"
+legal_name = "Bel Consulting OÜ"
+registry_code = "16588745"
+vat_number = "EE102951727"
+address = "Sakala tn 7-2, 10141 Tallinn, Estonia"
+city = "Tallinn"
+postal_code = "10141"
+country = "Estonia"
+copyright_entity = "Bel Consulting OÜ"
+copyright_start_year = 2025
+founding_date = "2025"
 
 # ── Internationalization ──────────────────────────────────────
 # i18n .po files are in ./i18n/{lang}.po

@@ -1,0 +1,15 @@
+{# API Explorer page template #}
+{% extends "base.html" %}
+
+{% block content %}
+{% include "partials/api-explorer/hero.html" %}
+
+{# API Explorer (static showcase, zero JS) #}
+<div>
+	{% include "partials/generated/api-explorer-island.html" %}
+</div>
+
+{# EndpointExplorer — content rendered statically above #}
+
+{% include "partials/api-explorer/cta.html" %}
+{% endblock content %}

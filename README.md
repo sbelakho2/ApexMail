@@ -4,21 +4,19 @@ Rust-first transactional email platform with SSR browser surfaces, tracking, ana
 
 ## Architecture Overview
 
-ApexMail now runs as a Rust-focused monorepo. The browser surfaces are served by the Rust `api-server`, tracking is handled by a dedicated Rust service, and the marketing site is generated statically with Zola.
+ApexMail runs as a Rust-focused monorepo. The auth-server serves REST APIs, the MTA handles SMTP, the marketing site is built with Zola and served by bare-metal nginx.
 
-### Runtime Services
+### Production Runtime Services
 
-| Service | Description | Port |
-|---------|-------------|------|
-| `api-server` | REST API plus SSR `web` and `control-plane` surfaces | 3001 |
-| `tracking-service` | Open pixel, click tracking, unsubscribe handling | 3001 (own pod) |
-| `enterprise` | Enterprise-only routes and support surfaces | 3002 |
-| `worker-processors` | Background job processing | N/A |
-| `mta` | SMTP handling and mail transfer | 25, 587, 465 |
-
-> Local dev (`tools/dev-start.sh`) runs `api-server` on `http://127.0.0.1:3001`.
-> `tracking-service` listens on port 3001 inside its own deployment pod, so there
-> is no collision in production. For local development they are not co-resident.
+| Service | Description | Port | Management |
+|---------|-------------|------|------------|
+| `auth-server` | REST API gateway (auth, billing, tenants, sandbox, status) | 3000 | systemd (`auth-server`) |
+| `mta-server` | SMTP handling and mail transfer | 25, 465, 587 | systemd (`apexmail-mta`) |
+| `imap-server` | IMAP4rev1 access | — | systemd (`apexmail-imap`) |
+| `status-server` | Monitoring probe aggregation | 9090 | systemd (`apexmail-status`) |
+| `postgres` | Primary database | 5432 (127.0.0.1) | Docker Compose |
+| `redis` | Cache and queue | 6379 (127.0.0.1) | Docker Compose |
+| `nginx` | HTTPS termination, static files, reverse proxy | 80, 443 | systemd (`nginx`) |
 
 ## Tech Stack
 
@@ -237,19 +235,60 @@ See `.env.example` for all available configuration options.
 
 ## Deployment
 
-### Docker
+### Production (bare-metal Hetzner server at 95.216.226.51)
+
+**This is the ONLY deployment mechanism.** Do NOT use GitHub Actions, Docker Compose,
+Kubernetes, manual rsync, or any other path. All deploys MUST go through the
+Makefile which invokes the server-side `deploy.sh`.
 
 ```bash
-# Build all images
-docker compose build
+# Build the Zola marketing site, stage it to the server, and atomically deploy
+make deploy-marketing
 
-# Start all services
-docker compose up -d
+# Push auth-server source, rebuild on server, restart via systemd
+make deploy-auth
+
+# Deploy nginx config from deploy/nginx/apexmail.conf
+make deploy-nginx
+
+# Full deployment in dependency order
+make deploy-all
+
+# Verify production (run after any deployment)
+make verify
+
+# Instant rollback to previous marketing snapshot
+make rollback-marketing
 ```
 
-### Kubernetes
+**Prerequisites:**
+- SSH config at `~/.ssh/config` with a `Host apexmail` block pointing to `95.216.226.51`
+- SSH key at `~/.ssh/hetzner-db-mac`
+- Zola installed locally (`brew install zola`)
 
-Kubernetes deployment documentation is planned for a future release. For now, use Docker Compose for production deployments.
+**How it works:**
+1. `make build-marketing` → Zola generates `apps/marketing-zola/public/`
+2. `make push-marketing` → rsync to `/var/www/.apexmail.ee.next` (staging)
+3. Server runs `deploy.sh marketing` → snapshot current → atomic `mv` swap → nginx reload → verify
+4. Verification checks: HTTP 200 on all 4 locales, content fingerprint, registry code scan, template leak scan, status API health
+5. Post-deploy cleanup removes staging directories and expires old snapshots
+
+**Rollback:** The previous deployment is kept at `/var/www/.apexmail.ee.prev`.
+`make rollback-marketing` atomically swaps it back into place.
+
+### Local Development
+
+```bash
+# Start dependencies
+docker compose up -d postgres redis
+
+# Build and run auth-server
+cargo build --release --manifest-path services/mail-server/Cargo.toml
+./services/mail-server/target/release/auth-server
+
+# Build marketing site
+zola build --root apps/marketing-zola
+```
 
 ## Security
 
@@ -271,7 +310,7 @@ ApexMail is a brand of Bel Consulting OÜ, Estonia.
 **Company Details:**
 - Bel Consulting OÜ
 - Sakala 7-2, 10141 Tallinn, Estonia
-- Registry Code: 16192499
+- Registry Code: 16588745
 - VAT: EE102951727
 
 ## Support

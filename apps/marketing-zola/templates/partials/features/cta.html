@@ -6,31 +6,30 @@
     <div class="animate-in bg-white border border-surface-200 rounded-sm p-8 lg:p-12 text-center">
       <div class="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-brand-50 text-brand-700 border border-brand-100/50 text-xs font-medium mb-6 uppercase">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-        <span>Start in 5 Minutes</span>
+        <span>{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_badge"] %}{{ i18n_data[l]["features"]["cta_badge"] }}{% else %}Start in 5 Minutes{% endif %}</span>
       </div>
 
       <h2 class="text-3xl lg:text-4xl font-bold text-surface-950 mb-6 tracking-tight">
-        Ready to Ship Better Email?
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_heading"] %}{{ i18n_data[l]["features"]["cta_heading"] }}{% else %}Ready to Ship Better Email?{% endif %}
       </h2>
 
       <p class="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed">
-        ApexMail provides reliable transactional email with built-in compliance.
-        Start free with 30,000 emails per month.
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_subtitle"] %}{{ i18n_data[l]["features"]["cta_subtitle"] }}{% else %}ApexMail provides reliable transactional email with built-in compliance. Start free with 30,000 emails per month.{% endif %}
       </p>
 
       <div class="flex flex-col sm:flex-row gap-4 justify-center">
         <a href="{{ config.extra.app_url }}/signup" class="inline-flex items-center justify-center gap-2 bg-surface-950 hover:bg-brand-700 text-white px-6 py-3 rounded-sm font-semibold transition-colors group uppercase">
-          Get Started Free
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_button"] %}{{ i18n_data[l]["features"]["cta_button"] }}{% else %}Get Started Free{% endif %}
           <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
         <a href="/contact/" class="inline-flex items-center justify-center gap-2 bg-white text-surface-950 border border-surface-200 hover:bg-surface-100 px-6 py-3 rounded-sm font-semibold transition-colors uppercase">
           <svg class="w-4 h-4 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          Talk to Sales
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_talk"] %}{{ i18n_data[l]["features"]["cta_talk"] }}{% else %}Talk to Sales{% endif %}
         </a>
       </div>
 
       <p class="text-surface-500 text-sm mt-8 font-medium">
-        No credit card required &bull; Free tier includes 30,000 emails/month
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cta_note"] %}{{ i18n_data[l]["features"]["cta_note"] }}{% else %}No credit card required &bull; Free tier includes 30,000 emails/month{% endif %}
       </p>
     </div>
   </div>

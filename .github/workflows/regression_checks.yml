@@ -1,0 +1,215 @@
+name: Regression Checks
+on:
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - '**/*.html'
+      - '**/*.md'
+      - '.github/workflows/regression_checks.yml'
+      - 'fixes.md'
+      - 'services/mail-server/crates/compliance/**'
+      - 'deploy/monitoring/**'
+  push:
+    branches: [main]
+    paths:
+      - '**/*.rs'
+      - '**/*.html'
+      - '**/*.md'
+      - '.github/workflows/regression_checks.yml'
+      - 'fixes.md'
+      - 'services/mail-server/crates/compliance/**'
+      - 'deploy/monitoring/**'
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  obsolete-registry-codes:
+    name: Check for obsolete registry codes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Scan for obsolete registry codes
+        run: |
+          echo "=== Checking for obsolete registry codes ==="
+          OBSOLETE_CODES=("16192499" "16942833")
+          FAILED=0
+          for code in "${OBSOLETE_CODES[@]}"; do
+            FOUND=$(grep -r --include='*.rs' --include='*.toml' --include='*.json' \
+              --include='*.html' --include='*.yaml' --include='*.md' \
+              -l "$code" . 2>/dev/null || true)
+            if [[ -n "$FOUND" ]]; then
+              echo "ERROR: Obsolete registry code $code found in:"
+              echo "$FOUND"
+              FAILED=1
+            fi
+          done
+          CURRENT_CODE="16588745"
+          HAS_CURRENT=$(grep -r --include='*.rs' -l "$CURRENT_CODE" services/mail-server/ 2>/dev/null || true)
+          if [[ -z "$HAS_CURRENT" ]]; then
+            echo "WARNING: Current registry code $CURRENT_CODE not found in Rust sources"
+          else
+            echo "OK: Current registry code $CURRENT_CODE present"
+          fi
+          if [[ $FAILED -eq 1 ]]; then
+            echo "FAILED: Obsolete registry codes detected"
+            exit 1
+          fi
+          echo "PASSED: No obsolete registry codes found"
+
+  prohibited-marketing-claims:
+    name: Check for prohibited marketing claims
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Scan for prohibited claims in public files
+        run: |
+          echo "=== Checking for prohibited marketing claims ==="
+          PROHIBITED=(
+            "100% GDPR compliant"
+            "System Integrity Verified"
+            "99.9% delivery rate"
+            "Guaranteed inbox placement"
+            "Deterministic deliverability"
+            "HIPAA Ready"
+            "global edge"
+            "zero egress"
+            "sub-millisecond"
+            "No tenant jitter"
+            "Fixed thirty-day warm-up"
+            "Entirely in your hands"
+          )
+          FAILED=0
+          TARGET_DIRS="apps/ docs/ deploy/"
+          for claim in "${PROHIBITED[@]}"; do
+            FOUND=$(grep -r --include='*.html' --include='*.md' --include='*.yaml' \
+              --include='*.json' -l "$claim" $TARGET_DIRS 2>/dev/null || true)
+            if [[ -n "$FOUND" ]]; then
+              echo "WARNING: Prohibited claim '$claim' found in:"
+              echo "$FOUND"
+              FAILED=1
+            fi
+          done
+          if [[ $FAILED -eq 1 ]]; then
+            echo "WARNING: Prohibited claims detected in public-facing files"
+            echo "This is advisory — review before merging"
+          else
+            echo "PASSED: No prohibited claims found"
+          fi
+
+  fixes-md-evidence-check:
+    name: Verify [x] items in fixes.md have evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Validate fixes.md evidence lines
+        run: |
+          echo "=== Validating fixes.md evidence ==="
+          python3 -c "
+          import re, sys
+          with open('fixes.md', 'r') as f:
+              content = f.read()
+          completed = re.findall(r'\* \[x\].*', content)
+          incomplete = re.findall(r'\* \[ \].*', content)
+          evidence_lines = re.findall(r'Evidence:.*', content)
+          print(f'Completed items: {len(completed)}')
+          print(f'Incomplete items: {len(incomplete)}')
+          print(f'Evidence lines: {len(evidence_lines)}')
+          errors = []
+          for item in completed:
+              lines = content.split(item, 1)
+              if len(lines) > 1:
+                  next_chunk = lines[1][:200]
+                  if 'Evidence:' not in next_chunk:
+                      errors.append(f'MISSING EVIDENCE: {item.strip()[:80]}...')
+          if errors:
+              print('ERRORS:')
+              for e in errors:
+                  print(f'  {e}')
+              sys.exit(1)
+          print('PASSED: All completed items have evidence lines')
+          "
+
+  compliance-tests:
+    name: cargo test -p compliance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: stable
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: regression-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: regression-cargo-registry-
+      - name: Run compliance crate tests
+        working-directory: services/mail-server
+        run: cargo test -p compliance --all-targets
+
+  internal-link-check:
+    name: Check for broken internal references
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Scan for placeholder text
+        run: |
+          echo "=== Scanning for placeholder and TODO text ==="
+          PATTERNS=(
+            'response would contain'
+            'TODO: implement'
+            'FIXME:'
+          )
+          FAILED=0
+          for pattern in "${PATTERNS[@]}"; do
+            FOUND=$(grep -r --include='*.rs' --include='*.html' -l "$pattern" \
+              services/mail-server/src/ apps/ 2>/dev/null || true)
+            if [[ -n "$FOUND" ]]; then
+              echo "WARNING: Placeholder text '$pattern' found in:"
+              echo "$FOUND"
+              FAILED=1
+            fi
+          done
+          if [[ $FAILED -eq 1 ]]; then
+            echo "WARNING: Placeholder text detected"
+          else
+            echo "PASSED: No placeholder text found"
+          fi
+
+  summary:
+    name: Regression Check Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    needs:
+      - obsolete-registry-codes
+      - prohibited-marketing-claims
+      - fixes-md-evidence-check
+      - compliance-tests
+      - internal-link-check
+    if: always()
+    steps:
+      - name: Report status
+        run: |
+          echo "=== Regression Check Results ==="
+          echo "obsolete-registry-codes:    ${{ needs.obsolete-registry-codes.result }}"
+          echo "prohibited-marketing-claims:${{ needs.prohibited-marketing-claims.result }}"
+          echo "fixes-md-evidence-check:    ${{ needs.fixes-md-evidence-check.result }}"
+          echo "compliance-tests:           ${{ needs.compliance-tests.result }}"
+          echo "internal-link-check:        ${{ needs.internal-link-check.result }}"

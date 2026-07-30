@@ -4,12 +4,12 @@ description = "ApexMail DPA — GDPR-compliant data processing terms."
 template = "prose.html"
 
 [extra]
-last_updated = "2026-05-02"
+last_updated = "2026-07-30"
 +++
 
 ## 1. Scope
 
-This Data Processing Agreement ("DPA") supplements the Terms of Service and governs the processing of personal data by **Bel Consulting OÜ** (registry code 16192499, VAT EE102951727, Sakala 7-2, 10141 Tallinn, Estonia), trading as ApexMail ("**Processor**") on behalf of the Customer ("**Controller**") under Article 28 of Regulation (EU) 2016/679 (General Data Protection Regulation).
+This Data Processing Agreement ("DPA") supplements the Terms of Service and governs the processing of personal data by **Bel Consulting OÜ** (registry code 16588745, VAT EE102951727, Sakala 7-2, 10141 Tallinn, Estonia), trading as ApexMail ("**Processor**") on behalf of the Customer ("**Controller**") under Article 28 of Regulation (EU) 2016/679 (General Data Protection Regulation).
 
 ## 2. Definitions
 
@@ -41,9 +41,16 @@ The Processor shall:
 
 ### 5.1 Authorised Sub-processors
 
-| Sub-processor | Purpose | Location |
-|---|---|---|
-| Hetzner Online GmbH | Infrastructure (compute, storage) | EU (Germany/Finland) |
+The current authorised subprocessors are maintained in the [ApexMail Subprocessor Register](https://apexmail.ee/subprocessors/), which is incorporated into this DPA by reference.
+
+| Sub-processor | Purpose | Location | Transfer Safeguard |
+|---|---|---|---|
+| Hetzner Online GmbH | Core infrastructure (compute, storage) | EU (Germany/Finland) | Not applicable — processing remains within the EEA |
+| Google LLC | Optional OAuth authentication | Global (US entity, data processed per OAuth config) | Standard Contractual Clauses |
+| GitHub, Inc. | Optional OAuth authentication | Global (US entity) | Standard Contractual Clauses |
+| Stripe, Inc. | Payment processing | US (primary), India (support) | Standard Contractual Clauses |
+
+Self-hosted infrastructure (ClickHouse, Redis) runs on Hetzner servers under ApexMail's operational control. The upstream open-source publishers do not process customer data.
 
 ### 5.2 Notification of Changes
 
@@ -51,21 +58,21 @@ The Processor shall notify the Controller at least **30 days** before adding or 
 
 ## 6. International Transfers
 
-All processing occurs within the EEA (Estonia). No personal data is transferred outside the EEA without appropriate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
+Core infrastructure processing occurs in Hetzner data centers in Germany and Finland. See the [Data Locations](/data-locations/) page for a complete category-by-category matrix. No personal data is transferred outside the EEA without appropriate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
 
 ## 7. Security Measures
 
 - AES-256-GCM encryption at rest
-- TLS 1.3 in transit
+- TLS 1.2+ in transit (TLS 1.3 preferred)
 - Argon2id password hashing
 - Audit logging with hash-chain integrity
-- SOC 2-aligned security controls
+- SOC 2-aligned security controls (SOC 2 Type II planned Q2 2028; Type I planned Q3 2027)
 - Access control with multi-factor authentication
-- Regular vulnerability scanning and penetration testing
+- Weekly automated vulnerability scanning; first external penetration test planned — results to be published after completion and remediation
 
 ## 8. Data Breach Notification
 
-The Processor shall notify the Controller **without undue delay** and no later than **72 hours** after becoming aware of a personal data breach involving the Controller's data, in accordance with Article 33(2). The notification shall include:
+The Processor shall notify the Controller **without undue delay** after becoming aware of a personal data breach involving the Controller's data. ApexMail contractually targets an initial notification within 48 hours, based on the information reasonably available at that time. The notification shall include:
 - The nature of the breach.
 - Categories and approximate number of data subjects and records concerned.
 - Contact details of the Data Protection Lead.

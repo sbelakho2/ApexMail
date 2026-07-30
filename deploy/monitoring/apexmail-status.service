@@ -1,0 +1,20 @@
+[Unit]
+Description=ApexMail Status Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/monitoring
+ExecStart=/usr/bin/python3 /root/monitoring/status_server.py
+Restart=always
+RestartSec=5
+Environment=BASE_URL=https://api.apexmail.com
+Environment=DASHBOARD_URL=https://app.apexmail.com
+Environment=STATUS_URL=https://status.apexmail.ee
+Environment=CACHE_TTL=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -23,9 +23,13 @@ This Service Level Agreement ("SLA") applies to Scale and Enterprise plan custom
 
 | Metric | Target |
 |---|---|
-| API response time (P95) | ≤100ms |
+| Production API P95 (gateway) | ≤500ms |
 | Email acceptance to first delivery attempt | ≤30 seconds |
 | Webhook delivery (P95) | ≤5 seconds |
+
+### Metric Definitions
+
+**Production API P95 (gateway):** Measured at the API gateway layer for all production `POST /v1/messages` requests. Start timestamp: request ingress at gateway. End timestamp: response egress from gateway. Percentile: P95. Qualifying requests: HTTP 200-299 responses from the messages endpoint, excluding sandbox/test API key traffic. Exclusions: health-check probes, preflight OPTIONS, sandbox API keys. Sample period: trailing 30-day window, 1-minute aggregation buckets.
 
 ## 4. Measurement
 

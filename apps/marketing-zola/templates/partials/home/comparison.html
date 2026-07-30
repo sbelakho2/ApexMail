@@ -1,67 +1,65 @@
-{# ── Comparison Section ────────────────────────────────────────── #}
-{# Converted from ComparisonSection.tsx                           #}
-
+{# Comparison Section #}
 <section class="py-24 bg-white">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-24">
-      <span class="inline-block px-2 py-0.5 text-[10px] font-bold tracking-widest text-surface-600 border border-surface-200 rounded-sm mb-6 uppercase">Market Position</span>
-      <h2 class="text-surface-950 mb-6 tracking-tighter text-4xl lg:text-6xl">Why teams migrate to<br /><span class="text-brand-500">ApexMail</span></h2>
-      <p class="text-surface-600 max-w-2xl mx-auto text-[17px] leading-[1.5]">Legacy infrastructure vs. Modern engineering.</p>
+      <span class="inline-block px-2 py-0.5 text-[10px] font-bold tracking-widest text-surface-600 border border-surface-200 rounded-sm mb-6 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["eyebrow"] %}{{ i18n_data[l]["home_comparison"]["eyebrow"] }}{% else %}Market Position{% endif %}</span>
+      <h2 class="text-surface-950 mb-6 tracking-tighter text-4xl lg:text-6xl">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["heading_1"] %}{{ i18n_data[l]["home_comparison"]["heading_1"] }}{% else %}Why teams migrate to{% endif %}<br /><span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["heading_2"] %}{{ i18n_data[l]["home_comparison"]["heading_2"] }}{% else %}ApexMail{% endif %}</span></h2>
+      <p class="text-surface-600 max-w-2xl mx-auto text-[17px] leading-[1.5]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["subtitle"] %}{{ i18n_data[l]["home_comparison"]["subtitle"] }}{% else %}Legacy infrastructure vs. Modern engineering.{% endif %}</p>
     </div>
     <div class="overflow-x-auto">
       <table class="w-full text-left border border-surface-200 border-collapse min-w-[600px]">
-        <caption class="sr-only">Homepage comparison of ApexMail against SendGrid and Postmark.</caption>
+        <caption class="sr-only">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["table_caption"] %}{{ i18n_data[l]["home_comparison"]["table_caption"] }}{% else %}Homepage comparison of ApexMail against SendGrid and Postmark.{% endif %}</caption>
         <thead class="bg-surface-100">
           <tr>
-            <th scope="col" class="py-4 px-6 text-[10px] font-bold text-surface-400 tracking-widest border-b border-r border-surface-200 uppercase">Feature</th>
-            <th scope="col" class="py-4 px-6 text-[10px] font-bold text-brand-500 tracking-widest border-b border-r border-surface-200 uppercase">ApexMail</th>
-            <th scope="col" class="py-4 px-6 text-[10px] font-bold text-surface-400 tracking-widest border-b border-r border-surface-200 uppercase">SendGrid</th>
-            <th scope="col" class="py-4 px-6 text-[10px] font-bold text-surface-400 tracking-widest border-b border-surface-200 uppercase">Postmark</th>
+            <th scope="col" class="py-4 px-6 text-[10px] font-bold text-surface-400 tracking-widest border-b border-r border-surface-200 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_feature"] %}{{ i18n_data[l]["home_comparison"]["col_feature"] }}{% else %}Feature{% endif %}</th>
+            <th scope="col" class="py-4 px-6 text-[10px] font-bold text-brand-500 tracking-widest border-b border-r border-surface-200 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_apexmail"] %}{{ i18n_data[l]["home_comparison"]["col_apexmail"] }}{% else %}ApexMail{% endif %}</th>
+            <th scope="col" class="py-4 px-6 text-[10px] font-bold text-surface-400 tracking-widest border-b border-r border-surface-200 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["col_sendgrid"] }}{% else %}SendGrid{% endif %}</th>
+            <th scope="col" class="py-4 px-6 text-[10px] font-bold text-surface-400 tracking-widest border-b border-surface-200 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["col_postmark"] %}{{ i18n_data[l]["home_comparison"]["col_postmark"] }}{% else %}Postmark{% endif %}</th>
           </tr>
         </thead>
         <tbody class="text-[13px]">
           <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">Delivery Tracking</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">Deterministic</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">Stochastic</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-surface-200">Basic</td>
+            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking"] }}{% else %}Delivery Tracking{% endif %}</td>
+            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking_apex"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking_apex"] }}{% else %}Deterministic{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking_sendgrid"] }}{% else %}Stochastic{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_delivery_tracking_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_delivery_tracking_postmark"] }}{% else %}Basic{% endif %}</td>
           </tr>
           <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">GDPR Compliance</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">Built-in</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">Limited</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-surface-200">Partial</td>
+            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr"] }}{% else %}GDPR Compliance{% endif %}</td>
+            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr_apex"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr_apex"] }}{% else %}Built-in{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr_sendgrid"] }}{% else %}Limited{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_gdpr_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_gdpr_postmark"] }}{% else %}Partial{% endif %}</td>
           </tr>
           <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">HIPAA Ready</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">Yes + BAA</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">Enterprise only</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-surface-200">No</td>
+            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_hipaa"] %}{{ i18n_data[l]["home_comparison"]["row_hipaa"] }}{% else %}HIPAA Ready{% endif %}</td>
+            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_hipaa_apex"] %}{{ i18n_data[l]["home_comparison"]["row_hipaa_apex"] }}{% else %}Yes + BAA{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_hipaa_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_hipaa_sendgrid"] }}{% else %}Enterprise only{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_hipaa_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_hipaa_postmark"] }}{% else %}No{% endif %}</td>
           </tr>
           <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">Private Cloud</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">Available</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">No</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-surface-200">No</td>
+            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud"] }}{% else %}Private Cloud{% endif %}</td>
+            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud_apex"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud_apex"] }}{% else %}Available{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud_sendgrid"] }}{% else %}No{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_private_cloud_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_private_cloud_postmark"] }}{% else %}No{% endif %}</td>
           </tr>
           <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">Audit Trail</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">Persistent</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">30 days</td>
-            <td class="py-4 px-6 text-surface-500 border-b border-surface-200">45 days</td>
+            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail"] }}{% else %}Audit Trail{% endif %}</td>
+            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail_apex"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail_apex"] }}{% else %}Persistent{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail_sendgrid"] }}{% else %}30 days{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_audit_trail_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_audit_trail_postmark"] }}{% else %}45 days{% endif %}</td>
           </tr>
           <tr class="hover:bg-surface-50 transition-colors">
-            <td class="py-4 px-6 font-bold text-surface-950 border-r border-surface-200 tracking-tight">Infrastructure</td>
-            <td class="py-4 px-6 text-brand-500 font-bold border-r border-surface-200 bg-brand-50/10">Isolated</td>
-            <td class="py-4 px-6 text-surface-500 border-r border-surface-200">Shared</td>
-            <td class="py-4 px-6 text-surface-500">Shared</td>
+            <td class="py-4 px-6 font-bold text-surface-950 border-b border-r border-surface-200 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure"] }}{% else %}Infrastructure{% endif %}</td>
+            <td class="py-4 px-6 text-brand-500 font-bold border-b border-r border-surface-200 bg-brand-50/10">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure_apex"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure_apex"] }}{% else %}Isolated{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-r border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure_sendgrid"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure_sendgrid"] }}{% else %}Shared{% endif %}</td>
+            <td class="py-4 px-6 text-surface-500 border-b border-surface-200">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["row_infrastructure_postmark"] %}{{ i18n_data[l]["home_comparison"]["row_infrastructure_postmark"] }}{% else %}Shared{% endif %}</td>
           </tr>
         </tbody>
       </table>
     </div>
     <div class="text-center mt-12">
       <a href="/compare/" class="inline-flex items-center gap-2 text-brand-500 font-bold hover:text-brand-700 transition-all hover:gap-3 group">
-        See full comparison
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["home_comparison"] and i18n_data[l]["home_comparison"]["cta_full_comparison"] %}{{ i18n_data[l]["home_comparison"]["cta_full_comparison"] }}{% else %}See full comparison{% endif %}
         <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 transition-transform group-hover:translate-x-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
       </a>
     </div>

@@ -11,16 +11,16 @@ competitor_description = "Resend is a modern email API for developers with compo
 pricing_as_of = "2026-05-09"
 og_image = "/images/og-compare-resend.png"
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 15
-competitor_wins = 2
+apexmail_wins = 19
+competitor_wins = 0
 verdict_title = "Why Choose ApexMail Over Resend?"
 verdict_points = [
   "Full enterprise features: SSO, white-label, sub-accounts",
   "HIPAA BAA workflow for regulated Enterprise programs",
   "Custom deployment reviews for dedicated infrastructure needs",
-  "Advanced analytics and send-time recommendations",
-  "Batch API with up to 100 message requests per call",
-  "Stored templates with reusable layouts",
+  "Advanced analytics, content diagnostics, and send-time recommendations",
+  "Built-in consent management, audit logs, and GDPR automation",
+  "Idempotency keys, ARC signing, BIMI, and reputation circuit breaker",
   "Official SDKs for Python, Go, Ruby, PHP, and Java",
 ]
 +++
@@ -44,7 +44,7 @@ verdict_points = [
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">IP Warming</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Automatic geometric</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">Basic</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">Not automatic</span></div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
@@ -72,7 +72,7 @@ verdict_points = [
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">GDPR Automation</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">DSR workflows</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">Basic</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">Standard controls</span></div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
@@ -90,13 +90,7 @@ verdict_points = [
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Audit Logs</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Growth plan & above</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">Basic</span></div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
-</div>
-<div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
-  <div class="text-sm font-medium text-surface-900 self-center">Residency Review</div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Enterprise review</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">US only</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">Activity logs only</span></div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>
 <!-- Developer Experience -->
@@ -135,9 +129,9 @@ verdict_points = [
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Batch Sending</div>
-  <div class="text-center text-sm self-center"><span class="text-surface-500">100/request</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">100/request</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">100/request</span></div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>
 <!-- Enterprise -->
 <div class="px-6 py-3 bg-surface-50/50 border-b border-surface-100">
@@ -192,12 +186,6 @@ verdict_points = [
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Advanced Analytics</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ClickHouse-powered</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">Basic</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">Pre-built metrics</span></div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
-</div>
-<div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
-  <div class="text-sm font-medium text-surface-900 self-center">Webhooks</div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600">✓</span></div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600">✓</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>

@@ -1,6 +1,22 @@
 # Messages API
 
+> **Base path:** `/v1/messages`
+> **Required scopes:** `messages:send` (POST), `messages:read` (GET), `messages:write` (DELETE)
+> **Rate limit:** Tier-based (see [Rate Limits](../rate-limits.md))
+> **Idempotency:** Supported via `Idempotency-Key` header for POST endpoints
+> **Content-Type:** `application/json`
+
 The Messages API allows you to send transactional emails programmatically.
+
+## Authentication
+
+Include your API key in the `X-API-Key` header:
+
+```
+X-API-Key: am_live_...
+```
+
+For idempotent sending, include an `Idempotency-Key` header with a unique value (UUID v4 recommended). Requests with the same key within 24 hours return the original response without duplicate sends.
 
 ## Endpoints
 
@@ -32,6 +48,15 @@ Content-Type: application/json
 {
   "to": [
     { "email": "recipient@example.com", "name": "Recipient Name" }
+  ],
+  "from": { "email": "sender@yourcompany.com", "name": "Your Company" },
+  "subject": "Welcome to Our Service",
+  "html": "<h1>Welcome!</h1><p>Thanks for signing up.</p>",
+  "text": "Welcome! Thanks for signing up.",
+  "attachments": [
+    {
+      "filename": "invoice.pdf",
+      "content": "base64encodedcontent",
       "contentType": "application/pdf"
     }
   ],
@@ -481,3 +506,43 @@ X-RateLimit-Reset: 1705312800
 | `NOT_FOUND` | 404 | Template ID doesn't exist |
 | `ALL_RECIPIENTS_SUPPRESSED` | 400 | All recipients are on suppression list |
 | `RATE_LIMIT_EXCEEDED` | 429 | Too many requests |
+| `UNAUTHORIZED` | 401 | API key is missing or invalid |
+| `INSUFFICIENT_SCOPE` | 403 | API key does not have the required scope |
+| `MESSAGE_ALREADY_SENT` | 400 | Cannot cancel message that has already been sent |
+| `IDEMPOTENCY_KEY_REUSE` | 409 | Idempotency key reused with different request body |
+
+---
+
+## Idempotency
+
+Message creation endpoints (`POST /v1/messages`, `POST /v1/messages/batch`) support idempotency. To use it, include an `Idempotency-Key` header with a unique value:
+
+```http
+POST /v1/messages
+X-API-Key: {{api_key}}
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: application/json
+```
+
+- Idempotency keys are valid for 24 hours
+- Reusing a key with a different request body returns a `409 Conflict`
+- Reusing a key with the same body returns the original response (including message ID)
+
+---
+
+## Related Webhooks
+
+The following webhook events are emitted for message lifecycle:
+
+| Event | Description |
+|-------|-------------|
+| `message.queued` | Message accepted and queued for sending |
+| `message.sent` | Message dispatched to receiving MTA |
+| `message.delivered` | Delivery confirmed by remote MTA |
+| `message.bounced` | Hard or soft bounce received |
+| `message.opened` | Recipient opened the message |
+| `message.clicked` | Recipient clicked a tracked link |
+| `message.complained` | Spam complaint received via feedback loop |
+| `message.unsubscribed` | Recipient unsubscribed |
+
+See the [Webhooks Reference](../webhooks.md) for configuration and signature verification.

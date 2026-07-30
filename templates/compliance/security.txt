@@ -1,0 +1,14 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Contact: mailto:{{SECURITY_EMAIL}}
+Encryption: https://keys.openpgp.org/vks/v1/by-fingerprint/AB12CD34EF5678901234567890ABCDEF12345678
+Acknowledgments: https://apexmail.ee/.well-known/security-policy
+Preferred-Languages: en, et
+Canonical: https://apexmail.ee/.well-known/security.txt
+Policy: https://apexmail.ee/.well-known/security-policy
+Hiring: https://apexmail.ee/careers
+Expires: {{EXPIRES_ISO8601}}
+-----BEGIN PGP SIGNATURE-----
+(PGP signature placeholder — replace with actual signature)
+-----END PGP SIGNATURE-----
