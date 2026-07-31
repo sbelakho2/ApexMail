@@ -229,28 +229,11 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
 
-      # ── Optimisation: only build images whose source changed ───────────────
-      # Per-image change detection keeps CI fast — an image only rebuilds when
-      # its own source tree (or shared base/runtime layers) changed.
-      - name: Detect changed image sources
-        id: changes
-        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
-        with:
-          filters: |
-            marketing:
-              - 'apps/marketing-zola/**'
-            rust-workspace:
-              - 'services/mail-server/**'
-              - 'deploy/Dockerfile.tracking'
-            deploy-infra:
-              - 'deploy/**'
-              - 'docker-compose*.yml'
 
       # Build the marketing site first (cheap, no Rust toolchain) so the
       # public website still publishes even if the larger Rust builds below
       # exceed the job timeout-minutes.
       - name: Build and push marketing site image
-        if: steps.changes.outputs.marketing == 'true'
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
           context: ./apps/marketing-zola
@@ -266,7 +249,6 @@ jobs:
 
       - name: Build and push Docker image (runtime-base)
         id: build-runtime
-        if: steps.changes.outputs.rust-workspace == 'true'
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
           context: .
@@ -285,7 +267,6 @@ jobs:
             type=provenance,enabled=true
 
       - name: Build and push API server image
-        if: steps.changes.outputs.rust-workspace == 'true'
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
           context: .
@@ -301,7 +282,6 @@ jobs:
             type=provenance,enabled=true
 
       - name: Build and push tracking service image
-        if: steps.changes.outputs.rust-workspace == 'true'
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
           context: .
@@ -316,7 +296,6 @@ jobs:
             type=provenance,enabled=true
 
       - name: Build and push MTA image
-        if: steps.changes.outputs.rust-workspace == 'true'
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
           context: .
@@ -332,7 +311,6 @@ jobs:
             type=provenance,enabled=true
 
       - name: Build and push worker image
-        if: steps.changes.outputs.rust-workspace == 'true'
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
           context: .
@@ -348,7 +326,6 @@ jobs:
             type=provenance,enabled=true
 
       - name: Build and push enterprise image
-        if: steps.changes.outputs.rust-workspace == 'true'
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
           context: .
@@ -364,7 +341,6 @@ jobs:
             type=provenance,enabled=true
 
       - name: Build and push observability image
-        if: steps.changes.outputs.rust-workspace == 'true'
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
           context: .
