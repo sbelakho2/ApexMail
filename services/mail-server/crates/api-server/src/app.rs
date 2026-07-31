@@ -500,6 +500,7 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/admin/warmup", routes::admin::warmup::router())
         .nest("/v1/admin/content", routes::admin::content::router())
         .nest("/v1/admin/autopilot", routes::admin::autopilot::router())
+        .nest("/v1/admin/operators", routes::admin::operators::router())
         .nest("/v1/admin/proxy", routes::admin::proxy::router())
         .nest("/v1/admin/sales", routes::admin::sales::router())
         .nest("/v1/admin/analytics", routes::admin::analytics::router())

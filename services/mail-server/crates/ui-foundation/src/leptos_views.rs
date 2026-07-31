@@ -2221,7 +2221,7 @@ pub fn web_inbox_placement_new_page() -> String {
 </div>",
         form = Card {
             title: "Test configuration",
-            body: "<form data-form=\"placement-test-create\" action=\"/v1/placement/tests\" method=\"post\" class=\"space-y-4\">\
+            body: "<form data-form=\"placement-test-create\" action=\"/v1/inbox-placement/tests\" method=\"post\" class=\"space-y-4\">\
 <div><label for=\"placement-name\" class=\"block text-sm font-medium text-surface-700\">Test name</label>\
 <input id=\"placement-name\" name=\"name\" type=\"text\" required maxlength=\"120\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"Q1 onboarding sequence — variant A\" /></div>\
 <div class=\"grid gap-4 md:grid-cols-2\">\

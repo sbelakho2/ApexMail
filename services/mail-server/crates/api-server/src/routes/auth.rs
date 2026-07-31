@@ -183,6 +183,8 @@ fn scopes_for_role(role: &str) -> Vec<String> {
             "suppressions:write".into(),
             "dedicated_ips:read".into(),
             "dedicated_ips:write".into(),
+            "support:read".into(),
+            "support:write".into(),
         ],
         "viewer" => vec![
             "messages:read".into(),
@@ -195,6 +197,7 @@ fn scopes_for_role(role: &str) -> Vec<String> {
             "campaigns:read".into(),
             "suppressions:read".into(),
             "dedicated_ips:read".into(),
+            "support:read".into(),
         ],
         _ => vec!["messages:read".into()],
     }

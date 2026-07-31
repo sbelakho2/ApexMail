@@ -155,7 +155,7 @@ async fn create_domain(
          return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, dkim_selector, created_at, updated_at)
          VALUES ($1,$2,$3,'pending',false,false,false,false,false,false,false,$4,$5,$5)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .bind(&body.name)
     .bind(&dkim_selector)
@@ -202,7 +202,7 @@ async fn list_domains(
 async fn get_domain(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<DomainResponse>, ApiError> {
     require_scopes(&auth, &["domains:read"])?;
 
@@ -210,7 +210,7 @@ async fn get_domain(
         "SELECT id, name, status, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
          FROM domains WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
@@ -222,20 +222,20 @@ async fn get_domain(
 async fn delete_domain(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["domains:write"])?;
 
     // Fetch domain name before deleting (for SES cleanup)
     let domain_name: Option<(String,)> =
         sqlx::query_as("SELECT name FROM domains WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
+            .bind(&id)
             .bind(&auth.tenant_id)
             .fetch_optional(&state.db)
             .await?;
 
     let result = sqlx::query("DELETE FROM domains WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
+        .bind(&id)
         .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
@@ -260,14 +260,14 @@ async fn delete_domain(
 async fn verify_domain(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<VerifyResponse>, ApiError> {
     require_scopes(&auth, &["domains:write"])?;
 
     let row = sqlx::query_as::<_, DomainFullRow>(
         "SELECT id, name, dkim_selector FROM domains WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
@@ -353,7 +353,7 @@ async fn verify_domain(
     .bind(return_path)
     .bind(status)
     .bind(ses_verified)
-    .bind(id)
+    .bind(&id)
     .execute(&state.db)
     .await?;
 
@@ -376,14 +376,14 @@ async fn verify_domain(
 async fn get_dns_records(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<DnsRecordsResponse>, ApiError> {
     require_scopes(&auth, &["domains:read"])?;
 
     let row = sqlx::query_as::<_, DomainFullRow>(
         "SELECT id, name, dkim_selector FROM domains WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
@@ -617,7 +617,7 @@ struct DomainAuthRow {
 async fn get_auth_status(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<DomainAuthStatus>, ApiError> {
     require_scopes(&auth, &["domains:read"])?;
 

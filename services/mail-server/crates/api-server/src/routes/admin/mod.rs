@@ -6,6 +6,7 @@ pub mod analytics;
 pub mod analytics_export;
 pub mod audit;
 pub mod autopilot;
+pub mod operators;
 pub mod calendar;
 pub mod campaigns;
 pub mod compliance_overview;

@@ -217,7 +217,7 @@ async fn dashboard(
         .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
-    let row = sqlx::query_as::<_, DashboardRow>(
+    let row = sqlx::query_as::<_, DashboardCountsRow>(
         "SELECT
             COUNT(*) FILTER (WHERE status IN ('sent','delivered')) as total_sent,
             COUNT(*) FILTER (WHERE status = 'delivered') as total_delivered,
@@ -231,7 +231,7 @@ async fn dashboard(
     .fetch_one(&state.db)
     .await?;
 
-    let events = sqlx::query_as::<_, EventCountsRow>(
+    let events = sqlx::query_as::<_, DashboardEventsRow>(
         "SELECT
             COUNT(*) FILTER (WHERE event_type = 'opened') as opened,
             COUNT(*) FILTER (WHERE event_type = 'clicked') as clicked
@@ -725,10 +725,19 @@ struct DashboardRow {
     total_clicked: i64,
 }
 
+/// Row shape for the dashboard's events sub-query (opened/clicked counts only).
 #[derive(sqlx::FromRow)]
-struct EventCountsRow {
+struct DashboardEventsRow {
     opened: i64,
     clicked: i64,
+}
+
+/// Row shape for the dashboard's messages sub-query (sent/delivered/bounced only).
+#[derive(sqlx::FromRow)]
+struct DashboardCountsRow {
+    total_sent: i64,
+    total_delivered: i64,
+    total_bounced: i64,
 }
 
 #[derive(sqlx::FromRow)]
