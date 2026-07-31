@@ -450,8 +450,6 @@ def webhooks():
 
 ```go
 import (
-	"fmt"
-	"io"
 	"net/http"
 	"os"
 
@@ -567,3 +565,4 @@ Full changelogs are maintained in each SDK repository:
 ## Getting Started
 
 Use the [API Reference](/docs/api/) for the wire contract, then choose the SDK that matches your runtime and rollout path. The [API Explorer](/api-explorer/) is the fastest place to validate payload shape before you move into typed client code.
+Use the [API Reference](/docs/api/) for the wire contract, then choose the SDK that matches your runtime and rollout path. The [API Explorer](/api-console/) is the fastest place to validate payload shape before you move into typed client code.

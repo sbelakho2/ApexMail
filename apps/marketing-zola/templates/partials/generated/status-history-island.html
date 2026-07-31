@@ -1,12 +1,14 @@
 {# ── Status History (static SSR, zero JS) ─────────────────────── #}
+{# Points to the live incident history page. Never asserts         #}
+{# "No recent incidents" at build time.                            #}
 
 <section class="py-12 bg-surface-100 border-b border-surface-200">
   <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
     <h2 class="text-xl font-semibold text-surface-950 mb-6">Recent Incidents</h2>
-    <div class="p-4 rounded-sm bg-surface-200/50 border border-surface-300">
-      <p class="text-sm text-surface-500">
-        <svg class="w-4 h-4 inline-block mr-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        This is a static fallback. Live incident data is available at <a href="https://status.apexmail.ee" class="font-semibold underline">status.apexmail.ee</a>.
+    <div class="p-6 rounded-sm bg-warning-500/10 border border-warning-500/20">
+      <p class="text-sm text-warning-600 font-medium">
+        <svg class="w-4 h-4 inline-block mr-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        Live incident history is available at <a href="https://status.apexmail.ee" class="font-semibold underline">status.apexmail.ee</a>. Visit the live status page for current and past incidents.
       </p>
     </div>
   </div>

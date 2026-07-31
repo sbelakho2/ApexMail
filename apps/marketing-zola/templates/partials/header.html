@@ -1,3 +1,4 @@
+{% import "macros.html" as macros %}
 {# ── Header Partial ──────────────────────────────────────────── #}
 {# Pure HTML + CSS header. Dropdowns use :focus-within, mobile   #}
 {# menu uses the #mobile-menu-state checkbox defined in base.html. #}
@@ -8,7 +9,7 @@
   id="site-header"
   class="sticky top-0 left-0 right-0 z-50 transition-all duration-300 bg-surface-50/95 backdrop-blur-md border-b border-surface-200/80"
 >
-  <nav class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8" aria-label="Main navigation">
+  <nav class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8" aria-label="{{ macros::t(section='header', key='main_nav', fallback='Main navigation') }}">
     <div class="flex items-center justify-between h-16 lg:h-20">
       {# ── Logo ─────────────────────────────────────── #}
       <a href="/" class="flex items-center gap-2 group">
@@ -26,7 +27,7 @@
             data-state="closed"
             data-dropdown-toggle
           >
-            Product
+            {{ macros::t(section="header", key="product", fallback="Product") }}
             <svg class="w-4 h-4 transition-transform duration-150 dropdown-chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="hidden absolute top-full left-0 mt-0 w-80 p-1 bg-surface-50 rounded-sm border border-surface-950 shadow-premium" data-dropdown-menu role="menu" aria-orientation="vertical" data-keyboard-nav="true">
@@ -87,8 +88,8 @@
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
               </div>
               <div>
-                <div class="font-bold text-surface-950 group-hover:text-white text-xs tracking-wider mb-0.5">API Console</div>
-                <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">Try the API console</div>
+                <div class="font-bold text-surface-950 group-hover:text-white text-xs tracking-wider mb-0.5">API Explorer</div>
+                <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">Try the API explorer</div>
               </div>
             </a>
           </div>
@@ -169,7 +170,7 @@
           </a>
           <a href="/api-console/" {% if current_path_value == "/api-console" or current_path_value == "/api-console/" %}aria-current="page"{% endif %} class="flex items-center gap-3 p-4 rounded-sm hover:bg-surface-100 transition-colors">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-            <span class="text-surface-950 font-medium text-sm">API Console</span>
+            <span class="text-surface-950 font-medium text-sm">API Explorer</span>
           </a>
         </div>
       </div>

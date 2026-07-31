@@ -38,9 +38,9 @@
             {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Get API Keys{% endif %}
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
-          <a href="/api-explorer/" class="btn-secondary px-8 py-4 text-lg uppercase" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_secondary"] %}{{ i18n_data[l]["home"]["hero_cta_secondary"] }}{% else %}Open API Explorer{% endif %}">
+          <a href="/api-console/" class="btn-secondary px-8 py-4 text-lg uppercase" aria-label="Open the interactive API explorer">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_secondary"] %}{{ i18n_data[l]["home"]["hero_cta_secondary"] }}{% else %}Open API Explorer{% endif %}
+            Open API Explorer
           </a>
         </div>
       </div>

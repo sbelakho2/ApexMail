@@ -91,8 +91,11 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         | ("marketing-zola", "/aup") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/acceptable-use/index.html"
         )),
-        ("marketing", "/api-console") | ("marketing-zola", "/api-console") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/api-console/index.html"
+        ("marketing", "/api-console")
+        | ("marketing", "/api-explorer")
+        | ("marketing-zola", "/api-console")
+        | ("marketing-zola", "/api-explorer") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/api-explorer/index.html"
         )),
         ("marketing", "/case-studies") | ("marketing-zola", "/case-studies") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/case-studies/index.html"

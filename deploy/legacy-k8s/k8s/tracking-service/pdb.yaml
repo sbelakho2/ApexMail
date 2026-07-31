@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tracking-service
+  namespace: apexmail
+  labels:
+    app.kubernetes.io/name: tracking-service
+spec:
+  # Keep at least 2 pods up during voluntary disruptions (node drain, rolling
+  # updates, cluster upgrades) so the service never fully goes dark.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tracking-service

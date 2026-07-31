@@ -4,7 +4,7 @@
 
 base_url = "https://apexmail.ee"
 title = "ApexMail - Enterprise Email API for Developers"
-description = "Enterprise email API with compliance workflow support, delivery tracking, and developer-first APIs. EU-hosted, GDPR-ready, with Enterprise private deployment options."
+description = "Enterprise email API with compliance workflow support, delivery tracking, and developer-first APIs. EU-hosted, GDPR-aligned, with Enterprise private deployment options."
 default_language = "en"
 # theme = ""  # No external theme; templates are in ./templates/
 
@@ -58,6 +58,7 @@ docs_url = "https://apexmail.ee/docs"
 app_url = "https://app.apexmail.ee"
 api_url = "https://api.apexmail.ee"
 pricing_as_of = "2026-07-30"
+build_id = "2026-07-29-prod-1"
 asset_cdn_base_url = "https://cdn.apexmail.ee"
 
 # ── Analytics (Plausible-compatible) ─────────────────────────
@@ -116,3 +117,26 @@ description = "Enterprise-E-Mail-API mit Compliance-Workflow-Unterstützung, Zus
 [languages.es]
 title = "ApexMail - API de correo electrónico empresarial para desarrolladores"
 description = "API de correo electrónico empresarial con soporte de flujos de cumplimiento normativo, seguimiento de entrega y APIs orientadas a desarrolladores. Alojado en la UE, conforme al RGPD, con opciones de implementación privada Enterprise."
+
+[extra.company]
+product_name = "ApexMail"
+legal_name = "Bel Consulting OÜ"
+registry_code = "16588745"
+vat_number = "EE102951727"
+address = "Sakala tn 7-2, 10141 Tallinn, Estonia"
+city = "Tallinn"
+postal_code = "10141"
+country = "Estonia"
+jurisdiction = "Republic of Estonia"
+governing_law = "Estonian law"
+support_email = "support@apexmail.ee"
+privacy_email = "privacy@apexmail.ee"
+security_email = "security@apexmail.ee"
+abuse_email = "abuse@apexmail.ee"
+sales_email = "sales@apexmail.ee"
+billing_email = "billing@apexmail.ee"
+hello_email = "hello@apexmail.ee"
+enterprise_email = "enterprise@apexmail.ee"
+copyright_entity = "Bel Consulting OÜ"
+copyright_start_year = 2025
+founding_date = "2025"

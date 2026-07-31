@@ -28,146 +28,9 @@ curl -X POST https://api.apexmail.ee/v1/messages \
 | `POST` | `/v1/messages/{id}/cancel` | Cancel a queued or scheduled message | API Key |
 | `GET` | `/v1/events` | Retrieve delivery, open, click event history | API Key |
 
-**POST /v1/messages** request body:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `from` | string | Yes | Sender email address (verified domain) |
-| `to` | string[] | Yes | Recipient email addresses |
-| `subject` | string | Yes | Email subject line |
-| `html` | string | No | HTML body content |
-| `text` | string | No | Plain text body |
-| `type` | string | No | `"transactional"` or `"broadcast"` (default: transactional) |
-| `scheduled_at` | ISO 8601 | No | Future delivery timestamp |
-| `tags` | string[] | No | Custom tags for filtering |
-| `metadata` | object | No | Custom key-value pairs |
-
-Response `200 OK`:
-```json
-{
-  "id": "msg_01HQMXJ5KXMW0NREP0YGCZKNVD",
-  "status": "queued",
-  "from": "hello@example.com",
-  "to": ["user@example.com"],
-  "subject": "Welcome"
-}
-```
-
-### Auth
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `POST` | `/v1/auth/login` | Authenticate and receive session cookie | None |
-| `POST` | `/v1/auth/register` | Create new account | None |
-| `POST` | `/v1/auth/mfa/disable` | Disable MFA (requires current TOTP code) | Session |
-| `GET` | `/v1/auth/mfa/qr` | Generate MFA QR code image | Session |
-
-**POST /v1/auth/login** request body:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `username_or_email` | string | Yes | Username or email address |
-| `password` | string | Yes | Account password (min 12 characters) |
-
-Response `200 OK`:
-```json
-{"message":"Login successful","redirect":"/dashboard","user":{"email":"user@apexmail.ee"}}
-```
-Sets `apexmail_session` cookie.
-
-**POST /v1/auth/register** request body:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `email` | string | Yes | Email address |
-| `password` | string | Yes | Password (min 12 characters) |
-| `name` | string | No | Display name |
-
-### API Keys
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `GET` | `/v1/api-keys` | List all active API keys | Session |
-| `POST` | `/v1/api-keys` | Create a new API key | Session |
-| `DELETE` | `/v1/api-keys/{id}` | Revoke an API key | Session |
-
-**POST /v1/api-keys** request body:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | Key name for identification |
-| `scopes` | string | No | Comma-separated scopes (default: messages:send) |
-| `is_test` | boolean | No | Create test-mode key with `am_test_` prefix |
-
-Response `201 Created`:
-```json
-{
-  "id": "b9dff4b8-395e-44f4-88f5-59046634839d",
-  "key": "am_live_cb821df8243641a58f67ff20ea8f6a3e",
-  "name": "Production Key",
-  "prefix": "am_live_cb8",
-  "scopes": "messages:send",
-  "message": "Save this key now — it will not be shown again."
-}
-```
-
-### Account
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `GET` | `/v1/account` | Get current user and plan info | Session |
-
-Response `200 OK`:
-```json
-{"email":"user@apexmail.ee","plan":"free"}
-```
-
-### Health
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `GET` | `/v1/health` | Platform health check (DB, Redis, queue) | None |
-| `GET` | `/status` | Interactive status dashboard | None |
-| `GET` | `/status/api` | Machine-readable status JSON | None |
-
-### Sandbox
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `POST` | `/v1/sandbox/send` | Validate and return envelope without delivering | None |
-
-**POST /v1/sandbox/send** request body:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `from` | string | Yes | Sender address |
-| `to` | string | Yes | Recipient address |
-| `subject` | string | Yes | Email subject |
-| `html` | string | No | HTML body |
-| `text` | string | No | Plain text body |
-
-Response `200 OK`:
-```json
-{"id":"sandbox_abc123","status":"accepted","request_id":"req_...","latency_ms":2,"sandbox":true,"note":"This was a sandbox request. No email was delivered."}
-```
-Validation errors return `422` with field-level `errors` array.
-
-### Billing
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `GET` | `/v1/billing/plans` | List all available plans with pricing | Session |
-| `GET` | `/v1/billing/subscription` | Get current subscription status | Session |
-| `GET` | `/v1/billing/usage` | Get current usage (emails sent, limit) | Session |
-| `POST` | `/v1/billing/switch-plan` | Switch to a different plan | Session |
-| `POST` | `/v1/billing/checkout` | Create Stripe checkout session | Session |
-| `POST` | `/v1/billing/portal` | Create Stripe customer portal session | Session |
-
-**POST /v1/billing/switch-plan** request body:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `plan` | string | Yes | Plan name: `free`, `developer`, `pro`, `growth`, `business`, `enterprise` |
+- Use idempotency keys when your sender may retry the same write request.
+- Keep API keys server-side; never embed them in browser code.
+- Use the [API Explorer](/api-console/) to test payloads before wiring them into your application.
 
 ## API Versioning
 
@@ -340,11 +203,11 @@ If you reuse a key with a **different request payload** than the original, the A
 
 ## Webhooks
 
-Webhook payloads are signed with HMAC-SHA256. Verify signatures using the `X-Webhook-Signature` header:
+Webhook payloads are signed with HMAC-SHA256. Verify signatures using `X-ApexMail-Signature` header:
 ```
-X-Webhook-Signature: sha256=7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069
+t=1690000000,v1=hmac_sha256_value
 ```
-The signature covers the raw request body. Use your webhook signing secret directly as the HMAC key. See the [Webhooks](/docs/webhooks/) page for complete integration details including event catalog, retry schedule, and code examples.
+Payload: `{timestamp}.{raw_body}` signed with your webhook secret. Events include: `email.sent`, `email.delivered`, `email.opened`, `email.clicked`, `email.bounced`, `email.complained`.
 
 ## SDKs
 

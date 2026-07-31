@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "apexmail.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+data:
+  # ── Shared runtime ────────────────────────────────────────────────────────
+  environment: {{ .Values.environment | quote }}
+  api-base-url: {{ .Values.apiBaseUrl | quote }}
+  oauth-redirect-base-url: {{ .Values.oauthRedirectBaseUrl | quote }}
+  cors-origins: {{ .Values.corsOrigins | quote }}
+
+  # ── Database ──────────────────────────────────────────────────────────────
+  db-host: {{ include "apexmail.databaseHost" . | quote }}
+  db-port: {{ include "apexmail.databasePort" . | quote }}
+  {{- if .Values.postgresql.enabled }}
+  db-name: {{ .Values.postgresql.auth.database | quote }}
+  db-user: {{ .Values.postgresql.auth.username | quote }}
+  {{- else }}
+  db-name: {{ .Values.externalDatabase.database | quote }}
+  db-user: {{ .Values.externalDatabase.user | quote }}
+  {{- end }}
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis-host: {{ include "apexmail.redisHost" . | quote }}
+  redis-port: {{ include "apexmail.redisPort" . | quote }}
+
+  # ── ClickHouse ─────────────────────────────────────────────────────────────
+  {{- if .Values.clickhouse.enabled }}
+  clickhouse-url: {{ printf "https://%s-clickhouse:8443" (include "apexmail.fullname" .) | quote }}
+  clickhouse-database: "apexmail"
+  clickhouse-user: "apexmail"
+  {{- end }}
+
+  # ── Tracking service ───────────────────────────────────────────────────────
+  {{- if .Values.trackingService.baseUrl }}
+  tracking-base-url: {{ .Values.trackingService.baseUrl | quote }}
+  {{- else }}
+  {{- with (index .Values.ingress.hosts 0) }}
+  tracking-base-url: "https://{{ .host }}"
+  {{- end }}
+  {{- end }}
+  trusted-proxies: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  rate-limit-enabled: "true"
+  rate-limit-max-per-minute: "1000"

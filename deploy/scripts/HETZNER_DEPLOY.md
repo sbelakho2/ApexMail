@@ -2,30 +2,35 @@
 
 This document walks through the **one-time** setup needed before the
 `Deploy — Hetzner` GitHub Action (`.github/workflows/deploy-hetzner.yml`)
-can roll out the ApexMail Docker Compose stack to `37.27.119.181`.
+can roll out the ApexMail Docker Compose stack to the production host.
 
-The deploy targets the `Bel-Consulting-OU` GitHub org. Mirror or transfer
-the repository there first (or set the secrets at org level so they are
-available to whichever repo runs the workflow).
+> **Canonical reference:** this is the operator-facing companion to
+> [`../DEPLOYMENT.md`](../DEPLOYMENT.md), which defines the single supported
+> deploy model (Docker Compose + GHCR via Hetzner SSH). The bare-metal
+> `deploy.sh` and Kubernetes paths under `deploy/legacy-*` are superseded.
+
+The deploy target host and user are provided **entirely** by the
+`HETZNER_SSH_HOST` and `HETZNER_SSH_USER` GitHub secrets — there are no
+hardcoded IP defaults. Substitute your host below wherever `$HETZNER_HOST`
+appears.
 
 ---
 
 ## 1. Install the local SSH key on the server
 
-The key in `~/.ssh/hetzner-db-mac.pub` is registered in the Hetzner Robot
-key list, but Robot only injects it during `installimage` / rescue. It is
-**not** automatically present on a running OS. Install it once:
+Register your public key once on the host (you'll be prompted for the current
+root/deploy password):
 
 ```sh
-# From your Mac (you'll be prompted for the current root password):
-ssh-copy-id -i ~/.ssh/hetzner-db-mac.pub root@37.27.119.181
+HETZNER_HOST=your.host.ip.or.name
+ssh-copy-id -i ~/.ssh/hetzner-deploy.pub "${HETZNER_SSH_USER:-root}@${HETZNER_HOST}"
 
 # Verify:
-ssh -i ~/.ssh/hetzner-db-mac root@37.27.119.181 'echo OK && uname -a'
+ssh -i ~/.ssh/hetzner-deploy "${HETZNER_SSH_USER:-root}@${HETZNER_HOST}" 'echo OK && uname -a'
 ```
 
-If you do not have the root password, boot the server into Hetzner Rescue
-from Robot and append the contents of `hetzner-db-mac.pub` to
+If you do not have the password, boot the server into Hetzner Rescue from
+Robot and append the contents of your public key to
 `/mnt/root/.ssh/authorized_keys` after mounting the system disk.
 
 ---
@@ -35,11 +40,12 @@ from Robot and append the contents of `hetzner-db-mac.pub` to
 Once SSH works:
 
 ```sh
-scp -i ~/.ssh/hetzner-db-mac \
+HETZNER_HOST=your.host.ip.or.name
+scp -i ~/.ssh/hetzner-deploy \
   deploy/scripts/hetzner-bootstrap.sh \
-  root@37.27.119.181:/root/
+  "${HETZNER_SSH_USER:-root}@${HETZNER_HOST}:/root/"
 
-ssh -i ~/.ssh/hetzner-db-mac root@37.27.119.181 \
+ssh -i ~/.ssh/hetzner-deploy "${HETZNER_SSH_USER:-root}@${HETZNER_HOST}" \
   'bash /root/hetzner-bootstrap.sh'
 ```
 
@@ -51,7 +57,7 @@ This installs Docker + compose plugin, configures UFW, hardens sshd
 ## 3. Capture the host's SSH host key
 
 ```sh
-ssh-keyscan -H 37.27.119.181
+ssh-keyscan -H "${HETZNER_HOST}"
 ```
 
 Copy the full output — you'll paste it into the `HETZNER_KNOWN_HOSTS`
@@ -85,30 +91,31 @@ Required vars (validated by `docker-compose.prod.yml` with `${VAR:?}`):
 
 ## 5. Configure GitHub secrets
 
-Set these at the **organization** level for `Bel-Consulting-OU` (so they
-apply to any repo) or at the repo level if you prefer to scope them:
+Set these at the **repository** level (or org level if you manage several
+repos under one org). The namespace GHCR publishes to is derived from
+`github.repository`, so the secrets must be visible to the repo that runs
+the workflow — do not assume a specific org.
 
 | Secret name | Value |
 |---|---|
-| `HETZNER_SSH_PRIVATE_KEY` | `cat ~/.ssh/hetzner-db-mac` (full PEM) |
-| `HETZNER_KNOWN_HOSTS`     | output of `ssh-keyscan -H 37.27.119.181` |
+| `HETZNER_SSH_HOST` (**required**) | production host IP/hostname |
+| `HETZNER_SSH_USER` (**required**) | SSH user (e.g. `root` or `deploy`) |
+| `HETZNER_SSH_PRIVATE_KEY` | `cat ~/.ssh/hetzner-deploy` (full PEM) |
+| `HETZNER_KNOWN_HOSTS`     | output of `ssh-keyscan -H <host>` |
 | `APEXMAIL_PROD_ENV`       | full rendered `.env` from step 4 |
 | `GHCR_DEPLOY_TOKEN`       | PAT with `read:packages` for the GHCR images built by `deploy.yml` |
-| `HETZNER_SSH_HOST` (optional) | override host (defaults to `37.27.119.181`) |
-| `HETZNER_SSH_USER` (optional) | override user (defaults to `root`) |
 | `HETZNER_DEPLOY_DIR` (optional) | override remote dir (defaults to `/opt/apexmail`) |
 
-CLI shortcuts (after `gh auth login` to the Bel-Consulting-OU-tied account):
+CLI shortcuts (after `gh auth login`):
 
 ```sh
-gh secret set HETZNER_SSH_PRIVATE_KEY < ~/.ssh/hetzner-db-mac
-ssh-keyscan -H 37.27.119.181 | gh secret set HETZNER_KNOWN_HOSTS
+gh secret set HETZNER_SSH_HOST       --body "your.host.ip.or.name"
+gh secret set HETZNER_SSH_USER       --body "root"
+gh secret set HETZNER_SSH_PRIVATE_KEY < ~/.ssh/hetzner-deploy
+ssh-keyscan -H your.host.ip.or.name | gh secret set HETZNER_KNOWN_HOSTS
 gh secret set APEXMAIL_PROD_ENV < /path/to/rendered.env
 gh secret set GHCR_DEPLOY_TOKEN  # paste PAT when prompted
 ```
-
-Add `--org Bel-Consulting-OU --visibility selected --repos ApexMail` to
-those calls if managing org-level secrets.
 
 ---
 
@@ -124,18 +131,37 @@ gh run watch
 ```
 
 The workflow:
-1. Validates all required secrets exist
+1. Validates all required secrets exist (fails fast if host/user/key absent)
 2. Configures SSH with strict host-key checking from `HETZNER_KNOWN_HOSTS`
 3. rsyncs `docker-compose*.yml` + `deploy/` to `/opt/apexmail/`
 4. Pipes `APEXMAIL_PROD_ENV` to `/opt/apexmail/.env` (mode 0600) without
    touching the runner filesystem
 5. Logs in to GHCR on the host, `docker compose pull`, `up -d --remove-orphans`
-6. Reports `docker compose ps`
-7. Shreds the SSH key from the runner
+   over the canonical service set (`api-server mta worker enterprise
+   tracking-service observability marketing nginx postgres redis clickhouse
+   certbot`)
+6. Reloads nginx to re-resolve upstream container IPs
+7. Verifies the rollout and the TLS certificate (warns if self-signed)
+8. Shreds the SSH key from the runner
 
 ---
 
-## 7. Rotation
+## 7. Issue a real Let's Encrypt certificate
+
+After the first deploy, nginx will start with a self-signed fallback cert.
+Replace it with a real LE cert:
+
+```sh
+ssh -i ~/.ssh/hetzner-deploy "${HETZNER_SSH_USER:-root}@${HETZNER_HOST}" \
+  "cd /opt/apexmail && bash deploy/scripts/issue-letsencrypt.sh"
+```
+
+The `deploy-hetzner.yml` workflow verifies the cert on every subsequent
+deploy and warns if it is still self-signed.
+
+---
+
+## 8. Rotation
 
 - **SSH key**: regenerate, append to authorized_keys, then update
   `HETZNER_SSH_PRIVATE_KEY` and `HETZNER_KNOWN_HOSTS` if the host key

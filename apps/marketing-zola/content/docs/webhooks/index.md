@@ -212,29 +212,32 @@ Triggered when recipient unsubscribes.
 
 ### Signature Header
 
-Every webhook POST request includes an HMAC-SHA256 signature in the `X-Webhook-Signature` header:
+Every webhook POST request includes a signature header that carries the timestamp and HMAC digest in a single value:
 
 ```
-X-Webhook-Signature: sha256=7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069
+X-ApexMail-Signature: t=1705312200,v1=abc123...
 ```
 
-The format is `sha256=` followed by the lowercase hexadecimal HMAC digest of the raw request body.
+The signature header uses the `t=` and `v1=` parameter format:
 
-| Header | Format | Description |
-|--------|--------|-------------|
-| `X-Webhook-Signature` | `sha256=<hex>` | HMAC-SHA256 hex digest of the raw request body |
-| `X-ApexMail-Event-Id` | `evt_` prefix | Unique event identifier for deduplication |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `t` | Unix timestamp (seconds) | When the signature was created |
+| `v1` | Hex-encoded HMAC-SHA256 | The computed signature over the canonical payload |
+
+The timestamp inside the signature header matches the value in the `X-ApexMail-Timestamp` response header (also provided as a standalone header for convenience).
 
 ### Timestamp Header
 
-A separate `X-ApexMail-Timestamp` header carries the Unix timestamp (seconds) of when the webhook was dispatched:
+A separate `X-ApexMail-Timestamp` header carries the same Unix timestamp for easy timestamp-only validation without parsing the signature value:
 
 ```
 X-ApexMail-Timestamp: 1705312200
 ```
 
-The timestamp is provided as a convenience header for timestamp-only validation. It is NOT embedded in the signature — the signature covers only the raw request body.
-| `X-Webhook-Signature` | `sha256=<hex>` | Signature with embedded timestamp and HMAC-SHA256 digest |
+| Header | Type | Description |
+|--------|------|-------------|
+| `X-ApexMail-Signature` | `t=<ts>,v1=<hex>` | Signature with embedded timestamp and HMAC-SHA256 digest |
 | `X-ApexMail-Timestamp` | Unix timestamp (seconds) | Convenience header; always matches `t=` in signature |
 
 ### Signature Construction
@@ -247,15 +250,15 @@ ApexMail computes the signature using **HMAC-SHA256** over the canonical payload
 
 where `{timestamp}` is the Unix-epoch seconds value and `{raw_request_body}` is the exact byte sequence of the HTTP request body (before any JSON parsing or charset conversion).
 
-The signing key is your **webhook signing secret (used directly, not Base64-decoded)**. Webhook secrets are generated and displayed as Base64 strings in the dashboard. You must Base64-decode the secret before using it as the HMAC key.
+The signing key is your **Base64-decoded webhook secret**. Webhook secrets are generated and displayed as Base64 strings in the dashboard. You must Base64-decode the secret before using it as the HMAC key.
 
 **Steps to verify on your side:**
 
-1. Parse the `X-Webhook-Signature` header.
+1. Extract `t` and `v1` from the `X-ApexMail-Signature` header.
 2. Read the raw request body bytes (do not parse or re-serialize JSON).
 3. Construct the canonical payload: `f"{t}.{raw_body_bytes}"`.
-4. use your webhook secret directly to get the raw key bytes.
-5. Compute `HMAC-SHA256(key=your_secret, message=canonical_payload)` and hex-encode the result.
+4. Base64-decode your webhook secret to get the raw key bytes.
+5. Compute `HMAC-SHA256(key=decoded_secret, message=canonical_payload)` and hex-encode the result.
 6. Compare the computed hex digest against `v1` using a constant-time comparison.
 
 ### Replay Prevention
@@ -302,7 +305,7 @@ def verify_webhook_signature(
 
     Args:
         raw_body: The raw request body bytes (before JSON parsing).
-        signature_header: The value of the X-Webhook-Signature header.
+        signature_header: The value of the X-ApexMail-Signature header.
         secret_b64: Your Base64-encoded webhook signing secret.
         tolerance_seconds: Max allowed clock skew (default 300s = 5 min).
 

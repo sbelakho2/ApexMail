@@ -1,0 +1,151 @@
+{{/*
+Post-start hook for cache warming after deployment.
+This runs the cache warming script after the container starts but before
+the pod becomes ready. Combined with the readiness probe, this ensures
+caches are warmed before the pod receives traffic.
+
+Usage:
+  1. Include this template in your deployment by adding to spec.template.spec:
+     {{- include "apexmail.postStartHook" . | nindent 8 }}
+
+  2. Or use as a standalone Job by uncommenting the Job definition below.
+*/}}
+
+{{- define "apexmail.postStartHook" -}}
+{{- $cacheWarming := .Values.cacheWarming | default dict -}}
+# This lifecycle hook runs after the container starts but before the
+# readiness probe succeeds. It executes the cache warming script which
+# pre-populates DNS, rate limiter, and database query caches.
+#
+# The readiness probe should have initialDelaySeconds set high enough
+# to allow cache warming to complete.
+lifecycle:
+  postStart:
+    exec:
+      command:
+        - /bin/bash
+        - -c
+        - |
+          # Wait for dependencies (DB, Redis) to be ready
+          echo "[cache-warm] Waiting for dependencies..."
+          for i in $(seq 1 30); do
+            db_ready=1
+            redis_ready=1
+
+            if command -v pg_isready >/dev/null 2>&1 && [ -n "${DATABASE_URL:-}" ]; then
+              pg_isready -d "$DATABASE_URL" >/dev/null 2>&1 || db_ready=0
+            fi
+
+            if command -v redis-cli >/dev/null 2>&1 && [ -n "${REDIS_URL:-}" ]; then
+              redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1 || redis_ready=0
+            fi
+
+            if [ "$db_ready" = "1" ] && [ "$redis_ready" = "1" ]; then
+              echo "[cache-warm] Dependencies ready."
+              break
+            else
+              echo "[cache-warm] Waiting... ($i/30)"
+              sleep 1
+            fi
+          done
+
+          # Run the cache warming script
+          echo "[cache-warm] Starting cache warming..."
+          CACHE_WARM_TIMEOUT={{ default 30 $cacheWarming.timeout }} \
+          WARM_DNS={{ default true $cacheWarming.dns }} \
+          WARM_RATE_LIMITER={{ default true $cacheWarming.rateLimiter }} \
+          WARM_DB_QUERY_CACHE={{ default true $cacheWarming.dbQueryCache }} \
+          {{ default "/usr/local/bin/cache-warm.sh" $cacheWarming.scriptPath }} \
+            --verbose 2>&1 | while IFS= read -r line; do echo "[cache-warm] $line"; done
+
+          echo "[cache-warm] Cache warming completed with exit code $?"
+{{- end -}}
+
+{{- if .Values.cacheWarming.job.enabled }}
+---
+# Standalone Cache Warming Job
+# Run this Job after deployments to warm caches across all services.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "apexmail.fullname" . }}-cache-warm-{{ randAlphaNum 5 | lower }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache-warming
+  annotations:
+    description: "Post-deployment cache warming job"
+    "helm.sh/hook": post-upgrade,post-install
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "apexmail.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cache-warming
+    spec:
+      restartPolicy: Never
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: cache-warm
+          image: "{{ .Values.global.imageRegistry }}/apexmail-toolbox:{{ .Values.global.imageTag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "=== ApexMail Cache Warming Job ==="
+              echo "Started: $(date)"
+              echo ""
+
+              # Wait for API server
+              echo "Waiting for API server..."
+              for i in $(seq 1 30); do
+                if curl -sf http://{{ include "apexmail.fullname" . }}-api-server:{{ .Values.apiServer.port }}/health >/dev/null 2>&1; then
+                  echo "API server ready."
+                  break
+                fi
+                sleep 2
+              done
+
+              # Run cache warming
+              /usr/local/bin/cache-warm.sh --all --verbose
+
+              echo ""
+              echo "Completed: $(date)"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: redis-url
+            - name: API_BASE_URL
+              value: "http://{{ include "apexmail.fullname" . }}-api-server:{{ .Values.apiServer.port }}"
+            - name: CACHE_WARM_TIMEOUT
+              value: "{{ .Values.cacheWarming.timeout | default 60 }}"
+            - name: WARM_DNS
+              value: "{{ .Values.cacheWarming.dns | default true }}"
+            - name: WARM_RATE_LIMITER
+              value: "{{ .Values.cacheWarming.rateLimiter | default true }}"
+            - name: WARM_DB_QUERY_CACHE
+              value: "{{ .Values.cacheWarming.dbQueryCache | default true }}"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      {{- if .Values.cacheWarming.job.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ .Values.cacheWarming.job.ttlSecondsAfterFinished }}
+  {{- end }}
+{{- end }}

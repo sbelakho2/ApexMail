@@ -16,7 +16,6 @@ Marketing and promotional email includes newsletters, product announcements, off
 **Requirements for all Marketing and Promotional Email:**
 
 - **Opt-in consent.** Senders must obtain and retain proof of opt-in consent before sending. Where the recipient's jurisdiction or the sender's regulatory obligations require express consent (e.g., GDPR Article 7 for direct marketing to individuals in the EEA, CAN-SPAM in the US), the sender must obtain such consent.
-- **Lawful basis.** Senders must identify, document, and maintain the lawful basis for processing recipient data under all applicable laws (e.g., consent under GDPR Article 6(1)(a), legitimate interest where legally valid). The sender bears sole responsibility for ensuring a valid lawful basis exists for each marketing communication before sending.
 - **Sender identification.** Each message must clearly identify the sending organization and provide accurate `From`, `Reply-To`, and physical postal address headers.
 - **Working unsubscribe mechanism.** Each message must include a one-click unsubscribe mechanism that processes removal requests promptly and permanently. Unsubscribe links must remain functional for at least 30 days after sending.
 - **No purchased, scraped, or harvested lists.** Lists acquired through purchase, rental, scraping, or harvesting are not permitted. All recipient addresses must be collected directly by the sender through an opt-in process.

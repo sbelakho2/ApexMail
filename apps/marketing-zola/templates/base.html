@@ -1,8 +1,10 @@
 {# ── I18n data loaded into template context ── #}
 {# Uses the dedicated data/i18n.json for structured translations.          #}
+{# templates reference this as: {% if i18n_data and i18n_data[l]... %}.    #}
 {# l is the active language code (e.g. "en", "de"), always defined here.   #}
 {%- set i18n_data = load_data(path="data/i18n.json", format="json", required=false) -%}
 {%- set l = lang | default(value=config.default_language) -%}
+
 <!DOCTYPE html>
 <html lang="{{ lang | default(value=config.default_language) }}" dir="ltr" id="top" data-theme="apex" class="scroll-smooth">
 <head>

@@ -1,14 +1,14 @@
 {# ── API Explorer Island (static SSR, zero JS) ────────────────── #}
-{# Static API explorer rendered as static HTML.                   #}
-{# This is a static API explorer — no requests are submitted to a live server. #}
+{# Interactive API explorer rendered as static HTML.               #}
 {# JS enhancement is layered on via data-api-console-* attributes.  #}
 <div data-api-console-root class="rounded-sm border border-surface-800 bg-surface-950 overflow-hidden shadow-premium-black/30">
   <div class="grid gap-0 xl:grid-cols-[19rem_1fr]">
     {# ── Endpoint Command Rail ── #}
     <aside class="border-b border-surface-800 bg-surface-900 xl:border-b-0 xl:border-r">
-      <div class="border-b border-surface-800 px-4 py-4">
+       <div class="border-b border-surface-800 px-4 py-4">
         <p class="text-[10px] font-bold tracking-[0.22em] text-surface-500">Endpoint Lanes</p>
-        <p class="mt-2 text-sm text-surface-300">Pick a lane, browse payload examples, and inspect schema envelopes.</p>
+        <p class="mt-2 text-sm text-surface-300">Pick a lane, tune payload, then inspect request and response examples.</p>
+        <p class="mt-2 text-xs text-surface-500 italic">This is a static API explorer — no requests are submitted to a live server.</p>
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 hide-scrollbar">
         <button data-api-console-endpoint-button="0" role="tab" aria-selected="true" aria-controls="api-console-panel-0" id="api-console-tab-0" class="w-full min-w-0 border-b border-surface-800 px-4 py-4 text-left transition-all xl:border-l-2 xl:border-b xl:border-l-brand-500 bg-surface-800 text-white">
@@ -51,7 +51,7 @@
             <span data-api-console-path class="max-w-full break-all font-mono text-xs text-surface-300 tracking-normal">/v1/messages</span>
             <span class="rounded-sm border border-surface-700 px-2 py-1 text-[10px] font-bold tracking-[0.16em] text-surface-400">Sandbox</span>
           </div>
-           <button data-api-console-send class="btn-primary w-full !px-6 !py-2 !text-[10px] !font-bold tracking-widest lg:ml-auto lg:w-auto">View Example</button>
+          <button data-api-console-send class="btn-primary w-full !px-6 !py-2 !text-[10px] !font-bold tracking-widest lg:ml-auto lg:w-auto">View Example</button>
         </div>
       </div>
 
@@ -75,7 +75,7 @@
             <span class="text-[10px] tracking-[0.16em] text-surface-500">Envelope + diagnostics</span>
           </div>
           <div data-api-console-response class="min-h-[17rem] rounded-sm border border-surface-800 bg-surface-900 p-4 font-mono text-[11px] text-surface-400">
-            <p class="text-surface-500 text-xs">This is a static API explorer — no requests are submitted to a live server.</p>
+            <p class="italic">This is a static API explorer — no requests are submitted to a live server.</p>
           </div>
           <div class="mt-4 grid gap-3 sm:grid-cols-3 text-[11px]">
             <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">Latency target: &lt; 120ms</div>

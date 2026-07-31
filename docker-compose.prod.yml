@@ -15,10 +15,10 @@ services:
   # MARKETING SITE (Zola static site, served by nginx-alpine on 8080)
   # ===========================================================================
   marketing:
-    # SECURITY: Pin to specific digest for reproducible builds
-    # Update digest after verified image build:
-    #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/sbelakho2/apexmail/marketing:latest
-    image: ghcr.io/sbelakho2/apexmail/marketing:v1.0.1
+    # Canonical image name + tag published by .github/workflows/deploy.yml.
+    # The namespace (ghcr.io/sbelakho2/apexmail) must match the CI publisher's
+    # `github.repository`-derived registry path. See deploy/DEPLOYMENT.md.
+    image: ghcr.io/sbelakho2/apexmail/marketing:latest
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -121,7 +121,7 @@ services:
       - apexmail_frontend
 
   observability:
-    image: ghcr.io/sbelakho2/apexmail/observability:v1.0.0
+    image: ghcr.io/sbelakho2/apexmail/observability:latest
     environment:
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
     secrets:
@@ -169,12 +169,12 @@ services:
         max-file: "5"
 
   tracking:
-    image: ghcr.io/sbelakho2/apexmail/tracking-service:v1.0.0
+    image: ghcr.io/sbelakho2/apexmail/tracking-service:latest
     # Use entrypoint wrapper to bridge _FILE env vars to native env vars
     # Full path required — "tracking-service" alone is not in PATH
     entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "/usr/local/bin/tracking-service"]
     volumes:
-      - ./entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
       RUST_LOG: info
       DB_HOST: postgres
@@ -222,7 +222,7 @@ services:
     # "api-server" is passed explicitly so the wrapper doesn't consume CMD args (--listen) as binary name
     entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "api-server"]
     volumes:
-      - ./entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
       RUST_LOG: info
       ENVIRONMENT: production
@@ -301,7 +301,10 @@ services:
   # MTA (Mail Transfer Agent)
   # ===========================================================================
   mta:
-    image: ghcr.io/sbelakho2/apexmail/mta-server:v1.0.0
+    # Canonical image name is `mta` (matches the CI build target and the
+    # docker-compose.yml dev service key). The binary inside the image is still
+    # named `mta-server`; the image/tag name is the single source of truth.
+    image: ghcr.io/sbelakho2/apexmail/mta:latest
     restart: unless-stopped
     entrypoint: ["/usr/bin/tini", "--", "mta-server"]
     command: ["--smtp-port", "25", "--submission-port", "587", "--smtps-port", "465", "--metrics-port", "9090"]
@@ -344,7 +347,7 @@ services:
         max_attempts: 5
 
   enterprise:
-    image: ghcr.io/sbelakho2/apexmail/enterprise:v1.0.0
+    image: ghcr.io/sbelakho2/apexmail/enterprise:latest
     environment:
       RUST_LOG: info
       JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
@@ -376,11 +379,11 @@ services:
   # WORKER (Background job processing)
   # ===========================================================================
   worker:
-    image: ghcr.io/sbelakho2/apexmail/worker:v1.0.0
+    image: ghcr.io/sbelakho2/apexmail/worker:latest
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "worker"]
     volumes:
-      - ./entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     depends_on:
       postgres:
         condition: service_healthy

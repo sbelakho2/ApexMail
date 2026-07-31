@@ -1,0 +1,35 @@
+{{- if .Values.mta.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "apexmail.fullname" . }}-mta
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "mta" "context" .) | nindent 4 }}
+  {{- with .Values.mta.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.mta.service.type }}
+  selector:
+    {{- include "apexmail.selectorLabels" (dict "name" "mta" "context" .) | nindent 4 }}
+  ports:
+    - name: smtp
+      port: {{ .Values.mta.ports.smtp }}
+      targetPort: smtp
+      protocol: TCP
+    - name: submission
+      port: {{ .Values.mta.ports.submission }}
+      targetPort: submission
+      protocol: TCP
+    - name: smtps
+      port: {{ .Values.mta.ports.smtps }}
+      targetPort: smtps
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.mta.ports.metrics }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

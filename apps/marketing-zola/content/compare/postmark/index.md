@@ -19,7 +19,18 @@ competitor_wins = 0
 <div class="px-6 py-3 bg-surface-50/50 border-b border-surface-100">
   <span class="text-xs font-bold text-surface-600">DELIVERABILITY</span>
 </div>
-
+<div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
+  <div class="text-sm font-medium text-surface-900 self-center">Delivery Rate</div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">High</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">High</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+</div>
+<div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
+  <div class="text-sm font-medium text-surface-900 self-center">P95 acceptance to first attempt</div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">&le;30s (P95)</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">Not publicly documented</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+</div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Dedicated IP</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">From $30/mo</span></div>

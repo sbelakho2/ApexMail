@@ -6,7 +6,24 @@ module.exports = {
       './src/**/*.rs',
       './assets/globals.input.css',
     ],
+    // Rust source stores class names inside escaped string literals
+    // (class=\"...\") which Tailwind's default extractor misses. Use a
+    // broader extract that treats the raw file text as a class source so
+    // utilities referenced only from Rust render correctly.
+    extract: {
+      rs: (content) => {
+        return content.match(/[A-Za-z0-9-_:/[\]()%]+/g) || [];
+      },
+    },
   },
+  // Layout-critical utilities that are assembled dynamically in Rust (sidebar
+  // width, viewport breakpoints) are safelisted so they are always emitted
+  // even if the extractor cannot see their definition site.
+  safelist: [
+    'w-16', 'w-56', 'w-60', 'w-64', 'md:ml-56', 'w-72', 'w-80',
+    'md:ml-16', 'md:ml-56', 'md:ml-60', 'md:ml-64',
+    'min-h-[44px]', 'min-w-[44px]', 'shrink-0',
+  ],
   theme: {
     extend: {
       colors: {

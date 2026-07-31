@@ -36,51 +36,58 @@
 
 @layer base {
   :root {
-    --background: 255 255 255;
-    --foreground: 9 9 11;
+    /* Reference design (Correct Design.png) tokens:
+       - content canvas is a cool light gray (#f8f9fa)
+       - panels/cards/sidebar are pure white (#ffffff)
+       - brand accent is coral red (#dd524c), not the deep #dc2626
+       - primary text is blue-tinted near-black (#0f1116), not neutral zinc
+       - borders are cool gray (#e2e3e5)
+       - muted text is slate (#5a6473) */
+    --background: 248 249 250;
+    --foreground: 15 17 22;
     --card: 255 255 255;
-    --card-foreground: 9 9 11;
+    --card-foreground: 15 17 22;
     --popover: 255 255 255;
-    --popover-foreground: 9 9 11;
-    --primary: 220 38 38;
+    --popover-foreground: 15 17 22;
+    --primary: 221 82 76;
     --primary-foreground: 255 255 255;
-    --secondary: 244 244 245;
-    --secondary-foreground: 9 9 11;
-    --muted: 244 244 245;
-    --muted-foreground: 113 113 122;
-    --accent: 244 244 245;
-    --accent-foreground: 9 9 11;
-    --destructive: 220 38 38;
+    --secondary: 241 243 245;
+    --secondary-foreground: 15 17 22;
+    --muted: 241 243 245;
+    --muted-foreground: 90 100 115;
+    --accent: 241 243 245;
+    --accent-foreground: 15 17 22;
+    --destructive: 221 82 76;
     --destructive-foreground: 255 255 255;
     --warning: 217 119 6;
-    --border: 228 228 231;
-    --input: 228 228 231;
-    --ring: 220 38 38;
-    --error: 220 38 38;
+    --border: 226 227 229;
+    --input: 226 227 229;
+    --ring: 221 82 76;
+    --error: 221 82 76;
 
-    --surface-50: 250 250 250;
-    --surface-100: 244 244 245;
-    --surface-200: 228 228 231;
-    --surface-300: 212 212 216;
-    --surface-400: 161 161 170;
-    --surface-500: 113 113 122;
-    --surface-600: 82 82 91;
-    --surface-700: 63 63 70;
-    --surface-800: 39 39 42;
-    --surface-900: 24 24 27;
-    --surface-950: 9 9 11;
+    --surface-50: 249 250 251;
+    --surface-100: 243 244 246;
+    --surface-200: 226 229 233;
+    --surface-300: 207 211 217;
+    --surface-400: 152 160 171;
+    --surface-500: 110 119 132;
+    --surface-600: 75 84 99;
+    --surface-700: 55 63 76;
+    --surface-800: 31 37 49;
+    --surface-900: 18 22 31;
+    --surface-950: 11 14 21;
 
-    --brand-50: 254 242 242;
-    --brand-100: 254 226 226;
-    --brand-200: 254 202 202;
-    --brand-300: 252 165 165;
-    --brand-400: 248 113 113;
-    --brand-500: 220 38 38;
-    --brand-600: 185 28 28;
-    --brand-700: 153 27 27;
-    --brand-800: 127 29 29;
-    --brand-900: 69 10 10;
-    --brand-950: 45 10 10;
+    --brand-50: 252 243 242;
+    --brand-100: 253 228 226;
+    --brand-200: 251 201 199;
+    --brand-300: 247 164 161;
+    --brand-400: 241 117 112;
+    --brand-500: 221 82 76;
+    --brand-600: 195 60 54;
+    --brand-700: 162 45 41;
+    --brand-800: 135 41 38;
+    --brand-900: 112 41 39;
+    --brand-950: 61 19 17;
 
     --success-50: 240 253 244;
     --success-100: 220 252 231;
@@ -271,35 +278,29 @@
 
   .apex-console-shell,
   .apex-cp-shell {
-    color: rgb(var(--surface-950));
-    background: #f6f6f3;
+    color: rgb(var(--foreground));
+    background: rgb(var(--background));
     font-feature-settings: 'tnum' 1, 'ss01' 1;
   }
 
   .apex-console-main,
   .apex-cp-main {
-    background-color: #f6f6f3;
-    /* Whisper-soft graph-paper texture instead of a visible grid — gives an instrument-panel
-       feel without bleeding through cards. */
-    background-image:
-      linear-gradient(rgba(9, 9, 11, 0.018) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(9, 9, 11, 0.018) 1px, transparent 1px),
-      radial-gradient(circle at top, rgba(9, 9, 11, 0.015), transparent 60%);
-    background-size: 80px 80px, 80px 80px, 100% 480px;
-    background-attachment: local, local, scroll;
+    /* Flat content canvas (#f8f9fa) — no texture, matching the reference's
+       clean minimal background. */
+    background-color: rgb(var(--background));
   }
 
   .apex-console-content,
   .apex-cp-page-frame {
-    max-width: 1120px;
+    max-width: 1400px;
     margin-left: auto;
     margin-right: auto;
   }
 
   .apex-console-header {
     min-height: 72px;
-    border-color: rgba(9, 9, 11, 0.1);
-    box-shadow: 0 1px 0 rgba(9, 9, 11, 0.04);
+    border-color: rgb(var(--border));
+    box-shadow: 0 1px 0 rgb(var(--foreground) / 0.04);
   }
 
   .apex-console-search input,
@@ -324,13 +325,15 @@
     box-shadow: 0 0 0 3px rgb(var(--primary) / 0.12);
   }
 
+  /* Sidebars are white (reference design) — NOT dark. Cool hairline border on
+     the right edge separates them from the #f8f9fa content canvas. */
   .apex-console-sidebar.apex-console-sidebar,
   .apex-cp-sidebar.apex-cp-sidebar {
     position: relative;
     overflow: hidden;
-    background: #09090b;
-    color: #fff;
-    border-right: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgb(var(--card));
+    color: rgb(var(--foreground));
+    border-right: 1px solid rgb(var(--border));
   }
 
   .apex-console-sidebar::before,
@@ -349,7 +352,7 @@
   }
 
   .apex-sidebar-brand {
-    color: #fff;
+    color: rgb(var(--foreground));
     text-transform: uppercase;
     letter-spacing: 0;
   }
@@ -358,20 +361,20 @@
   .apex-console-sidebar .border-t,
   .apex-cp-sidebar .border-t,
   .apex-cp-sidebar .border-b {
-    border-color: rgba(255, 255, 255, 0.1);
+    border-color: rgb(var(--border));
   }
 
   .apex-console-sidebar a,
   .apex-cp-sidebar a,
   .apex-sidebar-link,
   .apex-cp-sidebar-link {
-    min-height: 44px;
+    min-height: 40px;
     border: 1px solid transparent;
-    color: rgba(255, 255, 255, 0.72);
-    text-transform: uppercase;
-    font-size: 0.76rem;
-    line-height: 1rem;
-    font-weight: 700;
+    color: rgb(var(--surface-600));
+    text-transform: none;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    font-weight: 500;
     letter-spacing: 0;
   }
 
@@ -379,20 +382,31 @@
   .apex-cp-sidebar a:hover,
   .apex-sidebar-link:hover,
   .apex-cp-sidebar-link:hover {
-    border-color: rgba(255, 255, 255, 0.16);
-    background: rgba(255, 255, 255, 0.08);
-    color: #fff;
+    border-color: transparent;
+    background: rgb(var(--surface-100));
+    color: rgb(var(--foreground));
   }
 
   .apex-console-sidebar .text-surface-500,
   .apex-console-sidebar .text-\[10px\],
   .apex-cp-sidebar .text-white\/40 {
-    color: rgba(255, 255, 255, 0.42);
+    color: rgb(var(--surface-500));
   }
 
   .apex-console-sidebar .rounded-full {
     border-radius: var(--radius-sm);
-    background: rgba(255, 255, 255, 0.08);
+    background: rgb(var(--surface-100));
+  }
+
+  /* Active nav item — subtle coral tint (#fcf3f2) with coral icon, matching the
+     reference design's restrained active state. The icon turns coral via the
+     .text-primary class set on the active link's icon wrapper in shell.rs. */
+  .apex-nav-active {
+    background: rgb(var(--brand-50));
+    border-color: rgb(var(--brand-100));
+  }
+  .apex-nav-active:hover {
+    background: rgb(var(--brand-100));
   }
 
   .apex-page-hero {
@@ -850,17 +864,17 @@
     border-radius: 0.125rem;
   }
 
-  /* Control-plane dashboard hero (replaces former white card-in-card layout) */
+  /* Control-plane dashboard hero — clean white card matching the reference
+     (Correct Design.png): white panel, cool hairline border, subtle shadow. */
   .apex-cp-hero {
     position: relative;
-    border: 1px solid rgba(9, 9, 11, 0.14);
-    border-radius: 0.125rem;
-    background:
-      linear-gradient(180deg, #ffffff 0%, #fafaf8 100%);
+    border: 1px solid rgb(var(--border));
+    border-radius: var(--radius-md);
+    background: rgb(var(--card));
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.95),
-      0 1px 0 rgba(9, 9, 11, 0.04),
-      0 18px 44px rgba(9, 9, 11, 0.06);
+      0 1px 0 rgba(15, 17, 22, 0.03),
+      0 18px 44px rgba(15, 17, 22, 0.06);
   }
 
   .apex-cp-hero::before {
@@ -877,18 +891,19 @@
     position: relative;
   }
 
+  /* Side panel is light (not dark) to match the reference design. */
   .apex-cp-hero-side {
     position: relative;
     background:
-      radial-gradient(120% 100% at 100% 0%, rgba(255, 255, 255, 0.05), transparent 55%),
-      linear-gradient(135deg, #0b0b0e 0%, #09090b 60%, #050507 100%);
-    border-top: 1px solid rgba(9, 9, 11, 0.14);
+      radial-gradient(120% 100% at 100% 0%, rgb(var(--accent) / 0.6), transparent 55%),
+      rgb(var(--card));
+    border-top: 1px solid rgb(var(--border));
   }
 
   @media (min-width: 1024px) {
     .apex-cp-hero-side {
       border-top: 0;
-      border-left: 1px solid rgba(9, 9, 11, 0.14);
+      border-left: 1px solid rgb(var(--border));
     }
   }
 
@@ -901,15 +916,14 @@
     border-color: rgba(255, 255, 255, 0.28);
   }
 
-  /* Stat tiles inside the CP hero — borderless ghost tiles with hairline accent. */
+  /* Stat tiles — white cards with a coral hairline accent (reference design). */
   .apex-cp-stat-tile {
     position: relative;
     padding: 0.95rem 1rem 1.05rem;
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(250, 250, 249, 0.9) 100%);
-    border: 1px solid rgba(9, 9, 11, 0.08);
-    border-radius: 0.125rem;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    background: rgb(var(--card));
+    border: 1px solid rgb(var(--border));
+    border-radius: var(--radius-md);
+    box-shadow: 0 1px 2px rgb(15 17 22 / 0.04);
     overflow: hidden;
     transition: border-color 160ms ease-out, transform 160ms ease-out, box-shadow 160ms ease-out;
   }
@@ -922,20 +936,20 @@
     bottom: 0;
     width: 2px;
     background: rgb(var(--primary));
-    opacity: 0.55;
+    opacity: 0.7;
   }
 
   .apex-cp-stat-tile[data-tone='warn']::before {
-    background: rgb(var(--warning-500, 234 179 8));
-    opacity: 0.85;
+    background: rgb(var(--warning-500, 245 158 11));
+    opacity: 0.9;
   }
 
   .apex-cp-stat-tile:hover {
     transform: translateY(-1px);
-    border-color: rgba(9, 9, 11, 0.18);
+    border-color: rgb(var(--surface-300));
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.95),
-      0 8px 18px rgba(9, 9, 11, 0.06);
+      0 1px 2px rgb(15 17 22 / 0.04),
+      0 8px 18px rgb(15 17 22 / 0.07);
   }
 
   .apex-cp-stat-label {
@@ -986,11 +1000,10 @@
 
   .apex-cp-region-row {
     position: relative;
-    border: 1px solid rgba(9, 9, 11, 0.08);
-    border-radius: 0.125rem;
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(250, 250, 249, 0.9) 100%);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    border: 1px solid rgb(var(--border));
+    border-radius: var(--radius-md);
+    background: rgb(var(--card));
+    box-shadow: 0 1px 2px rgb(15 17 22 / 0.04);
   }
 
   /* Web console hero \u2014 same chassis as page-hero but slightly more restrained. */

@@ -1,7 +1,0 @@
-User-agent: *
-Allow: /
-
-# Yandex-specific directive — preferred canonical host
-Host: https://apexmail.ee
-
-Sitemap: https://apexmail.ee/sitemap.xml

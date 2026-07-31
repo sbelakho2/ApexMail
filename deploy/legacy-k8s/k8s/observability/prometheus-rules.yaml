@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alerting-rules
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: observability
+data:
+  alerting-rules.yml: |
+    groups:
+      - name: apexmail-k8s-availability
+        rules:
+          - alert: ApexMailApiDown
+            expr: up{job="apexmail-api"} == 0
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "ApexMail API target is down"
+              description: "Prometheus has been unable to scrape the API target for more than 2 minutes."
+          - alert: ApexMailTrackingDown
+            expr: up{job="apexmail-tracking"} == 0
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "ApexMail tracking target is down"
+              description: "Prometheus has been unable to scrape the tracking target for more than 2 minutes."
+      - name: apexmail-k8s-api
+        rules:
+          - alert: ApexMailApiHighErrorRate
+            expr: sum(rate(apexmail_http_requests_total{job="apexmail-api",status=~"5.."}[5m])) / clamp_min(sum(rate(apexmail_http_requests_total{job="apexmail-api"}[5m])), 1) > 0.05
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "ApexMail API 5xx rate is high"
+              description: "More than 5% of API requests are returning 5xx responses."
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-k8s-config
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: observability
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    rule_files:
+      - /etc/prometheus/rules/alerting-rules.yml
+    scrape_configs:
+      - job_name: apexmail-api
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: api-server
+            action: keep
+      - job_name: apexmail-tracking
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: tracking-service
+            action: keep

@@ -1,0 +1,243 @@
+{{- if .Values.networkPolicies.enabled -}}
+# ── Default deny all ingress ─────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "apexmail.fullname" . }}-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: apexmail
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+---
+# ── Common service egress — DNS, stateful backends, internal services, and required external ports ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "apexmail.fullname" . }}-common-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: apexmail
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "apexmail.fullname" . }}-postgresql
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "apexmail.fullname" . }}-redis-master
+      ports:
+        - port: 6379
+          protocol: TCP
+    # ClickHouse HTTP, HTTPS, and native ports
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "apexmail.fullname" . }}-clickhouse
+      ports:
+        - port: 8123
+          protocol: TCP
+        - port: 8443
+          protocol: TCP
+        - port: 9000
+          protocol: TCP
+    # Internal API -> enterprise traffic
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "apexmail.selectorLabels" (dict "name" "enterprise" "context" .) | nindent 14 }}
+      ports:
+        - port: {{ .Values.enterprise.port }}
+          protocol: TCP
+    # External HTTPS plus SMTP delivery paths
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 25
+          protocol: TCP
+        - port: 465
+          protocol: TCP
+        - port: 587
+          protocol: TCP
+---
+# ── API Server — allow ingress from ingress controller ───────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "apexmail.fullname" . }}-api-server-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "api-server" "context" .) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: {{ .Values.apiServer.port }}
+          protocol: TCP
+---
+# ── Tracking Service — allow ingress from ingress controller ─────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "apexmail.fullname" . }}-tracking-service-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "tracking-service" "context" .) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: {{ .Values.trackingService.port }}
+          protocol: TCP
+    # Allow Prometheus scraping on metrics port
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 9092
+          protocol: TCP
+---
+# ── Enterprise — allow only from API server (internal) ──────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "apexmail.fullname" . }}-enterprise-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "enterprise" "context" .) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "apexmail.selectorLabels" (dict "name" "api-server" "context" .) | nindent 14 }}
+      ports:
+        - port: {{ .Values.enterprise.port }}
+          protocol: TCP
+---
+# ── MTA — allow inbound SMTP from external ──────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "apexmail.fullname" . }}-mta-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "mta" "context" .) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # SMTP ports are exposed externally via LoadBalancer
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: {{ .Values.mta.ports.smtp }}
+          protocol: TCP
+        - port: {{ .Values.mta.ports.submission }}
+          protocol: TCP
+        - port: {{ .Values.mta.ports.smtps }}
+          protocol: TCP
+    # Allow Prometheus scraping on metrics port
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: {{ .Values.mta.ports.metrics }}
+          protocol: TCP
+---
+# ── Worker — egress only (DB, Redis, DNS); health-check ingress ──────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "apexmail.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "worker" "context" .) | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Kubelet health checks on health port
+    - ports:
+        - port: {{ .Values.worker.healthPort }}
+          protocol: TCP
+  egress:
+    # DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "apexmail.fullname" . }}-postgresql
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "apexmail.fullname" . }}-redis-master
+      ports:
+        - port: 6379
+          protocol: TCP
+{{- end }}

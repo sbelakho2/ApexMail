@@ -170,26 +170,24 @@ pub struct ShellHeader<'a> {
 impl<'a> ShellHeader<'a> {
     pub fn render_html(&self) -> String {
         let menu_icon = shell_icon("menu", "h-5 w-5");
-        let bell_icon = shell_icon("bell", "h-4 w-4");
         let theme_icon = shell_icon("moon", "h-4 w-4");
-        let badge = if self.unread_count > 0 {
+        let _bell_icon = shell_icon("bell", "h-4 w-4");
+        let _badge = if self.unread_count > 0 {
             format!("<span class=\"inline-flex items-center rounded-sm border font-bold border-transparent bg-primary text-white h-5 min-w-5 px-1.5 text-[10px] uppercase tracking-widest\">{}</span>", self.unread_count)
         } else {
             String::new()
         };
 
-        let safe_query = html_escape(self.search_query);
+        let _safe_query = html_escape(self.search_query);
         let safe_avatar = html_escape(self.avatar_fallback);
+        // Minimal header matching the reference: page title on the left, a compact
+        // search affordance + theme/avatar on the right. No heavy search box,
+        // no prominent notification button — the reference favours restraint.
         format!(
-            "<header class=\"apex-console-header sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200 bg-card px-6\"><div class=\"flex items-center gap-4\"><button class=\"md:hidden min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-sm text-surface-700 hover:bg-surface-100\" aria-label=\"{} menu\" aria-expanded=\"{}\" aria-controls=\"mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" data-shortcut=\"mod+b\">{}</button><div class=\"relative hidden md:block apex-console-search\"><div class=\"absolute left-3 top-1/2 -translate-y-1/2 text-surface-400\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg></div><input type=\"search\" role=\"combobox\" aria-label=\"Search campaigns and contacts\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"search-results-listbox\" value=\"{}\" data-debounce-ms=\"300\" data-search-scope=\"campaigns,contacts\" data-shortcut=\"mod+k\" class=\"w-64 pl-10 h-10 bg-surface-50 border border-surface-200 rounded-sm text-[13px] focus:outline-none focus:border-surface-950 transition-colors lg:w-80\" /><kbd class=\"pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border border-surface-200 px-1.5 py-0.5 text-[10px] font-bold text-surface-400 bg-white dark:bg-gray-900\">{}</kbd></div></div><div class=\"flex items-center gap-4\"><button aria-label=\"Notifications\" class=\"inline-flex h-10 w-10 items-center justify-center rounded-sm text-surface-500 hover:bg-surface-100 hover:text-surface-950 transition-colors\">{}{}</button>{}<button type=\"button\" aria-label=\"Toggle dark mode\" aria-pressed=\"false\" data-theme-toggle=\"true\" data-theme-storage-key=\"{}\" data-shortcut=\"mod+shift+d\" class=\"inline-flex h-10 w-10 items-center justify-center rounded-sm border border-surface-200 bg-card text-surface-700 hover:border-surface-950 transition-colors\">{}</button><div class=\"apex-avatar relative flex shrink-0 h-10 w-10 rounded-sm border border-surface-200 bg-surface-100 items-center justify-center\" role=\"button\" aria-label=\"User menu — {}\" tabindex=\"0\"><span class=\"text-surface-600 font-bold text-[11px] uppercase tracking-widest\">{}</span></div></div></header>",
+            "<header class=\"apex-console-header sticky top-0 z-40 flex h-14 items-center justify-between border-b border-surface-200 bg-card px-6\"><div class=\"flex items-center gap-3\"><button class=\"md:hidden min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-sm text-surface-700 hover:bg-surface-100\" aria-label=\"{} menu\" aria-expanded=\"{}\" aria-controls=\"mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" data-shortcut=\"mod+b\">{}</button></div><div class=\"flex items-center gap-2\"><button aria-label=\"Search\" data-shortcut=\"mod+k\" class=\"inline-flex h-9 w-9 items-center justify-center rounded-sm text-surface-500 hover:bg-surface-100 hover:text-surface-950 transition-colors\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg></button><button type=\"button\" aria-label=\"Toggle dark mode\" aria-pressed=\"false\" data-theme-toggle=\"true\" data-theme-storage-key=\"{}\" data-shortcut=\"mod+shift+d\" class=\"inline-flex h-9 w-9 items-center justify-center rounded-sm text-surface-500 hover:bg-surface-100 hover:text-surface-950 transition-colors\">{}</button><div class=\"apex-avatar relative flex shrink-0 h-8 w-8 rounded-full bg-surface-200 items-center justify-center\" role=\"button\" aria-label=\"User menu — {}\" tabindex=\"0\"><span class=\"text-surface-600 font-bold text-[11px]\">{}</span></div></div></header>",
             if self.mobile_menu_open { "Close" } else { "Open" },
             if self.mobile_menu_open { "true" } else { "false" },
             menu_icon,
-            safe_query,
-            header_shortcut_hint(),
-            bell_icon,
-            badge,
-            if self.unread_count > 0 { format!("<span class=\"sr-only\">{} unread notifications</span>", self.unread_count) } else { String::new() },
             theme_storage_key(),
             theme_icon,
             safe_avatar,
@@ -264,7 +262,7 @@ impl<'a> WebDashboardShell<'a> {
         let sidebar_width = if self.sidebar_collapsed {
             "w-16"
         } else {
-            "w-64"
+            "w-56"
         };
         let mobile_overlay = if self.mobile_menu_open {
             "<div class=\"fixed inset-0 z-40 bg-black/50 md:hidden\" aria-hidden=\"true\" data-close-on-escape=\"true\"></div><div id=\"mobile-sidebar\" role=\"navigation\" aria-label=\"Mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"fixed inset-y-0 left-0 z-50 w-[min(20rem,calc(100vw-2rem))] md:hidden \"></div>".to_string()
@@ -285,7 +283,7 @@ impl<'a> WebDashboardShell<'a> {
         let sidebar_content = render_web_sidebar(self.current_path);
         let mobile_script = mobile_menu_script();
         format!(
-            "<div class=\"apex-console-shell flex h-screen overflow-hidden bg-surface-50\" data-theme-mode=\"system\" data-theme-storage-key=\"{}\">{}{}<aside class=\"hidden md:flex {}\" data-sidebar-storage-key=\"{}\" aria-label=\"Primary sidebar navigation\">{}</aside>{}<div class=\"flex flex-1 flex-col overflow-hidden\">{}<main class=\"apex-console-main relative flex-1 overflow-y-auto bg-gradient-to-br from-surface-50 via-background to-brand-50/40 p-4 md:p-6 lg:p-8 safe-area-inset-bottom\"><div class=\"apex-console-content relative\">{}</div></main>{}{}</div></div>",
+            "<div class=\"apex-console-shell flex h-screen overflow-hidden bg-background\" data-theme-mode=\"system\" data-theme-storage-key=\"{}\">{}{}<aside class=\"hidden md:flex shrink-0 {}\" data-sidebar-storage-key=\"{}\" aria-label=\"Primary sidebar navigation\">{}</aside>{}<div class=\"flex flex-1 flex-col overflow-hidden\">{}<main class=\"apex-console-main relative flex-1 overflow-y-auto bg-background p-6 lg:p-10 safe-area-inset-bottom\"><div class=\"apex-console-content relative max-w-[1400px]\">{}</div></main>{}{}</div></div>",
             theme_storage_key(),
             banner,
             shortcut_contract,
@@ -343,7 +341,7 @@ impl<'a> ControlPlaneShell<'a> {
         let sidebar_content = render_cp_sidebar(self.current_path);
         let mobile_script = mobile_menu_script();
         format!(
-            "<div class=\"apex-cp-shell min-h-screen bg-background\" data-theme-mode=\"system\" data-theme-storage-key=\"{}\">{}{}<div class=\"apex-cp-mobile-header md:hidden fixed left-0 right-0 top-0 z-40 flex items-center justify-between p-4 bg-card border-b border-border\"><div class=\"flex items-center gap-3\"><div class=\"apex-logo-mark w-8 h-8 bg-primary rounded-sm flex items-center justify-center text-white font-bold text-sm\">A</div><span class=\"text-sm font-bold text-foreground\">Control Plane</span><span class=\"sr-only\">Operations</span><span class=\"sr-only\">Monitor the fleet.</span></div><button aria-expanded=\"{}\" aria-label=\"{} navigation menu\" aria-controls=\"control-plane-mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" class=\"inline-flex p-2 min-h-[44px] min-w-[44px] items-center justify-center rounded-sm text-surface-700 hover:bg-surface-100\">{}</button></div><div class=\"hidden md:block\"><aside class=\"fixed left-0 top-0 h-screen w-64\" data-user-role=\"{}\">{}</aside></div><div id=\"control-plane-mobile-sidebar\" role=\"navigation\" aria-label=\"Control plane mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"md:hidden fixed left-0 top-0 h-screen z-50 transition-transform duration-300 {}\"><aside class=\"h-full w-[min(20rem,calc(100vw-2rem))]\">{}</aside></div><main class=\"apex-cp-main ml-0 md:ml-64 p-4 md:p-8 pt-24 md:pt-8\"><div class=\"cp-page-frame apex-cp-page-frame\">{}</div></main>{}</div>",
+            "<div class=\"apex-cp-shell min-h-screen bg-background\" data-theme-mode=\"system\" data-theme-storage-key=\"{}\">{}{}<div class=\"apex-cp-mobile-header md:hidden fixed left-0 right-0 top-0 z-40 flex items-center justify-between p-4 bg-card border-b border-border\"><div class=\"flex items-center gap-2\"><span class=\"text-base font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-foreground\">Mail</span></span><span class=\"text-[10px] font-bold uppercase tracking-[0.2em] text-surface-400\">Control Plane</span><span class=\"sr-only\">Operations</span><span class=\"sr-only\">Monitor the fleet.</span></div><button aria-expanded=\"{}\" aria-label=\"{} navigation menu\" aria-controls=\"control-plane-mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" class=\"inline-flex p-2 min-h-[44px] min-w-[44px] items-center justify-center rounded-sm text-surface-700 hover:bg-surface-100\">{}</button></div><div class=\"hidden md:block\"><aside class=\"fixed left-0 top-0 h-screen w-56\" data-user-role=\"{}\">{}</aside></div><div id=\"control-plane-mobile-sidebar\" role=\"navigation\" aria-label=\"Control plane mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"md:hidden fixed left-0 top-0 h-screen z-50 transition-transform duration-300 {}\"><aside class=\"h-full w-[min(20rem,calc(100vw-2rem))]\">{}</aside></div><main class=\"apex-cp-main ml-0 md:ml-56 p-4 md:p-8 pt-24 md:pt-8\"><div class=\"cp-page-frame apex-cp-page-frame\">{}</div></main>{}</div>",
             theme_storage_key(),
             banner_markup,
             render_shortcut_contract(),
@@ -432,26 +430,30 @@ fn render_sidebar_content(
                 || (href != &"/" && current_path.starts_with(href))
                 || (href == &"/dashboard" && (current_path == "/" || current_path == "/cp" || current_path == "/dashboard"));
             let active_class = " aria-current=\"page\"";
+            // Active state: subtle coral tint (#fcf3f2) background + coral icon
+            // (the reference's active item has a coral icon), bold foreground text.
             let classes = if is_active {
-                // Web sidebar active: bg-surface-100 text-surface-950 font-bold
-                // CP sidebar active: bg-white/10 text-white
-                // Detect which mode we're in from the base_classes
-                if base_classes.contains("bg-surface-100") || base_classes.contains("text-surface-600") {
-                    "apex-sidebar-link flex items-center gap-3 px-3 py-2 text-sm font-medium transition-colors rounded-sm bg-surface-100 text-surface-950 font-bold"
+                if base_classes.starts_with("apex-cp-sidebar-link") {
+                    "apex-cp-sidebar-link apex-nav-active flex items-center gap-3 px-3 py-2 text-sm font-medium transition-colors rounded-md text-surface-950"
                 } else {
-                    "apex-cp-sidebar-link flex items-center gap-3 px-3 py-2 text-sm font-medium transition-colors rounded-sm bg-white/10 text-white"
+                    "apex-sidebar-link apex-nav-active flex items-center gap-3 px-3 py-2 text-sm font-medium transition-colors rounded-md text-surface-950"
                 }
             } else {
                 base_classes
             };
+            // Active icon is coral (matches reference); inactive icon is slate.
+            let icon_color = if is_active { "text-primary" } else { "text-surface-500" };
+            let icon_wrap = format!(
+                "<span class=\"w-5 h-5 flex items-center justify-center {}\">{}</span>",
+                icon_color, icon
+            );
             format!(
-                "<a href=\"{}\" class=\"{}\"{}>\
-                 <span class=\"w-5 h-5 flex items-center justify-center opacity-70\">{}</span>{}</a>",
+                "<a href=\"{}\" class=\"{}\"{}>{}{}</a>",
                 href,
                 classes,
                 if is_active { active_class } else { "" },
-                icon,
-                label
+                icon_wrap,
+                label,
             )
         })
         .collect::<Vec<_>>()
@@ -483,9 +485,8 @@ fn render_web_sidebar(current_path: &str) -> String {
     );
     format!(
         "<div class=\"apex-console-sidebar flex flex-col h-full bg-card border-r border-surface-200\">\
-         <div class=\"p-6 border-b border-surface-100\"><div class=\"flex items-center gap-3\">\
-         <div class=\"apex-logo-mark w-8 h-8 bg-primary rounded-sm flex items-center justify-center text-white font-bold\">A</div>\
-         <span class=\"apex-sidebar-brand font-bold tracking-tight\">ApexMail</span></div></div>\
+         <div class=\"p-6 border-b border-surface-100\"><div class=\"flex items-center gap-2\">\
+         <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span></div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{}</nav>\
          <div class=\"p-4 border-t border-surface-100\"><div class=\"flex items-center gap-3 px-2\">\
          <div class=\"w-8 h-8 rounded-full bg-surface-100\"></div>\
@@ -503,21 +504,21 @@ fn render_cp_sidebar(current_path: &str) -> String {
         ("Audit Logs", "/audit", "file-text"),
         ("Sales Console", "/sales", "trending-up"),
     ];
+    // CP sidebar is white (reference design): white card bg, coral active state,
+    // slate inactive text. Matches the web console sidebar chassis.
     let content = render_sidebar_content(
         &items,
-        "apex-cp-sidebar-link flex items-center gap-3 px-3 py-2 text-sm font-medium transition-colors rounded-sm text-surface-300 hover:bg-white/10 hover:text-white",
+        "apex-cp-sidebar-link flex items-center gap-3 px-3 py-2 text-sm font-medium transition-colors rounded-sm hover:bg-surface-100 text-surface-600 hover:text-surface-950",
         current_path,
     );
     format!(
-        "<div class=\"apex-cp-sidebar flex flex-col h-full bg-surface-950 text-white\">\
-         <div class=\"p-6 border-b border-white/10\"><div class=\"flex items-center gap-3\">\
-         <div class=\"apex-logo-mark w-8 h-8 bg-primary rounded-sm flex items-center justify-center text-white font-bold\">A</div>\
-         <span class=\"apex-sidebar-brand font-bold tracking-tight uppercase text-xs\">Control Plane</span></div></div>\
+        "<div class=\"apex-cp-sidebar flex flex-col h-full bg-card text-surface-900\">\
+         <div class=\"p-6 border-b border-surface-100\"><div class=\"flex flex-col gap-0.5\">\
+         <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
+         <span class=\"text-[10px] font-bold uppercase tracking-[0.2em] text-surface-400\">Control Plane</span></div></div>\
          <nav class=\"flex-1 overflow-y-auto cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
-         <div class=\"p-4 border-t border-white/10 text-[10px] text-white/40 px-6 uppercase tracking-widest font-bold\">System version</div></div>",
-        content.replace("hover:bg-surface-100", "hover:bg-white/10")
-               .replace("text-surface-600", "text-white/60")
-               .replace("hover:text-surface-950", "hover:text-white")
+         <div class=\"p-4 border-t border-surface-100 text-[10px] text-surface-500 px-6 uppercase tracking-widest font-bold\">System version</div></div>",
+        content
     )
 }
 
@@ -576,13 +577,14 @@ mod tests {
         }
         .render_html();
 
-        assert!(header.contains("role=\"combobox\""));
-        assert!(header.contains("data-debounce-ms=\"300\""));
+        // Minimal header (reference design): search affordance via a button
+        // with the mod+k shortcut, theme toggle, avatar — no combobox input,
+        // no unread badge. The notification count is surfaced via the toast
+        // surface, not the header.
+        assert!(header.contains("aria-label=\"Search\""));
         assert!(header.contains("data-shortcut=\"mod+k\""));
-        assert!(header.contains("Cmd K"));
         assert!(header.contains("data-theme-toggle=\"true\""));
         assert!(header.contains("data-mobile-menu-breakpoint=\"md\""));
-        assert!(header.contains("3 unread notifications"));
         assert!(header.contains("aria-label=\"Open menu\""));
         assert!(banner.contains("Impersonation Active"));
         assert!(banner.contains("tenant_123"));
@@ -665,6 +667,10 @@ mod tests {
 
     #[test]
     fn header_search_query_escapes_xss() {
+        // The minimal header (reference design) no longer renders the search
+        // query in an <input value="..."> — search is a button affordance, so
+        // the query value is never emitted and cannot be an XSS vector. Verify
+        // the payload does not appear anywhere in the header output.
         let xss_payload = "<img src=x onerror=\"alert('xss')\">";
         let header = ShellHeader {
             search_query: xss_payload,
@@ -673,15 +679,9 @@ mod tests {
             mobile_menu_open: false,
         }
         .render_html();
-        // Raw XSS payload must NOT appear in output
         assert!(
             !header.contains(xss_payload),
             "raw XSS payload found in header output"
-        );
-        // Escaped version must appear instead
-        assert!(
-            header.contains("&lt;img src=x onerror="),
-            "escaped XSS not found in header"
         );
     }
 

@@ -13,6 +13,7 @@ use axum::routing::post;
 use axum::{BoxError, Json, Router};
 use base64::Engine;
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::time::Duration;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::load_shed::{error::Overloaded, LoadShedLayer};
@@ -359,10 +360,28 @@ pub fn build_app(state: AppState) -> Router {
     // base directory is overridable via MARKETING_PUBLIC_DIR; the default is
     // resolved relative to the working directory when the api-server binary
     // is launched from the workspace root.
+    // Resolve the marketing site's generated public/ directory. The env var
+    // wins; otherwise probe candidate paths relative to the CWD and the crate,
+    // so the font/favicon/css assets resolve no matter where the binary runs
+    // from (dev runs from services/mail-server/, prod from /opt/apexmail).
     let marketing_public = std::env::var("MARKETING_PUBLIC_DIR")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "apps/marketing-zola/public".to_string());
+        .map(PathBuf::from)
+        .or_else(|| {
+            [
+                "apps/marketing-zola/public",
+                "../../apps/marketing-zola/public",
+                "../../../apps/marketing-zola/public",
+                "../../../../apps/marketing-zola/public",
+                "/opt/apexmail/apps/marketing-zola/public",
+            ]
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.join("icon.svg").exists())
+        })
+        .unwrap_or_else(|| PathBuf::from("apps/marketing-zola/public"));
+    let marketing_public = marketing_public.to_string_lossy().to_string();
     let marketing_assets = Router::<AppState>::new()
         .nest_service("/css", ServeDir::new(format!("{marketing_public}/css")))
         .nest_service("/fonts", ServeDir::new(format!("{marketing_public}/fonts")))

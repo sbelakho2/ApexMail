@@ -44,7 +44,7 @@ verdict_points = [
   <div class="text-sm font-medium text-surface-900 self-center">IP Warming</div>
     <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Automatic</span></div>
     <div class="text-center text-sm self-center"><span class="text-surface-600">Automated warmup</span></div>
-    <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+    <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">DKIM Rotation</div>
@@ -72,7 +72,7 @@ verdict_points = [
   <div class="text-sm font-medium text-surface-900 self-center">GDPR Tools</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">DSR workflows</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Documented DPA</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">HIPAA BAA</div>
@@ -90,7 +90,7 @@ verdict_points = [
   <div class="text-sm font-medium text-surface-900 self-center">Audit Logs</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Growth plan & above</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Access logs only</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Residency Review</div>
@@ -112,7 +112,7 @@ verdict_points = [
   <div class="text-sm font-medium text-surface-900 self-center">Official SDK Coverage</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Five official SDKs</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Seven SDKs</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Idempotency Keys</div>
@@ -146,13 +146,13 @@ verdict_points = [
   <div class="text-sm font-medium text-surface-900 self-center">100K emails/mo</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">$65 (Pro: 150K)</span></div>
    <div class="text-center text-sm self-center"><span class="text-surface-600">$89.95 (Essentials from $19.95)</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">SSO Included</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Scale & Enterprise plans</span></div>
    <div class="text-center text-sm self-center"><span class="text-surface-600">Included on Pro</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Custom Deployment Review</div>
@@ -168,7 +168,7 @@ verdict_points = [
   <div class="text-sm font-medium text-surface-900 self-center">Send-Time Insights</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Recommendations</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Email scoring</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Content Diagnostics</div>
@@ -186,5 +186,5 @@ verdict_points = [
   <div class="text-sm font-medium text-surface-900 self-center">Content Analysis</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600">✓</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Classify only</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>

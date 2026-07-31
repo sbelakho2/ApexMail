@@ -1463,25 +1463,19 @@ pub fn web_dashboard_page() -> String {
         }
         .render_html()
     );
+    // Layout matching the reference design (Correct Design.png): a page heading
+    // followed by two stacked white cards with generous whitespace between and
+    // below. The reference favours calm minimalism — sparse cards, no dense
+    // KPI grid, no twin charts.
     format!(
         "<div class=\"space-y-6\">{loading_state}\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
-<section class=\"apex-page-hero apex-console-hero\"><div><p class=\"apex-eyebrow\"><span>Delivery Command</span></p><h1 class=\"apex-hero-title\">Dashboard.</h1><p class=\"apex-hero-copy\">Campaign telemetry, inbox quality, and delivery risk in one sharp operator view.</p></div><div class=\"apex-hero-stat-grid\"><div><span>API</span><strong>Ready</strong></div><div><span>Webhooks</span><strong>P95</strong></div><div><span>Domains</span><strong>Clean</strong></div></div></section>\
-<div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
-{card_sent}{card_delivered}{card_opened}{card_bounced}\
-</div>\
-<div class=\"grid gap-6 md:grid-cols-2\">\
-<div class=\"apex-panel apex-chart-card rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Send Volume</h3>{chart}</div>\
-<div class=\"apex-panel apex-chart-card rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Delivery Rate</h3>{area}</div>\
-</div></section>\
+<header class=\"pt-2\"><h1 class=\"text-2xl font-semibold tracking-tight text-surface-950\">Dashboard</h1><p class=\"mt-1 text-sm text-surface-500\">Campaign telemetry, inbox quality, and delivery risk.</p></header>\
+<div class=\"apex-panel rounded-lg border border-surface-200 bg-card\"><div class=\"flex items-center justify-between border-b border-surface-100 px-6 py-4\"><h2 class=\"text-sm font-semibold text-surface-700\">Send volume</h2><span class=\"text-xs font-medium text-surface-400\">Last 30 days</span></div><div class=\"px-6 py-16 text-sm text-surface-400\">No sends yet. Metrics appear after your first campaign.</div></div>\
+<div class=\"apex-panel rounded-lg border border-surface-200 bg-card\"><div class=\"flex items-center justify-between border-b border-surface-100 px-6 py-4\"><h2 class=\"text-sm font-semibold text-surface-700\">Delivery rate</h2><span class=\"text-xs font-medium text-success-600\">99.8%</span></div><div class=\"px-6 py-10 text-sm text-surface-400\">All domains healthy.</div></div>\
+</section>\
 {error_state}\
 <section data-view-state=\"empty\" hidden>{empty_state}</section></div>",
-        card_sent = format!("<article aria-label=\"Emails Sent: 0 in the last 30 days\">{}</article>", Card { title: "Emails Sent", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        card_delivered = format!("<article aria-label=\"Delivered: 0 emails with 99.8% rate\">{}</article>", Card { title: "Delivered", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">99.8% rate</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        card_opened = format!("<article aria-label=\"Opened: 0 emails with 42.3% rate\">{}</article>", Card { title: "Opened", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">42.3% rate</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        card_bounced = format!("<article aria-label=\"Bounced: 0 emails with 0.2% rate\">{}</article>", Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">0.2% rate</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        chart = ApexBarChart { title: None, description: None, last_updated_label: None, height: 256, bars: vec![], data_count: 0, layout: "vertical", empty_state_reason: "No data" }.render_html(),
-        area = ApexAreaChart { title: None, description: None, last_updated_label: None, height: 256, areas: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
         loading_state = loading_state,
         error_state = error_state,
         empty_state = EmptyState {
@@ -2810,67 +2804,23 @@ pub fn web_settings_profile_page() -> String {
 
 /// Control-plane dashboard.
 pub fn control_plane_dashboard_page() -> String {
+    // Minimal layout matching the reference design (Correct Design.png):
+    // a page heading followed by a single spacious white card with generous
+    // whitespace. The reference is deliberately sparse — no dense KPI grid,
+    // no multi-panel war room — so the dashboard reads as calm and uncluttered.
     r#"
-<div class="space-y-6">
-    <section class="apex-cp-hero overflow-hidden">
-        <div class="grid gap-0 lg:grid-cols-[1.2fr_0.8fr]">
-            <div class="apex-cp-hero-main px-6 py-6 md:px-8 md:py-8">
-                <p class=\"apex-eyebrow\"><span>Control Plane Dashboard</span></p>
-                <h1 class="mt-3 text-3xl font-bold uppercase tracking-tight text-surface-950">Enterprise Operations</h1>
-                <p class="mt-3 max-w-3xl text-sm leading-6 text-surface-600">War-room telemetry for tenant readiness, queue pressure, trust workload, and conversion-critical revenue motion.</p>
-                <div class="apex-cp-stat-grid mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    <article class="apex-cp-stat-tile" aria-label="SLA posture: 99.93% rolling 30-day API uptime"><p class="apex-cp-stat-label">SLA posture</p><p class="apex-cp-stat-value">99.93%</p><p class="apex-cp-stat-help">Rolling 30-day API uptime</p></article>
-                    <article class="apex-cp-stat-tile" aria-label="Active Tenants: 12 tenant production and launch cohort"><p class="apex-cp-stat-label">Active Tenants</p><p class="apex-cp-stat-value">12</p><p class="apex-cp-stat-help">Tenant production and launch cohort</p></article>
-                    <article class="apex-cp-stat-tile" data-tone="warn" aria-label="Queue Depth: 13.1k regional backlog across processors"><p class="apex-cp-stat-label">Queue Depth</p><p class="apex-cp-stat-value text-warning-700">13.1k</p><p class="apex-cp-stat-help">Regional backlog across processors</p></article>
-                    <article class="apex-cp-stat-tile" aria-label="Throughput: 24.8k per minute processed messages in current window"><p class="apex-cp-stat-label">Throughput</p><p class="apex-cp-stat-value">24.8k/min</p><p class="apex-cp-stat-help">Processed messages in current window</p></article>
-                    <article class="apex-cp-stat-tile" aria-label="Trust desk: 5 open questionnaire packages"><p class="apex-cp-stat-label">Trust desk</p><p class="apex-cp-stat-value">5</p><p class="apex-cp-stat-help">Open questionnaire packages</p></article>
-                    <article class="apex-cp-stat-tile" aria-label="Revenue risk: 2 accounts requiring intervention"><p class="apex-cp-stat-label">Revenue risk</p><p class="apex-cp-stat-value">2 accounts</p><p class="apex-cp-stat-help">Expansion requiring intervention</p></article>
-                </div>
-            </div>
-            <aside class="apex-cp-hero-side px-6 py-6 text-white lg:border-l lg:border-t-0 md:px-8 md:py-8">
-                <p class="text-[11px] font-bold uppercase tracking-[0.28em] text-white/55">Live Decision Stream</p>
-                <h2 class="mt-3 text-2xl font-bold uppercase tracking-tight">Now</h2>
-                <div class="mt-5 space-y-3 text-sm">
-                    <article class="apex-cp-stream-item rounded-sm border border-warning-300/35 bg-warning-300/10 p-4">
-                        <p class="text-[10px] uppercase tracking-[0.2em] text-warning-100">Queue breach</p>
-                        <p class="mt-2 font-bold text-white">eu-central delivery queue sustained above error budget</p>
-                        <p class="mt-1 text-xs text-white/70">Action: route low-priority batch traffic to us-east</p>
-                    </article>
-                    <article class="apex-cp-stream-item rounded-sm border border-white/15 bg-black/20 p-4">
-                        <p class="text-[10px] uppercase tracking-[0.2em] text-white/55">Trust task</p>
-                        <p class="mt-2 font-bold text-white">HECVAT enterprise packet ready for compliance counsel</p>
-                        <p class="mt-1 text-xs text-white/70">Action: attach SOC2 mapping digest and export manifest</p>
-                    </article>
-                </div>
-            </aside>
+<div class="space-y-8">
+    <header class="px-1">
+        <h1 class="text-2xl font-semibold tracking-tight text-surface-950">Dashboard</h1>
+        <p class="mt-1.5 text-sm text-surface-500">Tenant readiness, fleet posture, and revenue motion at a glance.</p>
+    </header>
+
+    <section class="apex-panel rounded-md border border-surface-200 bg-card p-8">
+        <div class="flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-surface-700">System status</h2>
+            <span class="inline-flex items-center gap-1.5 text-xs font-medium text-surface-500"><span class="h-1.5 w-1.5 rounded-full bg-success-500"></span>All systems operational</span>
         </div>
-    </section>
-
-    <section class="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
-        <article class="apex-panel rounded-sm border border-surface-200 bg-card shadow-premium">
-            <div class="border-b border-surface-200 px-5 py-4">
-                <p class="text-[10px] uppercase tracking-[0.22em] text-surface-400">Operational Lanes</p>
-                <h2 class="mt-1 text-lg font-bold uppercase tracking-tight text-surface-950">Launch sequence</h2>
-            </div>
-            <div class="divide-y divide-surface-200 text-sm">
-                <a href="/tenants" class="apex-cp-launch-step block px-5 py-4 transition-colors hover:bg-surface-50"><p class="text-xs uppercase tracking-[0.2em] text-surface-400">01 Tenant readiness</p><p class="mt-2 font-bold text-surface-950">Workspace + operator + billing gate</p><p class="mt-1 text-xs text-surface-500">Promotion blocked until owner role and MFA controls are valid.</p></a>
-                <a href="/infrastructure" class="apex-cp-launch-step block px-5 py-4 transition-colors hover:bg-surface-50"><p class="text-xs uppercase tracking-[0.2em] text-surface-400">02 Fleet posture</p><p class="mt-2 font-bold text-surface-950">Node capacity, queue pressure, and domain health</p><p class="mt-1 text-xs text-surface-500">Escalate if p95 queue wait exceeds incident threshold.</p></a>
-                <a href="/audit" class="apex-cp-launch-step block px-5 py-4 transition-colors hover:bg-surface-50"><p class="text-xs uppercase tracking-[0.2em] text-surface-400">03 Trust evidence</p><p class="mt-2 font-bold text-surface-950">SOC2, HIPAA, GDPR and questionnaire stream</p><p class="mt-1 text-xs text-surface-500">Security packets flow into procurement-facing manifests.</p></a>
-                <a href="/sales" class="apex-cp-launch-step block px-5 py-4 transition-colors hover:bg-surface-50"><p class="text-xs uppercase tracking-[0.2em] text-surface-400">04 Revenue execution</p><p class="mt-2 font-bold text-surface-950">Triage, approvals, and outreach launch</p><p class="mt-1 text-xs text-surface-500">Operator cockpit is the final gate before expansion activation.</p></a>
-            </div>
-        </article>
-
-        <article class="apex-panel rounded-sm border border-surface-200 bg-card shadow-premium">
-            <div class="border-b border-surface-200 px-5 py-4">
-                <p class="text-[10px] uppercase tracking-[0.22em] text-surface-400">Capacity Matrix</p>
-                <h2 class="mt-1 text-lg font-bold uppercase tracking-tight text-surface-950">Regional health</h2>
-            </div>
-            <div class="p-5 space-y-3 text-sm">
-                <div class="apex-cp-region-row flex items-center justify-between gap-4 px-4 py-3"><div><p class="font-bold text-surface-950">eu-central-1</p><p class="mt-1 text-xs text-surface-500">Queue p95 4.8s · domain checks healthy · retry lane active</p></div><p class="text-xs font-bold uppercase tracking-[0.16em] text-warning-700">Watch</p></div>
-                <div class="apex-cp-region-row flex items-center justify-between gap-4 px-4 py-3"><div><p class="font-bold text-surface-950">us-east-1</p><p class="mt-1 text-xs text-surface-500">Spare throughput available for traffic rebalancing</p></div><p class="text-xs font-bold uppercase tracking-[0.16em] text-success-700">Stable</p></div>
-                <div class="apex-cp-region-row flex items-center justify-between gap-4 px-4 py-3"><div><p class="font-bold text-surface-950">ap-southeast-1</p><p class="mt-1 text-xs text-surface-500">Balanced queues and healthy complaint ratios</p></div><p class="text-xs font-bold uppercase tracking-[0.16em] text-surface-700">Normal</p></div>
-            </div>
-        </article>
+        <div class="mt-10 text-sm text-surface-400">No incidents in the last 24 hours.</div>
     </section>
 </div>
 "#
@@ -4247,14 +4197,13 @@ mod tests {
 
     #[test]
     fn web_dashboard_page_renders_cards_and_charts() {
+        // Minimal layout per the reference design: a calm heading and a single
+        // spacious white card (no dense KPI grid, no twin charts).
         let html = web_dashboard_page();
         assert!(html.contains("Dashboard"));
-        assert!(html.contains("Emails Sent"));
-        assert!(html.contains("Delivered"));
-        assert!(html.contains("Opened"));
-        assert!(html.contains("Bounced"));
-        assert!(html.contains("Send Volume"));
-        assert!(html.contains("Delivery Rate"));
+        assert!(html.contains("Send volume"));
+        assert!(html.contains("Last 30 days"));
+        assert!(html.contains("apex-panel"));
     }
 
     #[test]
@@ -4415,11 +4364,12 @@ mod tests {
 
     #[test]
     fn cp_dashboard_renders_cards() {
+        // Minimal layout per the reference design: a page heading and a single
+        // spacious white status card (no dense KPI grid).
         let html = control_plane_dashboard_page();
         assert!(html.contains("Dashboard"));
-        assert!(html.contains("Active Tenants"));
-        assert!(html.contains("Queue Depth"));
-        assert!(html.contains("Throughput"));
+        assert!(html.contains("System status"));
+        assert!(html.contains("apex-panel"));
     }
 
     #[test]
