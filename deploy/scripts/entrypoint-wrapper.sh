@@ -32,33 +32,29 @@ esac
 
 # ── Helper: read a secret file and export as an env var ────────────────────
 export_from_file() {
-  local env_name="$1"      # e.g. JWT_PRIVATE_KEY_PEM
-  local file_var="${env_name}_FILE"  # e.g. JWT_PRIVATE_KEY_PEM_FILE
-  local b64_var="${env_name}_B64"    # e.g. JWT_PRIVATE_KEY_PEM_B64
-  # Read the *_FILE / *_B64 env var's value via printenv (avoids eval, which
-  # would be an injection risk if the variable names ever came from untrusted
-  # input). printenv returns exit 1 when the variable is unset.
-  local file_path
-  file_path="$(printenv "$file_var" 2>/dev/null || true)"
+  _ef_env_name="$1"
+  _ef_file_var="${_ef_env_name}_FILE"
+  _ef_b64_var="${_ef_env_name}_B64"
+  _ef_file_path="$(printenv "$_ef_file_var" 2>/dev/null || true)"
 
-  if [ -n "$file_path" ] && [ -f "$file_path" ] && [ -r "$file_path" ]; then
-    local content
-    content="$(cat "$file_path")"
-    export "${env_name}"="${content}"
+  if [ -n "$_ef_file_path" ] && [ -f "$_ef_file_path" ] && [ -r "$_ef_file_path" ]; then
+    _ef_content="$(cat "$_ef_file_path")"
+    export "${_ef_env_name}"="${_ef_content}"
+    unset _ef_content _ef_file_path _ef_file_var _ef_b64_var _ef_env_name
     return 0
   fi
 
-  local b64
-  b64="$(printenv "$b64_var" 2>/dev/null || true)"
-  if [ -n "$b64" ]; then
-    local content
-    content="$(printf '%s' "$b64" | base64 -d 2>/dev/null || true)"
-    if [ -n "$content" ]; then
-      export "${env_name}"="${content}"
+  _ef_b64="$(printenv "$_ef_b64_var" 2>/dev/null || true)"
+  if [ -n "$_ef_b64" ]; then
+    _ef_content="$(printf '%s' "$_ef_b64" | base64 -d 2>/dev/null || true)"
+    if [ -n "$_ef_content" ]; then
+      export "${_ef_env_name}"="${_ef_content}"
+      unset _ef_content _ef_file_path _ef_file_var _ef_b64_var _ef_env_name
       return 0
     fi
   fi
 
+  unset _ef_content _ef_file_path _ef_file_var _ef_b64_var _ef_env_name
   return 1
 }
 
@@ -81,7 +77,42 @@ export_from_file STRIPE_WEBHOOK_SECRET    || true
 export_from_file DB_PASSWORD              || true
 export_from_file REDIS_PASSWORD           || true
 
+# Direct fallback: if DB_PASSWORD wasn't exported by export_from_file (the
+# indirect export can fail in some POSIX sh implementations), read the
+# secret file directly.
+if [ -z "${DB_PASSWORD:-}" ] && [ -n "${DB_PASSWORD_FILE:-}" ] && [ -f "${DB_PASSWORD_FILE}" ]; then
+  DB_PASSWORD="$(cat "${DB_PASSWORD_FILE}")"
+  export DB_PASSWORD
+fi
+if [ -z "${REDIS_PASSWORD:-}" ] && [ -n "${REDIS_PASSWORD_FILE:-}" ] && [ -f "${REDIS_PASSWORD_FILE}" ]; then
+  REDIS_PASSWORD="$(cat "${REDIS_PASSWORD_FILE}")"
+  export REDIS_PASSWORD
+fi
+
+# ── Construct DATABASE_URL from DB_* parts if not already set ──────────────
+if [ -z "${DATABASE_URL:-}" ] && [ -n "${DB_HOST:-}" ]; then
+  DB_PORT_VAL="${DB_PORT:-5432}"
+  DB_NAME_VAL="${DB_NAME:-apexmail}"
+  DB_USER_VAL="${DB_USER:-apexmail}"
+  if [ -n "${DB_PASSWORD:-}" ]; then
+    export DATABASE_URL="postgresql://${DB_USER_VAL}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=disable"
+  else
+    export DATABASE_URL="postgresql://${DB_USER_VAL}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=disable"
+  fi
+fi
+
+# ── Construct REDIS_URL from REDIS_* parts if not already set ──────────────
+if [ -z "${REDIS_URL:-}" ] && [ -n "${REDIS_HOST:-}" ]; then
+  REDIS_PORT_VAL="${REDIS_PORT:-6379}"
+  if [ -n "${REDIS_PASSWORD:-}" ]; then
+    export REDIS_URL="redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT_VAL}"
+  else
+    export REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT_VAL}"
+  fi
+fi
+
 echo "[entrypoint-wrapper] Export complete. Starting binary: ${BINARY}"
+echo "[entrypoint-wrapper] DB_PASSWORD is ${DB_PASSWORD:+set} (${#DB_PASSWORD} chars), DB_HOST=${DB_HOST:-unset}, DATABASE_URL is ${DATABASE_URL:+set}"
 
 # Execute the binary
 exec /usr/bin/tini -- "${BINARY}" "$@"

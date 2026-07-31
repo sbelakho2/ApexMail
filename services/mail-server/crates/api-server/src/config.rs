@@ -840,16 +840,25 @@ impl Config {
     }
 
     /// Build a Postgres connection URL from the config.
+    /// Build a Postgres connection URL. If the `DATABASE_URL` env var is set
+    /// (e.g. by the Docker entrypoint wrapper or the `.env` file), use it
+    /// verbatim so the caller controls sslmode and query params. Otherwise
+    /// construct from the individual `db_*` config fields.
     /// User and password are percent-encoded so that special characters
     /// (like `@`, `:`, `/`) do not corrupt the URL.
     pub fn database_url(&self) -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            if !url.trim().is_empty() {
+                return url;
+            }
+        }
         use url::form_urlencoded;
         let encoded_user: String =
             form_urlencoded::byte_serialize(self.db_user.as_bytes()).collect();
         let encoded_pass: String =
             form_urlencoded::byte_serialize(self.db_password.as_bytes()).collect();
         format!(
-            "postgres://{}:{}@{}:{}/{}",
+            "postgres://{}:{}@{}:{}/{}?sslmode=disable",
             encoded_user, encoded_pass, self.db_host, self.db_port, self.db_name
         )
     }
