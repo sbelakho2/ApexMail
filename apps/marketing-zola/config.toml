@@ -88,18 +88,6 @@ analytics = true
 primary = true
 
 
-[extra.company]
-product_name = "ApexMail"
-legal_name = "Bel Consulting OÜ"
-registry_code = "16588745"
-vat_number = "EE102951727"
-address = "Sakala tn 7-2, 10141 Tallinn, Estonia"
-city = "Tallinn"
-postal_code = "10141"
-country = "Estonia"
-copyright_entity = "Bel Consulting OÜ"
-copyright_start_year = 2025
-founding_date = "2025"
 
 # ── Internationalization ──────────────────────────────────────
 # i18n .po files are in ./i18n/{lang}.po
