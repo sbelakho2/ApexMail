@@ -1031,15 +1031,14 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
 {marketing_panel}\
 <div class=\"w-full max-w-[480px] mx-auto\">\
 <div class=\"text-center mb-10\">\
-<div class=\"inline-flex items-center justify-center w-16 h-16 rounded-sm bg-primary text-white shadow-premium-primary/30 mb-8\">{mail_icon}</div>\
-<h1 class=\"text-4xl font-bold text-surface-950 uppercase tracking-tighter\">{title}</h1>\
-<p class=\"text-base text-surface-500 mt-3 font-medium\">{subtitle}</p>\
+<span class=\"inline-block text-3xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
+<h1 class=\"mt-3 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1>\
+<p class=\"text-sm text-surface-500 mt-2 font-medium\">{subtitle}</p>\
 </div>\
 <div class=\"bg-card rounded-sm shadow-premium border border-surface-200/80 overflow-hidden\">\
 {form_html}{footer_html}\
 </div></div></div></div>{auth_form_script}</main>",
         marketing_panel = web_auth_marketing_panel(),
-        mail_icon = web_auth_mail_icon(),
         auth_form_script = web_auth_form_script(),
     )
 }
@@ -3884,8 +3883,8 @@ pub fn control_plane_login_page(
         "<main class=\"flex min-h-screen items-center justify-center bg-surface-50\">\
 <div class=\"w-full max-w-md space-y-10 rounded-sm border border-surface-200 bg-card p-10 shadow-premium\">\
 <div class=\"text-center\">\
-<div class=\"mx-auto flex h-14 w-14 items-center justify-center rounded-sm bg-primary text-white font-bold text-xl shadow-premium mb-8\">A</div>\
-<h1 class=\"text-3xl font-bold uppercase tracking-tighter text-surface-950\">Control Plane</h1>\
+<span class=\"inline-block text-3xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
+<h1 class=\"mt-2 text-sm font-bold uppercase tracking-[0.2em] text-surface-400\">Control Plane</h1>\
 <p class=\"mt-3 text-sm font-bold uppercase tracking-tight text-surface-500\">Administrator access</p>\
 </div>\
 <form class=\"space-y-6\" action=\"/api/auth/login\" method=\"POST\">\
