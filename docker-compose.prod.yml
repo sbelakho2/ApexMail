@@ -307,11 +307,8 @@ services:
     image: ghcr.io/sbelakho2/apexmail/mta:latest
     restart: unless-stopped
     entrypoint: ["/usr/bin/tini", "--", "mta-server"]
-    command: ["--smtp-port", "25", "--submission-port", "587", "--smtps-port", "465", "--metrics-port", "9090"]
     ports:
       - "25:25"
-      - "587:587"
-      - "465:465"
     environment:
       RUST_LOG: info
       DB_PASSWORD_FILE: /run/secrets/postgres_password
@@ -403,6 +400,13 @@ services:
       METRICS_PORT: "9093"
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: worker
+      # Email transport — use the self-hosted MTA container for sending
+      EMAIL_TRANSPORT_TYPE: ${EMAIL_TRANSPORT_TYPE:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-mta}
+      SMTP_PORT: ${SMTP_PORT:-25}
+      SMTP_TLS: ${SMTP_TLS:-false}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
     secrets:
       - postgres_password
       - redis_password
