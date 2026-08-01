@@ -10,10 +10,10 @@
   <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-16">
       <h2 class="section-title mb-4">
-        <span class="text-surface-950">Pricing That</span>
-        <span class="text-brand-500"> Scales With You</span>
+        <span class="text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_heading_1"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_heading_1"] }}{% else %}Pricing That{% endif %}</span>
+        <span class="text-brand-500"> {% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_heading_2"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_heading_2"] }}{% else %}Scales With You{% endif %}</span>
       </h2>
-      <p class="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">Transparent plan math with a 30,000-email free tier, published overages, and Enterprise pricing reserved for managed ownership.</p>
+      <p class="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] }}{% else %}Transparent plan math with a 30,000-email free tier, published overages, and Enterprise pricing reserved for managed ownership.{% endif %}</p>
     </div>
 
     {# ── Volume Tier Comparison ─────────────────────── #}

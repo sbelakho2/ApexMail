@@ -40,7 +40,7 @@ competitor_wins = 0
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Automatic IP Warming</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600">✓</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">Managed optional</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">Automatic (Postmark-managed)</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">

@@ -21,7 +21,7 @@ verdict_points = [
   "Advanced analytics, content diagnostics, and send-time recommendations",
   "Built-in consent management, audit logs, and GDPR automation",
   "Idempotency keys, ARC signing, BIMI, and reputation circuit breaker",
-  "Official SDKs for Python, Go, Ruby, PHP, and Java",
+  "First-party SDKs for Python, Go, Ruby, PHP, and Java (in development); Resend SDKs for Node.js, PHP, Python, Ruby, Go, Java, Rust, .NET, and Laravel",
 ]
 +++
 
@@ -38,14 +38,14 @@ verdict_points = [
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Dedicated IP</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">From $30/mo</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">From $50/mo</span></div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">approximately €28/month ($30/month)</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">IP Warming</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Automatic geometric</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">Not automatic</span></div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">Automatic (managed)</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">BIMI Support</div>
@@ -91,6 +91,10 @@ verdict_points = [
   <div class="text-sm font-medium text-surface-900 self-center">Audit Logs</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Growth plan & above</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Activity logs only</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
+</div>
+<div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
+  <div class="text-sm font-medium text-surface-900 self-center">Idempotency Keys</div>
   <div class="text-center text-sm self-center"><span class="text-brand-600">✓</span></div>
   <div class="text-center text-sm self-center"><span class="text-brand-600">✓</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>

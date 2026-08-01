@@ -749,6 +749,7 @@ pub fn router() -> Router<AppState> {
 
 pub fn control_plane_alias_router() -> Router<AppState> {
     Router::new()
+        .route("/me", get(get_current_user))
         .route("/login", post(login))
         .route("/mfa/verify", post(complete_mfa_challenge))
         .route("/mfa/setup", post(init_mfa_setup))

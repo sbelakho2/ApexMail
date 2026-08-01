@@ -27,7 +27,7 @@ We process data under GDPR Article 6(1)(b) (contract performance), Article 6(1)(
 
 ## 4. Data Storage
 
-Core infrastructure data is stored in Hetzner data centers in Germany and Finland. Account and billing data may also be stored in these locations. For a complete breakdown of all data categories and their locations, see our [Data Locations](/data-locations/) page.
+Account and tenant data is stored in EU data centres. Primary infrastructure operates on Hetzner cloud in Germany and Finland. Email content and event data may be processed transiently in the EU/EEA. For a complete breakdown of all data categories and their locations, see our [Data Locations](/data-locations/) page.
 
 ### Summary Location Matrix
 

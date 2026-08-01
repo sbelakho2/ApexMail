@@ -211,13 +211,14 @@ Payload: `{timestamp}.{raw_body}` signed with your webhook secret. Events includ
 
 ## SDKs
 
-| Language | Package | Install | Minimum Runtime |
-|----------|---------|---------|-----------------|
-| Node.js | `@apexmail/node` | `npm install @apexmail/node` | Node.js 20+ |
-| Python | `apexmail` | `pip install apexmail` | Python 3.10+ |
-| Go | `apexmail-go` | `go get github.com/apexmail/apexmail-go` | Go 1.21+ |
-| PHP | `apexmail-php` | `composer require apexmail/apexmail-php` | PHP 8.2+ |
-| Ruby | `apexmail` | `gem install apexmail` | Ruby 3.0+ |
-| Java | `apexmail-java` | Maven: `ee.apexmail:apexmail-java:1.0.0` | Java 17+ |
+ApexMail ships first-party SDKs for Python, Go, PHP, Ruby, and Java. **These SDKs are under active development and are not yet published to public package registries** (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). Source is available in the [`packages/` directory of the monorepo](https://github.com/Bel-Consulting-OU/ApexMail/tree/main/packages); see the [SDKs page](/docs/sdks/) for build-from-source instructions and planned install commands. There is no Node.js SDK — Node developers should call the HTTP API directly with `fetch`.
 
-All official SDKs require TLS 1.2+ for API connections. SDK versions follow semantic versioning — pin major versions in production.
+| Language   | Module / package            | Minimum runtime | Status          |
+|------------|-----------------------------|-----------------|-----------------|
+| Python     | `apexmail`                  | Python 3.9+     | Source only     |
+| Go         | `github.com/apexmail/apexmail-go` | Go 1.21+   | Source only     |
+| PHP        | `apexmail/apexmail-php`     | PHP 8.1+        | Source only     |
+| Ruby       | `apexmail` (gem)            | Ruby 3.0+       | Source only     |
+| Java       | `ee.apexmail:apexmail-java` | Java 17+        | Source only     |
+
+All SDKs require TLS 1.2+ for API connections.

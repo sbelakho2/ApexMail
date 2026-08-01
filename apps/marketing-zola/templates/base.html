@@ -3,8 +3,10 @@
 {# Uses the dedicated data/i18n.json for structured translations.          #}
 {# templates reference this as: {% if i18n_data and i18n_data[l]... %}.    #}
 {# l is the active language code (e.g. "en", "de"), always defined here.   #}
-{%- set i18n_data = load_data(path="data/i18n.json", format="json", required=false) -%}
-{%- set l = lang | default(value=config.default_language) -%}
+{# set_global so the macros::t() macro (macros.html) and all included      #}
+{# partials can read these — Tera macros do NOT see the caller's scope.    #}
+{%- set_global i18n_data = load_data(path="data/i18n.json", format="json", required=false) -%}
+{%- set_global l = lang | default(value=config.default_language) -%}
 
 <!DOCTYPE html>
 <html lang="{{ lang | default(value=config.default_language) }}" dir="ltr" id="top" data-theme="apex" class="scroll-smooth">

@@ -357,7 +357,7 @@ def verify_webhook_signature_with_rotation(
 
 ### SDK Helpers
 
-All official SDKs provide helper functions for signature verification. See the [SDKs](/docs/sdks/) page for language-specific examples.
+The first-party SDKs (currently in development) will provide helper functions for signature verification. See the [SDKs](/docs/sdks/) page for status. Until the SDKs ship, verify signatures against the raw request body as shown above.
 
 ---
 

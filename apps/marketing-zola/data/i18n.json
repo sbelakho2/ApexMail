@@ -403,7 +403,7 @@
       "card_5_title": "Intelligentes Routing",
       "card_5_desc": "Überwachung und Aufwärmen dedizierter IP-Reputation. Leiten Sie Ihre E-Mails über den optimalen Zustellpfad.",
       "card_6_title": "Entwickler zuerst",
-      "card_6_desc": "REST-API, Webhooks und Sprach-SDKs. Implementieren Sie E-Mail-Funktionen in Minuten, nicht Tagen.",
+      "card_6_desc": "REST-API und Webhooks, mit SDKs für gängige Sprachen in Kürze. Implementieren Sie E-Mail-Funktionen in Minuten, nicht Tagen.",
       "card_7_title": "E-Mail-Grader",
       "card_7_desc": "Bewerten Sie Ihre E-Mail-Zustellbarkeit mit deterministischen DNS-, Authentifizierungs-, Inhalts- und Reputationsprüfungen.",
       "card_8_title": "Inbox-Platzierung",
@@ -599,6 +599,18 @@
       "cta_title": "Bereit zu starten?",
       "cta_subtitle": "Senden Sie bis zu 30.000 E-Mails pro Monat kostenlos.",
       "cta_button": "Kostenlos starten"
+    },
+    "home_testimonials": {
+      "heading_1": "Gemacht für",
+      "heading_2": "Teams, die ausliefern",
+      "subtitle": "Implementierungsgestützte Nachweise zu Zustellbarkeit, Compliance und KI-gestütztem Betrieb.",
+      "scroll_hint": "Scrollen Sie für weitere Nachweise →",
+      "footnote": "Die obigen Nachweise entsprechen implementierten Plan-Voraussetzungen, Compliance-Workflows und API-gestützten Betriebsflächen."
+    },
+    "home_pricing_island": {
+      "pricing_island_heading_1": "Preise, die",
+      "pricing_island_heading_2": "mit Ihnen skalieren",
+      "pricing_island_subtitle": "Transparente Preisberechnung mit 30.000 kostenlosen E-Mails pro Monat, veröffentlichten Überziehungsraten und Enterprise-Preisen für betreute Infrastruktur."
     }
   },
   "fr": {
@@ -682,11 +694,11 @@
       "forensic_tools": "Forensik-Tools",
       "log_in": "Anmelden",
       "sla": "SLA",
-      "status_degraded": "Teilweise Beeinträchtigung",
-      "status_disruption": "Dienstunterbrechung",
-      "status_operational": "Alle Systeme betriebsbereit",
-      "status_page": "Status-Seite",
-      "status_unavailable": "Statusdaten nicht verfügbar",
+      "status_degraded": "Dégradation partielle",
+      "status_disruption": "Interruption de service",
+      "status_operational": "Tous les systèmes opérationnels",
+      "status_page": "Page de statut",
+      "status_unavailable": "Données de statut indisponibles",
       "tagline": "Email-Infrastruktur, die Compliance sicherstellt und Ihre Emails zuverlässig zustellt.",
       "use_cases": "Anwendungsfälle"
     },
@@ -1055,7 +1067,7 @@
       "card_4_title": "Analyse de Livraison",
       "card_5_desc": "Sélection adaptative des fournisseurs avec basculement automatique.",
       "card_5_title": "Routage Intelligent",
-      "card_6_desc": "SDK en 6 langages, webhooks signés et mode bac à sable.",
+      "card_6_desc": "API REST et webhooks, avec des SDK pour des langages courants à venir. Expédiez des fonctionnalités e-mail en minutes, pas en jours.",
       "card_6_title": "API Prioritaire Développeur",
       "card_7_desc": "Évaluation DNS complète : SPF, DKIM, DMARC, BIMI et MTA-STS.",
       "card_8_desc": "Tests de placement chez 6 fournisseurs avec diagnostics exploitables.",
@@ -1270,6 +1282,18 @@
       "title": "Statut",
       "subtitle": "État du service en direct",
       "description": "Surveillance en temps réel des services ApexMail."
+    },
+    "home_testimonials": {
+      "heading_1": "Conçu pour",
+      "heading_2": "les équipes qui livrent",
+      "subtitle": "Preuves fondées sur l'implémentation en matière de délivrabilité, de conformité et d'operations assistées par IA.",
+      "scroll_hint": "Faites défiler pour voir d’autres preuves →",
+      "footnote": "Les preuves ci-dessus correspondent à des étapes de plan implémentées, des flux de conformité et des surfaces opérationnelles basées sur l’API."
+    },
+    "home_pricing_island": {
+      "pricing_island_heading_1": "Des prix qui",
+      "pricing_island_heading_2": "évoluent avec vous",
+      "pricing_island_subtitle": "Tarification transparente avec 30 000 e-mails gratuits par mois, dépassements publiés et tarifs Enterprise réservés à une infrastructure gérée."
     }
   },
   "es": {
@@ -1353,11 +1377,11 @@
       "forensic_tools": "Forensik-Tools",
       "log_in": "Anmelden",
       "sla": "SLA",
-      "status_degraded": "Teilweise Beeinträchtigung",
-      "status_disruption": "Dienstunterbrechung",
-      "status_operational": "Alle Systeme betriebsbereit",
-      "status_page": "Status-Seite",
-      "status_unavailable": "Statusdaten nicht verfügbar",
+      "status_degraded": "Degradación parcial",
+      "status_disruption": "Interrupción del servicio",
+      "status_operational": "Todos los sistemas operativos",
+      "status_page": "Página de estado",
+      "status_unavailable": "Datos de estado no disponibles",
       "tagline": "Email-Infrastruktur, die Compliance sicherstellt und Ihre Emails zuverlässig zustellt.",
       "use_cases": "Anwendungsfälle"
     },
@@ -1726,7 +1750,7 @@
       "card_4_title": "Analítica de Entrega",
       "card_5_desc": "Selección adaptativa de proveedores con conmutación por error automática.",
       "card_5_title": "Enrutamiento Inteligente",
-      "card_6_desc": "SDKs en 6 lenguajes, webhooks firmados y modo sandbox.",
+      "card_6_desc": "API REST y webhooks, con SDK para lenguajes populares próximamente. Implemente funciones de correo electrónico en minutos, no en días.",
       "card_6_title": "API para Desarrolladores",
       "card_7_desc": "Evaluación DNS completa: SPF, DKIM, DMARC, BIMI y MTA-STS.",
       "card_8_desc": "Pruebas de ubicación en 6 proveedores con diagnósticos procesables.",
@@ -1928,6 +1952,18 @@
       "subscribe_button": "Abonnieren",
       "subscribe_desc": "Erhalten Sie Status-Updates per Email oder Webhook.",
       "subscribe_title": "Updates abonnieren"
+    },
+    "home_testimonials": {
+      "heading_1": "Hecho para",
+      "heading_2": "equipos que envían",
+      "subtitle": "Pruebas respaldadas por la implementación en entregabilidad, cumplimiento y operaciones asistidas por IA.",
+      "scroll_hint": "Desplázate para ver más pruebas →",
+      "footnote": "Las pruebas anteriores se corresponden con hites de plan implementados, flujos de cumplimiento y superficies operativas basadas en la API."
+    },
+    "home_pricing_island": {
+      "pricing_island_heading_1": "Precios que",
+      "pricing_island_heading_2": "escalan contigo",
+      "pricing_island_subtitle": "Precios transparentes con 30 000 correos gratuitos al mes, excedentes publicados y precios Enterprise reservados para infraestructura gestionada."
     }
   }
 }

@@ -43,7 +43,7 @@ verdict_points = [
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">IP Warming</div>
     <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Automatic</span></div>
-    <div class="text-center text-sm self-center"><span class="text-surface-600">Automated warmup</span></div>
+    <div class="text-center text-sm self-center"><span class="text-surface-600">Automatic</span></div>
     <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
@@ -110,7 +110,7 @@ verdict_points = [
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Official SDK Coverage</div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Five official SDKs</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">5 SDKs in development (not yet published)</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Seven SDKs</span></div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>

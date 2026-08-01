@@ -6,11 +6,11 @@
   <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-12">
       <h2 class="section-title mb-4">
-        <span class="text-surface-950">Built for</span>
-        <span class="text-brand-500"> Teams Who Ship</span>
+        <span class="text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["heading_1"] %}{{ i18n_data[l]["home_testimonials"]["heading_1"] }}{% else %}Built for{% endif %}</span>
+        <span class="text-brand-500"> {% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["heading_2"] %}{{ i18n_data[l]["home_testimonials"]["heading_2"] }}{% else %}Teams Who Ship{% endif %}</span>
       </h2>
       <p class="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">
-        Implementation-backed proof points across deliverability, compliance, and AI-assisted operations.
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["subtitle"] %}{{ i18n_data[l]["home_testimonials"]["subtitle"] }}{% else %}Implementation-backed proof points across deliverability, compliance, and AI-assisted operations.{% endif %}
       </p>
     </div>
 
@@ -145,12 +145,12 @@
     </div>
 
     <div class="mt-8 text-center">
-      <p class="text-sm font-medium text-surface-500">Scroll to see more proof points →</p>
+      <p class="text-sm font-medium text-surface-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["scroll_hint"] %}{{ i18n_data[l]["home_testimonials"]["scroll_hint"] }}{% else %}Scroll to see more proof points →{% endif %}</p>
     </div>
 
     <div class="mt-12 pt-12 border-t border-surface-200 text-center">
       <p class="text-sm font-medium text-surface-600">
-        Proof points shown above map to implemented plan gates, compliance workflows, and API-backed operational surfaces.
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["home_testimonials"] and i18n_data[l]["home_testimonials"]["footnote"] %}{{ i18n_data[l]["home_testimonials"]["footnote"] }}{% else %}Proof points shown above map to implemented plan gates, compliance workflows, and API-backed operational surfaces.{% endif %}
       </p>
     </div>
   </div>

@@ -102,6 +102,8 @@ Any disputes arising under these Terms shall first be submitted to the Harju Cou
 
 **Estonian Consumer Disputes Committee.** If you are a Consumer and your complaint is not resolved through our internal procedure, you may refer the dispute to the Estonian Consumer Disputes Committee (Tarbijakaebuste komisjon, Endla 10a, 10142 Tallinn, https://komisjon.ee). The Committee is the independent out-of-court body for qualifying consumer disputes involving an Estonian trader. Referral is voluntary and does not affect your right to bring proceedings before the courts.
 
+**Direct contact and consumer authority.** For consumer disputes, please contact Bel Consulting OÜ directly at legal@apexmail.ee. Estonian consumers may also seek assistance from the Consumer Protection and Technical Regulatory Authority (Tarbijakaitse ja Tehnilise Järelevalve Amet, https://ttja.ee).
+
 **Court proceedings.** Any disputes arising under these Terms shall first be submitted to the Harju County Court, Tallinn, Estonia. Governing law: Estonian law. Nothing in this section limits your rights as a Consumer under mandatory EU or Estonian law.
 
 ### 11.4 Supervisory Authority
