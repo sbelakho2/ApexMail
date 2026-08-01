@@ -348,6 +348,7 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/auth/sso", routes::sso::router())
         .nest("/v1/auth/csrf", routes::csrf::router())
         .nest("/api/auth", routes::auth::control_plane_alias_router())
+        .nest("/api/auth/csrf", routes::csrf::router())
         .nest("/api/auth/session", routes::session::router())
         .nest("/api/csrf", routes::csrf::router())
         .layer(axum::middleware::from_fn_with_state(
