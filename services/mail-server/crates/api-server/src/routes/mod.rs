@@ -6,6 +6,7 @@ pub mod automations;
 pub mod billing;
 pub mod campaigns;
 pub mod client_errors;
+pub mod contact;
 pub mod contacts;
 pub mod dashboard;
 pub mod dedicated_ips;

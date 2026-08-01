@@ -339,6 +339,7 @@ pub fn build_app(state: AppState) -> Router {
     // credential stuffing and registration spam.
     let rate_limited_public = Router::new()
         .nest("/v1/auth", routes::auth::router())
+        .nest("/v1/contact", routes::contact::router())
         .nest("/v1/auth/session", routes::session::router())
         .nest(
             "/v1/auth/forgot-password",
@@ -786,6 +787,7 @@ async fn browser_globals_css() -> impl IntoResponse {
         ui_foundation::GLOBALS_CSS,
     )
 }
+
 
 // ─── Content-Type validation ──────────────────────────────────────
 

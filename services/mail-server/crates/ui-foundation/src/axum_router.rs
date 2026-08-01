@@ -845,12 +845,21 @@ mod tests {
                     let is_mfa_management_script = !opening_tag.contains("src=")
                         && script.contains("mfaChallengeToken")
                         && script.contains("/v1/auth/mfa/");
+                    // External client-side hydration script emitted by the web and
+                    // control-plane root layouts. It wires SSR tables/forms/buttons to the
+                    // JSON API and is served from /assets/console.js. Allowed only with
+                    // `defer` so it never blocks initial render.
+                    let is_console_js = opening_tag.contains("src=\"/assets/console.js")
+                        && opening_tag.contains("defer");
                     let allowed = match route.surface {
                         "marketing" | "marketing-zola" => {
                             is_json_ld || is_allowed_marketing_js || is_marketing_theme_bootstrap
                         }
                         "web" | "control-plane" => {
-                            is_mobile_menu_script || is_auth_form_script || is_mfa_management_script
+                            is_mobile_menu_script
+                                || is_auth_form_script
+                                || is_mfa_management_script
+                                || is_console_js
                         }
                         _ => false,
                     };
@@ -861,7 +870,7 @@ mod tests {
                     );
                     if opening_tag.contains("src=") {
                         assert!(
-                            is_allowed_marketing_js,
+                            is_allowed_marketing_js || is_console_js,
                             "[{}] {} emitted an unexpected external script tag: <script{}>",
                             route.surface, route.pattern, opening_tag,
                         );

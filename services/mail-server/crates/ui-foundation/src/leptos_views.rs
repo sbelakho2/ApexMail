@@ -68,7 +68,8 @@ pub fn web_root_layout(child_html: &str) -> String {
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail</title>\
 <meta name=\"description\" content=\"Modern email infrastructure for developers\">\
 {theme_script}\
-<link rel=\"stylesheet\" href=\"/assets/globals.css\"></head>\
+<link rel=\"stylesheet\" href=\"/assets/globals.css\">\
+</head>\
     <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main></body>\
 </html>",
         html_classes = WEB_ROOT_HTML_CLASSES,
@@ -88,7 +89,8 @@ pub fn control_plane_root_layout(child_html: &str) -> String {
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail Control Plane</title>\
 <meta name=\"description\" content=\"ApexMail administration and monitoring\">\
 {theme_script}\
-<link rel=\"stylesheet\" href=\"/assets/globals.css\"></head>\
+<link rel=\"stylesheet\" href=\"/assets/globals.css\">\
+</head>\
 <body class=\"antialiased bg-background text-surface-950\">{child_html}</body>\
 </html>",
         theme_script = theme_script(),
@@ -113,13 +115,14 @@ pub fn control_plane_app_layout_with_title(
     page_description: &str,
     current_path: &str,
 ) -> String {
+    let child_with_script = format!("{}{}", child_html, api_form_script());
     let shell = ControlPlaneShell {
         mobile_menu_open: false,
         user_role: "admin",
         page_title,
         page_description,
         banners: Vec::new(),
-        child_html,
+        child_html: &child_with_script,
         current_path,
     };
     shell.render_html()
@@ -164,10 +167,13 @@ pub fn web_not_found_page() -> String {
 
 /// Pixel-identical reproduction of the authenticated web dashboard shell.
 pub fn web_dashboard_layout(child_html: &str, current_path: &str) -> String {
+    // Append the API form hydration script (Rust-rendered inline, same pattern
+    // as web_auth_form_script) so data-api-form elements submit to the backend.
+    let child_with_script = format!("{}{}", child_html, api_form_script());
     let shell = WebDashboardShell {
         sidebar_collapsed: false,
         mobile_menu_open: false,
-        child_html,
+        child_html: &child_with_script,
         header: ShellHeader {
             search_query: "",
             unread_count: 0,
@@ -368,7 +374,7 @@ fn render_campaign_editor_page(
     .render_html();
 
     format!(
-        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-success/25 bg-success/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-success\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 uppercase tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Autosave keeps long campaign edits safe across accidental navigation and route changes.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div aria-live=\"polite\" data-autosave-status=\"saved\" class=\"flex items-center gap-2\">{autosave_badge}<span class=\"text-xs font-medium text-success\">Last saved just now</span></div><p class=\"text-xs text-muted-foreground\">Changes sync every 10 seconds and before navigation.</p></div></div></section><form class=\"space-y-6\" data-autosave-endpoint=\"/v1/campaigns/drafts\" data-autosave-interval-ms=\"10000\" data-dirty-guard=\"true\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Leaving the page before autosave completes will trigger a confirmation dialog instead of discarding your work.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}{schedule_button}</div></div></form><div hidden id=\"campaign-leave-guard\">{leave_dialog}</div></div>",
+        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-success/25 bg-success/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-success\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 uppercase tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Autosave keeps long campaign edits safe across accidental navigation and route changes.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div aria-live=\"polite\" data-autosave-status=\"saved\" class=\"flex items-center gap-2\">{autosave_badge}<span class=\"text-xs font-medium text-success\">Last saved just now</span></div><p class=\"text-xs text-muted-foreground\">Changes sync every 10 seconds and before navigation.</p></div></div></section><form class=\"space-y-6\" data-autosave-endpoint=\"/v1/campaigns/drafts\" data-autosave-interval-ms=\"10000\" data-dirty-guard=\"true\" data-api-form data-api-action=\"/v1/campaigns\" data-redirect=\"/campaigns\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Leaving the page before autosave completes will trigger a confirmation dialog instead of discarding your work.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}{schedule_button}</div></div></form><div hidden id=\"campaign-leave-guard\">{leave_dialog}</div></div>",
         breadcrumbs = breadcrumbs,
         title = title,
         autosave_badge = autosave_badge,
@@ -1129,6 +1135,34 @@ document.querySelectorAll('form[action^=\"/v1/auth/\"],form[action^=\"/api/auth/
 if(f.dataset.authBound==='1')return;f.dataset.authBound='1';f.addEventListener('submit',submitForm);\
 });\
 }\
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind);}else{bind();}\
+})();</script>"
+}
+
+/// Inline script (Rust-rendered, same pattern as web_auth_form_script) that
+/// hydrates `form[data-api-form]` elements: serializes fields to JSON, POSTs
+/// to the form's `data-api-action` URL with the CSRF header, and redirects
+/// on success. This keeps the entire stack in Rust SSR — no external JS files.
+fn api_form_script() -> &'static str {
+    "<script>(function(){\
+function csrf(){var m=document.querySelector('meta[name=csrf-token]');if(m)return m.content;var c=document.cookie.match(/(?:^|; )csrf_token=([^;]+)/);return c?c[1]:'';}\
+function err(form,msg){var b=form.querySelector('[role=alert]');if(!b){b=document.createElement('div');b.setAttribute('role','alert');b.className='mt-2 text-sm text-warning-700 font-bold';form.appendChild(b);}b.textContent=msg||'Request failed.';}\
+function submit(e){\
+e.preventDefault();var form=e.target;if(!form.dataset.apiAction)return;\
+var btn=form.querySelector('[type=submit]');if(btn){btn.dataset.ol=btn.textContent;btn.disabled=true;btn.textContent='Saving...';}\
+var p={};\
+new FormData(form).forEach(function(v,k){if(p[k]!==undefined){if(!Array.isArray(p[k]))p[k]=[p[k]];p[k].push(v);}else p[k]=v;});\
+form.querySelectorAll('[data-field]').forEach(function(el){var n=el.dataset.field||el.id;if(n&&!(n in p))p[n]=el.value;});\
+fetch(form.dataset.apiAction,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf()},body:JSON.stringify(p)})\
+.then(function(r){return r.json().then(function(d){return{ok:r.ok,status:r.status,data:d,headers:r.headers};}).catch(function(){return{ok:r.ok,status:r.status,data:null,headers:r.headers};});})\
+.then(function(r){\
+if(r.ok){var dest=form.dataset.redirect;if(!dest&&form.dataset.apiAction){var m=form.dataset.apiAction.match(/\\/v1\\/([\\w-]+)/);if(m)dest='/'+m[1];}if(dest)window.location.assign(dest);}\
+else{var msg=(r.data&&r.data.error&&(r.data.error.message||r.data.error.code))||('Error ('+r.status+')');err(form,msg);}\
+})\
+.catch(function(){err(form,'Network error.');})\
+.finally(function(){if(btn){btn.disabled=false;btn.textContent=btn.dataset.ol||'Submit';}});\
+}\
+function bind(){document.querySelectorAll('form[data-api-form]').forEach(function(f){if(f.dataset.bound==='1')return;f.dataset.bound='1';f.addEventListener('submit',submit);});}\
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind);}else{bind();}\
 })();</script>"
 }
@@ -1905,7 +1939,7 @@ pub fn web_contacts_new_page() -> String {
 <li class=\"text-surface-300\">/</li>\
 <li class=\"text-surface-900 font-medium\">New Contact</li></ol></nav>\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Add Contact</h1>\
-<form class=\"space-y-6\">\
+<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/contacts\" data-redirect=\"/contacts\">\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
@@ -2039,7 +2073,7 @@ pub fn web_lists_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Create List</h1>\
-<form class=\"space-y-6\">\
+<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/lists\" data-redirect=\"/lists\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
@@ -2121,7 +2155,7 @@ pub fn web_templates_new_page() -> String {
     format!(
         "<div class=\"max-w-3xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Create Template</h1>\
-<form class=\"space-y-6\">\
+<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/templates\" data-redirect=\"/templates\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{subject_label}{subject_input}</div>\
 <div class=\"space-y-2\">\
@@ -2433,7 +2467,7 @@ pub fn web_domains_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
 <h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Add Domain</h1>\
-<form class=\"space-y-6\">\
+<form class=\"space-y-6\" data-api-form data-api-action=\"/v1/domains\" data-redirect=\"/domains\">\
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
