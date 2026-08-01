@@ -253,8 +253,9 @@ services:
       # ── mCaptcha (login CAPTCHA protection) ───────────────────────────────
       MCAPTCHA_ENABLED: ${MCAPTCHA_ENABLED:?MCAPTCHA_ENABLED is required in production}
       MCAPTCHA_SITE_KEY: ${MCAPTCHA_SITE_KEY:?MCAPTCHA_SITE_KEY is required in production}
+      MCAPTCHA_BASE_URL: ${MCAPTCHA_BASE_URL:-https://app.apexmail.ee/mcaptcha}
       MCAPTCHA_SECRET_KEY_FILE: /run/secrets/mcaptcha_secret_key
-      MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:-https://demo.mcaptcha.org/api/v1/pow/siteverify}
+      MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:-https://app.apexmail.ee/mcaptcha/api/v1/pow/siteverify}
       METRICS_PORT: 9090
     depends_on:
       postgres:
