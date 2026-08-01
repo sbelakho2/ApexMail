@@ -729,6 +729,7 @@ async fn enqueue_verification_email(
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/me", get(get_current_user))
         .route("/login", post(login))
         .route("/mfa/verify", post(complete_mfa_challenge))
         .route("/mfa/setup", post(init_mfa_setup))
@@ -1057,6 +1058,38 @@ pub struct ResetPasswordResponse {
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
+
+/// GET /v1/auth/me — returns the currently authenticated user's profile.
+/// Used by the Console/CP after login to hydrate the UI.
+async fn get_current_user(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // If authenticated via API key, return the key's tenant info
+    if let Some(user_id) = &auth.user_id {
+        let user: Option<(String, String, Option<String>, String)> =
+            sqlx::query_as("SELECT id, email, name, role FROM users WHERE id = $1 AND status = 'active'")
+                .bind(user_id)
+                .fetch_optional(&state.db)
+                .await?;
+        if let Some((id, email, name, role)) = user {
+            return Ok(Json(serde_json::json!({
+                "id": id,
+                "email": email,
+                "name": name,
+                "role": role,
+                "tenant_id": auth.tenant_id,
+                "scopes": auth.scopes,
+            })));
+        }
+    }
+    // Fallback: return tenant + scopes (e.g. API key auth)
+    Ok(Json(serde_json::json!({
+        "tenant_id": auth.tenant_id,
+        "scopes": auth.scopes,
+        "api_key_id": auth.api_key_id,
+    })))
+}
 
 async fn login(
     State(state): State<AppState>,
