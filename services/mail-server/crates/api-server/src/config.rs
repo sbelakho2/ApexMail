@@ -1019,7 +1019,15 @@ impl Config {
                 &["dev"],
             )?;
             validate_https_url("MCAPTCHA_BASE_URL", &self.mcaptcha_base_url)?;
-            validate_https_url("MCAPTCHA_VERIFY_URL", &self.mcaptcha_verify_url)?;
+            // MCAPTCHA_VERIFY_URL is a server-to-server call (api-server → mCaptcha).
+            // When mCaptcha is self-hosted on the Docker network, it uses HTTP.
+            // Only enforce HTTPS for external mCaptcha instances.
+            if !self.mcaptcha_verify_url.contains("://apexmail-mcaptcha")
+                && !self.mcaptcha_verify_url.contains("://mcaptcha")
+                && !self.mcaptcha_verify_url.starts_with("http://captcha.apexmail.ee")
+            {
+                validate_https_url("MCAPTCHA_VERIFY_URL", &self.mcaptcha_verify_url)?;
+            }
         }
         Ok(())
     }
