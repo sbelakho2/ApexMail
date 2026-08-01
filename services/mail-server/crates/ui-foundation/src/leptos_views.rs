@@ -1204,11 +1204,23 @@ fn mcaptcha_widget_html(site_key: &str, base_url: &str) -> String {
     }
 
     let base_url = base_url.trim_end_matches('/');
+    // mCaptcha v0.1.0 embeds the widget via an iframe pointing at the PoW
+    // page. The iframe communicates the token back via postMessage. The
+    // hidden input receives the token from the postMessage listener.
     format!(
         "<div class=\"space-y-2\">\
-<div class=\"mcaptcha__widget\" data-sitekey=\"{site_key}\"></div>\
+<div class=\"mcaptcha__widget\" data-sitekey=\"{site_key}\" data-controller=\"mcaptcha\">\
+<iframe src=\"{base_url}/?key={site_key}\" style=\"width:100%;height:78px;border:0;\" title=\"mCaptcha\"></iframe>\
+</div>\
 <input type=\"hidden\" name=\"mcaptcha__token\" id=\"mcaptcha__token\" />\
-<script src=\"{base_url}/widget.js\" async defer></script>\
+<script>\
+(function(){{\
+var i=document.getElementById('mcaptcha__token');\
+window.addEventListener('message',function(e){{\
+if(e.origin==='{base_url}'&&e.data&&e.data.token){{i.value=e.data.token;}}\
+}});\
+}})();\
+</script>\
 </div>"
     )
 }
