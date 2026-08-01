@@ -1204,15 +1204,24 @@ fn mcaptcha_widget_html(site_key: &str, base_url: &str) -> String {
     }
 
     let base_url = base_url.trim_end_matches('/');
-    // mCaptcha v0.1.0 self-hosted: the widget bundle.js contains the WASM/JS
-    // that finds div[data-sitekey], computes PoW, and fills the hidden input.
-    // The bundle has a content hash in the filename; this hash is stable for
-    // a given mCaptcha image version.
+    // mCaptcha v0.1.0 self-hosted: the widget page at /widget?key=SITEKEY
+    // renders the PoW challenge in an iframe. It computes the proof-of-work
+    // and posts the token back to the parent window via postMessage.
+    // The hidden input receives the token from the postMessage listener.
     format!(
         "<div class=\"space-y-2\">\
-<div class=\"mcaptcha__widget\" data-sitekey=\"{site_key}\" data-controller=\"mcaptcha\"></div>\
+<div class=\"mcaptcha__widget\" data-sitekey=\"{site_key}\">\
+<iframe src=\"{base_url}/widget?key={site_key}\" style=\"width:100%;height:78px;border:0;\" title=\"mCaptcha\"></iframe>\
+</div>\
 <input type=\"hidden\" name=\"mcaptcha__token\" id=\"mcaptcha__token\" />\
-<script src=\"{base_url}/assets/bundle/bundle.51A722E130696686C8C7E6A0CBDE709423958A7D0A2F467711E87842E80F2D61.js\" async defer></script>\
+<script>\
+(function(){{\
+var i=document.getElementById('mcaptcha__token');\
+window.addEventListener('message',function(e){{\
+if(e.data&&(e.data.token||e.data.mcaptcha_token)){{i.value=e.data.token||e.data.mcaptcha_token;}}\
+}});\
+}})();\
+</script>\
 </div>"
     )
 }
