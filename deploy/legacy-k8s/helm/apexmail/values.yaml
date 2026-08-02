@@ -453,10 +453,11 @@ secrets:
   #   TRACKING_SECRET_KEY
   #   SESSION_SECRET
   #   CSRF_SECRET
-  #   MCAPTCHA_ENABLED          — "true" to enforce CAPTCHA on login/signup
-  #   MCAPTCHA_SITE_KEY         — Site key rendered in the CAPTCHA widget
-  #   MCAPTCHA_SECRET_KEY       — Server-side secret for token verification
-  #   MCAPTCHA_VERIFY_URL       — mCaptcha verification endpoint URL
+  #   KIWI_ENABLED              — "true" to enforce CAPTCHA on login/signup
+  #   KIWI_SECRET_KEY           — Server-side secret for challenge signing/verification
+  #   KIWI_ARGON_M_KIB          — Argon2 memory cost in KiB (e.g. "50000")
+  #   KIWI_DIFFICULTY_BITS      — PoW difficulty in bits (e.g. "16")
+  #   KIWI_CHALLENGE_TTL_SECS   — Challenge time-to-live in seconds (e.g. "120")
 
 # ── HIPAA Compliance ─────────────────────────────────────────────────────────
 

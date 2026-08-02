@@ -442,16 +442,11 @@ services:
       # ── Rate limiting ─────────────────────────────────────────────────────
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       RATE_LIMIT_MAX_PER_MINUTE: ${RATE_LIMIT_MAX_PER_MINUTE:-1000}
-      # ── mCaptcha (login CAPTCHA protection) ───────────────────────────────
-      # Enable mCaptcha PoW CAPTCHA. Set to "true" to enforce CAPTCHA
-      # challenges on login/signup. Defaults to "false" in development.
-      MCAPTCHA_ENABLED: ${MCAPTCHA_ENABLED:-false}
-      # Site key passed to the CAPTCHA widget. Use "dev" to bypass locally.
-      MCAPTCHA_SITE_KEY: ${MCAPTCHA_SITE_KEY:-dev}
-      # Server-side secret for token verification. Use "dev" to bypass locally.
-      MCAPTCHA_SECRET_KEY: ${MCAPTCHA_SECRET_KEY:-${MCAPTCHA_SECRET:-dev}}
-      # Verification endpoint URL for the mCaptcha server.
-      MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:-http://localhost:5001/api/v1/verify}
+      # ── KiwiCaptcha (native Rust login CAPTCHA protection) ────────────────
+      # Disabled in development. Set KIWI_ENABLED=true to enforce CAPTCHA
+      # challenges on login/signup.
+      KIWI_ENABLED: "false"
+      KIWI_SECRET_KEY: dev
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:

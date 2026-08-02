@@ -45,86 +45,118 @@ fn register_rate_limit_message() -> String {
     "Too many sign-up attempts from this network. Please wait a few minutes and try again.".into()
 }
 
-// ─── mCaptcha token verification ───────────────────────────────
+// ─── KiwiCaptcha token verification ───────────────────────────
 
-/// Verify a proof-of-work token against the configured mCaptcha instance.
+/// The Redis key prefix under which issued KiwiCaptcha challenges are stored.
+const KIWI_CHALLENGE_PREFIX: &str = "apexmail:kiwi:";
+
+/// Verify a KiwiCaptcha proof-of-work solution against the stored challenge.
 ///
-/// In development mode (`site_key == "dev"`) verification is **bypassed**
-/// so developers are not required to run an mCaptcha instance locally.
+/// This is the server-side half of the KiwiCaptcha protocol:
+/// 1. Decode the `kiwi__token` (nonce.counter.duration.telemetry).
+/// 2. Look up the stored `ChallengeRecord` in Redis by nonce.
+/// 3. Re-derive the Argon2id hash and check leading zero bits.
+/// 4. Check TTL, IP binding, and minimum solve duration.
+/// 5. Delete the challenge (single-use).
 ///
-/// The mCaptcha widget's JavaScript collects a proof-of-work solution and
-/// writes it into the hidden `mcaptcha__token` input. This function POSTs
-/// that token together with the server's secret key to the mCaptcha
-/// verification endpoint.
-async fn verify_mcaptcha_token(
+/// In development mode (`kiwi_secret_key == "dev"`) verification is bypassed,
+/// gated behind `cfg!(debug_assertions)` so it is impossible in release builds.
+async fn verify_kiwi_token(
     config: &crate::config::Config,
-    http_client: &reqwest::Client,
-    mcaptcha_token: Option<&str>,
+    redis_pool: &deadpool_redis::Pool,
+    kiwi_token: Option<&str>,
+    client_ip: &str,
 ) -> Result<(), ApiError> {
     // RS-063: Dev-mode bypass gated behind compile-time debug_assertions check.
-    // In release builds, the "dev" key bypass is completely disabled regardless
-    // of configuration, preventing accidental production bypass.
-    if cfg!(debug_assertions) && (config.mcaptcha_site_key == "dev" || config.mcaptcha_secret_key == "dev") {
+    if cfg!(debug_assertions) && config.kiwi_secret_key == "dev" {
         tracing::warn!(
-            "mCaptcha dev-mode bypass active — this must NOT be enabled in production"
+            "KiwiCaptcha dev-mode bypass active — this must NOT be enabled in production"
         );
         return Ok(());
     }
 
-    // If mCaptcha is explicitly disabled via MCAPTCHA_ENABLED=false, skip verification.
-    if !config.mcaptcha_enabled {
+    if !config.kiwi_enabled {
         return Ok(());
     }
 
-    let token = mcaptcha_token.filter(|t| !t.is_empty()).ok_or_else(|| {
-        ApiError::Validation(vec!["mCaptcha verification token is required".into()])
+    let raw = kiwi_token.filter(|t| !t.is_empty()).ok_or_else(|| {
+        ApiError::Validation(vec!["CAPTCHA verification token is required".into()])
     })?;
 
-    // Use the explicit verify URL if configured, otherwise construct from base URL.
-    let verify_url = if config.mcaptcha_verify_url.is_empty() {
-        let base_url = config.mcaptcha_base_url.trim_end_matches('/');
-        format!("{base_url}/api/v1/verify")
-    } else {
-        config.mcaptcha_verify_url.clone()
-    };
+    let solution = kcaptcha::SolutionToken::decode(raw).map_err(|e| {
+        tracing::warn!(error = %e, "KiwiCaptcha token decode failed");
+        ApiError::Validation(vec![
+            "CAPTCHA verification failed — please refresh and try again".into(),
+        ])
+    })?;
 
-    let body = serde_json::json!({
-        "token": token,
-        "secret_key": config.mcaptcha_secret_key,
-    });
+    // Look up the stored challenge by nonce.
+    let mut conn = redis_pool.get().await?;
+    let key = format!("{KIWI_CHALLENGE_PREFIX}{}", solution.nonce);
+    let stored: Option<String> =
+        deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key).await?;
 
-    let resp = http_client
-        .post(&verify_url)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, url = %verify_url, "mCaptcha verification request failed");
-            ApiError::ServiceUnavailable("CAPTCHA verification service unreachable".into())
+    let record: kcaptcha::ChallengeRecord = stored
+        .ok_or_else(|| {
+            ApiError::Validation(vec![
+                "CAPTCHA challenge expired or not found — please refresh and try again".into(),
+            ])
+        })
+        .and_then(|s| {
+            serde_json::from_str(&s).map_err(|e| {
+                tracing::warn!(error = %e, "KiwiCaptcha challenge record decode failed");
+                ApiError::Internal("CAPTCHA state corrupted".into())
+            })
         })?;
 
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    // Single-use: delete immediately regardless of verification outcome, so a
+    // failed attempt cannot be retried with the same challenge.
+    let _: Option<String> =
+        deadpool_redis::redis::AsyncCommands::del(&mut *conn, &key).await?;
 
-    // Parse the JSON response — mCaptcha may return `{"valid": true}` or `{"success": true}`.
-    let valid: bool = serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|v| {
-            v.get("valid")
-                .and_then(|x| x.as_bool())
-                .or_else(|| v.get("success").and_then(|x| x.as_bool()))
-        })
-        .unwrap_or(false);
-
-    if !valid || !status.is_success() {
-        tracing::warn!(status = %status, response = %text, "mCaptcha verification rejected token");
+    // IP binding: the challenge was issued to this IP. A mismatch means a
+    // relay attack (token minted elsewhere, submitted from here).
+    let expected_ip_hash = kcaptcha::hash_ip(client_ip);
+    if record.ip_hash != expected_ip_hash {
+        tracing::warn!(
+            "KiwiCaptcha IP mismatch — challenge was issued to a different client"
+        );
         return Err(ApiError::Validation(vec![
             "CAPTCHA verification failed — please try again".into(),
         ]));
     }
 
-    Ok(())
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Minimum duration: reject solves faster than theoretically possible.
+    // A 64MiB/t2 Argon2id takes ~250ms minimum on real hardware; we set the
+    // floor conservatively at 80ms to avoid false positives on fast devices.
+    let min_duration_ms: u64 = 80;
+
+    let ctx = kcaptcha::VerifyContext {
+        record: &record,
+        secret_key: &config.kiwi_secret_key,
+        counter: solution.counter,
+        duration_ms: solution.duration_ms,
+        now_unix,
+        min_duration_ms,
+    };
+
+    match kcaptcha::verify_solution(&ctx) {
+        kcaptcha::VerifyOutcome::Valid => {
+            tracing::debug!(duration_ms = solution.duration_ms, "KiwiCaptcha solution verified");
+            Ok(())
+        }
+        kcaptcha::VerifyOutcome::Invalid(reason) => {
+            tracing::warn!(reason = ?reason, "KiwiCaptcha solution rejected");
+            Err(ApiError::Validation(vec![
+                "CAPTCHA verification failed — please try again".into(),
+            ]))
+        }
+    }
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
@@ -773,10 +805,10 @@ pub struct LoginRequest {
     pub password: String,
     #[serde(default, rename = "mfaCode", alias = "mfa_code")]
     pub mfa_code: Option<String>,
-    /// Token from the mCaptcha proof-of-work widget, submitted as a hidden form field.
-    /// Optional for non-interactive API clients; required if mCaptcha is not in dev mode.
-    #[serde(default, rename = "mcaptcha__token")]
-    pub mcaptcha__token: Option<String>,
+    /// Token from the KiwiCaptcha proof-of-work widget, submitted as a hidden form field.
+    /// Optional for non-interactive API clients; required if KiwiCaptcha is enabled.
+    #[serde(default, rename = "kiwi__token")]
+    pub kiwi__token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1107,15 +1139,6 @@ async fn login(
         ]));
     }
 
-    // Verify mCaptcha proof-of-work token before proceeding with credential check.
-    // Early verification avoids leaking user existence via timing or error messages.
-    verify_mcaptcha_token(
-        &state.config,
-        &state.http_client,
-        body.mcaptcha__token.as_deref(),
-    )
-    .await?;
-
     // RS-H-03: Per-IP rate limiting — prevents credential-stuffing and brute-force
     // attacks from a single source, complementing per-account lockout below.
     let client_ip = connect_info
@@ -1128,6 +1151,17 @@ async fn login(
             );
             "unknown".to_string()
         });
+
+    // Verify KiwiCaptcha proof-of-work before proceeding with credential check.
+    // Early verification avoids leaking user existence via timing or error messages.
+    // The client IP is needed to verify the challenge's IP binding (relay-attack defense).
+    verify_kiwi_token(
+        &state.config,
+        &state.redis,
+        body.kiwi__token.as_deref(),
+        &client_ip,
+    )
+    .await?;
 
     if let Ok(mut conn) = state.redis.get().await {
         let ip_rate_key = format!("apexmail:login_rate:ip:{client_ip}");
@@ -1767,10 +1801,10 @@ pub struct RegisterRequest {
     pub password: String,
     #[serde(default = "default_plan")]
     pub plan: String,
-    /// Token from the mCaptcha proof-of-work widget, submitted as a hidden form field.
-    /// Optional for non-interactive API clients; required if mCaptcha is not in dev mode.
-    #[serde(default, rename = "mcaptcha__token")]
-    pub mcaptcha__token: Option<String>,
+    /// Token from the KiwiCaptcha proof-of-work widget, submitted as a hidden form field.
+    /// Optional for non-interactive API clients; required if KiwiCaptcha is enabled.
+    #[serde(default, rename = "kiwi__token")]
+    pub kiwi__token: Option<String>,
 }
 
 fn default_plan() -> String {
@@ -1806,11 +1840,19 @@ async fn register(
     // Validate CSRF token from X-CSRF-Token header (auth form protection)
     validate_form_csrf(&headers, &state.config.csrf_secret)?;
 
-    // Verify mCaptcha proof-of-work token before processing registration.
-    verify_mcaptcha_token(
+    // Extract client IP for KiwiCaptcha IP-binding verification.
+    let client_ip = connect_info
+        .map(|ConnectInfo(addr)| {
+            extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Verify KiwiCaptcha proof-of-work before processing registration.
+    verify_kiwi_token(
         &state.config,
-        &state.http_client,
-        body.mcaptcha__token.as_deref(),
+        &state.redis,
+        body.kiwi__token.as_deref(),
+        &client_ip,
     )
     .await?;
 

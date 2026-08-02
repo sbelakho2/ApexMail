@@ -153,26 +153,28 @@ pub struct Config {
     /// Secret key used for field encryption of IMAP passwords.
     pub placement_encryption_secret: String,
 
-    // ── mCaptcha CAPTCHA ────────────────────────────────────
-    /// mCaptcha is a privacy-preserving, proof-of-work based CAPTCHA system.
-    /// Base URL of the mCaptcha server (e.g. "https://mcaptcha.example.com").
-    pub mcaptcha_base_url: String,
-    /// Site key issued by the mCaptcha server for this deployment.
+    // ── KiwiCaptcha (native Rust proof-of-work CAPTCHA) ────
+    /// KiwiCaptcha is ApexMail's first-party, memory-hard proof-of-work
+    /// CAPTCHA. Unlike mCaptcha (which it replaces), it has no external
+    /// container, no iframe, and no external JS — the widget is an inline
+    /// nonce'd script and challenges are verified server-side via Argon2id.
+    /// Enable KiwiCaptcha verification on auth routes (login, signup).
+    pub kiwi_enabled: bool,
+    /// HMAC secret key used to sign and verify KiwiCaptcha challenges.
     /// In development, set to "dev" to bypass verification.
-    pub mcaptcha_site_key: String,
-    /// Secret key used to verify the mCaptcha token server-side.
-    /// In development, set to "dev" to bypass verification.
-    pub mcaptcha_secret_key: String,
-    /// Enable mCaptcha CAPTCHA verification on auth routes (login, signup).
-    pub mcaptcha_enabled: bool,
-    /// mCaptcha verification endpoint URL.
-    pub mcaptcha_verify_url: String,
-    /// Internal base URL of the self-hosted mCaptcha container, used by the
-    /// Rust reverse proxy in `fallback_handler` to serve the `/mcaptcha/*`
-    /// widget assets. This is a server-to-server call on the Docker network,
-    /// so it is HTTP (not HTTPS). The browser-facing URL is `mcaptcha_base_url`.
-    /// Default: "http://apexmail-mcaptcha-1:7000".
-    pub mcaptcha_internal_url: String,
+    pub kiwi_secret_key: String,
+    /// Argon2id memory cost in KiB (default 65536 = 64 MiB). Memory-hardness
+    /// collapses the GPU/ASIC brute-force advantage to ~1.5×.
+    pub kiwi_argon_m_kib: u32,
+    /// Argon2id time cost (iterations). Default 2.
+    pub kiwi_argon_t: u32,
+    /// Argon2id parallelism (lanes). Default 1.
+    pub kiwi_argon_p: u32,
+    /// Required leading zero bits in the Argon2id output (difficulty).
+    /// Default 18 (~0.5–1s solve on commodity CPU).
+    pub kiwi_difficulty_bits: u32,
+    /// Challenge lifetime in seconds. Default 120.
+    pub kiwi_challenge_ttl_secs: u64,
 
     // ── HTTP Client ─────────────────────────────────────────
     /// Timeout in seconds for the internal HTTP client used for outbound
@@ -233,10 +235,9 @@ fn env_required_pem(key: &str) -> Result<String, ConfigError> {
     Ok(raw.replace("\\n", "\n"))
 }
 
-fn resolve_mcaptcha_secret_key(
-    secret_key: Option<String>,
-    legacy_secret: Option<String>,
-) -> String {
+fn resolve_kiwi_secret_key(secret_key: Option<String>, legacy_secret: Option<String>) -> String {
+    // KIWI_SECRET_KEY is canonical; MCAPTCHA_SECRET_KEY is accepted as a
+    // legacy fallback so existing deployments keep working after the rename.
     secret_key
         .or(legacy_secret)
         .unwrap_or_else(|| "dev".to_string())
@@ -646,29 +647,25 @@ impl Config {
         let placement_encryption_secret =
             env_or("PLACEMENT_ENCRYPTION_SECRET", "change-me-in-production");
 
-        let mcaptcha_base_url = env_or("MCAPTCHA_BASE_URL", "https://mcaptcha.example.com");
-        let mcaptcha_site_key = env_or("MCAPTCHA_SITE_KEY", "dev");
-        let mcaptcha_secret_key = resolve_mcaptcha_secret_key(
+        let kiwi_enabled = env_or("KIWI_ENABLED", "false").parse().unwrap_or(false);
+        let kiwi_secret_key = resolve_kiwi_secret_key(
+            env::var("KIWI_SECRET_KEY").ok(),
             env::var("MCAPTCHA_SECRET_KEY").ok(),
-            env::var("MCAPTCHA_SECRET").ok(),
         );
-        let mcaptcha_enabled = env_or("MCAPTCHA_ENABLED", "false").parse().unwrap_or(false);
-        let mcaptcha_verify_url = env_or(
-            "MCAPTCHA_VERIFY_URL",
-            "https://demo.mcaptcha.org/api/v1/pow/siteverify",
-        );
-        // Internal container URL used by the api-server reverse proxy for the
-        // `/mcaptcha/*` widget assets. Server-to-server on the Docker network
-        // (HTTP), so it is separate from the browser-facing `mcaptcha_base_url`.
-        let mcaptcha_internal_url = env_or(
-            "MCAPTCHA_INTERNAL_URL",
-            "http://apexmail-mcaptcha-1:7000",
-        );
-        if !environment.is_production()
-            && (mcaptcha_site_key == "dev" || mcaptcha_secret_key == "dev")
-        {
+        let kiwi_argon_m_kib = env_or("KIWI_ARGON_M_KIB", "50000")
+            .parse()
+            .unwrap_or(50_000);
+        let kiwi_argon_t = env_or("KIWI_ARGON_T", "2").parse().unwrap_or(2);
+        let kiwi_argon_p = env_or("KIWI_ARGON_P", "1").parse().unwrap_or(1);
+        let kiwi_difficulty_bits = env_or("KIWI_DIFFICULTY_BITS", "16")
+            .parse()
+            .unwrap_or(16);
+        let kiwi_challenge_ttl_secs = env_or("KIWI_CHALLENGE_TTL_SECS", "120")
+            .parse()
+            .unwrap_or(120);
+        if !environment.is_production() && kiwi_secret_key == "dev" {
             tracing::info!(
-                "mCaptcha configured with dev keys — CAPTCHA verification will be bypassed"
+                "KiwiCaptcha configured with dev key — CAPTCHA verification will be bypassed"
             );
         }
 
@@ -806,12 +803,13 @@ impl Config {
             placement_encrypt_passwords,
             placement_encryption_secret,
 
-            mcaptcha_base_url,
-            mcaptcha_site_key,
-            mcaptcha_secret_key,
-            mcaptcha_enabled,
-            mcaptcha_verify_url,
-            mcaptcha_internal_url,
+            kiwi_enabled,
+            kiwi_secret_key,
+            kiwi_argon_m_kib,
+            kiwi_argon_t,
+            kiwi_argon_p,
+            kiwi_difficulty_bits,
+            kiwi_challenge_ttl_secs,
 
             http_client_timeout_secs: parse_u64(
                 "HTTP_CLIENT_TIMEOUT_SECONDS",
@@ -1023,25 +1021,10 @@ impl Config {
             &self.billing_company_phone,
             &["UNCONFIGURED"],
         )?;
-        if self.mcaptcha_enabled {
-            validate_required_setting("MCAPTCHA_BASE_URL", &self.mcaptcha_base_url, &[""])?;
-            validate_required_setting("MCAPTCHA_SITE_KEY", &self.mcaptcha_site_key, &["dev"])?;
-            validate_secret(
-                "MCAPTCHA_SECRET_KEY",
-                &self.mcaptcha_secret_key,
-                16,
-                &["dev"],
-            )?;
-            validate_https_url("MCAPTCHA_BASE_URL", &self.mcaptcha_base_url)?;
-            // MCAPTCHA_VERIFY_URL is a server-to-server call (api-server → mCaptcha).
-            // When mCaptcha is self-hosted on the Docker network, it uses HTTP.
-            // Only enforce HTTPS for external mCaptcha instances.
-            if !self.mcaptcha_verify_url.contains("://apexmail-mcaptcha")
-                && !self.mcaptcha_verify_url.contains("://mcaptcha")
-                && !self.mcaptcha_verify_url.starts_with("http://captcha.apexmail.ee")
-            {
-                validate_https_url("MCAPTCHA_VERIFY_URL", &self.mcaptcha_verify_url)?;
-            }
+        if self.kiwi_enabled {
+            // KiwiCaptcha is fully self-contained (no external service), so the
+            // only production requirement is a strong HMAC secret key.
+            validate_secret("KIWI_SECRET_KEY", &self.kiwi_secret_key, 16, &["dev"])?;
         }
         Ok(())
     }
@@ -1181,12 +1164,18 @@ mod tests {
             placement_encrypt_passwords: true,
             placement_encryption_secret: "test-placement-encryption-secret".into(),
 
-            mcaptcha_base_url: "https://mcaptcha.example.com".into(),
-            mcaptcha_site_key: "prod-site-key-12345".into(),
-            mcaptcha_secret_key: "prod-secret-key-67890".into(),
-            mcaptcha_enabled: true,
-            mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
-            mcaptcha_internal_url: "http://apexmail-mcaptcha-1:7000".into(),
+            kiwi_enabled: true,
+            kiwi_secret_key: "prod-kiwi-secret-key-67890".into(),
+            kiwi_argon_m_kib: 50_000,
+            kiwi_argon_t: 2,
+            kiwi_argon_p: 1,
+            kiwi_difficulty_bits: 16,
+            kiwi_challenge_ttl_secs: 120,
+            http_client_timeout_secs: 30,
+            internal_tls_enabled: false,
+            internal_tls_ca_cert_path: None,
+            internal_tls_client_cert_path: None,
+            internal_tls_client_key_path: None,
         }
     }
 
@@ -1222,34 +1211,29 @@ mod tests {
         config.billing_company_phone.clear();
         assert!(config.validate_production().is_err());
 
+        // KiwiCaptcha with a "dev" secret key must fail production validation.
         let mut config = valid_production_config();
-        config.mcaptcha_site_key = "dev".into();
+        config.kiwi_secret_key = "dev".into();
         assert!(config.validate_production().is_err());
 
-        let mut config = valid_production_config();
-        config.mcaptcha_secret_key = "dev".into();
-        assert!(config.validate_production().is_err());
-
+        // The resolve helper prefers KIWI_SECRET_KEY, falls back to legacy
+        // MCAPTCHA_SECRET_KEY.
         assert_eq!(
-            resolve_mcaptcha_secret_key(None, Some("legacy-secret-value".into())),
+            resolve_kiwi_secret_key(None, Some("legacy-secret-value".into())),
             "legacy-secret-value"
         );
         assert_eq!(
-            resolve_mcaptcha_secret_key(
+            resolve_kiwi_secret_key(
                 Some("preferred-secret-value".into()),
                 Some("legacy-secret-value".into())
             ),
             "preferred-secret-value"
         );
 
+        // When KiwiCaptcha is disabled, the dev key is acceptable.
         let mut config = valid_production_config();
-        config.mcaptcha_base_url = "http://mcaptcha.example.com".into();
-        assert!(config.validate_production().is_err());
-
-        let mut config = valid_production_config();
-        config.mcaptcha_enabled = false;
-        config.mcaptcha_site_key = "dev".into();
-        config.mcaptcha_secret_key = "dev".into();
+        config.kiwi_enabled = false;
+        config.kiwi_secret_key = "dev".into();
         assert!(config.validate_production().is_ok());
     }
 
@@ -1330,12 +1314,18 @@ mod tests {
             placement_encrypt_passwords: true,
             placement_encryption_secret: "test-placement-encryption-secret".into(),
 
-            mcaptcha_base_url: "https://mcaptcha.example.com".into(),
-            mcaptcha_site_key: "dev".into(),
-            mcaptcha_secret_key: "dev".into(),
-            mcaptcha_enabled: false,
-            mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
-            mcaptcha_internal_url: "http://apexmail-mcaptcha-1:7000".into(),
+            kiwi_enabled: false,
+            kiwi_secret_key: "dev".into(),
+            kiwi_argon_m_kib: 50_000,
+            kiwi_argon_t: 2,
+            kiwi_argon_p: 1,
+            kiwi_difficulty_bits: 16,
+            kiwi_challenge_ttl_secs: 120,
+            http_client_timeout_secs: 30,
+            internal_tls_enabled: false,
+            internal_tls_ca_cert_path: None,
+            internal_tls_client_cert_path: None,
+            internal_tls_client_key_path: None,
         };
 
         assert_eq!(

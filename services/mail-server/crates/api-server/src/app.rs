@@ -351,6 +351,8 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/api/auth/csrf", routes::csrf::router())
         .nest("/api/auth/session", routes::session::router())
         .nest("/api/csrf", routes::csrf::router())
+        .nest("/api/kcaptcha", routes::kcaptcha::router())
+        .nest("/v1/kcaptcha", routes::kcaptcha::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limiter::public_rate_limit_middleware,
@@ -631,38 +633,25 @@ fn generate_csp_nonce() -> String {
 
 fn browser_csp_header(nonce: &str) -> HeaderValue {
     let analytics_img_src = std::env::var("ANALYTICS_IMAGE_SRC").ok();
-    let mcaptcha_enabled = std::env::var("MCAPTCHA_ENABLED")
-        .ok()
-        .and_then(|value| value.parse::<bool>().ok())
-        .unwrap_or(false);
-    let mcaptcha_site_key = std::env::var("MCAPTCHA_SITE_KEY").unwrap_or_else(|_| "dev".into());
-    let mcaptcha_secret_key = std::env::var("MCAPTCHA_SECRET_KEY").unwrap_or_else(|_| "dev".into());
-    let mcaptcha_base_url =
-        if mcaptcha_enabled && mcaptcha_site_key != "dev" && mcaptcha_secret_key != "dev" {
-            std::env::var("MCAPTCHA_BASE_URL").ok()
-        } else {
-            None
-        };
-    browser_csp_header_with_sources(
-        nonce,
-        analytics_img_src.as_deref(),
-        mcaptcha_base_url.as_deref(),
-    )
+    browser_csp_header_with_sources(nonce, analytics_img_src.as_deref())
 }
 
 #[allow(dead_code)]
 fn browser_csp_header_with_analytics(nonce: &str, analytics_img_src: Option<&str>) -> HeaderValue {
-    browser_csp_header_with_sources(nonce, analytics_img_src, None)
+    browser_csp_header_with_sources(nonce, analytics_img_src)
 }
 
 /// Build the browser Content-Security-Policy header.
 ///
 /// `analytics_img_src` — optional HTTPS image source for analytics (e.g. Plausible).
-/// `mcaptcha_base_url` — optional mCaptcha server base URL for connect-src and script-src.
+///
+/// KiwiCaptcha requires no special CSP carve-outs: the widget is an inline
+/// nonce'd `<script>` (covered by `script-src 'self' 'nonce-XXX'`) and the
+/// challenge endpoint is same-origin (`connect-src 'self'`). No external hosts,
+/// no iframes, no `unsafe-inline`.
 fn browser_csp_header_with_sources(
     nonce: &str,
     analytics_img_src: Option<&str>,
-    mcaptcha_base_url: Option<&str>,
 ) -> HeaderValue {
     let analytics_img_src = analytics_img_src
         .map(str::trim)
@@ -671,37 +660,10 @@ fn browser_csp_header_with_sources(
         .map(|src| format!(" {src}"))
         .unwrap_or_default();
 
-    let mcaptcha_source = mcaptcha_base_url.and_then(valid_https_csp_source);
-
-    let mcaptcha_connect_src = mcaptcha_source
-        .map(|src| format!(" {src}"))
-        .unwrap_or_default();
-
-    let mcaptcha_script_src = mcaptcha_source
-        .map(|src| format!(" {src}"))
-        .unwrap_or_default();
-
-    let mcaptcha_frame_src = mcaptcha_source
-        .map(str::to_string)
-        .unwrap_or_else(|| "'none'".to_string());
-
     HeaderValue::from_str(&format!(
-        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'{mcaptcha_connect_src}; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; script-src 'self' 'nonce-{nonce}'{mcaptcha_script_src}; frame-src {mcaptcha_frame_src}; object-src 'none'"
+        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; script-src 'self' 'nonce-{nonce}'; frame-src 'none'; object-src 'none'"
     ))
     .expect("browser CSP should be valid")
-}
-
-fn valid_https_csp_source(source: &str) -> Option<&str> {
-    let source = source.trim().trim_end_matches('/');
-    if source.starts_with("https://")
-        && !source.chars().any(char::is_whitespace)
-        && !source.contains(';')
-        && HeaderValue::from_str(source).is_ok()
-    {
-        Some(source)
-    } else {
-        None
-    }
 }
 
 fn inject_script_nonce(html: &str, nonce: &str) -> String {
@@ -979,24 +941,15 @@ fn render_ui_response(
     let surface = config.ui_surface_for_host(host)?;
     // Pass CSRF secret so auth forms receive real tokens during SSR
     let csrf_secret = Some(config.csrf_secret.as_str());
-    let (mcaptcha_base_url, mcaptcha_site_key) = if config.mcaptcha_enabled
-        && config.mcaptcha_site_key != "dev"
-        && config.mcaptcha_secret_key != "dev"
-    {
-        (
-            Some(config.mcaptcha_base_url.as_str()),
-            Some(config.mcaptcha_site_key.as_str()),
-        )
-    } else {
-        (None, None)
-    };
+    // KiwiCaptcha widget is self-contained — it fetches its challenge from
+    // /api/kcaptcha/challenge at runtime, so no SSR params are threaded here.
     let html = ui_router::render_route_with_query(
         surface,
         uri.path(),
         uri.query(),
         csrf_secret,
-        mcaptcha_base_url,
-        mcaptcha_site_key,
+        None,
+        None,
     )?;
     Some(browser_html_response(html))
 }
@@ -1107,151 +1060,6 @@ fn not_found_response() -> Response {
         .into_response()
 }
 
-/// Reverse-proxy a `/mcaptcha/*` request to the self-hosted mCaptcha container.
-///
-/// The browser-facing `MCAPTCHA_BASE_URL` (e.g. `https://app.apexmail.ee/mcaptcha`)
-/// points at the api-server's own `/mcaptcha/*` surface, so the widget assets must
-/// be served by Rust. This forwards the request to the internal mCaptcha container
-/// (`mcaptcha_internal_url`, e.g. `http://apexmail-mcaptcha-1:7000`), stripping the
-/// `/mcaptcha/` prefix and preserving the query string. The proxied response is
-/// returned with its status, body, and content-type, plus `X-Frame-Options:
-/// ALLOWALL` so the mCaptcha widget can be embedded in an iframe.
-async fn proxy_mcaptcha(state: &AppState, uri: &Uri, method: &Method) -> Option<Response> {
-    let path = uri.path();
-
-    // Match both "/mcaptcha" (widget root) and "/mcaptcha/..." (sub-paths).
-    let suffix = if path == "/mcaptcha" {
-        ""
-    } else if let Some(rest) = path.strip_prefix("/mcaptcha/") {
-        rest
-    } else {
-        return None;
-    };
-
-    // Only proxy safe read-only methods. Always use GET upstream because
-    // mCaptcha's actix server returns 404 for HEAD requests.
-    let reqwest_method = match *method {
-        Method::GET | Method::HEAD => reqwest::Method::GET,
-        _ => return None,
-    };
-
-    let upstream_base = state.config.mcaptcha_internal_url.trim_end_matches('/');
-    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let upstream_url = format!("{upstream_base}/{suffix}{query}");
-
-    let upstream_result = state
-        .http_client
-        .request(reqwest_method, &upstream_url)
-        .header("Host", "captcha.apexmail.ee")
-        .header("X-Forwarded-Host", "captcha.apexmail.ee")
-        .send()
-        .await;
-
-    let upstream = match upstream_result {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::warn!(
-                url = %upstream_url,
-                error = %error,
-                "mCaptcha reverse proxy upstream request failed"
-            );
-            return Some(
-                (
-                    StatusCode::BAD_GATEWAY,
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "mCaptcha upstream unreachable",
-                )
-                    .into_response(),
-            );
-        }
-    };
-
-    let status = upstream.status();
-    let upstream_headers = upstream.headers().clone();
-    let original_bytes = upstream.bytes().await.unwrap_or_default();
-    let content_type = upstream_headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    tracing::info!(
-        path = %path,
-        status = %status,
-        content_type = %content_type,
-        body_len = original_bytes.len(),
-        "mCaptcha proxy response received"
-    );
-
-    // Rewrite relative URLs in the widget HTML so assets load through the proxy.
-    let bytes: Vec<u8> = if content_type.contains("text/html") {
-        let html = String::from_utf8_lossy(&original_bytes);
-        tracing::info!(
-            has_head = html.contains("<head>"),
-            has_base = html.contains("<base"),
-            "mCaptcha proxy HTML analysis"
-        );
-        if html.contains("<head>") {
-            let rewritten = html.replacen(
-                "<head>",
-                "<head><base href=\"/mcaptcha/\">",
-                1,
-            );
-            tracing::info!(
-                injected = rewritten.contains("<base href"),
-                "mCaptcha proxy base tag injection"
-            );
-            rewritten.into_bytes()
-        } else {
-            original_bytes.to_vec()
-        }
-    } else {
-        original_bytes.to_vec()
-    };
-
-    let mut resp_builder = Response::builder().status(status);
-    let resp_headers = resp_builder.headers_mut().expect("response headers exist");
-
-    // Forward Content-Type (and a few other safe hop-by-hop-irrelevant headers)
-    // from the upstream response so JS/HTML/CSS assets render correctly.
-    for name in [
-        header::CONTENT_TYPE,
-        header::CACHE_CONTROL,
-        header::ETAG,
-        header::LAST_MODIFIED,
-        header::EXPIRES,
-    ] {
-        if let Some(value) = upstream_headers.get(&name) {
-            resp_headers.insert(name, value.clone());
-        }
-    }
-    // Allow the mCaptcha widget to be framed on the login/signup pages. The
-    // security_headers middleware respects a pre-set X-Frame-Options instead of
-    // overwriting it with DENY.
-    resp_headers.insert(
-        header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("ALLOWALL"),
-    );
-    // The global security_headers middleware sets a restrictive default CSP
-    // (`default-src 'none'; frame-ancestors 'none'`) only when no CSP is present,
-    // so set one here that lets the self-hosted widget render and be embedded by
-    // the same-origin login/signup pages.
-    resp_headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; \
-             style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-             font-src 'self' data:; connect-src 'self'; frame-ancestors *",
-        ),
-    );
-
-    resp_builder
-        .body(axum::body::Body::from(bytes))
-        .map(Some)
-        .unwrap_or_else(|error| {
-            tracing::error!(error = %error, "failed to build mCaptcha proxy response");
-            Some(StatusCode::INTERNAL_SERVER_ERROR.into_response())
-        })
-}
-
 async fn fallback_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: axum::extract::Request,
@@ -1259,24 +1067,13 @@ async fn fallback_handler(
     let path = request.uri().path();
     let method = request.method().clone();
 
-    // mCaptcha self-hosted widget reverse proxy. The browser-facing
-    // MCAPTCHA_BASE_URL points at "/mcaptcha/*" on this host, so forward those
-    // requests to the internal mCaptcha container and allow framing.
-    if path == "/mcaptcha" || path.starts_with("/mcaptcha/") {
-        if let Some(response) =
-            proxy_mcaptcha(&state, request.uri(), request.method()).await
-        {
-            return response;
-        }
-    }
-
     // Serve static assets that the SSR pages reference
     if method == axum::http::Method::GET {
         // Favicon and apple-icon requests — return empty 204 to avoid JSON NOT_FOUND
         if path.starts_with("/favicon") || path.starts_with("/apple-icon") || path.starts_with("/android-icon") || path == "/favicon.ico" {
             return StatusCode::NO_CONTENT.into_response();
         }
-        // ms-application TileImage requests from mCaptcha iframe
+        // ms-application TileImage requests
         if path.starts_with("/assets/img/") || path.ends_with(".png") || path.ends_with(".ico") {
             return StatusCode::NO_CONTENT.into_response();
         }
@@ -1499,12 +1296,18 @@ mod tests {
             placement_encrypt_passwords: true,
             placement_encryption_secret: "test-placement-encryption-secret".into(),
 
-            mcaptcha_base_url: "https://mcaptcha.example.com".into(),
-            mcaptcha_site_key: "dev".into(),
-            mcaptcha_secret_key: "dev".into(),
-            mcaptcha_enabled: false,
-            mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
-            mcaptcha_internal_url: "http://apexmail-mcaptcha-1:7000".into(),
+            kiwi_enabled: false,
+            kiwi_secret_key: "dev".into(),
+            kiwi_argon_m_kib: 50_000,
+            kiwi_argon_t: 2,
+            kiwi_argon_p: 1,
+            kiwi_difficulty_bits: 16,
+            kiwi_challenge_ttl_secs: 120,
+            http_client_timeout_secs: 30,
+            internal_tls_enabled: false,
+            internal_tls_ca_cert_path: None,
+            internal_tls_client_cert_path: None,
+            internal_tls_client_key_path: None,
         }
     }
 
@@ -2025,31 +1828,19 @@ mod tests {
     }
 
     #[test]
-    fn browser_csp_accepts_https_mcaptcha_source() {
-        let csp = browser_csp_header_with_sources(
-            "test-nonce",
-            None,
-            Some("https://mcaptcha.example.com/"),
-        );
-        let csp = csp.to_str().expect("csp header should be utf-8");
-
-        assert!(csp.contains("connect-src 'self' https://mcaptcha.example.com"));
-        assert!(csp.contains("script-src 'self' 'nonce-test-nonce' https://mcaptcha.example.com"));
-        assert!(csp.contains("frame-src https://mcaptcha.example.com"));
-    }
-
-    #[test]
-    fn browser_csp_rejects_non_https_mcaptcha_source() {
-        let csp = browser_csp_header_with_sources(
-            "test-nonce",
-            None,
-            Some("http://mcaptcha.example.com"),
-        );
+    fn browser_csp_has_no_external_kiwi_sources() {
+        // KiwiCaptcha is fully same-origin: the inline nonce'd script and the
+        // /api/kcaptcha/challenge endpoint are both covered by 'self'. The CSP
+        // must NOT contain any external connect/script/frame sources for it.
+        let csp = browser_csp_header_with_sources("test-nonce", None);
         let csp = csp.to_str().expect("csp header should be utf-8");
 
         assert!(csp.contains("connect-src 'self';"));
+        assert!(csp.contains("script-src 'self' 'nonce-test-nonce';"));
         assert!(csp.contains("frame-src 'none'"));
-        assert!(!csp.contains("http://mcaptcha.example.com"));
+        // No external hosts leaked into the CSP.
+        assert!(!csp.contains("mcaptcha"));
+        assert!(!csp.contains("captcha.apexmail"));
     }
 
     #[tokio::test]

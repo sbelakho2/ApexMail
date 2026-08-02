@@ -102,36 +102,56 @@ mod tests {
     use axum::body::Body;
     use axum::http::HeaderValue;
     use axum::http::Request;
+    use axum::middleware::from_fn;
+    use axum::routing::any;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    /// Builds a `Router` with the versioning middleware layered over a handler
+    /// that always returns 200 OK. The middleware receives a real `Next`, so
+    /// requests are exercised end-to-end via `oneshot`.
+    fn app_with_versioning() -> Router {
+        Router::new()
+            .route("/v1/messages", any(ok_handler))
+            .layer(from_fn(api_versioning_middleware))
+    }
+
+    async fn ok_handler() -> Response {
+        (StatusCode::OK, "ok").into_response()
+    }
 
     #[tokio::test]
     async fn no_version_header_passes() {
+        let app = app_with_versioning();
         let req = Request::builder()
             .uri("/v1/messages")
             .body(Body::empty())
             .unwrap();
-        let resp = api_versioning_middleware(req, next_ok()).await;
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn valid_version_passes() {
+        let app = app_with_versioning();
         let req = Request::builder()
             .uri("/v1/messages")
             .header(ACCEPT, "application/json; version=1")
             .body(Body::empty())
             .unwrap();
-        let resp = api_versioning_middleware(req, next_ok()).await;
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn invalid_version_rejected() {
+        let app = app_with_versioning();
         let req = Request::builder()
             .uri("/v1/messages")
             .header(ACCEPT, "application/json; version=2")
             .body(Body::empty())
             .unwrap();
-        let resp = api_versioning_middleware(req, next_ok()).await;
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
 
         let body = resp.into_body();
@@ -142,17 +162,18 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_version_ignored() {
+        let app = app_with_versioning();
         let req = Request::builder()
             .uri("/v1/messages")
             .header(ACCEPT, "application/json; version=abc")
             .body(Body::empty())
             .unwrap();
-        let resp = api_versioning_middleware(req, next_ok()).await;
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
-    fn test_extract_version_from_accept() {
+    async fn test_extract_version_from_accept() {
         let mut headers = axum::http::HeaderMap::new();
         assert_eq!(extract_version_from_accept(&headers), None);
 
@@ -170,13 +191,5 @@ mod tests {
             HeaderValue::from_static("application/json; version=abc"),
         );
         assert_eq!(extract_version_from_accept(&headers), None);
-    }
-
-    /// Helper that returns a 200 OK response for the next middleware.
-    async fn next_ok() -> axum::response::Response {
-        axum::http::Response::builder()
-            .status(StatusCode::OK)
-            .body(Body::empty())
-            .unwrap()
     }
 }

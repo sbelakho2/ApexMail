@@ -1186,84 +1186,42 @@ mod simulation {
     }
 
     // =========================================================================
-    // MCAPTCHA: DEV-MODE BYPASS, PRODUCTION VERIFICATION
+    // KIWICAPTCHA: DEV-MODE BYPASS, PRODUCTION VERIFICATION
     // =========================================================================
 
-    /// Simulates mCaptcha dev-mode bypass in debug builds.
+    /// Simulates KiwiCaptcha dev-mode bypass in debug builds.
     #[test]
-    fn sim_mcaptcha_dev_mode_bypass() {
-        let site_key = "dev";
+    fn sim_kiwi_dev_mode_bypass() {
+        let kiwi_secret_key = "dev";
         let is_debug = cfg!(debug_assertions);
 
-        let bypass = is_debug && site_key == "dev";
+        let bypass = is_debug && kiwi_secret_key == "dev";
         // In debug builds with dev key: bypass is active
         if is_debug {
             assert!(bypass, "dev-mode bypass must be active in debug builds");
         }
     }
 
-    /// Simulates mCaptcha disabled via config flag.
+    /// Simulates KiwiCaptcha disabled via config flag.
     #[test]
-    fn sim_mcaptcha_disabled_by_config() {
-        let mcaptcha_enabled = false;
-        if !mcaptcha_enabled {
+    fn sim_kiwi_disabled_by_config() {
+        let kiwi_enabled = false;
+        if !kiwi_enabled {
             // Verification skipped entirely
             let skip = true;
-            assert!(skip, "disabled mCaptcha must skip verification");
+            assert!(skip, "disabled KiwiCaptcha must skip verification");
         }
     }
 
-    /// Simulates mCaptcha production verification flow (token required).
+    /// Simulates KiwiCaptcha production verification flow (token required).
     #[test]
-    fn sim_mcaptcha_token_required() {
+    fn sim_kiwi_token_required() {
         let token: Option<&str> = None;
-        let mcaptcha_enabled = true;
-        let site_key = "prod-site-key";
+        let kiwi_enabled = true;
 
-        let is_dev_bypass = cfg!(debug_assertions)
-            && (site_key == "dev" || false);
-
-        if mcaptcha_enabled && !is_dev_bypass {
+        if kiwi_enabled {
             assert!(token.is_none(), "missing token must return validation error");
         }
-    }
-
-    /// Simulates mCaptcha verification URL construction.
-    #[test]
-    fn sim_mcaptcha_verify_url_construction() {
-        let base_url = "https://mcaptcha.example.com";
-        let verify_url = format!("{base_url}/api/v1/verify");
-        assert_eq!(verify_url, "https://mcaptcha.example.com/api/v1/verify");
-    }
-
-    /// Simulates mCaptcha response parsing (valid/success fields).
-    #[test]
-    fn sim_mcaptcha_response_parsing() {
-        // mCaptcha may return {"valid": true} or {"success": true}
-        let valid_response = r#"{"valid": true}"#;
-        let success_response = r#"{"success": true}"#;
-
-        let valid: bool = serde_json::from_str::<serde_json::Value>(valid_response)
-            .ok()
-            .and_then(|v| {
-                v.get("valid")
-                    .and_then(|x| x.as_bool())
-                    .or_else(|| v.get("success").and_then(|x| x.as_bool()))
-            })
-            .unwrap_or(false);
-
-        assert!(valid);
-
-        let valid2: bool = serde_json::from_str::<serde_json::Value>(success_response)
-            .ok()
-            .and_then(|v| {
-                v.get("valid")
-                    .and_then(|x| x.as_bool())
-                    .or_else(|| v.get("success").and_then(|x| x.as_bool()))
-            })
-            .unwrap_or(false);
-
-        assert!(valid2);
     }
 
     // =========================================================================

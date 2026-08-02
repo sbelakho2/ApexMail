@@ -1057,12 +1057,12 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
 fn web_auth_form_script() -> &'static str {
     "<script>(function(){\
 var ALLOWED={\
-'/v1/auth/login':['email','password','mfaCode','mcaptcha__token'],\
-'/api/auth/login':['email','password','mfaCode','mcaptcha__token'],\
-'/v1/auth/signup':['name','email','password','company_name','plan','mcaptcha__token'],\
-'/v1/auth/register':['name','email','password','company_name','plan','mcaptcha__token'],\
-'/v1/auth/forgot-password':['email','mcaptcha__token'],\
-'/v1/auth/reset-password':['token','email','password','confirmPassword','mcaptcha__token']\
+'/v1/auth/login':['email','password','mfaCode','kiwi__token'],\
+'/api/auth/login':['email','password','mfaCode','kiwi__token'],\
+'/v1/auth/signup':['name','email','password','company_name','plan','kiwi__token'],\
+'/v1/auth/register':['name','email','password','company_name','plan','kiwi__token'],\
+'/v1/auth/forgot-password':['email','kiwi__token'],\
+'/v1/auth/reset-password':['token','email','password','confirmPassword','kiwi__token']\
 };\
 function destFor(action){\
 if(action.indexOf('/login')>-1)return '/dashboard';\
@@ -1193,31 +1193,16 @@ fn csrf_hidden_input(token: &str) -> String {
     web_auth_hidden_input("_csrf", token)
 }
 
-/// Renders the mCaptcha CAPTCHA widget container and hidden input.
+/// Renders the KiwiCaptcha proof-of-work widget.
 ///
-/// When `site_key` is `"dev"` the widget is not rendered (dev-mode bypass).
-/// Otherwise the mCaptcha widget script is loaded from `base_url` and the
-/// proof-of-work challenge is rendered inside the `.mcaptcha__widget` div.
-fn mcaptcha_widget_html(site_key: &str, base_url: &str) -> String {
-    if site_key == "dev" {
-        return String::new();
-    }
-
-    let base_url = base_url.trim_end_matches('/');
-    // mCaptcha v0.1.0 self-hosted: load the verification widget bundle JS
-    // directly into the page (not via iframe). Same-origin iframes inherit
-    // the parent's nonce-based CSP which blocks the widget's scripts.
-    // Loading the bundle directly gives it the page's nonce and lets it
-    // execute. The widget finds div[data-sitekey], renders the PoW challenge,
-    // computes the proof, and fills the hidden input with the token.
-    format!(
-        "<div class=\"space-y-2\">\
-<div class=\"mcaptcha__widget\" data-sitekey=\"{site_key}\"></div>\
-<input type=\"hidden\" name=\"mcaptcha__token\" id=\"mcaptcha__token\" />\
-<link rel=\"stylesheet\" href=\"{base_url}/assets/bundle/css/widget.980B6BBE3EAF37577BA230FD89068AF7793575A4E274798DCC7F921B18D8DD49.css\" />\
-<script src=\"{base_url}/assets/bundle/verificationWidget.12E101EEF094B43462BD81F36DCCB02404893AF7263E9C96391C68CC90B99C50.js\" defer></script>\
-</div>"
-    )
+/// KiwiCaptcha is ApexMail's native Rust CAPTCHA. The widget is a fully
+/// self-contained inline script (no external JS, no iframe) that fetches a
+/// challenge from `/api/kcaptcha/challenge`, solves a PBKDF2-HMAC-SHA256
+/// proof-of-work via the browser's native WebCrypto API, and fills the hidden
+/// `kiwi__token` input. The api-server's `inject_script_nonce` middleware adds
+/// the page's CSP nonce to the inline script automatically.
+fn kiwi_widget_html() -> String {
+    crate::kiwi_widget::kiwi_widget_html()
 }
 
 fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
@@ -1238,11 +1223,11 @@ fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
 /// Signup page.
 pub fn web_signup_page(
     csrf_token: &str,
-    mcaptcha_site_key: &str,
-    mcaptcha_base_url: &str,
+    _mcaptcha_site_key: &str,
+    _mcaptcha_base_url: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let mcaptcha_html = mcaptcha_widget_html(mcaptcha_site_key, mcaptcha_base_url);
+    let mcaptcha_html = kiwi_widget_html();
     let password_hint = password_requirements_hint();
     let form_html = format!(
         "<form class=\"p-8 space-y-5\" action=\"/v1/auth/signup\" method=\"POST\">\
@@ -1291,11 +1276,11 @@ pub fn web_signup_page(
 
 pub fn web_forgot_password_page(
     csrf_token: &str,
-    mcaptcha_site_key: &str,
-    mcaptcha_base_url: &str,
+    _mcaptcha_site_key: &str,
+    _mcaptcha_base_url: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let mcaptcha_html = mcaptcha_widget_html(mcaptcha_site_key, mcaptcha_base_url);
+    let mcaptcha_html = kiwi_widget_html();
     let form_html = format!(
         "<form class=\"p-8 space-y-5\" action=\"/v1/auth/forgot-password\" method=\"POST\">\
 {csrf}\
@@ -3860,11 +3845,11 @@ pub fn marketing_zola_compare_index_page() -> String {
 /// aria labels, and error-message data attributes from the React version.
 pub fn web_login_page(
     csrf_token: &str,
-    mcaptcha_site_key: &str,
-    mcaptcha_base_url: &str,
+    _mcaptcha_site_key: &str,
+    _mcaptcha_base_url: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let mcaptcha_html = mcaptcha_widget_html(mcaptcha_site_key, mcaptcha_base_url);
+    let mcaptcha_html = kiwi_widget_html();
     let form_html = format!(
         "<form class=\"p-10 space-y-6\" action=\"/v1/auth/login\" method=\"POST\">\
 {csrf}\
@@ -3918,11 +3903,11 @@ pub fn web_login_page(
 /// `#login-password`) from the behavior baseline manifest.
 pub fn control_plane_login_page(
     csrf_token: &str,
-    mcaptcha_site_key: &str,
-    mcaptcha_base_url: &str,
+    _mcaptcha_site_key: &str,
+    _mcaptcha_base_url: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let mcaptcha_html = mcaptcha_widget_html(mcaptcha_site_key, mcaptcha_base_url);
+    let mcaptcha_html = kiwi_widget_html();
     let form_html = format!(
         "<form class=\"p-10 space-y-6\" action=\"/api/auth/login\" method=\"POST\">\
 {csrf}\
@@ -4215,7 +4200,7 @@ mod tests {
         assert!(script.contains("passwordTogglesBound"));
         assert!(script.contains("document.addEventListener('click'"));
         assert!(script.contains("[data-password-toggle]"));
-        assert!(script.contains("'token','email','password','confirmPassword','mcaptcha__token'"));
+        assert!(script.contains("'token','email','password','confirmPassword','kiwi__token'"));
     }
 
     #[test]

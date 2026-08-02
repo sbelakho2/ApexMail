@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn revenue_audit_log_spend_sql_reads_known_spend_metadata_keys() {
-        let sql = audit_log_spend_sql("timestamp");
+        let sql = audit_log_spend_sql("timestamp").expect("audit_log_spend_sql should succeed");
 
         assert!(sql.contains("spendCents"));
         assert!(sql.contains("acquisitionCostCents"));

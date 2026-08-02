@@ -255,12 +255,13 @@ fn test_config() -> Config {
         placement_imap_timeout_secs: 30,
         placement_encrypt_passwords: false,
         placement_encryption_secret: "test-placement-encryption-secret-32b".into(),
-        mcaptcha_base_url: "https://mcaptcha.example.com".into(),
-        mcaptcha_site_key: "dev".into(),
-        mcaptcha_secret_key: "dev".into(),
-        mcaptcha_enabled: false,
-        mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
-        mcaptcha_internal_url: "http://apexmail-mcaptcha-1:7000".into(),
+        kiwi_enabled: false,
+        kiwi_secret_key: "dev".into(),
+        kiwi_argon_m_kib: 50_000,
+        kiwi_argon_t: 2,
+        kiwi_argon_p: 1,
+        kiwi_difficulty_bits: 16,
+        kiwi_challenge_ttl_secs: 120,
     }
 }
 

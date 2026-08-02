@@ -7,9 +7,13 @@
 //! - Verifies response structure, calculations, time filtering, tenant isolation,
 //!   performance, and authentication requirements.
 //!
-//! Run with: `cargo test --test live_analytics_tests -- --test-threads=1 --nocapture`
+//! Run with: `cargo test --test live_analytics_tests --features live-db -- --test-threads=1 --nocapture`
 //!
 //! Requires TEST_DATABASE_URL or DATABASE_URL env var pointing to a test database.
+//! Gated behind the `live-db` feature because it needs the full AppState wiring
+//! (DdosProtector, WafEngine) and a running database.
+
+#![cfg(feature = "live-db")]
 
 use std::sync::Arc;
 use std::time::Instant;

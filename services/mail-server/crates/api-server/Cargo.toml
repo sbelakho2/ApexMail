@@ -69,6 +69,13 @@ ddos-protection = { path = "../ddos-protection" }
 apexmail-analytics = { path = "../analytics", package = "analytics" }
 observability-service = { path = "../observability-service" }
 inbox-placement = { path = "../inbox-placement" }
+kcaptcha = { path = "../kcaptcha" }
+
+[features]
+default = []
+# Live-database integration tests that require a running PostgreSQL instance
+# and the full AppState wiring (DdosProtector, WafEngine). Disabled by default.
+live-db = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

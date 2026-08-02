@@ -3,6 +3,7 @@ pub mod axum_router;
 pub mod csrf;
 pub mod data;
 pub mod icons;
+pub mod kiwi_widget;
 pub mod leptos_views;
 pub mod marketing;
 pub mod pixel_parity;

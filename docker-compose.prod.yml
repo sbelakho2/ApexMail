@@ -250,15 +250,12 @@ services:
       CSRF_SECRET_FILE: /run/secrets/csrf_secret
       BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:?BILLING_COMPANY_IBAN is required in production}
       BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:?BILLING_COMPANY_PHONE is required in production}
-      # ── mCaptcha (login CAPTCHA protection) ───────────────────────────────
-      MCAPTCHA_ENABLED: ${MCAPTCHA_ENABLED:?MCAPTCHA_ENABLED is required in production}
-      MCAPTCHA_SITE_KEY: ${MCAPTCHA_SITE_KEY:?MCAPTCHA_SITE_KEY is required in production}
-      MCAPTCHA_BASE_URL: ${MCAPTCHA_BASE_URL:-https://app.apexmail.ee/mcaptcha}
-      MCAPTCHA_SECRET_KEY_FILE: /run/secrets/mcaptcha_secret_key
-      MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:-https://app.apexmail.ee/mcaptcha/api/v1/pow/siteverify}
-      # Internal container URL for the api-server reverse proxy that serves
-      # the /mcaptcha/* widget assets to the browser (server-to-server, HTTP).
-      MCAPTCHA_INTERNAL_URL: ${MCAPTCHA_INTERNAL_URL:-http://apexmail-mcaptcha-1:7000}
+      # ── KiwiCaptcha (native Rust login CAPTCHA protection) ────────────────
+      KIWI_ENABLED: "true"
+      KIWI_SECRET_KEY_FILE: /run/secrets/kiwi_secret_key
+      KIWI_ARGON_M_KIB: "50000"
+      KIWI_DIFFICULTY_BITS: "16"
+      KIWI_CHALLENGE_TTL_SECS: "120"
       METRICS_PORT: 9090
     depends_on:
       postgres:
@@ -299,7 +296,7 @@ services:
       - session_secret
       - impersonation_secret
       - csrf_secret
-      - mcaptcha_secret_key
+      - kiwi_secret_key
 
   # ===========================================================================
   # MTA (Mail Transfer Agent)
@@ -519,5 +516,5 @@ secrets:
     file: ${PROD_IMPERSONATION_SECRET_FILE:?PROD_IMPERSONATION_SECRET_FILE is required in production}
   csrf_secret:
     file: ${PROD_CSRF_SECRET_FILE:?PROD_CSRF_SECRET_FILE is required in production}
-  mcaptcha_secret_key:
-    file: ${PROD_MCAPTCHA_SECRET_KEY_FILE:?PROD_MCAPTCHA_SECRET_KEY_FILE is required in production}
+  kiwi_secret_key:
+    file: ${PROD_KIWI_SECRET_KEY_FILE:?PROD_KIWI_SECRET_KEY_FILE is required in production}

@@ -71,7 +71,7 @@ export_from_file INTERNAL_SERVICE_TOKEN   || true
 export_from_file SESSION_SECRET           || true
 export_from_file IMPERSONATION_SECRET     || true
 export_from_file CSRF_SECRET              || true
-export_from_file MCAPTCHA_SECRET_KEY      || true
+export_from_file KIWI_SECRET_KEY          || true
 export_from_file STRIPE_SECRET_KEY        || true
 export_from_file STRIPE_WEBHOOK_SECRET    || true
 export_from_file DB_PASSWORD              || true

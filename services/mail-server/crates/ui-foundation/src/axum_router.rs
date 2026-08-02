@@ -834,10 +834,12 @@ mod tests {
                     let is_allowed_marketing_js = opening_tag
                         .contains("src=\"/js/apexmail-site.js")
                         && opening_tag.contains("defer");
-                    // Inline theme bootstrap script emitted by marketing pages
-                    // to avoid flash-of-incorrect-theme before CSS is applied.
-                    let is_marketing_theme_bootstrap = !opening_tag.contains("src=")
-                        && script.contains("apexmail-theme")
+                    // Inline theme bootstrap + toggle script emitted by ALL root
+                    // layouts (marketing, web, control-plane) via theme_script().
+                    // Reads localStorage "apexmail-ui:theme" to prevent FOUC, and
+                    // handles toggle clicks on [data-theme-toggle] buttons.
+                    let is_theme_script = !opening_tag.contains("src=")
+                        && script.contains("apexmail-ui:theme")
                         && script.contains("prefers-color-scheme:dark");
                     // Inline mobile-menu toggle script injected by shell::mobile_menu_script()
                     // into both web and control-plane shells. It is an inline self-contained IIFE
@@ -847,7 +849,7 @@ mod tests {
                         && script.contains("data-mobile-menu-breakpoint")
                         && script.contains("ResizeObserver");
                     // Inline auth-form bridge script injected by `web_auth_form_script`
-                    // (and shared by control-plane login). Self-contained IIFE that
+                    // (shared by control-plane login). Self-contained IIFE that
                     // converts native form submission to JSON for the auth handlers.
                     let is_auth_form_script = !opening_tag.contains("src=")
                         && script.contains("authBound")
@@ -858,6 +860,16 @@ mod tests {
                     let is_mfa_management_script = !opening_tag.contains("src=")
                         && script.contains("mfaChallengeToken")
                         && script.contains("/v1/auth/mfa/");
+                    // Inline KiwiCaptcha proof-of-work widget script. Self-contained
+                    // IIFE that fetches a challenge from /api/kcaptcha/challenge,
+                    // solves a PBKDF2 proof-of-work via WebCrypto, and fills the
+                    // hidden token input. No external dependencies. The script
+                    // body references the token input via a DOM selector, so we
+                    // match on the challenge endpoint URL + the PBKDF2 solver
+                    // function name instead of the input field name.
+                    let is_kiwi_widget_script = !opening_tag.contains("src=")
+                        && script.contains("/api/kcaptcha/challenge")
+                        && script.contains("deriveHash");
                     // External client-side hydration script emitted by the web and
                     // control-plane root layouts. It wires SSR tables/forms/buttons to the
                     // JSON API and is served from /assets/console.js. Allowed only with
@@ -866,12 +878,14 @@ mod tests {
                         && opening_tag.contains("defer");
                     let allowed = match route.surface {
                         "marketing" | "marketing-zola" => {
-                            is_json_ld || is_allowed_marketing_js || is_marketing_theme_bootstrap
+                            is_json_ld || is_allowed_marketing_js || is_theme_script
                         }
                         "web" | "control-plane" => {
-                            is_mobile_menu_script
+                            is_theme_script
+                                || is_mobile_menu_script
                                 || is_auth_form_script
                                 || is_mfa_management_script
+                                || is_kiwi_widget_script
                                 || is_console_js
                         }
                         _ => false,
@@ -893,3 +907,6 @@ mod tests {
         }
     }
 }
+
+
+

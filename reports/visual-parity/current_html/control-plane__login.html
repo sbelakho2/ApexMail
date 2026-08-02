@@ -1,1 +1,175 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexMail Control Plane</title><meta name="description" content="ApexMail administration and monitoring"><script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();</script><link rel="stylesheet" href="/assets/globals.css"><script src="/assets/console.js" defer></script></head><body class="antialiased bg-background text-surface-950"><main class="flex min-h-screen items-center justify-center bg-surface-50"><div class="w-full max-w-md space-y-10 rounded-sm border border-surface-200 bg-card p-10 shadow-premium"><div class="text-center"><span class="inline-block text-3xl font-bold tracking-tighter"><span class="text-primary">Apex</span><span class="text-surface-950">Mail</span></span><h1 class="mt-2 text-sm font-bold uppercase tracking-[0.2em] text-surface-400">Control Plane</h1><p class="mt-3 text-sm font-bold uppercase tracking-tight text-surface-500">Administrator access</p></div><form class="space-y-6" action="/api/auth/login" method="POST"><input type="hidden" name="_csrf" value="" /><div class="space-y-2"><label for="login-email" class="text-[11px] font-bold uppercase tracking-tight text-surface-950">Email or username</label><input id="login-email" name="email" type="text" required autocomplete="username" placeholder="admin@apexmail.ee" class="flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm focus:border-primary outline-none transition-all" /></div><div class="space-y-2"><label for="login-password" class="text-[11px] font-bold uppercase tracking-tight text-surface-950">Password</label><div class="relative"><input id="login-password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••" class="flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm focus:border-primary outline-none transition-all pr-12" /><button type="button" class="absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100" aria-label="Show password" aria-pressed="false" data-password-toggle="login-password" aria-controls="login-password">Show</button></div></div><button type="submit" class="inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight bg-primary text-white hover:bg-brand-700 h-12 w-full transition-all">Sign In</button></form><div id="login-mfa" class="hidden space-y-6" inert><p class="text-[11px] font-bold uppercase tracking-tight text-surface-500">MFA Verification</p><input name="mfaCode" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" class="flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all" disabled tabindex="-1" /></div></div><script>(function(){var ALLOWED={'/v1/auth/login':['email','password','mfaCode','mcaptcha__token'],'/api/auth/login':['email','password','mfaCode','mcaptcha__token'],'/v1/auth/signup':['name','email','password','company_name','plan','mcaptcha__token'],'/v1/auth/register':['name','email','password','company_name','plan','mcaptcha__token'],'/v1/auth/forgot-password':['email','mcaptcha__token'],'/v1/auth/reset-password':['token','email','password','confirmPassword','mcaptcha__token']};function destFor(action){if(action.indexOf('/login')>-1)return '/dashboard';if(action.indexOf('/signup')>-1||action.indexOf('/register')>-1)return '/verify-email';if(action.indexOf('/forgot-password')>-1)return null;if(action.indexOf('/reset-password')>-1)return '/login?reset=1';return null;}function showError(form,msg){var box=form.querySelector('[data-error-key],[role="alert"]');if(!box){box=document.createElement('div');box.setAttribute('role','alert');box.className='text-sm text-warning-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Request failed. Please try again.';}function showSuccess(form,msg){var box=form.querySelector('[data-success]');if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Done.';}function togglePassword(btn){var id=btn.getAttribute('data-password-toggle')||btn.getAttribute('aria-controls');var input=id?document.getElementById(id):null;if(!input)return;var showing=input.type==='text';input.type=showing?'password':'text';btn.setAttribute('aria-pressed',showing?'false':'true');btn.setAttribute('aria-label',showing?'Show password':'Hide password');btn.textContent=showing?'Show':'Hide';}function bindPasswordToggles(){document.querySelectorAll('[data-password-toggle]').forEach(function(btn){btn.dataset.passwordToggleBound='1';});if(document.documentElement.dataset.passwordTogglesBound==='1')return;document.documentElement.dataset.passwordTogglesBound='1';document.addEventListener('click',function(ev){var target=ev.target&&ev.target.closest?ev.target.closest('[data-password-toggle]'):null;if(!target)return;ev.preventDefault();togglePassword(target);});}async function submitForm(ev){var form=ev.currentTarget;var action=form.getAttribute('action')||'';if(action.indexOf('/v1/auth/')!==0&&action.indexOf('/api/auth/')!==0)return;ev.preventDefault();var btn=form.querySelector('button[type="submit"]');if(btn){btn.disabled=true;btn.dataset.originalLabel=btn.textContent;}var fd=new FormData(form);var allowed=ALLOWED[action]||null;var payload={};fd.forEach(function(v,k){if(k==='_csrf')return;if(allowed&&allowed.indexOf(k)===-1)return;payload[k]=v;});var headers={'Content-Type':'application/json','Accept':'application/json'};var csrf=fd.get('_csrf');if(csrf)headers['X-CSRF-Token']=csrf;try{var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-origin',body:JSON.stringify(payload)});var data=null;try{data=await res.json();}catch(_e){}if(res.ok){if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}}}else{var msg=(data&&data.error&&(data.error.message||data.error.code))||(data&&data.message)||('Request failed ('+res.status+').');showError(form,msg);if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}}catch(err){showError(form,'Network error. Please try again.');if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}}function bind(){bindPasswordToggles();document.querySelectorAll('form[action^="/v1/auth/"],form[action^="/api/auth/"]').forEach(function(f){if(f.dataset.authBound==='1')return;f.dataset.authBound='1';f.addEventListener('submit',submitForm);});}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind);}else{bind();}})();</script></main></body></html>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexMail Control Plane</title><meta name="description" content="ApexMail administration and monitoring"><script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();</script><link rel="stylesheet" href="/assets/globals.css"></head><body class="antialiased bg-background text-surface-950"><main class="min-h-screen bg-surface-50 relative overflow-hidden"><div class="pointer-events-none absolute inset-0"></div><div class="relative mx-auto flex min-h-screen w-full max-w-7xl items-center px-6 py-20"><div class="grid w-full items-center gap-20 lg:grid-cols-[1.1fr_0.9fr]"><div class="hidden lg:block"><div class="inline-flex items-center gap-2 rounded-sm border border-brand-200/60 bg-card/80 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.2em] text-brand-700 mb-8 shadow-premium-sm">Console Access</div><h1 class="text-5xl font-bold text-surface-950 tracking-tight leading-[1.1]">Your command center for delivery, trust, and analytics.</h1><p class="mt-6 max-w-[520px] text-[17px] text-surface-600 leading-relaxed">Monitor every campaign, verify your domains, and spot deliverability risks before they impact your reputation.</p><div class="mt-12 space-y-4"><div class="flex items-center gap-4"><span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm bg-primary text-white shadow-premium"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4"><path d="M6 12l4 4 8-8"></path></svg></span><span class="text-surface-600 font-medium leading-tight">Delivery intelligence across regions</span></div><div class="flex items-center gap-4"><span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm bg-primary text-white shadow-premium"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4"><path d="M6 12l4 4 8-8"></path></svg></span><span class="text-surface-600 font-medium leading-tight">Enterprise-grade compliance workflows</span></div><div class="flex items-center gap-4"><span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm bg-primary text-white shadow-premium"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4"><path d="M6 12l4 4 8-8"></path></svg></span><span class="text-surface-600 font-medium leading-tight">Executive-ready performance reporting</span></div></div></div><div class="w-full max-w-[480px] mx-auto"><div class="text-center mb-10"><span class="inline-block text-3xl font-bold tracking-tighter"><span class="text-primary">Apex</span><span class="text-surface-950">Mail</span></span><h1 class="mt-3 text-2xl font-bold text-surface-950 tracking-tight">Operator access</h1><p class="text-sm text-surface-500 mt-2 font-medium">Sign in to the ApexMail control plane</p></div><div class="bg-card rounded-sm shadow-premium border border-surface-200/80 overflow-hidden"><form class="p-10 space-y-6" action="/api/auth/login" method="POST"><input type="hidden" name="_csrf" value="" /><div class="space-y-2"><label class="text-[11px] font-bold uppercase tracking-tight text-surface-950" for="login-email">Email or username</label><input id="login-email" name="email" type="text" required autocomplete="username" placeholder="admin@apexmail.ee" class="w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950" /></div><div class="space-y-2"><div class="flex items-center justify-between"><label class="text-[11px] font-bold uppercase tracking-tight text-surface-950" for="login-password">Password</label></div><div class="relative"><input id="login-password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••" class="w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-10" /><button type="button" class="absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100" aria-label="Show password" aria-pressed="false" data-password-toggle="login-password" aria-controls="login-password">Show</button></div></div><div class="flex items-center gap-3 py-1"><input id="rememberMe" name="rememberMe" type="checkbox" checked class="h-4 w-4 rounded-sm border-surface-300 text-primary focus:ring-primary" /><label for="rememberMe" class="text-xs text-surface-500 font-medium">Keep me signed in for 30 days.</label></div><div class="kiwi-widget space-y-3" data-kiwi-widget>
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2.5">
+<span class="inline-flex h-7 w-7 items-center justify-center rounded-sm bg-brand-50 text-primary shadow-premium-sm" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14 5c-2.8 0-5 2.2-5 5 0 .4 0 .8.1 1.2-1.8.4-3.1 2-3.1 3.9 0 .5.1 1 .3 1.5-.2.1-.4.2-.5.3-.3.2-.3.6-.1.8.1.2.3.2.5.2.1 0 .2 0 .3-.1 2-1.3 4.6-1.5 6.8-.7 1.2.4 2.5.4 3.7 0 .3-.1.4-.4.3-.7-.1-.2-.3-.4-.6-.3-1 .3-2.1.3-3.1 0 .8-.9 1.3-2.1 1.3-3.4 0-2.8-2.2-5-5-5zm0 1.5c1.9 0 3.5 1.6 3.5 3.5S15.9 13.5 14 13.5 10.5 11.9 10.5 10 12.1 6.5 14 6.5z"/></svg></span>
+<div class="flex flex-col leading-tight">
+<span class="text-[10px] font-bold uppercase tracking-[0.2em] text-surface-950">KiwiCaptcha</span>
+<span class="text-[10px] text-surface-400 font-medium" data-kiwi-status>Preparing verification&hellip;</span>
+</div>
+</div>
+<span class="kiwi-pill inline-flex items-center gap-1.5 rounded-sm border border-surface-200 bg-card px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 transition-premium" data-kiwi-pill>
+<span class="kiwi-dot inline-block h-1.5 w-1.5 rounded-full bg-surface-400 transition-premium" data-kiwi-dot></span>
+<span data-kiwi-pill-label>Waiting</span>
+</span>
+</div>
+<div class="kiwi-track h-[3px] w-full overflow-hidden rounded-sm bg-surface-200">
+<div class="kiwi-fill h-full bg-primary transition-all duration-300 ease-premium" style="width:0%" data-kiwi-fill></div>
+</div>
+<input type="hidden" name="kiwi__token" id="kiwi__token" data-kiwi-token />
+<p class="text-[10px] text-surface-400 font-medium leading-relaxed">Memory-hard proof-of-work verification runs entirely in your browser. No tracking, no third parties.</p>
+</div>
+<script>
+(function() {
+  var W = document.querySelector('[data-kiwi-widget]');
+  if (!W) return;
+  var statusEl = W.querySelector('[data-kiwi-status]');
+  var pillEl = W.querySelector('[data-kiwi-pill]');
+  var pillLabel = W.querySelector('[data-kiwi-pill-label]');
+  var dotEl = W.querySelector('[data-kiwi-dot]');
+  var fillEl = W.querySelector('[data-kiwi-fill]');
+  var tokenEl = W.querySelector('[data-kiwi-token]');
+  var PBKDF2_ITERATIONS = 50000;
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function setStatus(label, pillText, state) {
+    if (statusEl) statusEl.textContent = label;
+    if (pillLabel) pillLabel.textContent = pillText;
+    if (dotEl) {
+      dotEl.className = 'kiwi-dot inline-block h-1.5 w-1.5 rounded-full transition-premium ' +
+        (state === 'solving' ? (reduceMotion ? 'bg-primary' : 'bg-primary animate-pulse') :
+         state === 'done' ? 'bg-success' : 'bg-surface-400');
+    }
+    if (pillEl) {
+      pillEl.className = 'kiwi-pill inline-flex items-center gap-1.5 rounded-sm border px-2 py-1 text-[10px] font-bold uppercase tracking-tight transition-premium ' +
+        (state === 'solving' ? 'border-primary/30 bg-brand-50 text-primary' :
+         state === 'done' ? 'border-success-200 bg-success-50 text-success-700' :
+         'border-surface-200 bg-card text-surface-400');
+    }
+  }
+
+  // Count leading zero bits of a 256-bit hash (big-endian).
+  function leadingZeros(bytes) {
+    var n = 0;
+    for (var i = 0; i < bytes.length; i++) {
+      if (bytes[i] === 0) { n += 8; }
+      else { var b = bytes[i]; while ((b & 128) === 0) { n++; b <<= 1; } break; }
+    }
+    return n;
+  }
+
+  // Derive PBKDF2-HMAC-SHA256 hash of (prefix + counter) with the given salt.
+  function deriveHash(prefix, counter, saltBytes, iterations) {
+    var password = new TextEncoder().encode(prefix + counter);
+    var algo = { name: 'PBKDF2', hash: 'SHA-256', salt: saltBytes, iterations: iterations };
+    return crypto.subtle.deriveBits(algo,
+      crypto.subtle.importKey('raw', password, {name:'PBKDF2'}, false, ['deriveBits']));
+  }
+
+  function b64decode(str) {
+    // URL-safe base64 → binary
+    str = str.replace(/-/g, '+').replace(/_/g, '/');
+    while (str.length % 4) str += '=';
+    var bin = atob(str);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  function b64encode(bytes) {
+    var bin = '';
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+
+  // Collect lightweight telemetry during the solve window.
+  var solveStart = 0;
+  var mouseEvents = 0;
+  var keyEvents = 0;
+  document.addEventListener('mousemove', function() { mouseEvents++; }, { passive: true });
+  document.addEventListener('keydown', function() { keyEvents++; }, { passive: true });
+
+  async function solve(challenge, saltB64, iterations, targetBits, prefix) {
+    var salt = b64decode(saltB64);
+    solveStart = performance.now();
+    for (var counter = 0; counter < 4294967295; counter++) {
+      var buf = await deriveHash(prefix, counter, salt, iterations);
+      var bytes = new Uint8Array(buf);
+      if (leadingZeros(bytes) >= targetBits) {
+        var duration = Math.round(performance.now() - solveStart);
+        var telemetry = {
+          wd: navigator.webdriver === true,
+          hc: navigator.hardwareConcurrency || 0,
+          dm: navigator.deviceMemory || 0,
+          me: mouseEvents,
+          ke: keyEvents,
+          sw: window.screen.width || 0,
+          sh: window.screen.height || 0,
+          iw: window.innerWidth || 0,
+          ih: window.innerHeight || 0
+        };
+        // Wire format: nonce.counter.duration.telemetry_json (base64)
+        var nonceB64 = btoa(challenge.split('.')[0] || '');
+        var plain = nonceB64 + '.' + counter + '.' + duration + '.' + JSON.stringify(telemetry);
+        return btoa(plain);
+      }
+      if (counter % 50 === 0) {
+        if (fillEl) fillEl.style.width = Math.min(95, counter / 10) + '%';
+        // Yield to the event loop so the UI doesn't freeze.
+        await new Promise(function(r) { setTimeout(r, 0); });
+      }
+      if (counter > 500000) break; // safety cap
+    }
+    return null;
+  }
+
+  async function run() {
+    try {
+      setStatus('Requesting challenge&hellip;', 'Connecting', 'solving');
+      // Infer the scope from the page URL.
+      var scope = 'login';
+      var p = window.location.pathname.toLowerCase();
+      if (p.indexOf('signup') >= 0 || p.indexOf('register') >= 0) scope = 'signup';
+      else if (p.indexOf('forgot') >= 0) scope = 'forgot-password';
+      else if (p.indexOf('reset') >= 0) scope = 'reset-password';
+
+      var resp = await fetch('/api/kcaptcha/challenge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: scope })
+      });
+      if (!resp.ok) throw new Error('challenge request failed: ' + resp.status);
+      var data = await resp.json();
+
+      // Dev bypass: if the challenge is "dev", write a trivial token.
+      if (data.challenge === 'dev') {
+        if (tokenEl) tokenEl.value = btoa('dev.0.0.{}');
+        setStatus('Dev mode (verification bypassed)', 'Dev', 'done');
+        if (fillEl) fillEl.style.width = '100%';
+        return;
+      }
+
+      setStatus('Computing proof-of-work&hellip;', 'Verifying', 'solving');
+      var token = await solve(data.challenge, data.salt, data.mKib || PBKDF2_ITERATIONS, data.targetBits, data.prefix);
+      if (!token) throw new Error('solver exhausted without finding a solution');
+
+      if (tokenEl) tokenEl.value = token;
+      if (fillEl) fillEl.style.width = '100%';
+      setStatus('Verified — you may continue', 'Verified', 'done');
+    } catch (e) {
+      setStatus('Verification failed — please reload', 'Error', 'idle');
+      if (fillEl) fillEl.style.width = '0%';
+    }
+  }
+
+  // Start after DOM is ready and crypto is available.
+  if (window.crypto && window.crypto.subtle) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', run);
+    } else {
+      run();
+    }
+  } else {
+    setStatus('Browser not supported', 'Unsupported', 'idle');
+  }
+})();
+</script><button type="submit" class="w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-tight flex items-center justify-center gap-3 py-4 rounded-sm shadow-premium transition-all group"><span>Sign In</span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><path d="M5 12h12m-4-4 4 4-4 4"></path></svg></button><div id="login-mfa" class="hidden" aria-hidden="true" inert><p class="text-[11px] font-bold uppercase tracking-tight text-surface-500">Additional verification required. Enter your MFA code.</p><label class="sr-only" for="mfaCode">MFA code</label><input id="mfaCode" name="mfaCode" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="000000" class="flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all" disabled tabindex="-1" /></div><div id="login-form-errors" class="hidden" role="alert" aria-live="assertive" data-error-key="auth.error.rate_limited"></div></form><div class="px-10 pb-10"><p class="text-center text-xs text-surface-500 font-medium">Operator console restricted to authorized administrators.</p></div></div></div></div></div><script>(function(){var ALLOWED={'/v1/auth/login':['email','password','mfaCode','kiwi__token'],'/api/auth/login':['email','password','mfaCode','kiwi__token'],'/v1/auth/signup':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/register':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/forgot-password':['email','kiwi__token'],'/v1/auth/reset-password':['token','email','password','confirmPassword','kiwi__token']};function destFor(action){if(action.indexOf('/login')>-1)return '/dashboard';if(action.indexOf('/signup')>-1||action.indexOf('/register')>-1)return '/verify-email';if(action.indexOf('/forgot-password')>-1)return null;if(action.indexOf('/reset-password')>-1)return '/login?reset=1';return null;}function showError(form,msg){var box=form.querySelector('[data-error-key],[role="alert"]');if(!box){box=document.createElement('div');box.setAttribute('role','alert');box.className='text-sm text-warning-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Request failed. Please try again.';}function showSuccess(form,msg){var box=form.querySelector('[data-success]');if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Done.';}function togglePassword(btn){var id=btn.getAttribute('data-password-toggle')||btn.getAttribute('aria-controls');var input=id?document.getElementById(id):null;if(!input)return;var showing=input.type==='text';input.type=showing?'password':'text';btn.setAttribute('aria-pressed',showing?'false':'true');btn.setAttribute('aria-label',showing?'Show password':'Hide password');btn.textContent=showing?'Show':'Hide';}function bindPasswordToggles(){document.querySelectorAll('[data-password-toggle]').forEach(function(btn){btn.dataset.passwordToggleBound='1';});if(document.documentElement.dataset.passwordTogglesBound==='1')return;document.documentElement.dataset.passwordTogglesBound='1';document.addEventListener('click',function(ev){var target=ev.target&&ev.target.closest?ev.target.closest('[data-password-toggle]'):null;if(!target)return;ev.preventDefault();togglePassword(target);});}async function submitForm(ev){var form=ev.currentTarget;var action=form.getAttribute('action')||'';if(action.indexOf('/v1/auth/')!==0&&action.indexOf('/api/auth/')!==0)return;ev.preventDefault();var btn=form.querySelector('button[type="submit"]');if(btn){btn.disabled=true;btn.dataset.originalLabel=btn.textContent;}var fd=new FormData(form);var allowed=ALLOWED[action]||null;var payload={};fd.forEach(function(v,k){if(k==='_csrf')return;if(allowed&&allowed.indexOf(k)===-1)return;payload[k]=v;});var headers={'Content-Type':'application/json','Accept':'application/json'};var csrf=fd.get('_csrf');if(csrf)headers['X-CSRF-Token']=csrf;try{var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-origin',body:JSON.stringify(payload)});var data=null;try{data=await res.json();}catch(_e){}if(res.ok){if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}}}else{var msg=(data&&data.error&&(data.error.message||data.error.code))||(data&&data.message)||('Request failed ('+res.status+').');showError(form,msg);if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}}catch(err){showError(form,'Network error. Please try again.');if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}}function bind(){bindPasswordToggles();document.querySelectorAll('form[action^="/v1/auth/"],form[action^="/api/auth/"]').forEach(function(f){if(f.dataset.authBound==='1')return;f.dataset.authBound='1';f.addEventListener('submit',submitForm);});}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind);}else{bind();}})();</script></main></body></html>

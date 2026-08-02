@@ -315,13 +315,13 @@ fn migration_primitives_render_valid_html() {
 
 #[test]
 fn migration_login_pages_preserve_field_ids() {
-    let web = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
+    let web = leptos_views::web_login_page("", "", "");
     let ids = ["id=\"login-email\"", "id=\"password\"", "id=\"mfaCode\""];
     for id in &ids {
         assert!(web.contains(id), "web login missing {}", id);
     }
 
-    let cp = leptos_views::control_plane_login_page("", "dev", "https://mcaptcha.example.com");
+    let cp = leptos_views::control_plane_login_page("", "", "");
     let cp_ids = [
         "id=\"login-email\"",
         "id=\"login-password\"",
@@ -334,19 +334,19 @@ fn migration_login_pages_preserve_field_ids() {
 
 #[test]
 fn migration_forms_have_action_attributes() {
-    let login = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
+    let login = leptos_views::web_login_page("", "", "");
     assert!(
         login.contains("action=\"/v1/auth/login\""),
         "login missing action"
     );
 
-    let signup = leptos_views::web_signup_page("", "dev", "https://mcaptcha.example.com");
+    let signup = leptos_views::web_signup_page("", "", "");
     assert!(
         signup.contains("action=\"/v1/auth/signup\""),
         "signup missing action"
     );
 
-    let forgot = leptos_views::web_forgot_password_page("", "dev", "https://mcaptcha.example.com");
+    let forgot = leptos_views::web_forgot_password_page("", "", "");
     assert!(
         forgot.contains("action=\"/v1/auth/forgot-password\""),
         "forgot missing action"
@@ -359,7 +359,7 @@ fn migration_forms_have_action_attributes() {
     );
 
     let cp_login =
-        leptos_views::control_plane_login_page("", "dev", "https://mcaptcha.example.com");
+        leptos_views::control_plane_login_page("", "", "");
     assert!(
         cp_login.contains("action=\"/api/auth/login\""),
         "cp login missing action"
@@ -368,7 +368,7 @@ fn migration_forms_have_action_attributes() {
 
 #[test]
 fn migration_security_data_attributes_present() {
-    let login = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
+    let login = leptos_views::web_login_page("", "", "");
     assert!(
         login.contains("data-error-key=\"auth.error.rate_limited\""),
         "rate limiting data attribute missing"
@@ -539,9 +539,9 @@ fn migration_unknown_routes_are_rejected_for_every_surface() {
 
 #[test]
 fn migration_web_and_cp_share_primitives() {
-    let web_login = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
+    let web_login = leptos_views::web_login_page("", "", "");
     let cp_login =
-        leptos_views::control_plane_login_page("", "dev", "https://mcaptcha.example.com");
+        leptos_views::control_plane_login_page("", "", "");
 
     // Both should use the same button class pattern
     let btn_class = "inline-flex items-center justify-center";

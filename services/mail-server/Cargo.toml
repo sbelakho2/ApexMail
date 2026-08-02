@@ -55,6 +55,8 @@ members = [
     "crates/email-grader",
     "crates/bounce-analytics",
     "crates/inbox-placement",
+    # KiwiCaptcha — native Rust proof-of-work CAPTCHA engine
+    "crates/kcaptcha",
 ]
 
 [workspace.package]
@@ -89,6 +91,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 base64 = "0.22"
 rand = "0.9"
 argon2 = { version = "0.5.3", features = ["std"] }
+pbkdf2 = { version = "0.12", features = ["simple"] }
 bcrypt = "0.16"
 arc-swap = "1.7"
 

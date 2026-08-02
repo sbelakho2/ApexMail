@@ -392,6 +392,7 @@ dependencies = [
  "inbox-placement",
  "ipnetwork",
  "jsonwebtoken",
+ "kcaptcha",
  "mail-common",
  "metrics",
  "metrics-exporter-prometheus",
@@ -5105,6 +5106,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kcaptcha"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "base64 0.22.1",
+ "hmac 0.12.1",
+ "pbkdf2",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "konst"
 version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6878,6 +6894,8 @@ checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
 dependencies = [
  "digest 0.10.7",
  "hmac 0.12.1",
+ "password-hash",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -10984,6 +11002,7 @@ dependencies = [
  "chrono",
  "hmac 0.12.1",
  "js-sys",
+ "kcaptcha",
  "leptos 0.6.15",
  "leptos_meta",
  "leptos_router",
