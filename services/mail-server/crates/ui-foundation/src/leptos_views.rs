@@ -1204,24 +1204,18 @@ fn mcaptcha_widget_html(site_key: &str, base_url: &str) -> String {
     }
 
     let base_url = base_url.trim_end_matches('/');
-    // mCaptcha v0.1.0 self-hosted: the widget page at /widget?key=SITEKEY
-    // renders the PoW challenge in an iframe. It computes the proof-of-work
-    // and posts the token back to the parent window via postMessage.
-    // The hidden input receives the token from the postMessage listener.
+    // mCaptcha v0.1.0 self-hosted: load the verification widget bundle JS
+    // directly into the page (not via iframe). Same-origin iframes inherit
+    // the parent's nonce-based CSP which blocks the widget's scripts.
+    // Loading the bundle directly gives it the page's nonce and lets it
+    // execute. The widget finds div[data-sitekey], renders the PoW challenge,
+    // computes the proof, and fills the hidden input with the token.
     format!(
         "<div class=\"space-y-2\">\
-<div class=\"mcaptcha__widget\" data-sitekey=\"{site_key}\">\
-<iframe src=\"{base_url}/widget?key={site_key}\" style=\"width:100%;height:78px;border:0;\" title=\"mCaptcha\"></iframe>\
-</div>\
+<div class=\"mcaptcha__widget\" data-sitekey=\"{site_key}\"></div>\
 <input type=\"hidden\" name=\"mcaptcha__token\" id=\"mcaptcha__token\" />\
-<script>\
-(function(){{\
-var i=document.getElementById('mcaptcha__token');\
-window.addEventListener('message',function(e){{\
-if(e.data&&(e.data.token||e.data.mcaptcha_token)){{i.value=e.data.token||e.data.mcaptcha_token;}}\
-}});\
-}})();\
-</script>\
+<link rel=\"stylesheet\" href=\"{base_url}/assets/bundle/css/widget.980B6BBE3EAF37577BA230FD89068AF7793575A4E274798DCC7F921B18D8DD49.css\" />\
+<script src=\"{base_url}/assets/bundle/verificationWidget.12E101EEF094B43462BD81F36DCCB02404893AF7263E9C96391C68CC90B99C50.js\" defer></script>\
 </div>"
     )
 }
