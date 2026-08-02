@@ -1142,6 +1142,8 @@ async fn proxy_mcaptcha(state: &AppState, uri: &Uri, method: &Method) -> Option<
     let upstream_result = state
         .http_client
         .request(reqwest_method, &upstream_url)
+        .header("Host", "captcha.apexmail.ee")
+        .header("X-Forwarded-Host", "captcha.apexmail.ee")
         .send()
         .await;
 
