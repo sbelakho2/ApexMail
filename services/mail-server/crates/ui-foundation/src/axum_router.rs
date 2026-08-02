@@ -260,6 +260,12 @@ pub fn render_route_with_query(
     mcaptcha_base_url: Option<&str>,
     mcaptcha_site_key: Option<&str>,
 ) -> Option<String> {
+    // Normalise trailing slash at the top level so ALL surfaces handle /login/ etc.
+    let path = if path.len() > 1 && path.ends_with('/') {
+        &path[..path.len() - 1]
+    } else {
+        path
+    };
     let html = match surface {
         "web" => {
             let inner = render_inner(
