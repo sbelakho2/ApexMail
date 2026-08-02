@@ -103,3 +103,30 @@ deploy-clean: ## Remove staging directories on server
 	$(SSH) 'rm -rf $(NEXT_DIR) /var/www/.apexmail.ee.prev'
 
 test-all: verify ## Run all verification checks
+
+# ── Bare-metal api-server deploy (fast: ~5 min, no Docker build) ──
+
+deploy-api-src: ## Rsync api-server source to server
+	$(RSYNC) --delete --exclude=target packages/kiwicaptcha/ $(RSYNC_DEST)/opt/apexmail/packages/kiwicaptcha/
+	$(RSYNC) --delete --exclude=target services/mail-server/crates/api-server/ $(RSYNC_DEST)/opt/apexmail/services/mail-server/crates/api-server/
+	$(RSYNC) --delete --exclude=target services/mail-server/crates/ui-foundation/ $(RSYNC_DEST)/opt/apexmail/services/mail-server/crates/ui-foundation/
+	$(RSYNC) services/mail-server/Cargo.toml $(RSYNC_DEST)/opt/apexmail/services/mail-server/Cargo.toml
+	$(RSYNC) docs/development/ui-baseline-manifest.json $(RSYNC_DEST)/opt/apexmail/docs/development/ui-baseline-manifest.json
+
+deploy-api-build: deploy-api-src ## Build api-server on server (incremental, ~3-7 min)
+	$(SSH) 'export PATH="/root/.cargo/bin:$$PATH" && cd /opt/apexmail/services/mail-server && cargo build --release --bin api-server 2>&1 | tail -3'
+
+deploy-api-restart: ## Restart api-server via systemd (5s downtime)
+	$(SSH) 'systemctl restart api-server && sleep 3 && systemctl is-active api-server'
+
+deploy-api-health: ## Health check API server
+	@curl -sk -o /dev/null -w "app.apexmail.ee: %{http_code}\n" https://app.apexmail.ee/login/
+	@curl -sk -o /dev/null -w "admin.apexmail.ee: %{http_code}\n" https://admin.apexmail.ee/
+	@curl -sk -X POST -o /dev/null -w "kcaptcha challenge: %{http_code}\n" https://app.apexmail.ee/api/kcaptcha/challenge -H "Content-Type: application/json" -d '{"scope":"login"}'
+
+deploy-api: deploy-api-build deploy-api-restart deploy-api-health ## Full API server deploy (~5 min)
+
+deploy-nginx-config: ## Deploy nginx config to server
+	$(RSYNC) deploy/nginx/nginx.conf $(RSYNC_DEST)/opt/apexmail/deploy/nginx/nginx.conf
+	$(SSH) 'docker restart apexmail-nginx-1'
+	@echo "Nginx config deployed and reloaded"
