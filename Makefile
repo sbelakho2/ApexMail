@@ -113,20 +113,25 @@ deploy-api-src: ## Rsync api-server source to server
 	$(RSYNC) services/mail-server/Cargo.toml $(RSYNC_DEST)/opt/apexmail/services/mail-server/Cargo.toml
 	$(RSYNC) docs/development/ui-baseline-manifest.json $(RSYNC_DEST)/opt/apexmail/docs/development/ui-baseline-manifest.json
 
-deploy-api-build: deploy-api-src ## Build api-server on server (incremental, ~3-7 min)
-	$(SSH) 'export PATH="/root/.cargo/bin:$$PATH" && cd /opt/apexmail/services/mail-server && cargo build --release --bin api-server 2>&1 | tail -3'
+deploy-api-build: deploy-api-src ## Build api-server inside Docker (matching GLIBC, incremental via host target dir)
+	$(SSH) 'docker run --rm \
+      -v /opt/apexmail:/opt/apexmail \
+      -v /root/.cargo/registry:/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/opt/apexmail/services/mail-server/target \
+      rust:1.93.1-slim-bookworm \
+      bash -c "apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev protobuf-compiler > /dev/null 2>&1 && cd /opt/apexmail/services/mail-server && cargo build --release --bin api-server 2>&1 | tail -3"'
 
-deploy-api-restart: ## Restart api-server via systemd (5s downtime)
-	$(SSH) 'systemctl restart api-server && sleep 3 && systemctl is-active api-server'
+deploy-api-restart: ## Restart api-server Docker container (picks up volume-mounted binary)
+	$(SSH) 'docker compose -f /opt/apexmail/docker-compose.yml -f /opt/apexmail/docker-compose.prod.yml -f /opt/apexmail/docker-compose.override.yml up -d api-server 2>&1 | tail -2'
 
 deploy-api-health: ## Health check API server
 	@curl -sk -o /dev/null -w "app.apexmail.ee: %{http_code}\n" https://app.apexmail.ee/login/
 	@curl -sk -o /dev/null -w "admin.apexmail.ee: %{http_code}\n" https://admin.apexmail.ee/
 	@curl -sk -X POST -o /dev/null -w "kcaptcha challenge: %{http_code}\n" https://app.apexmail.ee/api/kcaptcha/challenge -H "Content-Type: application/json" -d '{"scope":"login"}'
 
-deploy-api: deploy-api-build deploy-api-restart deploy-api-health ## Full API server deploy (~5 min)
+deploy-api: deploy-api-build deploy-api-restart deploy-api-health ## Full API deploy (~5 min)
 
-deploy-nginx-config: ## Deploy nginx config to server
+deploy-nginx-config: ## Deploy nginx config and restart
 	$(RSYNC) deploy/nginx/nginx.conf $(RSYNC_DEST)/opt/apexmail/deploy/nginx/nginx.conf
 	$(SSH) 'docker restart apexmail-nginx-1'
-	@echo "Nginx config deployed and reloaded"
+	@echo "Nginx deployed"
