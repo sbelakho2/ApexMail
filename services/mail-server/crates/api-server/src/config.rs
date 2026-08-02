@@ -705,7 +705,7 @@ impl Config {
             ui_web_hosts: parse_csv(&env_or("UI_WEB_HOSTS", "app.apexmail.ee,127.0.0.1")),
             ui_control_plane_hosts: parse_csv(&env_or(
                 "UI_CONTROL_PLANE_HOSTS",
-                "admin.apexmail.ee,control.apexmail.ee,localhost",
+                "admin.apexmail.ee,control.apexmail.ee",
             )),
             ui_marketing_hosts: parse_csv(&env_or(
                 "UI_MARKETING_HOSTS",
