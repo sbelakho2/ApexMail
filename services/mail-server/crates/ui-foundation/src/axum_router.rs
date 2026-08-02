@@ -410,7 +410,14 @@ fn render_web(
     let mcaptcha_site_key_str = mcaptcha_site_key.unwrap_or("dev");
     let mcaptcha_base_url_str = mcaptcha_base_url.unwrap_or("https://mcaptcha.example.com");
 
-    Some(match path {
+    // Normalise trailing slash so /login/ matches /login etc.
+    let normalised_path = if path.len() > 1 && path.ends_with('/') {
+        &path[..path.len() - 1]
+    } else {
+        path
+    };
+
+    Some(match normalised_path {
         "/" => leptos_views::web_home_page(),
         "/login" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
