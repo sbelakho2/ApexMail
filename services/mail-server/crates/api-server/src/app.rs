@@ -1107,6 +1107,21 @@ async fn fallback_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: axum::extract::Request,
 ) -> Response {
+    let path = request.uri().path();
+    let method = request.method().clone();
+
+    // Serve static assets that the SSR pages reference
+    if method == axum::http::Method::GET {
+        // Favicon and apple-icon requests — return empty 204 to avoid JSON NOT_FOUND
+        if path.starts_with("/favicon") || path.starts_with("/apple-icon") || path.starts_with("/android-icon") || path == "/favicon.ico" {
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        // ms-application TileImage requests from mCaptcha iframe
+        if path.starts_with("/assets/img/") || path.ends_with(".png") || path.ends_with(".ico") {
+            return StatusCode::NO_CONTENT.into_response();
+        }
+    }
+
     if let Some(response) =
         ui_auth_redirect_if_required(&state, request.headers(), request.uri(), request.method())
             .await
@@ -1123,7 +1138,20 @@ async fn fallback_handler(
         return response;
     }
 
-    not_found_response()
+    // For API paths (starting with /v1/ or /api/), return JSON NOT_FOUND
+    if path.starts_with("/v1/") || path.starts_with("/api/") {
+        return not_found_response();
+    }
+
+    // For non-API paths, return a proper HTML 404 page instead of JSON
+    (
+        StatusCode::NOT_FOUND,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        axum::body::Body::from(
+            r#"<!DOCTYPE html><html><head><title>Page Not Found</title></head><body><h1>404 — Page Not Found</h1><p><a href="/">Go home</a></p></body></html>"#
+        ),
+    )
+        .into_response()
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
