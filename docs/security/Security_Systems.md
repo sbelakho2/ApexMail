@@ -31,7 +31,7 @@ ApexMail implements eight dedicated Rust security crates providing defense-in-de
 - ✅ **ATO: Self-protecting rate limit** (`rate_limit_rps`) on `evaluate()` endpoint
 - ✅ **ATO: Default travel speed lowered** from 900 → 500 km/h
 - ✅ **ATO: Documented limitations** — IP /16 cloud fingerprinting, in-memory lockout_events multi-node gap
-- ✅ **ATO + App Integration:** `RequireCaptcha` escalation is now wired to web/control-plane login routes via mCaptcha widget + server-side token verification
+- ✅ **ATO + App Integration:** `RequireCaptcha` escalation is now wired to web/control-plane login routes via KiwiCaptcha widget + server-side token verification
 - ✅ DLP recipient trust tiers and expiring temporary exceptions
 - ✅ **DLP: SSN regex tightened** to dash-only separator to reduce false positives
 - ✅ **DLP: PII documentation** — risk score table, image-based PII gap, phone false-positive caveat

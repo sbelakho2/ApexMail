@@ -12,7 +12,7 @@
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hmac::{Hmac, Mac};
-use rand::{rng, RngCore};
+use rand::{thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -171,12 +171,12 @@ pub fn issue_challenge(
 ) -> Result<Issued, SignError> {
     // 32-byte nonce.
     let mut nonce_bytes = [0u8; 32];
-    rng().fill_bytes(&mut nonce_bytes);
+    thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = B64.encode(nonce_bytes);
 
     // 16-byte salt.
     let mut salt_bytes = [0u8; 16];
-    rng().fill_bytes(&mut salt_bytes);
+    thread_rng().fill_bytes(&mut salt_bytes);
     let salt = B64.encode(salt_bytes);
 
     let ip_hash = hash_ip(client_ip);
@@ -215,6 +215,7 @@ pub fn issue_challenge(
     };
 
     let challenge_token = IssuedChallenge {
+        nonce: nonce.clone(),
         challenge,
         salt,
         m_kib: config.m_kib,
@@ -280,6 +281,9 @@ mod tests {
         assert_eq!(issued.challenge.target_bits, 18);
         assert!(!issued.challenge.challenge.is_empty());
         assert!(!issued.challenge.salt.is_empty());
+        assert!(!issued.challenge.nonce.is_empty());
+        // The nonce in the IssuedChallenge should match the record nonce.
+        assert_eq!(issued.challenge.nonce, issued.record.nonce);
         assert!(issued.challenge.prefix.starts_with(&issued.challenge.challenge));
         // Record expiry = issued + ttl.
         assert_eq!(issued.record.expires_at, 1_000_120);

@@ -87,13 +87,12 @@ retry_delay_seconds = 300
 concurrent_deliveries = 10
 ```
 
-### Login CAPTCHA (mCaptcha)
+### Login CAPTCHA (KiwiCaptcha)
 
-`mCaptcha` enforcement for interactive login flows is configured in the Rust UI/application layer (`api-server` plus `ui-foundation`), not in the SMTP/mail transport runtime itself.
+KiwiCaptcha enforcement for interactive login flows is configured in the Rust UI/application layer (`api-server` plus `ui-foundation`), not in the SMTP/mail transport runtime itself.
 
 Use these docs for setup and behavior:
 
-- `docs/security/mcaptcha-login.md`
 - `docs/deployment/configuration.md` (Login CAPTCHA section)
 - `docs/deployment/quickstart.md` (optional local setup and smoke checks)
 

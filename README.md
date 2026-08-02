@@ -226,9 +226,8 @@ See `.env.example` for all available configuration options.
 | `REDIS_URL` | Redis connection string | Yes |
 | `JWT_PRIVATE_KEY_PEM` | RSA private key used for JWT signing | Yes |
 | `JWT_PUBLIC_KEY_PEM` | RSA public key used for JWT verification | Yes |
-| `MCAPTCHA_ENABLED` | Enable server-side login CAPTCHA verification (`true`/`false`) | No |
-| `MCAPTCHA_SITE_KEY` | mCaptcha site key for verification API | When enabled |
-| `MCAPTCHA_SECRET_KEY` | mCaptcha secret for verification API | When enabled |
+| `KIWI_ENABLED` | Enable server-side login CAPTCHA verification (`true`/`false`) | No |
+| `KIWI_SECRET_KEY` | KiwiCaptcha HMAC secret key for challenge signing | When enabled |
 | `TRACKING_ENCRYPTION_KEY` | 128-bit key for tracking IDs | Yes |
 | `TRACKING_SIGNATURE_KEY` | 256-bit key for signatures | Yes |
 | `S3_ENDPOINT` | S3-compatible storage endpoint | Yes |
@@ -299,7 +298,7 @@ zola build --root apps/marketing-zola
 - DKIM signing for all outbound email (SES Easy DKIM 2048-bit or self-hosted keys)
 - SPF/DMARC validation for inbound email
 - Dual delivery transport: AWS SES (primary) with self-hosted SMTP opt-in
-- Optional mCaptcha protection on login routes for both web and control-plane apps (see `docs/security/mcaptcha-login.md`)
+- Optional KiwiCaptcha protection on login routes for both web and control-plane apps (native Rust proof-of-work CAPTCHA)
 
 ## License
 

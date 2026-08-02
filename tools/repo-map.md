@@ -458,7 +458,7 @@ Key documents: overview, data-flow, delivery-transport, hybrid-email-infrastruct
 | `docs/evaluation/` | Canary deployment, load testing, staging environment, post-mortem template |
 | `docs/marketing/` | Pricing |
 | `docs/operations/` | Monitoring, on-call, SLO management, DR, runbooks (incident response, crypto incidents) |
-| `docs/security/` | RBAC, data protection, email auth, HSTS, mCaptcha, PGP, vulnerability SLA, secrets |
+| `docs/security/` | RBAC, data protection, email auth, HSTS, KiwiCaptcha, PGP, vulnerability SLA, secrets |
 | `docs/tool-contracts/` | ClickHouse, Hetzner, PostgreSQL, Prometheus, Redis, SES, Stripe, Zone.ee |
 | `docs/user-guide/` | Getting started, contacts, delivery options, inbox placement, troubleshooting, glossary |
 | `docs/migration/` | API contract baselines |

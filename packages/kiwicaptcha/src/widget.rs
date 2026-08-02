@@ -1,7 +1,7 @@
 //! KiwiCaptcha widget — the inline, nonce'd HTML + JS that renders the
 //! proof-of-work challenge on auth pages.
 //!
-//! This replaces the mCaptcha iframe/bundle approach entirely. The widget is a
+//! The widget is a
 //! self-contained block of HTML + an inline `<script>` (which receives the page's
 //! CSP nonce from `inject_script_nonce`). The script:
 //!
@@ -17,7 +17,7 @@
 //! browser takes ~200–800ms, while a parallel GPU farm still pays real cost per
 //! solve. The server-side verification re-derives the same PBKDF2 hash.
 
-use kcaptcha::kiwi_mark_svg;
+use crate::kiwi_mark_svg;
 
 /// The PBKDF2 iteration count used by both the widget script and the server
 /// verifier. Tuned for ~300–500ms in a real browser.
@@ -25,9 +25,14 @@ pub const KIWI_PBKDF2_ITERATIONS: u32 = 50_000;
 
 /// Render the full KiwiCaptcha widget HTML block, including the inline script.
 ///
-/// The script tag is written WITHOUT a nonce — the api-server's
-/// `inject_script_nonce` middleware adds the page nonce to every `<script>`
-/// tag automatically, so the widget complies with the strict CSP.
+/// This is the same widget used on the ApexMail auth pages.  The returned HTML
+/// is a `<div>` containing the status indicator, progress bar, hidden
+/// `kiwi__token` input, and an inline `<script>` that fetches a challenge
+/// from `/api/kcaptcha/challenge` and brute-forces a PBKDF2 counter.
+///
+/// The script tag is written WITHOUT a nonce — the host application's CSP
+/// middleware should inject the page nonce into every `<script>` tag
+/// automatically so the widget complies with a strict CSP.
 pub fn kiwi_widget_html() -> String {
     format!(
         r#"<div class="kiwi-widget space-y-3" data-kiwi-widget>
@@ -120,30 +125,16 @@ pub fn kiwi_widget_html() -> String {
   document.addEventListener('mousemove', function() {{ mouseEvents++; }}, {{ passive: true }});
   document.addEventListener('keydown', function() {{ keyEvents++; }}, {{ passive: true }});
 
-  async function solve(challenge, saltB64, iterations, targetBits, prefix) {{
-    var salt = b64decode(saltB64);
-    solveStart = performance.now();
-    for (var counter = 0; counter < 4294967295; counter++) {{
-      var buf = await deriveHash(prefix, counter, salt, iterations);
-      var bytes = new Uint8Array(buf);
-      if (leadingZeros(bytes) >= targetBits) {{
-        var duration = Math.round(performance.now() - solveStart);
-        var telemetry = {{
-          wd: navigator.webdriver === true,
-          hc: navigator.hardwareConcurrency || 0,
-          dm: navigator.deviceMemory || 0,
-          me: mouseEvents,
-          ke: keyEvents,
-          sw: window.screen.width || 0,
-          sh: window.screen.height || 0,
-          iw: window.innerWidth || 0,
-          ih: window.innerHeight || 0
-        }};
-        // Wire format: nonce.counter.duration.telemetry_json (base64)
-        var nonceB64 = btoa(challenge.split('.')[0] || '');
-        var plain = nonceB64 + '.' + counter + '.' + duration + '.' + JSON.stringify(telemetry);
-        return btoa(plain);
-      }}
+   async function solve(challenge, saltB64, iterations, targetBits, prefix) {{
+     var salt = b64decode(saltB64);
+     solveStart = performance.now();
+     for (var counter = 0; counter < 4294967295; counter++) {{
+       var buf = await deriveHash(prefix, counter, salt, iterations);
+       var bytes = new Uint8Array(buf);
+       if (leadingZeros(bytes) >= targetBits) {{
+         var duration = Math.round(performance.now() - solveStart);
+         return {{ counter: counter, duration: duration }};
+       }}
       if (counter % 50 === 0) {{
         if (fillEl) fillEl.style.width = Math.min(95, counter / 10) + '%';
         // Yield to the event loop so the UI doesn't freeze.
@@ -164,27 +155,43 @@ pub fn kiwi_widget_html() -> String {
       else if (p.indexOf('forgot') >= 0) scope = 'forgot-password';
       else if (p.indexOf('reset') >= 0) scope = 'reset-password';
 
-      var resp = await fetch('/api/kcaptcha/challenge', {{
-        method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{ scope: scope }})
-      }});
-      if (!resp.ok) throw new Error('challenge request failed: ' + resp.status);
-      var data = await resp.json();
+       var resp = await fetch('/api/kcaptcha/challenge', {{
+         method: 'POST',
+         headers: {{ 'Content-Type': 'application/json' }},
+         body: JSON.stringify({{ scope: scope }})
+       }});
+       if (!resp.ok) throw new Error('challenge request failed: ' + resp.status);
+       var data = await resp.json();
 
-      // Dev bypass: if the challenge is "dev", write a trivial token.
-      if (data.challenge === 'dev') {{
-        if (tokenEl) tokenEl.value = btoa('dev.0.0.{{}}');
-        setStatus('Dev mode (verification bypassed)', 'Dev', 'done');
-        if (fillEl) fillEl.style.width = '100%';
-        return;
-      }}
+       // Dev bypass: if the challenge is "dev", write a trivial token.
+       if (data.challenge === 'dev') {{
+         if (tokenEl) tokenEl.value = btoa('dev.0.0.{{}}');
+         setStatus('Dev mode (verification bypassed)', 'Dev', 'done');
+         if (fillEl) fillEl.style.width = '100%';
+         return;
+       }}
 
-      setStatus('Computing proof-of-work&hellip;', 'Verifying', 'solving');
-      var token = await solve(data.challenge, data.salt, data.mKib || PBKDF2_ITERATIONS, data.targetBits, data.prefix);
-      if (!token) throw new Error('solver exhausted without finding a solution');
+       setStatus('Computing proof-of-work&hellip;', 'Verifying', 'solving');
+       var result = await solve(data.challenge, data.salt, data.mKib || PBKDF2_ITERATIONS, data.targetBits, data.prefix);
+       if (!result) throw new Error('solver exhausted without finding a solution');
 
-      if (tokenEl) tokenEl.value = token;
+       var telemetry = {{
+         wd: navigator.webdriver === true,
+         hc: navigator.hardwareConcurrency || 0,
+         dm: navigator.deviceMemory || 0,
+         me: mouseEvents,
+         ke: keyEvents,
+         sw: window.screen.width || 0,
+         sh: window.screen.height || 0,
+         iw: window.innerWidth || 0,
+         ih: window.innerHeight || 0
+       }};
+       // Wire format: nonce.counter.duration.telemetry_json (base64)
+       var nonce = data.nonce || '';
+       var plain = nonce + '.' + result.counter + '.' + result.duration + '.' + JSON.stringify(telemetry);
+       var finalToken = btoa(plain);
+
+       if (tokenEl) tokenEl.value = finalToken;
       if (fillEl) fillEl.style.width = '100%';
       setStatus('Verified — you may continue', 'Verified', 'done');
     }} catch (e) {{

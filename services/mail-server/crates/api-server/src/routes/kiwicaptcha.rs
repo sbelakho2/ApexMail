@@ -35,6 +35,7 @@ pub struct ChallengeRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ChallengeResponse {
+    pub nonce: String,
     pub challenge: String,
     pub salt: String,
     #[serde(rename = "mKib")]
@@ -61,6 +62,7 @@ async fn issue_challenge_handler(
     // solve. (Mirrors the bypass in verify_kiwi_token.)
     if cfg!(debug_assertions) && state.config.kiwi_secret_key == "dev" {
         return Ok(Json(ChallengeResponse {
+            nonce: "dev".into(),
             challenge: "dev".into(),
             salt: "dev".into(),
             m_kib: 8,
@@ -96,16 +98,16 @@ async fn issue_challenge_handler(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let kc_config = kcaptcha::ChallengeConfig {
+    let kc_config = kiwicaptcha::ChallengeConfig {
         secret_key: state.config.kiwi_secret_key.clone(),
-        m_kib: state.config.kiwi_argon_m_kib,
+        m_kib: state.config.kiwi_pbkdf2_iterations,
         t: state.config.kiwi_argon_t,
         p: state.config.kiwi_argon_p,
         target_bits: state.config.kiwi_difficulty_bits,
         ttl_secs: state.config.kiwi_challenge_ttl_secs,
     };
 
-    let issued = kcaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix)
+    let issued = kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix)
         .map_err(|_| ApiError::Internal("failed to issue KiwiCaptcha challenge".into()))?;
 
     // Store the challenge record in Redis, keyed by nonce, with TTL.
@@ -129,6 +131,7 @@ async fn issue_challenge_handler(
     );
 
     Ok(Json(ChallengeResponse {
+        nonce: issued.challenge.nonce,
         challenge: issued.challenge.challenge,
         salt: issued.challenge.salt,
         m_kib: issued.challenge.m_kib,

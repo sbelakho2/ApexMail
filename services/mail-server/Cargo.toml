@@ -56,7 +56,6 @@ members = [
     "crates/bounce-analytics",
     "crates/inbox-placement",
     # KiwiCaptcha — native Rust proof-of-work CAPTCHA engine
-    "crates/kcaptcha",
 ]
 
 [workspace.package]

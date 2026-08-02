@@ -69,7 +69,7 @@ ddos-protection = { path = "../ddos-protection" }
 apexmail-analytics = { path = "../analytics", package = "analytics" }
 observability-service = { path = "../observability-service" }
 inbox-placement = { path = "../inbox-placement" }
-kcaptcha = { path = "../kcaptcha" }
+kiwicaptcha = { path = "../../../../packages/kiwicaptcha" }
 
 [features]
 default = []

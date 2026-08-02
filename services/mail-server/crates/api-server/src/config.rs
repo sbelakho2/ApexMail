@@ -154,27 +154,28 @@ pub struct Config {
     pub placement_encryption_secret: String,
 
     // ── KiwiCaptcha (native Rust proof-of-work CAPTCHA) ────
-    /// KiwiCaptcha is ApexMail's first-party, memory-hard proof-of-work
-    /// CAPTCHA. Unlike mCaptcha (which it replaces), it has no external
-    /// container, no iframe, and no external JS — the widget is an inline
-    /// nonce'd script and challenges are verified server-side via Argon2id.
+    /// KiwiCaptcha is a first-party, self-contained proof-of-work
+    /// CAPTCHA — no external services, no iframe, no external JS.
     /// Enable KiwiCaptcha verification on auth routes (login, signup).
     pub kiwi_enabled: bool,
     /// HMAC secret key used to sign and verify KiwiCaptcha challenges.
     /// In development, set to "dev" to bypass verification.
     pub kiwi_secret_key: String,
-    /// Argon2id memory cost in KiB (default 65536 = 64 MiB). Memory-hardness
-    /// collapses the GPU/ASIC brute-force advantage to ~1.5×.
-    pub kiwi_argon_m_kib: u32,
-    /// Argon2id time cost (iterations). Default 2.
+    /// PBKDF2 iteration count (previously named KIWI_ARGON_M_KIB for backward
+    /// compatibility — old name still accepted via env). Default 50,000.
+    pub kiwi_pbkdf2_iterations: u32,
+    /// Reserved (unused by PBKDF2; kept for wire compatibility).
     pub kiwi_argon_t: u32,
-    /// Argon2id parallelism (lanes). Default 1.
+    /// Reserved (unused by PBKDF2; kept for wire compatibility).
     pub kiwi_argon_p: u32,
-    /// Required leading zero bits in the Argon2id output (difficulty).
-    /// Default 18 (~0.5–1s solve on commodity CPU).
+    /// Required leading zero bits in the PBKDF2 output (difficulty).
+    /// Default 16 (~1–3s solve on commodity CPU).
     pub kiwi_difficulty_bits: u32,
     /// Challenge lifetime in seconds. Default 120.
     pub kiwi_challenge_ttl_secs: u64,
+    /// Minimum acceptable solve duration in milliseconds. Rejects solves
+    /// faster than this as infeasible. Default 80ms.
+    pub kiwi_min_duration_ms: Option<u64>,
 
     // ── HTTP Client ─────────────────────────────────────────
     /// Timeout in seconds for the internal HTTP client used for outbound
@@ -235,13 +236,6 @@ fn env_required_pem(key: &str) -> Result<String, ConfigError> {
     Ok(raw.replace("\\n", "\n"))
 }
 
-fn resolve_kiwi_secret_key(secret_key: Option<String>, legacy_secret: Option<String>) -> String {
-    // KIWI_SECRET_KEY is canonical; MCAPTCHA_SECRET_KEY is accepted as a
-    // legacy fallback so existing deployments keep working after the rename.
-    secret_key
-        .or(legacy_secret)
-        .unwrap_or_else(|| "dev".to_string())
-}
 
 fn parse_optional_pem_list(value: Option<String>) -> Vec<String> {
     value
@@ -648,11 +642,11 @@ impl Config {
             env_or("PLACEMENT_ENCRYPTION_SECRET", "change-me-in-production");
 
         let kiwi_enabled = env_or("KIWI_ENABLED", "false").parse().unwrap_or(false);
-        let kiwi_secret_key = resolve_kiwi_secret_key(
-            env::var("KIWI_SECRET_KEY").ok(),
-            env::var("MCAPTCHA_SECRET_KEY").ok(),
-        );
-        let kiwi_argon_m_kib = env_or("KIWI_ARGON_M_KIB", "50000")
+        let kiwi_secret_key = env_or("KIWI_SECRET_KEY", "dev");
+        // Backward-compat: accept KIWI_ARGON_M_KIB as fallback for KIWI_PBKDF2_ITERATIONS
+        let kiwi_pbkdf2_iterations = env::var("KIWI_PBKDF2_ITERATIONS")
+            .or_else(|_| env::var("KIWI_ARGON_M_KIB"))
+            .unwrap_or_else(|_| "50000".into())
             .parse()
             .unwrap_or(50_000);
         let kiwi_argon_t = env_or("KIWI_ARGON_T", "2").parse().unwrap_or(2);
@@ -663,6 +657,9 @@ impl Config {
         let kiwi_challenge_ttl_secs = env_or("KIWI_CHALLENGE_TTL_SECS", "120")
             .parse()
             .unwrap_or(120);
+        let kiwi_min_duration_ms = env::var("KIWI_MIN_DURATION_MS")
+            .ok()
+            .and_then(|v| v.parse().ok());
         if !environment.is_production() && kiwi_secret_key == "dev" {
             tracing::info!(
                 "KiwiCaptcha configured with dev key — CAPTCHA verification will be bypassed"
@@ -805,11 +802,12 @@ impl Config {
 
             kiwi_enabled,
             kiwi_secret_key,
-            kiwi_argon_m_kib,
+            kiwi_pbkdf2_iterations,
             kiwi_argon_t,
             kiwi_argon_p,
             kiwi_difficulty_bits,
             kiwi_challenge_ttl_secs,
+            kiwi_min_duration_ms,
 
             http_client_timeout_secs: parse_u64(
                 "HTTP_CLIENT_TIMEOUT_SECONDS",
@@ -1166,11 +1164,12 @@ mod tests {
 
             kiwi_enabled: true,
             kiwi_secret_key: "prod-kiwi-secret-key-67890".into(),
-            kiwi_argon_m_kib: 50_000,
+            kiwi_pbkdf2_iterations: 50_000,
             kiwi_argon_t: 2,
             kiwi_argon_p: 1,
             kiwi_difficulty_bits: 16,
             kiwi_challenge_ttl_secs: 120,
+            kiwi_min_duration_ms: None,
             http_client_timeout_secs: 30,
             internal_tls_enabled: false,
             internal_tls_ca_cert_path: None,
@@ -1215,20 +1214,6 @@ mod tests {
         let mut config = valid_production_config();
         config.kiwi_secret_key = "dev".into();
         assert!(config.validate_production().is_err());
-
-        // The resolve helper prefers KIWI_SECRET_KEY, falls back to legacy
-        // MCAPTCHA_SECRET_KEY.
-        assert_eq!(
-            resolve_kiwi_secret_key(None, Some("legacy-secret-value".into())),
-            "legacy-secret-value"
-        );
-        assert_eq!(
-            resolve_kiwi_secret_key(
-                Some("preferred-secret-value".into()),
-                Some("legacy-secret-value".into())
-            ),
-            "preferred-secret-value"
-        );
 
         // When KiwiCaptcha is disabled, the dev key is acceptable.
         let mut config = valid_production_config();
@@ -1316,11 +1301,12 @@ mod tests {
 
             kiwi_enabled: false,
             kiwi_secret_key: "dev".into(),
-            kiwi_argon_m_kib: 50_000,
+            kiwi_pbkdf2_iterations: 50_000,
             kiwi_argon_t: 2,
             kiwi_argon_p: 1,
             kiwi_difficulty_bits: 16,
             kiwi_challenge_ttl_secs: 120,
+            kiwi_min_duration_ms: None,
             http_client_timeout_secs: 30,
             internal_tls_enabled: false,
             internal_tls_ca_cert_path: None,

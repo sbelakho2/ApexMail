@@ -86,7 +86,7 @@ docs/
 │   ├── data-protection.md          ✅
 │   ├── email-authentication.md     ✅
 │   ├── advanced-analytics.md       ✅
-│   └── mcaptcha-login.md           ✅
+│   └── kiwicaptcha-login.md         ✅
 └── user-guide/            # User Documentation
   ├── contacts.md                 ✅
   ├── delivery-options.md         ✅
@@ -160,7 +160,7 @@ docs/
   - Account Takeover Protection (ato-protection) — Haversine impossible travel, device fingerprinting
   - Data Loss Prevention (dlp-engine) — PII/Luhn, Shannon entropy, content policy
   - Threat Intelligence (threat-intel) — IP/domain blocklists, CIDR, reputation scoring
-- [Login mCaptcha Protection](security/mcaptcha-login.md) (NEW)
+- [Login KiwiCaptcha Protection](security/kiwicaptcha-login.md)
   - Web + control-plane login widget wiring
   - Server-side verification and error semantics
   - Environment variable matrix and smoke checklist

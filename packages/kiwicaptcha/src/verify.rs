@@ -72,8 +72,11 @@ pub struct VerifyContext<'a> {
     /// The current Unix timestamp (for TTL check).
     pub now_unix: u64,
     /// The minimum acceptable solve duration in milliseconds. A solve arriving
-    /// faster than the theoretical Argon2id minimum is rejected as infeasible.
+    /// faster than the theoretical minimum is rejected as infeasible.
     pub min_duration_ms: u64,
+    /// Expected auth scope. If [`Some`], the solution is rejected if the
+    /// challenge was issued for a different scope (prevents cross-scope replay).
+    pub expected_scope: Option<&'a str>,
 }
 
 /// Outcome of a verification.
@@ -98,8 +101,8 @@ pub enum VerifyError {
     InsufficientWork,
     #[error("stored challenge record is malformed")]
     MalformedRecord,
-    #[error("proof-of-work hash does not meet the difficulty target")]
-    InsufficientWorkAlias,
+    #[error("automated or headless client detected via telemetry")]
+    BotDetected,
 }
 
 /// Verify a solution against its stored challenge record.
@@ -121,6 +124,14 @@ pub fn verify_solution(ctx: &VerifyContext<'_>) -> VerifyOutcome {
     // 2. TTL.
     if ctx.now_unix >= ctx.record.expires_at {
         return VerifyOutcome::Invalid(VerifyError::Expired);
+    }
+
+    // 2b. Scope validation: reject if the challenge was issued for a different
+    //     auth flow (e.g. a login challenge used on /signup).
+    if let Some(expected) = ctx.expected_scope {
+        if ctx.record.scope != expected {
+            return VerifyOutcome::Invalid(VerifyError::BadSignature);
+        }
     }
 
     // 3. Minimum duration (only enforced for non-trivial difficulties; a 0
@@ -177,6 +188,34 @@ pub fn sha256_hex(input: &str) -> String {
     result.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Score telemetry data for bot detection. Returns `true` if the client
+/// appears to be automated/headless.
+///
+/// Heuristics (conservative, tuned for low false-positive rate):
+/// - `webdriver` flag set → automated browser
+/// - Zero mouse/key events over a >500ms solve → no human interaction
+/// - Hardware concurrency = 0 and no device memory → likely headless
+pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool {
+    let wd = telemetry.get("wd").and_then(|v| v.as_bool()).unwrap_or(false);
+    if wd {
+        return true; // webdriver flag set: navigator.webdriver === true
+    }
+
+    let mouse: u64 = telemetry.get("me").and_then(|v| v.as_u64()).unwrap_or(0);
+    let keys: u64 = telemetry.get("ke").and_then(|v| v.as_u64()).unwrap_or(0);
+    if duration_ms > 500 && mouse == 0 && keys == 0 {
+        return true; // no human interaction during solve
+    }
+
+    let hc: u64 = telemetry.get("hc").and_then(|v| v.as_u64()).unwrap_or(0);
+    let dm: u64 = telemetry.get("dm").and_then(|v| v.as_u64()).unwrap_or(0);
+    if hc == 0 && dm == 0 {
+        return true; // no hardware info: likely headless
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +245,7 @@ mod tests {
             duration_ms: 5000,
             now_unix: 1_000_001,
             min_duration_ms: 0,
+            expected_scope: None,
         };
         assert_eq!(verify_solution(&ctx), VerifyOutcome::Valid);
     }
@@ -223,6 +263,7 @@ mod tests {
             duration_ms: 5000,
             now_unix: 1_000_001,
             min_duration_ms: 0,
+            expected_scope: None,
         };
         assert_eq!(
             verify_solution(&ctx),
@@ -241,6 +282,7 @@ mod tests {
             duration_ms: 5000,
             now_unix: 1_000_000 + 121, // past TTL
             min_duration_ms: 0,
+            expected_scope: None,
         };
         assert_eq!(
             verify_solution(&ctx),
@@ -259,6 +301,7 @@ mod tests {
             duration_ms: 10, // impossibly fast
             now_unix: 1_000_001,
             min_duration_ms: 100,
+            expected_scope: None,
         };
         assert_eq!(
             verify_solution(&ctx),
@@ -277,6 +320,7 @@ mod tests {
             duration_ms: 5000,
             now_unix: 1_000_001,
             min_duration_ms: 0,
+            expected_scope: None,
         };
         assert_eq!(
             verify_solution(&ctx),

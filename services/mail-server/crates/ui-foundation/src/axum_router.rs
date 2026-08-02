@@ -246,19 +246,16 @@ fn normalize_marketing_static_document(document: &str) -> String {
 /// Renders the full HTML page for a given surface and path.
 /// Returns `None` if the route is not recognized.
 pub fn render_route(surface: &str, path: &str) -> Option<String> {
-    render_route_with_query(surface, path, None, None, None, None)
+    render_route_with_query(surface, path, None, None)
 }
 
 /// Renders the full HTML page with an optional CSRF secret for form protection.
 /// When `csrf_secret` is `Some`, CSRF tokens are generated for auth-related forms.
-/// `mcaptcha_base_url` and `mcaptcha_site_key` control the mCaptcha CAPTCHA widget on auth pages.
 pub fn render_route_with_query(
     surface: &str,
     path: &str,
     query: Option<&str>,
     csrf_secret: Option<&str>,
-    mcaptcha_base_url: Option<&str>,
-    mcaptcha_site_key: Option<&str>,
 ) -> Option<String> {
     // Normalise trailing slash at the top level so ALL surfaces handle /login/ etc.
     let path = if path.len() > 1 && path.ends_with('/') {
@@ -273,8 +270,6 @@ pub fn render_route_with_query(
                 path,
                 query,
                 csrf_secret,
-                mcaptcha_base_url,
-                mcaptcha_site_key,
             )?;
             match path {
                 "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
@@ -290,8 +285,6 @@ pub fn render_route_with_query(
                 path,
                 query,
                 csrf_secret,
-                mcaptcha_base_url,
-                mcaptcha_site_key,
             )?;
             let page = match path {
                 "/login" => inner,
@@ -315,8 +308,6 @@ pub fn render_route_with_query(
                     path,
                     query,
                     csrf_secret,
-                    mcaptcha_base_url,
-                    mcaptcha_site_key,
                 )?;
                 Some(leptos_views::marketing_page(&inner))
             })?,
@@ -383,19 +374,15 @@ fn render_inner(
     path: &str,
     query: Option<&str>,
     csrf_secret: Option<&str>,
-    mcaptcha_base_url: Option<&str>,
-    mcaptcha_site_key: Option<&str>,
 ) -> Option<String> {
     match surface {
         "web" => render_web(
             path,
             query,
             csrf_secret,
-            mcaptcha_base_url,
-            mcaptcha_site_key,
         ),
         "control-plane" => {
-            render_control_plane(path, csrf_secret, mcaptcha_base_url, mcaptcha_site_key)
+            render_control_plane(path, csrf_secret)
         }
         "marketing" | "marketing-zola" => render_marketing(surface, path),
         _ => None,
@@ -406,15 +393,11 @@ fn render_web(
     path: &str,
     query: Option<&str>,
     csrf_secret: Option<&str>,
-    mcaptcha_base_url: Option<&str>,
-    mcaptcha_site_key: Option<&str>,
 ) -> Option<String> {
     let params = parse_query_params(query);
 
     // Generate CSRF token for auth routes if a secret is available
     let csrf_token = |secret: &str| crate::csrf::generate_csrf_token(secret);
-    let mcaptcha_site_key_str = mcaptcha_site_key.unwrap_or("dev");
-    let mcaptcha_base_url_str = mcaptcha_base_url.unwrap_or("https://mcaptcha.example.com");
 
     // Normalise trailing slash so /login/ matches /login etc.
     let normalised_path = if path.len() > 1 && path.ends_with('/') {
@@ -427,18 +410,16 @@ fn render_web(
         "/" => leptos_views::web_home_page(),
         "/login" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
-            leptos_views::web_login_page(&token, mcaptcha_site_key_str, mcaptcha_base_url_str)
+            leptos_views::web_login_page(&token)
         }
         "/signup" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
-            leptos_views::web_signup_page(&token, mcaptcha_site_key_str, mcaptcha_base_url_str)
+            leptos_views::web_signup_page(&token)
         }
         "/forgot-password" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
             leptos_views::web_forgot_password_page(
                 &token,
-                mcaptcha_site_key_str,
-                mcaptcha_base_url_str,
             )
         }
         "/reset-password" => {
@@ -492,12 +473,8 @@ fn render_web(
 fn render_control_plane(
     path: &str,
     csrf_secret: Option<&str>,
-    mcaptcha_base_url: Option<&str>,
-    mcaptcha_site_key: Option<&str>,
 ) -> Option<String> {
     let csrf_token = |secret: &str| crate::csrf::generate_csrf_token(secret);
-    let mcaptcha_site_key_str = mcaptcha_site_key.unwrap_or("dev");
-    let mcaptcha_base_url_str = mcaptcha_base_url.unwrap_or("https://mcaptcha.example.com");
 
     Some(match path {
         "/cp" => leptos_views::control_plane_dashboard_page(),
@@ -511,8 +488,6 @@ fn render_control_plane(
             let token = csrf_secret.map_or_else(String::new, csrf_token);
             leptos_views::control_plane_login_page(
                 &token,
-                mcaptcha_site_key_str,
-                mcaptcha_base_url_str,
             )
         }
         "/dashboard" => leptos_views::control_plane_dashboard_page(),
@@ -780,8 +755,6 @@ mod tests {
             "/reset-password",
             Some("token=reset-token-123&email=owner%40apexmail.ee"),
             None,
-            None,
-            None,
         )
         .expect("reset-password route should render with query state");
         assert!(reset.contains("name=\"token\" value=\"reset-token-123\""));
@@ -792,8 +765,6 @@ mod tests {
             "web",
             "/verify-email",
             Some("token=verify-token-456&status=success&message=Email%20verified%20successfully"),
-            None,
-            None,
             None,
         )
         .expect("verify-email route should render with query state");

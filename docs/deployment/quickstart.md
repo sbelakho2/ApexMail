@@ -59,11 +59,10 @@ TRACKING_SECRET_KEY=your-secure-tracking-secret-minimum-32-characters
 # URLs
 TRACKING_BASE_URL=http://localhost:3001
 
-# Optional: login CAPTCHA protection (mCaptcha)
-MCAPTCHA_ENABLED=false
+# Optional: login CAPTCHA protection (KiwiCaptcha)
+KIWI_ENABLED=false
 # Required only when enabling CAPTCHA
-# MCAPTCHA_SITE_KEY=...
-# MCAPTCHA_SECRET_KEY=...
+# KIWI_SECRET_KEY=...
 ```
 
 For the repo Docker Compose stack, store the Postgres password in the repo-local secret file:
@@ -139,14 +138,13 @@ curl http://localhost:3001/ready
 
 ### Optional Login CAPTCHA Smoke Test
 
-If you enable mCaptcha, verify both login surfaces:
+If you enable KiwiCaptcha, verify both login surfaces:
 
 1. Set these env values and restart the local dev services:
 
 ```env
-MCAPTCHA_ENABLED=true
-MCAPTCHA_SITE_KEY=your-site-key
-MCAPTCHA_SECRET_KEY=your-secret
+KIWI_ENABLED=true
+KIWI_SECRET_KEY=your-secret-key
 ```
 
 2. Open both login pages:

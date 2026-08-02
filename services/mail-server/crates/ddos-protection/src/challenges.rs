@@ -388,8 +388,6 @@ pub enum CaptchaProvider {
     HCaptcha,
     /// Google reCAPTCHA
     ReCaptcha,
-    /// mCaptcha — privacy-preserving PoW-based CAPTCHA
-    MCaptcha,
 }
 
 impl CaptchaChallenge {

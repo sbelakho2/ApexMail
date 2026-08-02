@@ -1201,9 +1201,6 @@ fn csrf_hidden_input(token: &str) -> String {
 /// proof-of-work via the browser's native WebCrypto API, and fills the hidden
 /// `kiwi__token` input. The api-server's `inject_script_nonce` middleware adds
 /// the page's CSP nonce to the inline script automatically.
-fn kiwi_widget_html() -> String {
-    crate::kiwi_widget::kiwi_widget_html()
-}
 
 fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
     let classes = match intent {
@@ -1223,11 +1220,9 @@ fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
 /// Signup page.
 pub fn web_signup_page(
     csrf_token: &str,
-    _mcaptcha_site_key: &str,
-    _mcaptcha_base_url: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let mcaptcha_html = kiwi_widget_html();
+    let kiwi_html = kiwicaptcha::kiwi_widget_html();
     let password_hint = password_requirements_hint();
     let form_html = format!(
         "<form class=\"p-8 space-y-5\" action=\"/v1/auth/signup\" method=\"POST\">\
@@ -1254,13 +1249,13 @@ pub fn web_signup_page(
 </div>\
 {password_hint}\
 </div>\
-{mcaptcha_html}\
+{kiwi_html}\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-2 py-3 rounded-sm shadow-premium-primary/25 mt-2 transition-all\"><span>Create Account</span>{arrow}</button>\
 <div class=\"text-xs text-muted-foreground text-center\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
 </form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
-        mcaptcha_html = mcaptcha_html,
+        kiwi_html = kiwi_html,
         password_pattern = password_pattern(),
         password_title = password_requirements_text(),
         password_hint = password_hint,
@@ -1276,11 +1271,9 @@ pub fn web_signup_page(
 
 pub fn web_forgot_password_page(
     csrf_token: &str,
-    _mcaptcha_site_key: &str,
-    _mcaptcha_base_url: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let mcaptcha_html = kiwi_widget_html();
+    let kiwi_html = kiwicaptcha::kiwi_widget_html();
     let form_html = format!(
         "<form class=\"p-8 space-y-5\" action=\"/v1/auth/forgot-password\" method=\"POST\">\
 {csrf}\
@@ -1288,13 +1281,13 @@ pub fn web_forgot_password_page(
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"reset-email\">Email</label>\
 <input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"name@company.com\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground\" />\
 </div>\
-{mcaptcha_html}\
+{kiwi_html}\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-2 py-3 rounded-sm shadow-premium-primary/25 mt-2 transition-all\"><span>Send Reset Link</span>{arrow}</button>\
 <div class=\"text-xs text-muted-foreground text-center\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
-        mcaptcha_html = mcaptcha_html,
+        kiwi_html = kiwi_html,
     );
 
     let footer_html = "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-muted-foreground\">Need help with account recovery? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>";
@@ -3845,11 +3838,9 @@ pub fn marketing_zola_compare_index_page() -> String {
 /// aria labels, and error-message data attributes from the React version.
 pub fn web_login_page(
     csrf_token: &str,
-    _mcaptcha_site_key: &str,
-    _mcaptcha_base_url: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let mcaptcha_html = kiwi_widget_html();
+    let kiwi_html = kiwicaptcha::kiwi_widget_html();
     let form_html = format!(
         "<form class=\"p-10 space-y-6\" action=\"/v1/auth/login\" method=\"POST\">\
 {csrf}\
@@ -3872,7 +3863,7 @@ pub fn web_login_page(
 <input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 rounded-sm border-surface-300 text-primary focus:ring-primary\" />\
 <label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium\">Keep me signed in for 30 days.</label>\
 </div>\
-{mcaptcha_html}\
+{kiwi_html}\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-tight flex items-center justify-center gap-3 py-4 rounded-sm shadow-premium transition-all group\"><span>Sign In</span>{arrow}</button>\
 <div class=\"text-[10px] text-surface-400 font-bold uppercase tracking-[0.2em] flex items-center justify-center gap-2\" role=\"status\" aria-live=\"polite\">\
 <span class=\"inline-block h-1.5 w-1.5 rounded-sm bg-primary animate-pulse\" aria-hidden=\"true\"></span>\
@@ -3885,7 +3876,7 @@ pub fn web_login_page(
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
-        mcaptcha_html = mcaptcha_html,
+        kiwi_html = kiwi_html,
     );
 
     web_auth_shell(
@@ -3903,11 +3894,9 @@ pub fn web_login_page(
 /// `#login-password`) from the behavior baseline manifest.
 pub fn control_plane_login_page(
     csrf_token: &str,
-    _mcaptcha_site_key: &str,
-    _mcaptcha_base_url: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let mcaptcha_html = kiwi_widget_html();
+    let kiwi_html = kiwicaptcha::kiwi_widget_html();
     let form_html = format!(
         "<form class=\"p-10 space-y-6\" action=\"/api/auth/login\" method=\"POST\">\
 {csrf}\
@@ -3928,7 +3917,7 @@ pub fn control_plane_login_page(
 <input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 rounded-sm border-surface-300 text-primary focus:ring-primary\" />\
 <label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium\">Keep me signed in for 30 days.</label>\
 </div>\
-{mcaptcha_html}\
+{kiwi_html}\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-tight flex items-center justify-center gap-3 py-4 rounded-sm shadow-premium transition-all group\"><span>Sign In</span>{arrow}</button>\
 <div id=\"login-mfa\" class=\"hidden\" aria-hidden=\"true\" inert>\
 <p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
@@ -3938,7 +3927,7 @@ pub fn control_plane_login_page(
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
-        mcaptcha_html = mcaptcha_html,
+        kiwi_html = kiwi_html,
     );
 
     web_auth_shell(
@@ -4073,7 +4062,7 @@ mod tests {
 
     #[test]
     fn web_login_page_has_correct_selectors_and_structure() {
-        let html = web_login_page("", "dev", "https://mcaptcha.example.com");
+        let html = web_login_page("");
         // Field IDs matching behavior baseline manifest
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"password\""));
@@ -4096,7 +4085,7 @@ mod tests {
 
     #[test]
     fn control_plane_login_has_correct_selectors() {
-        let html = control_plane_login_page("", "dev", "https://mcaptcha.example.com");
+        let html = control_plane_login_page("");
         // Selectors from behavior baseline manifest
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"login-password\""));
@@ -4132,11 +4121,11 @@ mod tests {
         for page_label in [
             (
                 "control_plane_login",
-                control_plane_login_page("", "dev", "https://mcaptcha.example.com"),
+                control_plane_login_page(""),
             ),
             (
                 "web_login",
-                web_login_page("", "dev", "https://mcaptcha.example.com"),
+                web_login_page(""),
             ),
         ] {
             let (label, html) = page_label;
@@ -4175,7 +4164,7 @@ mod tests {
 
     #[test]
     fn web_signup_page_renders_form() {
-        let html = web_signup_page("", "dev", "https://mcaptcha.example.com");
+        let html = web_signup_page("");
         assert!(html.contains("Create your account"));
         assert!(html.contains("Console Access"));
         assert!(html.contains("id=\"signup-name\""));
@@ -4205,7 +4194,7 @@ mod tests {
 
     #[test]
     fn web_forgot_password_page_renders_form() {
-        let html = web_forgot_password_page("", "dev", "https://mcaptcha.example.com");
+        let html = web_forgot_password_page("");
         assert!(html.contains("Reset your password"));
         assert!(html.contains("Console Access"));
         assert!(html.contains("action=\"/v1/auth/forgot-password\""));
@@ -4567,8 +4556,8 @@ mod tests {
             web_root_layout(&web_dashboard_layout(&web_events_page(), "")),
             web_root_layout(&web_dashboard_layout(&web_domains_page(), "")),
             web_root_layout(&web_dashboard_layout(&web_settings_page(), "")),
-            web_root_layout(&web_login_page("", "dev", "https://mcaptcha.example.com")),
-            web_root_layout(&web_signup_page("", "dev", "https://mcaptcha.example.com")),
+            web_root_layout(&web_login_page("")),
+            web_root_layout(&web_signup_page("")),
             web_root_layout(&web_not_found_page()),
         ];
         for (i, html) in pages.iter().enumerate() {
@@ -4605,8 +4594,6 @@ mod tests {
             control_plane_root_layout(&control_plane_settings_page()),
             control_plane_root_layout(&control_plane_login_page(
                 "",
-                "dev",
-                "https://mcaptcha.example.com",
             )),
             control_plane_root_layout(&control_plane_not_found_page()),
         ];
@@ -4689,15 +4676,15 @@ mod tests {
             ("web_dedicated_ips_page", web_dedicated_ips_page()),
             (
                 "web_login_page",
-                web_login_page("", "dev", "https://mcaptcha.example.com"),
+                web_login_page(""),
             ),
             (
                 "web_signup_page",
-                web_signup_page("", "dev", "https://mcaptcha.example.com"),
+                web_signup_page(""),
             ),
             (
                 "web_forgot_password_page",
-                web_forgot_password_page("", "dev", "https://mcaptcha.example.com"),
+                web_forgot_password_page(""),
             ),
             ("web_reset_password_page", web_reset_password_page()),
             ("web_verify_email_page", web_verify_email_page()),
@@ -4726,7 +4713,7 @@ mod tests {
             ("cp_audit", control_plane_audit_page()),
             (
                 "cp_login",
-                control_plane_login_page("", "dev", "https://mcaptcha.example.com"),
+                control_plane_login_page(""),
             ),
             ("mkt_home", marketing_home_page()),
             ("mkt_pricing", marketing_pricing_page()),

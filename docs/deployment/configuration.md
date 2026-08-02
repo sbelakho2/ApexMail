@@ -64,33 +64,33 @@ JWT_ACCESS_TTL=3600
 JWT_REFRESH_TTL=2592000
 ```
 
-### Login CAPTCHA (mCaptcha)
+### Login CAPTCHA (KiwiCaptcha)
 
 Login protection is available for both login surfaces:
 - User web login: Rust SSR web surface served by `services/mail-server/crates/api-server` on the `127.0.0.1` host map (`/login`)
 - Control-plane login: Rust SSR control-plane surface served by `services/mail-server/crates/api-server` on the `localhost` host map (`/login`)
 
+KiwiCaptcha is a native Rust, self-contained proof-of-work CAPTCHA — no external services, no iframes, no external JS.
+
 Server-side verification variables:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MCAPTCHA_ENABLED` | | `false` | Enforce CAPTCHA verification in login API routes |
-| `MCAPTCHA_SITE_KEY` | ✓ when enabled | - | Site key sent to verification API |
-| `MCAPTCHA_SECRET_KEY` | ✓ when enabled | - | Secret sent to verification API |
-| `MCAPTCHA_VERIFY_URL` | | `https://demo.mcaptcha.org/api/v1/pow/siteverify` | Verification endpoint |
+| `KIWI_ENABLED` | | `false` | Enforce CAPTCHA verification in login API routes |
+| `KIWI_SECRET_KEY` | ✓ when enabled | `dev` | HMAC secret key for challenge signing and verification |
+| `KIWI_PBKDF2_ITERATIONS` | | `50000` | PBKDF2 iteration count for proof-of-work |
+| `KIWI_DIFFICULTY_BITS` | | `16` | Required leading zero bits (~1-3s solve time) |
 
 ```env
 # Server-side enforcement
-MCAPTCHA_ENABLED=true
-MCAPTCHA_SITE_KEY=your-site-key
-MCAPTCHA_SECRET_KEY=your-secret
-MCAPTCHA_VERIFY_URL=https://demo.mcaptcha.org/api/v1/pow/siteverify
+KIWI_ENABLED=true
+KIWI_SECRET_KEY=your-production-secret-key
 ```
 
 Behavior when enabled:
-- Missing token: login is rejected (`MCAPTCHA_REQUIRED`)
-- Invalid token: login is rejected (`MCAPTCHA_INVALID`)
-- Provider/verification outage: login is rejected (`MCAPTCHA_UNAVAILABLE`)
+- Missing token: login is rejected (`CAPTCHA_REQUIRED`)
+- Invalid token: login is rejected (`CAPTCHA_INVALID`)
+- Server-side verification failure: login is rejected (`CAPTCHA_UNAVAILABLE`)
 
 ### Encryption
 

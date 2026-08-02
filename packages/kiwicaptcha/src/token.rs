@@ -19,8 +19,11 @@ use serde::{Deserialize, Serialize};
 /// the client solver and the server verifier run identical Argon2id configs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssuedChallenge {
+    /// Single-use nonce (base64, 32 random bytes). The client must include this
+    /// in the solution token so the server can look up the stored challenge record.
+    pub nonce: String,
     /// Opaque challenge string (base64 of the signed payload). The client
-    /// passes this verbatim as the Argon2id password input.
+    /// passes this verbatim as the PBKDF2 preimage input.
     pub challenge: String,
     /// Base64-encoded salt (16 bytes). Reused across the nonce's lifetime so
     /// the server can re-derive the hash deterministically.

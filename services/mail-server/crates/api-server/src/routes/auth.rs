@@ -61,11 +61,12 @@ const KIWI_CHALLENGE_PREFIX: &str = "apexmail:kiwi:";
 ///
 /// In development mode (`kiwi_secret_key == "dev"`) verification is bypassed,
 /// gated behind `cfg!(debug_assertions)` so it is impossible in release builds.
-async fn verify_kiwi_token(
+pub async fn verify_kiwi_token(
     config: &crate::config::Config,
     redis_pool: &deadpool_redis::Pool,
     kiwi_token: Option<&str>,
     client_ip: &str,
+    scope: Option<&str>,
 ) -> Result<(), ApiError> {
     // RS-063: Dev-mode bypass gated behind compile-time debug_assertions check.
     if cfg!(debug_assertions) && config.kiwi_secret_key == "dev" {
@@ -83,7 +84,7 @@ async fn verify_kiwi_token(
         ApiError::Validation(vec!["CAPTCHA verification token is required".into()])
     })?;
 
-    let solution = kcaptcha::SolutionToken::decode(raw).map_err(|e| {
+    let solution = kiwicaptcha::SolutionToken::decode(raw).map_err(|e| {
         tracing::warn!(error = %e, "KiwiCaptcha token decode failed");
         ApiError::Validation(vec![
             "CAPTCHA verification failed — please refresh and try again".into(),
@@ -96,7 +97,7 @@ async fn verify_kiwi_token(
     let stored: Option<String> =
         deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key).await?;
 
-    let record: kcaptcha::ChallengeRecord = stored
+    let record: kiwicaptcha::ChallengeRecord = stored
         .ok_or_else(|| {
             ApiError::Validation(vec![
                 "CAPTCHA challenge expired or not found — please refresh and try again".into(),
@@ -116,7 +117,7 @@ async fn verify_kiwi_token(
 
     // IP binding: the challenge was issued to this IP. A mismatch means a
     // relay attack (token minted elsewhere, submitted from here).
-    let expected_ip_hash = kcaptcha::hash_ip(client_ip);
+    let expected_ip_hash = kiwicaptcha::hash_ip(client_ip);
     if record.ip_hash != expected_ip_hash {
         tracing::warn!(
             "KiwiCaptcha IP mismatch — challenge was issued to a different client"
@@ -132,25 +133,37 @@ async fn verify_kiwi_token(
         .unwrap_or(0);
 
     // Minimum duration: reject solves faster than theoretically possible.
-    // A 64MiB/t2 Argon2id takes ~250ms minimum on real hardware; we set the
-    // floor conservatively at 80ms to avoid false positives on fast devices.
-    let min_duration_ms: u64 = 80;
+    // Configurable via KIWI_MIN_DURATION_MS (default 80ms).
+    let min_duration_ms: u64 = config.kiwi_min_duration_ms.unwrap_or(80);
 
-    let ctx = kcaptcha::VerifyContext {
+    // Telemetry scoring: detect headless/automated clients.
+    if kiwicaptcha::score_telemetry(&solution.telemetry, solution.duration_ms) {
+        tracing::warn!(
+            telemetry = ?solution.telemetry,
+            duration_ms = solution.duration_ms,
+            "KiwiCaptcha bot detected via telemetry"
+        );
+        return Err(ApiError::Validation(vec![
+            "CAPTCHA verification failed — please try again".into(),
+        ]));
+    }
+
+    let ctx = kiwicaptcha::VerifyContext {
         record: &record,
         secret_key: &config.kiwi_secret_key,
         counter: solution.counter,
         duration_ms: solution.duration_ms,
         now_unix,
         min_duration_ms,
+        expected_scope: scope,
     };
 
-    match kcaptcha::verify_solution(&ctx) {
-        kcaptcha::VerifyOutcome::Valid => {
+    match kiwicaptcha::verify_solution(&ctx) {
+        kiwicaptcha::VerifyOutcome::Valid => {
             tracing::debug!(duration_ms = solution.duration_ms, "KiwiCaptcha solution verified");
             Ok(())
         }
-        kcaptcha::VerifyOutcome::Invalid(reason) => {
+        kiwicaptcha::VerifyOutcome::Invalid(reason) => {
             tracing::warn!(reason = ?reason, "KiwiCaptcha solution rejected");
             Err(ApiError::Validation(vec![
                 "CAPTCHA verification failed — please try again".into(),
@@ -1082,6 +1095,8 @@ pub struct ResetPasswordRequest {
     pub password: String,
     #[serde(default, rename = "confirmPassword", alias = "confirm_password")]
     pub confirm_password: Option<String>,
+    #[serde(default)]
+    pub kiwi__token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1160,6 +1175,7 @@ async fn login(
         &state.redis,
         body.kiwi__token.as_deref(),
         &client_ip,
+        Some("login"),
     )
     .await?;
 
@@ -1853,6 +1869,7 @@ async fn register(
         &state.redis,
         body.kiwi__token.as_deref(),
         &client_ip,
+        Some("signup"),
     )
     .await?;
 
@@ -2295,6 +2312,16 @@ async fn reset_password(
             );
             "unknown".to_string()
         });
+
+    // Verify KiwiCaptcha proof-of-work token
+    verify_kiwi_token(
+        &state.config,
+        &state.redis,
+        body.kiwi__token.as_deref(),
+        &client_ip,
+        Some("reset-password"),
+    )
+    .await?;
 
     let rate_key = format!("apexmail:reset_password_rate:{client_ip}");
     let window_secs: u64 = 15 * 60; // 15 minutes

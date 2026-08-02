@@ -351,8 +351,8 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/api/auth/csrf", routes::csrf::router())
         .nest("/api/auth/session", routes::session::router())
         .nest("/api/csrf", routes::csrf::router())
-        .nest("/api/kcaptcha", routes::kcaptcha::router())
-        .nest("/v1/kcaptcha", routes::kcaptcha::router())
+        .nest("/api/kcaptcha", routes::kiwicaptcha::router())
+        .nest("/v1/kcaptcha", routes::kiwicaptcha::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limiter::public_rate_limit_middleware,
@@ -606,8 +606,8 @@ async fn security_headers(
     let headers = resp.headers_mut();
     headers.insert("X-API-Version", HDR_API_VERSION.clone());
     headers.insert("Strict-Transport-Security", HDR_HSTS.clone());
-    // Respect a pre-set X-Frame-Options (e.g. the mCaptcha reverse proxy sets
-    // ALLOWALL so the widget can be framed) instead of always forcing DENY.
+    // Respect a pre-set X-Frame-Options so that embedded widgets can be
+    // framed instead of always forcing DENY.
     if !headers.contains_key("X-Frame-Options") {
         headers.insert("X-Frame-Options", HDR_FRAME_OPTIONS.clone());
     }
@@ -913,8 +913,6 @@ async fn browser_verify_email_page(
             Some(query.as_str())
         },
         None,
-        None,
-        None,
     );
 
     match html {
@@ -948,8 +946,6 @@ fn render_ui_response(
         uri.path(),
         uri.query(),
         csrf_secret,
-        None,
-        None,
     )?;
     Some(browser_html_response(html))
 }
@@ -1298,11 +1294,12 @@ mod tests {
 
             kiwi_enabled: false,
             kiwi_secret_key: "dev".into(),
-            kiwi_argon_m_kib: 50_000,
+            kiwi_pbkdf2_iterations: 50_000,
             kiwi_argon_t: 2,
             kiwi_argon_p: 1,
             kiwi_difficulty_bits: 16,
             kiwi_challenge_ttl_secs: 120,
+            kiwi_min_duration_ms: None,
             http_client_timeout_secs: 30,
             internal_tls_enabled: false,
             internal_tls_ca_cert_path: None,
@@ -1839,7 +1836,6 @@ mod tests {
         assert!(csp.contains("script-src 'self' 'nonce-test-nonce';"));
         assert!(csp.contains("frame-src 'none'"));
         // No external hosts leaked into the CSP.
-        assert!(!csp.contains("mcaptcha"));
         assert!(!csp.contains("captcha.apexmail"));
     }
 

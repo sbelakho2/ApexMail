@@ -2,6 +2,7 @@
 //!
 //! Validates email, rate-limits by IP, then delegates to password reset logic.
 
+use super::auth::verify_kiwi_token;
 use super::helpers::{hash_token, html_escape};
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
@@ -27,6 +28,8 @@ pub fn router() -> Router<AppState> {
 #[serde(deny_unknown_fields)]
 pub struct ForgotPasswordRequest {
     pub email: String,
+    #[serde(default)]
+    pub kiwi__token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +65,16 @@ async fn forgot_password(
             );
             "unknown".to_string()
         });
+
+    // Verify KiwiCaptcha proof-of-work token
+    verify_kiwi_token(
+        &state.config,
+        &state.redis,
+        body.kiwi__token.as_deref(),
+        &client_ip,
+        Some("forgot-password"),
+    )
+    .await?;
 
     // F-11: Dual rate-limiting — IP-based and email-based.
     // IP-based prevents single-source flooding; email-based prevents

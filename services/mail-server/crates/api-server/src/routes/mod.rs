@@ -35,7 +35,7 @@ pub mod telemetry;
 pub mod admin;
 
 // KiwiCaptcha — native Rust proof-of-work CAPTCHA
-pub mod kcaptcha;
+pub mod kiwicaptcha;
 
 // Real-time SSE stream token issuance
 pub mod stream_tokens;

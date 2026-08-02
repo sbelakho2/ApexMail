@@ -103,7 +103,7 @@ We operate **async-first** support. Most answers live in the docs and the in-app
 - 🩺 In-app domain diagnostics: `GET /v1/domains/{id}/auth-score` returns structured `expected → actual → fix` output
 - 💬 [Community Forum](https://github.com/sbelakho2/ApexMail/discussions) — shared, public, searchable
 - 📧 [Email Support](mailto:support@apexmail.ee) — Starter/Growth: 24–48h async response
-- 🛡️ [Login mCaptcha Protection](./security/mcaptcha-login.md)
+- 🛡️ [Login KiwiCaptcha Protection](./security/kiwicaptcha-login.md)
 - 🐛 [Report a Bug](https://github.com/sbelakho2/ApexMail/issues)
 
 > We do **not** run per-customer Discord servers, 24/7 live chat, or white-glove real-time support. Scale customers get priority email + a shared Slack hub; Enterprise customers get a dedicated async channel + SLA. Calls are scheduled, not on-demand.

@@ -102,7 +102,7 @@ This document serves as Annex 1 to the [Data Processing Agreement (DPA)](../lega
 - Account Takeover (ATO) Protection:
   - Impossible travel detection (Haversine distance).
   - Device fingerprinting.
-  - Login anomaly detection with mCaptcha integration.
+  - Login anomaly detection with KiwiCaptcha integration.
 - Brute-force protection: rate limiting on authentication endpoints.
 - API key rotation supported without downtime.
 - Automatic suspension after repeated failed authentication attempts.
