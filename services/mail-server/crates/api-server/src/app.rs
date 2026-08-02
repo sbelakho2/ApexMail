@@ -1239,7 +1239,7 @@ async fn proxy_mcaptcha(state: &AppState, uri: &Uri, method: &Method) -> Option<
         HeaderValue::from_static(
             "default-src 'self'; script-src 'self' 'unsafe-inline'; \
              style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-             font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'",
+             font-src 'self' data:; connect-src 'self'; frame-ancestors *",
         ),
     );
 
