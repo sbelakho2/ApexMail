@@ -260,6 +260,7 @@ fn test_config() -> Config {
         mcaptcha_secret_key: "dev".into(),
         mcaptcha_enabled: false,
         mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
+        mcaptcha_internal_url: "http://apexmail-mcaptcha-1:7000".into(),
     }
 }
 

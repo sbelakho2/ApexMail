@@ -604,7 +604,11 @@ async fn security_headers(
     let headers = resp.headers_mut();
     headers.insert("X-API-Version", HDR_API_VERSION.clone());
     headers.insert("Strict-Transport-Security", HDR_HSTS.clone());
-    headers.insert("X-Frame-Options", HDR_FRAME_OPTIONS.clone());
+    // Respect a pre-set X-Frame-Options (e.g. the mCaptcha reverse proxy sets
+    // ALLOWALL so the widget can be framed) instead of always forcing DENY.
+    if !headers.contains_key("X-Frame-Options") {
+        headers.insert("X-Frame-Options", HDR_FRAME_OPTIONS.clone());
+    }
     headers.insert("X-Content-Type-Options", HDR_CONTENT_TYPE_OPTIONS.clone());
     headers.insert("X-XSS-Protection", HDR_XSS_PROTECTION.clone());
     headers.insert("Referrer-Policy", HDR_REFERRER_POLICY.clone());
@@ -1103,12 +1107,129 @@ fn not_found_response() -> Response {
         .into_response()
 }
 
+/// Reverse-proxy a `/mcaptcha/*` request to the self-hosted mCaptcha container.
+///
+/// The browser-facing `MCAPTCHA_BASE_URL` (e.g. `https://app.apexmail.ee/mcaptcha`)
+/// points at the api-server's own `/mcaptcha/*` surface, so the widget assets must
+/// be served by Rust. This forwards the request to the internal mCaptcha container
+/// (`mcaptcha_internal_url`, e.g. `http://apexmail-mcaptcha-1:7000`), stripping the
+/// `/mcaptcha/` prefix and preserving the query string. The proxied response is
+/// returned with its status, body, and content-type, plus `X-Frame-Options:
+/// ALLOWALL` so the mCaptcha widget can be embedded in an iframe.
+async fn proxy_mcaptcha(state: &AppState, uri: &Uri, method: &Method) -> Option<Response> {
+    let path = uri.path();
+
+    // Match both "/mcaptcha" (widget root) and "/mcaptcha/..." (sub-paths).
+    let suffix = if path == "/mcaptcha" {
+        ""
+    } else if let Some(rest) = path.strip_prefix("/mcaptcha/") {
+        rest
+    } else {
+        return None;
+    };
+
+    // Only proxy safe read-only methods; the widget only needs GET/HEAD.
+    let reqwest_method = match *method {
+        Method::GET => reqwest::Method::GET,
+        Method::HEAD => reqwest::Method::HEAD,
+        _ => return None,
+    };
+
+    let upstream_base = state.config.mcaptcha_internal_url.trim_end_matches('/');
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let upstream_url = format!("{upstream_base}/{suffix}{query}");
+
+    let upstream_result = state
+        .http_client
+        .request(reqwest_method, &upstream_url)
+        .send()
+        .await;
+
+    let upstream = match upstream_result {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(
+                url = %upstream_url,
+                error = %error,
+                "mCaptcha reverse proxy upstream request failed"
+            );
+            return Some(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "mCaptcha upstream unreachable",
+                )
+                    .into_response(),
+            );
+        }
+    };
+
+    let status = upstream.status();
+    let upstream_headers = upstream.headers().clone();
+    let bytes = upstream.bytes().await.unwrap_or_default();
+
+    let mut resp_builder = Response::builder().status(status);
+    let resp_headers = resp_builder.headers_mut().expect("response headers exist");
+
+    // Forward Content-Type (and a few other safe hop-by-hop-irrelevant headers)
+    // from the upstream response so JS/HTML/CSS assets render correctly.
+    for name in [
+        header::CONTENT_TYPE,
+        header::CACHE_CONTROL,
+        header::ETAG,
+        header::LAST_MODIFIED,
+        header::EXPIRES,
+    ] {
+        if let Some(value) = upstream_headers.get(&name) {
+            resp_headers.insert(name, value.clone());
+        }
+    }
+    // Allow the mCaptcha widget to be framed on the login/signup pages. The
+    // security_headers middleware respects a pre-set X-Frame-Options instead of
+    // overwriting it with DENY.
+    resp_headers.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("ALLOWALL"),
+    );
+    // The global security_headers middleware sets a restrictive default CSP
+    // (`default-src 'none'; frame-ancestors 'none'`) only when no CSP is present,
+    // so set one here that lets the self-hosted widget render and be embedded by
+    // the same-origin login/signup pages.
+    resp_headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+             style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+             font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'",
+        ),
+    );
+
+    resp_builder
+        .body(axum::body::Body::from(bytes))
+        .map(Some)
+        .unwrap_or_else(|error| {
+            tracing::error!(error = %error, "failed to build mCaptcha proxy response");
+            Some(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        })
+}
+
 async fn fallback_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: axum::extract::Request,
 ) -> Response {
     let path = request.uri().path();
     let method = request.method().clone();
+
+    // mCaptcha self-hosted widget reverse proxy. The browser-facing
+    // MCAPTCHA_BASE_URL points at "/mcaptcha/*" on this host, so forward those
+    // requests to the internal mCaptcha container and allow framing.
+    if path == "/mcaptcha" || path.starts_with("/mcaptcha/") {
+        if let Some(response) =
+            proxy_mcaptcha(&state, request.uri(), request.method()).await
+        {
+            return response;
+        }
+    }
 
     // Serve static assets that the SSR pages reference
     if method == axum::http::Method::GET {
@@ -1344,6 +1465,7 @@ mod tests {
             mcaptcha_secret_key: "dev".into(),
             mcaptcha_enabled: false,
             mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
+            mcaptcha_internal_url: "http://apexmail-mcaptcha-1:7000".into(),
         }
     }
 

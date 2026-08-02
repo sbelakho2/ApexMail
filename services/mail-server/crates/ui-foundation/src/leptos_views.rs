@@ -3917,8 +3917,11 @@ pub fn web_login_page(
     )
 }
 
-/// Login page for the control plane. Matches field selectors from the
-/// behavior baseline manifest (e.g. `#login-email`, `#login-password`).
+/// Login page for the control plane. Matches the same two-column marketing
+/// shell (`web_auth_shell`) as the web login/signup pages so all auth surfaces
+/// share one visual design, while preserving the control-plane-specific form
+/// action (`/api/auth/login`) and field selectors (`#login-email`,
+/// `#login-password`) from the behavior baseline manifest.
 pub fn control_plane_login_page(
     csrf_token: &str,
     mcaptcha_site_key: &str,
@@ -3926,37 +3929,44 @@ pub fn control_plane_login_page(
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
     let mcaptcha_html = mcaptcha_widget_html(mcaptcha_site_key, mcaptcha_base_url);
-    format!(
-        "<main class=\"flex min-h-screen items-center justify-center bg-surface-50\">\
-<div class=\"w-full max-w-md space-y-10 rounded-sm border border-surface-200 bg-card p-10 shadow-premium\">\
-<div class=\"text-center\">\
-<span class=\"inline-block text-3xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
-<h1 class=\"mt-2 text-sm font-bold uppercase tracking-[0.2em] text-surface-400\">Control Plane</h1>\
-<p class=\"mt-3 text-sm font-bold uppercase tracking-tight text-surface-500\">Administrator access</p>\
-</div>\
-<form class=\"space-y-6\" action=\"/api/auth/login\" method=\"POST\">\
+    let form_html = format!(
+        "<form class=\"p-10 space-y-6\" action=\"/api/auth/login\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
-<label for=\"login-email\" class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\">Email or username</label>\
-<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"admin@apexmail.ee\" class=\"flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm focus:border-primary outline-none transition-all\" />\
+<label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"login-email\">Email or username</label>\
+<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"admin@apexmail.ee\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
-<label for=\"login-password\" class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\">Password</label>\
+<div class=\"flex items-center justify-between\">\
+<label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"login-password\">Password</label>\
+</div>\
 <div class=\"relative\">\
-<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"••••••••\" class=\"flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm focus:border-primary outline-none transition-all pr-12\" />\
+<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"••••••••\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-10\" />\
 <button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"login-password\" aria-controls=\"login-password\">Show</button>\
 </div>\
 </div>\
+<div class=\"flex items-center gap-3 py-1\">\
+<input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 rounded-sm border-surface-300 text-primary focus:ring-primary\" />\
+<label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium\">Keep me signed in for 30 days.</label>\
+</div>\
 {mcaptcha_html}\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight bg-primary text-white hover:bg-brand-700 h-12 w-full transition-all\">Sign In</button>\
-</form>\
-<div id=\"login-mfa\" class=\"hidden space-y-6\" inert>\
-<p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">MFA Verification</p>\
-<input name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" placeholder=\"000000\" class=\"flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" disabled tabindex=\"-1\" />\
-</div></div>{auth_form_script}</main>",
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-tight flex items-center justify-center gap-3 py-4 rounded-sm shadow-premium transition-all group\"><span>Sign In</span>{arrow}</button>\
+<div id=\"login-mfa\" class=\"hidden\" aria-hidden=\"true\" inert>\
+<p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
+<label class=\"sr-only\" for=\"mfaCode\">MFA code</label>\
+<input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" disabled tabindex=\"-1\" />\
+</div>\
+<div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
         csrf = csrf,
+        arrow = web_auth_arrow_icon(),
         mcaptcha_html = mcaptcha_html,
-        auth_form_script = web_auth_form_script(),
+    );
+
+    web_auth_shell(
+        "Operator access",
+        "Sign in to the ApexMail control plane",
+        &form_html,
+        "<div class=\"px-10 pb-10\"><p class=\"text-center text-xs text-surface-500 font-medium\">Operator console restricted to authorized administrators.</p></div>",
     )
 }
 
@@ -4112,12 +4122,15 @@ mod tests {
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"login-password\""));
         assert!(html.contains("id=\"login-mfa\""));
-        // MFA text
-        assert!(html.contains("MFA Verification"));
+        // MFA text (matches the web login's MFA wording)
+        assert!(html.contains("MFA code"));
         // Auth endpoint
         assert!(html.contains("action=\"/api/auth/login\""));
         assert!(html.contains("bg-background px-2 py-1"));
         assert!(html.contains("text-foreground hover:bg-surface-100"));
+        // CP login now shares the web auth shell (two-column marketing layout)
+        assert!(html.contains("web_auth_shell") || html.contains("lg:grid-cols-[1.1fr_0.9fr]"));
+        assert!(html.contains("Operator access"));
     }
 
     /// Regression guard: login pages must not carry US-style "federal crime /

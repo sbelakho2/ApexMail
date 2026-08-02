@@ -256,6 +256,9 @@ services:
       MCAPTCHA_BASE_URL: ${MCAPTCHA_BASE_URL:-https://app.apexmail.ee/mcaptcha}
       MCAPTCHA_SECRET_KEY_FILE: /run/secrets/mcaptcha_secret_key
       MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:-https://app.apexmail.ee/mcaptcha/api/v1/pow/siteverify}
+      # Internal container URL for the api-server reverse proxy that serves
+      # the /mcaptcha/* widget assets to the browser (server-to-server, HTTP).
+      MCAPTCHA_INTERNAL_URL: ${MCAPTCHA_INTERNAL_URL:-http://apexmail-mcaptcha-1:7000}
       METRICS_PORT: 9090
     depends_on:
       postgres:

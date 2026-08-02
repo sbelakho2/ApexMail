@@ -167,6 +167,12 @@ pub struct Config {
     pub mcaptcha_enabled: bool,
     /// mCaptcha verification endpoint URL.
     pub mcaptcha_verify_url: String,
+    /// Internal base URL of the self-hosted mCaptcha container, used by the
+    /// Rust reverse proxy in `fallback_handler` to serve the `/mcaptcha/*`
+    /// widget assets. This is a server-to-server call on the Docker network,
+    /// so it is HTTP (not HTTPS). The browser-facing URL is `mcaptcha_base_url`.
+    /// Default: "http://apexmail-mcaptcha-1:7000".
+    pub mcaptcha_internal_url: String,
 
     // ── HTTP Client ─────────────────────────────────────────
     /// Timeout in seconds for the internal HTTP client used for outbound
@@ -651,6 +657,13 @@ impl Config {
             "MCAPTCHA_VERIFY_URL",
             "https://demo.mcaptcha.org/api/v1/pow/siteverify",
         );
+        // Internal container URL used by the api-server reverse proxy for the
+        // `/mcaptcha/*` widget assets. Server-to-server on the Docker network
+        // (HTTP), so it is separate from the browser-facing `mcaptcha_base_url`.
+        let mcaptcha_internal_url = env_or(
+            "MCAPTCHA_INTERNAL_URL",
+            "http://apexmail-mcaptcha-1:7000",
+        );
         if !environment.is_production()
             && (mcaptcha_site_key == "dev" || mcaptcha_secret_key == "dev")
         {
@@ -798,6 +811,7 @@ impl Config {
             mcaptcha_secret_key,
             mcaptcha_enabled,
             mcaptcha_verify_url,
+            mcaptcha_internal_url,
 
             http_client_timeout_secs: parse_u64(
                 "HTTP_CLIENT_TIMEOUT_SECONDS",
@@ -1172,6 +1186,7 @@ mod tests {
             mcaptcha_secret_key: "prod-secret-key-67890".into(),
             mcaptcha_enabled: true,
             mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
+            mcaptcha_internal_url: "http://apexmail-mcaptcha-1:7000".into(),
         }
     }
 
@@ -1320,6 +1335,7 @@ mod tests {
             mcaptcha_secret_key: "dev".into(),
             mcaptcha_enabled: false,
             mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
+            mcaptcha_internal_url: "http://apexmail-mcaptcha-1:7000".into(),
         };
 
         assert_eq!(
