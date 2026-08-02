@@ -1,0 +1,512 @@
+# =============================================================================
+# ApexMail Docker Compose - Production Overrides
+# =============================================================================
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# This file overrides development defaults with production-ready settings:
+# - No host port exposure for databases
+# - Stricter resource limits
+# - Required secrets validation
+# - Replicas for stateless services
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # MARKETING SITE (Zola static site, served by nginx-alpine on 8080)
+  # ===========================================================================
+  marketing:
+    # Canonical image name + tag published by .github/workflows/deploy.yml.
+    # The namespace (ghcr.io/sbelakho2/apexmail) must match the CI publisher's
+    # `github.repository`-derived registry path. See deploy/DEPLOYMENT.md.
+    image: ghcr.io/sbelakho2/apexmail/marketing:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      - /var/cache/nginx:mode=0777
+      - /var/run:mode=0777
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - apexmail_frontend
+    healthcheck:
+      # Use wget instead of curl — the nginx-alpine base image ships wget, not curl
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+        reservations:
+          memory: 32M
+
+  # ===========================================================================
+  # REVERSE PROXY (TLS termination)
+  # ===========================================================================
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      NGINX_RESOLVER: 127.0.0.11
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      - /var/log/nginx:mode=0777
+      - /var/cache/nginx:mode=0777
+      - /var/run:mode=0777
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    depends_on:
+      api-server:
+        condition: service_healthy
+      enterprise:
+        condition: service_healthy
+      tracking:
+        condition: service_healthy
+      marketing:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/etc/nginx/ssl:ro
+      - certbot_webroot:/var/www/certbot:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - apexmail_frontend
+      - apexmail_backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/nginx-health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+
+  certbot:
+    image: certbot/certbot:v2.11.0
+    restart: unless-stopped
+    # Must run as root: certbot writes /var/log/letsencrypt and chowns
+    # /etc/letsencrypt/{accounts,archive,live,renewal}.
+    user: "0:0"
+    volumes:
+      - certbot_webroot:/var/www/certbot
+      - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/etc/letsencrypt:rw
+      - ./deploy/scripts/certbot-renew-loop.sh:/usr/local/bin/certbot-renew-loop.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/certbot-renew-loop.sh"]
+    networks:
+      - apexmail_frontend
+
+  observability:
+    image: ghcr.io/sbelakho2/apexmail/observability:latest
+    environment:
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+    secrets:
+      - internal_service_token
+
+  postgres:
+    # Production: Do NOT expose database port to host
+    ports: []
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  redis:
+    # Production: Do NOT expose Redis port to host
+    ports: []
+    # SECURITY: Password from Docker secret, not environment variable
+    environment:
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      REDIS_MAXMEMORY: "1gb"
+      REDIS_MAXMEMORY_POLICY: "volatile-lru"
+    secrets:
+      - redis_password
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  tracking:
+    image: ghcr.io/sbelakho2/apexmail/tracking-service:latest
+    # Use entrypoint wrapper to bridge _FILE env vars to native env vars
+    # Full path required — "tracking-service" alone is not in PATH
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "/usr/local/bin/tracking-service"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    environment:
+      RUST_LOG: info
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
+    secrets:
+      - postgres_password
+      - clickhouse_password
+      - redis_password
+      - tracking_secret_key
+      - internal_service_token
+      - jwt_public_key_pem
+    ports: []
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3001' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  api-server:
+    image: ghcr.io/sbelakho2/apexmail/api-server:latest
+    restart: unless-stopped
+    # Use entrypoint wrapper to bridge _FILE env vars to native env vars
+    # "api-server" is passed explicitly so the wrapper doesn't consume CMD args (--listen) as binary name
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "api-server"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    environment:
+      RUST_LOG: info
+      ENVIRONMENT: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      BASE_URL: ${BASE_URL:?BASE_URL is required in production}
+      OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:?OAUTH_REDIRECT_BASE_URL is required in production}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      DATABASE_REPLICA_URL: ${DATABASE_REPLICA_URL:-}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      API_KEY_HASH_SECRET_FILE: /run/secrets/api_key_hash_secret
+      WEBHOOK_SIGNING_SECRET_FILE: /run/secrets/webhook_signing_secret
+      TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      JWT_PRIVATE_KEY_PEM_FILE: /run/secrets/jwt_private_key_pem
+      JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
+      SESSION_SECRET_FILE: /run/secrets/session_secret
+      IMPERSONATION_SECRET_FILE: /run/secrets/impersonation_secret
+      CSRF_SECRET_FILE: /run/secrets/csrf_secret
+      BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:?BILLING_COMPANY_IBAN is required in production}
+      BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:?BILLING_COMPANY_PHONE is required in production}
+      # ── mCaptcha (login CAPTCHA protection) ───────────────────────────────
+      METRICS_PORT: 9090
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports: []
+    networks:
+      - apexmail_backend
+      - apexmail_data
+    healthcheck:
+      # Use /dev/tcp bash built-in instead of nc — distroless/minimal images may not ship netcat
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+    secrets:
+      - postgres_password
+      - redis_password
+      - api_key_hash_secret
+      - webhook_signing_secret
+      - tracking_secret_key
+      - internal_service_token
+      - jwt_private_key_pem
+      - jwt_public_key_pem
+      - session_secret
+      - impersonation_secret
+      - csrf_secret
+
+  # ===========================================================================
+  # MTA (Mail Transfer Agent)
+  # ===========================================================================
+  mta:
+    # Canonical image name is `mta` (matches the CI build target and the
+    # docker-compose.yml dev service key). The binary inside the image is still
+    # named `mta-server`; the image/tag name is the single source of truth.
+    image: ghcr.io/sbelakho2/apexmail/mta:latest
+    restart: unless-stopped
+    entrypoint: ["/usr/bin/tini", "--", "mta-server"]
+    ports:
+      - "25:25"
+    environment:
+      RUST_LOG: info
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      METRICS_PORT: "9090"
+      HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
+      LOCAL_DOMAINS: ${LOCAL_DOMAINS:-apexmail.ee}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+    secrets:
+      - postgres_password
+      - redis_password
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/25' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apexmail_frontend
+      - apexmail_data
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  enterprise:
+    image: ghcr.io/sbelakho2/apexmail/enterprise:latest
+    environment:
+      RUST_LOG: info
+      JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
+    secrets:
+      - postgres_password
+      - redis_password
+      - jwt_public_key_pem
+    ports: []
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3002' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  # ===========================================================================
+  # WORKER (Background job processing)
+  # ===========================================================================
+  worker:
+    image: ghcr.io/sbelakho2/apexmail/worker:latest
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "worker"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      METRICS_PORT: "9093"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SERVICE_NAME: worker
+      # Email transport — use the self-hosted MTA container for sending
+      EMAIL_TRANSPORT_TYPE: ${EMAIL_TRANSPORT_TYPE:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-mta}
+      SMTP_PORT: ${SMTP_PORT:-25}
+      SMTP_TLS: ${SMTP_TLS:-false}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+    secrets:
+      - postgres_password
+      - redis_password
+      - internal_service_token
+    ports: []
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9093' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - apexmail_backend
+      - apexmail_data
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  postgres-backup:
+    image: prodrigestivill/postgres-backup-local:16-alpine
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-apexmail}
+      POSTGRES_USER: ${POSTGRES_USER:-apexmail}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      BACKUP_DIR: /backups
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_KEEP_WEEKS: ${BACKUP_KEEP_WEEKS:-8}
+      BACKUP_KEEP_MONTHS: ${BACKUP_KEEP_MONTHS:-6}
+    volumes:
+      - postgres_backups:/backups
+    networks:
+      - apexmail_data
+    secrets:
+      - postgres_password
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+
+  clickhouse:
+    ports: []
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+
+volumes:
+  certbot_webroot:
+  postgres_backups:
+
+secrets:
+  postgres_password:
+    file: ${PROD_POSTGRES_PASSWORD_FILE:?PROD_POSTGRES_PASSWORD_FILE is required in production}
+  redis_password:
+    file: ${PROD_REDIS_PASSWORD_FILE:?PROD_REDIS_PASSWORD_FILE is required in production}
+  clickhouse_password:
+    file: ${PROD_CLICKHOUSE_PASSWORD_FILE:?PROD_CLICKHOUSE_PASSWORD_FILE is required in production}
+  api_key_hash_secret:
+    file: ${PROD_API_KEY_HASH_SECRET_FILE:?PROD_API_KEY_HASH_SECRET_FILE is required in production}
+  webhook_signing_secret:
+    file: ${PROD_WEBHOOK_SIGNING_SECRET_FILE:?PROD_WEBHOOK_SIGNING_SECRET_FILE is required in production}
+  tracking_secret_key:
+    file: ${PROD_TRACKING_SECRET_KEY_FILE:?PROD_TRACKING_SECRET_KEY_FILE is required in production}
+  internal_service_token:
+    file: ${PROD_INTERNAL_SERVICE_TOKEN_FILE:?PROD_INTERNAL_SERVICE_TOKEN_FILE is required in production}
+  jwt_secret:
+    file: ${PROD_JWT_SECRET_FILE:?PROD_JWT_SECRET_FILE is required in production}
+  jwt_private_key_pem:
+    file: ${PROD_JWT_PRIVATE_KEY_FILE:?PROD_JWT_PRIVATE_KEY_FILE is required in production}
+  jwt_public_key_pem:
+    file: ${PROD_JWT_PUBLIC_KEY_FILE:?PROD_JWT_PUBLIC_KEY_FILE is required in production}
+  session_secret:
+    file: ${PROD_SESSION_SECRET_FILE:?PROD_SESSION_SECRET_FILE is required in production}
+  impersonation_secret:
+    file: ${PROD_IMPERSONATION_SECRET_FILE:?PROD_IMPERSONATION_SECRET_FILE is required in production}
+  csrf_secret:
+    file: ${PROD_CSRF_SECRET_FILE:?PROD_CSRF_SECRET_FILE is required in production}
