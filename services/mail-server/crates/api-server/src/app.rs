@@ -1168,27 +1168,43 @@ async fn proxy_mcaptcha(state: &AppState, uri: &Uri, method: &Method) -> Option<
 
     let status = upstream.status();
     let upstream_headers = upstream.headers().clone();
-    let bytes = upstream.bytes().await.unwrap_or_default();
-
-    // Rewrite relative URLs in the widget HTML so assets load through the proxy.
-    // The mCaptcha widget page uses relative URLs like /assets/bundle/...css
-    // which would resolve to https://app.apexmail.ee/assets/... (404).
-    // Inject a <base href="/mcaptcha/"> tag so they resolve to /mcaptcha/assets/...
-    let bytes: Vec<u8> = if upstream_headers
+    let original_bytes = upstream.bytes().await.unwrap_or_default();
+    let content_type = upstream_headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.contains("text/html"))
-        .unwrap_or(false)
-    {
-        let html = String::from_utf8_lossy(&bytes);
-        if html.contains("<head>") && !html.contains("<base") {
-            html.replacen("<head>", "<head><base href=\"/mcaptcha/\">", 1)
-                .into_bytes()
+        .unwrap_or("");
+    tracing::info!(
+        path = %path,
+        status = %status,
+        content_type = %content_type,
+        body_len = original_bytes.len(),
+        "mCaptcha proxy response received"
+    );
+
+    // Rewrite relative URLs in the widget HTML so assets load through the proxy.
+    let bytes: Vec<u8> = if content_type.contains("text/html") {
+        let html = String::from_utf8_lossy(&original_bytes);
+        tracing::info!(
+            has_head = html.contains("<head>"),
+            has_base = html.contains("<base"),
+            "mCaptcha proxy HTML analysis"
+        );
+        if html.contains("<head>") {
+            let rewritten = html.replacen(
+                "<head>",
+                "<head><base href=\"/mcaptcha/\">",
+                1,
+            );
+            tracing::info!(
+                injected = rewritten.contains("<base href"),
+                "mCaptcha proxy base tag injection"
+            );
+            rewritten.into_bytes()
         } else {
-            bytes.to_vec()
+            original_bytes.to_vec()
         }
     } else {
-        bytes.to_vec()
+        original_bytes.to_vec()
     };
 
     let mut resp_builder = Response::builder().status(status);
