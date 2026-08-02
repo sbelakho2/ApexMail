@@ -1170,6 +1170,27 @@ async fn proxy_mcaptcha(state: &AppState, uri: &Uri, method: &Method) -> Option<
     let upstream_headers = upstream.headers().clone();
     let bytes = upstream.bytes().await.unwrap_or_default();
 
+    // Rewrite relative URLs in the widget HTML so assets load through the proxy.
+    // The mCaptcha widget page uses relative URLs like /assets/bundle/...css
+    // which would resolve to https://app.apexmail.ee/assets/... (404).
+    // Inject a <base href="/mcaptcha/"> tag so they resolve to /mcaptcha/assets/...
+    let bytes: Vec<u8> = if upstream_headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/html"))
+        .unwrap_or(false)
+    {
+        let html = String::from_utf8_lossy(&bytes);
+        if html.contains("<head>") && !html.contains("<base") {
+            html.replacen("<head>", "<head><base href=\"/mcaptcha/\">", 1)
+                .into_bytes()
+        } else {
+            bytes.to_vec()
+        }
+    } else {
+        bytes.to_vec()
+    };
+
     let mut resp_builder = Response::builder().status(status);
     let resp_headers = resp_builder.headers_mut().expect("response headers exist");
 
