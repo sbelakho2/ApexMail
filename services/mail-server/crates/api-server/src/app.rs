@@ -1128,10 +1128,10 @@ async fn proxy_mcaptcha(state: &AppState, uri: &Uri, method: &Method) -> Option<
         return None;
     };
 
-    // Only proxy safe read-only methods; the widget only needs GET/HEAD.
+    // Only proxy safe read-only methods. Always use GET upstream because
+    // mCaptcha's actix server returns 404 for HEAD requests.
     let reqwest_method = match *method {
-        Method::GET => reqwest::Method::GET,
-        Method::HEAD => reqwest::Method::HEAD,
+        Method::GET | Method::HEAD => reqwest::Method::GET,
         _ => return None,
     };
 
