@@ -1089,7 +1089,7 @@ var mfaEl=form.querySelector('[data-mfa-section]');\
 if(mfaEl){mfaEl.classList.remove('hidden');mfaEl.removeAttribute('aria-hidden');mfaEl.removeAttribute('inert');}\
 var sbtn=form.querySelector('button[type=submit]');\
 if(sbtn){sbtn.dataset.originalMfaLabel=sbtn.textContent;sbtn.textContent='Verify MFA';sbtn.disabled=false;}\
-if(btn){btn.disabled=false;btn.textContent=btn.dataset.originalLabel||'Sign In';}\
+if(btn){btn.disabled=false;}
 }\
 else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}}\
 }else{\
