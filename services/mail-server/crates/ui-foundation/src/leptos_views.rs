@@ -962,14 +962,6 @@ pub fn marketing_api_console_page() -> String {
 
 // ─── Web auth pages ────────────────────────────────────────
 
-fn web_auth_check_icon() -> &'static str {
-    "<svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"h-4 w-4\"><path d=\"M6 12l4 4 8-8\"></path></svg>"
-}
-
-fn web_auth_mail_icon() -> &'static str {
-    "<svg aria-hidden=\"true\" focusable=\"false\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-6 h-6\"><path d=\"M22 17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9.5C2 7 4 5 5.5 5H18.5C20 5 22 7 22 9.5V17Z\"></path><path d=\"M6 8L12 12L18 8\"></path></svg>"
-}
-
 fn web_auth_arrow_icon() -> &'static str {
     "<svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-4 h-4\"><path d=\"M5 12h12m-4-4 4 4-4 4\"></path></svg>"
 }
@@ -980,35 +972,6 @@ fn web_auth_google_icon() -> &'static str {
 
 fn web_auth_github_icon() -> &'static str {
     "<svg aria-hidden=\"true\" class=\"w-5 h-5 text-foreground\" fill=\"currentColor\" viewBox=\"0 0 24 24\"><path d=\"M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.03.555-3.885-1.425-3.885-1.425-.546-1.38-1.335-1.755-1.335-1.755-1.005-.69.075-.675.075-.675 1.11.075 1.695 1.14 1.695 1.14 1.005 1.725 2.64 1.23 3.285.945.105-.72.39-1.215.705-1.485-2.565-.285-5.265-1.29-5.265-5.73 0-1.26.45-2.295 1.185-3.09-.12-.285-.525-1.455.105-3.045 0 0 .96-.3 3.15 1.2A10.965 10.965 0 0 1 12 5.805c.9.015 1.785.12 2.64.24 2.19-1.5 3.15-1.2 3.15-1.2.63 1.59.225 2.76.105 3.045.735.795 1.185 1.83 1.185 3.09 0 4.455-2.715 5.43-5.295 5.715.39.345.735 1.02.735 2.055 0 1.485-.015 2.685-.015 3.045 0 .315.225.69.84.57C20.565 21.795 24 17.31 24 12c0-6.63-5.37-12-12-12\"></path></svg>"
-}
-
-fn web_auth_bullet(text: &str) -> String {
-    format!(
-        "<div class=\"flex items-center gap-4\">\
-<span class=\"flex h-8 w-8 shrink-0 items-center justify-center rounded-sm bg-primary text-white shadow-premium\">{icon}</span>\
-<span class=\"text-surface-600 font-medium leading-tight\">{text}</span></div>",
-        icon = web_auth_check_icon(),
-    )
-}
-
-fn web_auth_marketing_panel() -> String {
-    let bullets = [
-        "Delivery intelligence across regions",
-        "Enterprise-grade compliance workflows",
-        "Executive-ready performance reporting",
-    ]
-    .into_iter()
-    .map(web_auth_bullet)
-    .collect::<Vec<_>>()
-    .join("");
-
-    format!(
-        "<div class=\"hidden lg:block\">\
-<div class=\"inline-flex items-center gap-2 rounded-sm border border-brand-200/60 bg-card/80 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.2em] text-brand-700 mb-8 shadow-premium-sm\">Console Access</div>\
-<h1 class=\"text-5xl font-bold text-surface-950 tracking-tight leading-[1.1]\">Your command center for delivery, trust, and analytics.</h1>\
-<p class=\"mt-6 max-w-[520px] text-[17px] text-surface-600 leading-relaxed\">Monitor every campaign, verify your domains, and spot deliverability risks before they impact your reputation.</p>\
-<div class=\"mt-12 space-y-4\">{bullets}</div></div>",
-    )
 }
 
 fn web_auth_social_footer(agreement_prefix: &str) -> String {
@@ -1032,9 +995,7 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
     format!(
         "<main class=\"min-h-screen bg-surface-50 relative overflow-hidden\">\
     <div class=\"pointer-events-none absolute inset-0\"></div>\
-<div class=\"relative mx-auto flex min-h-screen w-full max-w-7xl items-center px-6 py-20\">\
-<div class=\"grid w-full items-center gap-20 lg:grid-cols-[1.1fr_0.9fr]\">\
-{marketing_panel}\
+<div class=\"relative mx-auto flex min-h-screen w-full max-w-7xl items-center justify-center px-6 py-20\">\
 <div class=\"w-full max-w-[480px] mx-auto\">\
 <div class=\"text-center mb-10\">\
 <span class=\"inline-block text-3xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
@@ -1043,8 +1004,7 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
 </div>\
 <div class=\"bg-card rounded-sm shadow-premium border border-surface-200/80 overflow-hidden\">\
 {form_html}{footer_html}\
-</div></div></div></div>{auth_form_script}</main>",
-        marketing_panel = web_auth_marketing_panel(),
+</div></div></div>{auth_form_script}</main>",
         auth_form_script = web_auth_form_script(),
     )
 }
@@ -3890,7 +3850,7 @@ pub fn web_login_page(
     )
 }
 
-/// Login page for the control plane. Matches the same two-column marketing
+/// Login page for the control plane. Matches the same centered
 /// shell (`web_auth_shell`) as the web login/signup pages so all auth surfaces
 /// share one visual design, while preserving the control-plane-specific form
 /// action (`/api/auth/login`) and field selectors (`#login-email`,
@@ -3905,7 +3865,7 @@ pub fn control_plane_login_page(
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"login-email\">Email or username</label>\
-<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"admin@apexmail.ee\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
+<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
@@ -4081,7 +4041,6 @@ mod tests {
         // Form structure
         assert!(html.contains("Forgot password?"));
         assert!(html.contains("Welcome back"));
-        assert!(html.contains("Console Access"));
         assert!(html.contains("Security Check Active"));
         assert!(html.contains("Or continue with"));
     }
@@ -4099,8 +4058,8 @@ mod tests {
         assert!(html.contains("action=\"/api/auth/login\""));
         assert!(html.contains("bg-background px-2 py-1"));
         assert!(html.contains("text-foreground hover:bg-surface-100"));
-        // CP login now shares the web auth shell (two-column marketing layout)
-        assert!(html.contains("web_auth_shell") || html.contains("lg:grid-cols-[1.1fr_0.9fr]"));
+        // CP login now shares the centered web auth shell
+        assert!(html.contains("max-w-[480px]"));
         assert!(html.contains("Operator access"));
     }
 
@@ -4169,7 +4128,6 @@ mod tests {
     fn web_signup_page_renders_form() {
         let html = web_signup_page("");
         assert!(html.contains("Create your account"));
-        assert!(html.contains("Console Access"));
         assert!(html.contains("id=\"signup-name\""));
         assert!(html.contains("id=\"signup-email\""));
         assert!(html.contains("id=\"signup-password\""));
@@ -4199,7 +4157,6 @@ mod tests {
     fn web_forgot_password_page_renders_form() {
         let html = web_forgot_password_page("");
         assert!(html.contains("Reset your password"));
-        assert!(html.contains("Console Access"));
         assert!(html.contains("action=\"/v1/auth/forgot-password\""));
         assert!(html.contains("Send Reset Link"));
         assert!(html.contains("Back to sign in"));

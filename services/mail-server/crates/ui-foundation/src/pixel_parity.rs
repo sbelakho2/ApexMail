@@ -331,8 +331,8 @@ mod tests {
 
     #[test]
     fn deterministic_rendering_web_login() {
-        let a = leptos_views::web_login_page("", "", "");
-        let b = leptos_views::web_login_page("", "", "");
+        let a = leptos_views::web_login_page("");
+        let b = leptos_views::web_login_page("");
         assert_pixel_parity("web_login determinism", &a, &b);
     }
 
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn web_login_page_selectors_match_behavior_baseline() {
-        let html = leptos_views::web_login_page("", "", "");
+        let html = leptos_views::web_login_page("");
         let data = extract_data_attrs(&html);
         // Check the error-key data attribute
         assert!(
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn control_plane_login_page_selectors_match_behavior_baseline() {
         let html =
-            leptos_views::control_plane_login_page("", "", "");
+            leptos_views::control_plane_login_page("");
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"login-password\""));
         assert!(html.contains("id=\"login-mfa\""));
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn web_login_full_parity_check() {
-        let html = leptos_views::web_login_page("", "", "");
+        let html = leptos_views::web_login_page("");
         let result = check_parity(&html, &html);
         assert!(
             result.is_identical,
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn parity_detects_class_mutation_on_real_page() {
-        let html = leptos_views::web_login_page("", "", "");
+        let html = leptos_views::web_login_page("");
         let tampered = html.replacen("rounded-sm", "rounded-none", 1);
         let result = check_parity(&html, &tampered);
         assert!(
@@ -643,11 +643,11 @@ mod tests {
             ("home", leptos_views::web_home_page()),
             (
                 "login",
-                leptos_views::web_login_page("", "", ""),
+                leptos_views::web_login_page(""),
             ),
             (
                 "signup",
-                leptos_views::web_signup_page("", "", ""),
+                leptos_views::web_signup_page(""),
             ),
             ("dashboard", leptos_views::web_dashboard_page()),
             ("campaigns", leptos_views::web_campaigns_page()),
@@ -682,7 +682,7 @@ mod tests {
             ("home", leptos_views::control_plane_home_page()),
             (
                 "login",
-                leptos_views::control_plane_login_page("", "", ""),
+                leptos_views::control_plane_login_page(""),
             ),
             ("dashboard", leptos_views::control_plane_dashboard_page()),
             ("tenants", leptos_views::control_plane_tenants_page()),
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn web_login_preserves_tailwind_classes() {
-        let html = leptos_views::web_login_page("", "", "");
+        let html = leptos_views::web_login_page("");
         let classes = extract_classes(&html);
         let flat: Vec<&str> = classes
             .iter()
@@ -773,7 +773,6 @@ mod tests {
             "border",
             "bg-white",
             "shadow-premium",
-            "text-4xl",
             "font-bold",
             "bg-primary",
         ];
@@ -785,7 +784,7 @@ mod tests {
     #[test]
     fn cp_login_preserves_tailwind_classes() {
         let html =
-            leptos_views::control_plane_login_page("", "", "");
+            leptos_views::control_plane_login_page("");
         let classes = extract_classes(&html);
         let flat: Vec<&str> = classes
             .iter()
