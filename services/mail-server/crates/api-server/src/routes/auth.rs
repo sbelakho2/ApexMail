@@ -1258,9 +1258,10 @@ async fn login(
     }
 
     let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
-         FROM users WHERE LOWER(email) = LOWER($1)",
+        "SELECT id::text, tenant_id::text, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
+         FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)",
     )
+    .bind(&body.email)
     .bind(&body.email)
     .fetch_optional(&state.db)
     .await?;
