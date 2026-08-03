@@ -1,7 +1,7 @@
 //! Challenge issuance for KiwiCaptcha.
 //!
 //! A challenge is an HMAC-signed, nonce-stamped, IP-bound token that the client
-//! must fold into an Argon2id proof-of-work. The signature binds the challenge
+//! must fold into a PBKDF2 proof-of-work. The signature binds the challenge
 //! to the server's secret key (so clients cannot forge challenges), the issuing
 //! time (for TTL enforcement), the client IP hash (for replay-across-clients
 //! prevention), and the scope (so a login challenge can't be used for signup).
@@ -49,7 +49,7 @@ pub struct ChallengeRecord {
     pub ip_hash: String,
     pub issued_at: u64,
     pub expires_at: u64,
-    /// The Argon2id difficulty parameters this challenge was issued with, so a
+    /// The PBKDF2 difficulty parameters this challenge was issued with, so a
     /// difficulty downgrade attack (client claims a lower target_bits) is
     /// rejected — the server always verifies against the parameters it issued.
     pub m_kib: u32,
@@ -136,15 +136,17 @@ pub fn verify_signature(
     Ok(hmac_ct_eq(&expected, signature))
 }
 
-/// Constant-time string comparison (lengths are equal because both are hex
-/// HMAC outputs).
+/// Constant-time string comparison. Even if lengths differ, the comparison
+/// still iterates over `min(a.len(), b.len())` bytes using XOR accumulation
+/// so the timing is proportional to the shorter input — not short-circuited.
 fn hmac_ct_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
     let mut diff: u8 = 0;
-    for (x, y) in a.bytes().zip(b.bytes()) {
+    let min_len = a.len().min(b.len());
+    for (x, y) in a.bytes().take(min_len).zip(b.bytes().take(min_len)) {
         diff |= x ^ y;
+    }
+    if a.len() != b.len() {
+        diff |= 1;
     }
     diff == 0
 }
@@ -169,6 +171,9 @@ pub fn issue_challenge(
     client_ip: &str,
     now_unix: u64,
 ) -> Result<Issued, SignError> {
+    if scope.contains('|') {
+        return Err(SignError::InvalidScope);
+    }
     // 32-byte nonce.
     let mut nonce_bytes = [0u8; 32];
     thread_rng().fill_bytes(&mut nonce_bytes);
@@ -246,6 +251,8 @@ pub fn payload_from_record(record: &ChallengeRecord) -> ChallengePayload {
 pub enum SignError {
     #[error("HMAC secret key is too short")]
     KeyTooShort,
+    #[error("scope contains invalid character '|'")]
+    InvalidScope,
 }
 
 // Minimal hex encode/decode to avoid pulling in a `hex` crate dependency —

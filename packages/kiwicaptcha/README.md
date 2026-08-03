@@ -1,6 +1,6 @@
 # KiwiCaptcha
 
-A native Rust, zero-dependency proof-of-work CAPTCHA engine.
+A native Rust proof-of-work CAPTCHA engine.
 
 **Owner**: Bel Consulting OÜ (registry 16588745, VAT EE102951727, Tallinn, Estonia)
 **License**: MIT
@@ -9,12 +9,12 @@ A native Rust, zero-dependency proof-of-work CAPTCHA engine.
 
 - **No external services** — runs entirely in your infrastructure, no third-party calls, no iframes
 - **No external JavaScript** — the browser widget uses only the native WebCrypto API (`crypto.subtle.deriveBits`)
-- **CSP-compatible** — no `script-src` carve-outs needed; the widget is an inline nonce'd script
-- **PBKDF2-HMAC-SHA256** proof-of-work — memory-hard-ish, GPU-resistant, tunable difficulty
+- **CSP-compatible** — widget scripts receive nonce from host CSP middleware; no `script-src` carve-outs needed
+- **PBKDF2-HMAC-SHA256** proof-of-work — CPU-bound, sequential, tunable difficulty
 - **Single-use tokens** — Redis-backed, HMAC-signed, IP-bound challenges prevent replay and relay attacks
 - **Telemetry scoring** — detects headless browsers via webdriver flag, hardware concurrency, and interaction metrics
 - **Scope isolation** — a challenge minted for "login" cannot be reused on "signup"
-- **Dev-mode bypass** — compile-gated bypass for local development (`cfg!(debug_assertions)` gate)
+- **Dev-mode bypass** — use KIWI_SECRET_KEY=dev with cfg!(debug_assertions)
 
 ## Protocol
 

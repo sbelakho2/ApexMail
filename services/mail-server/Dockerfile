@@ -22,6 +22,7 @@ COPY services/mail-server/Cargo.toml services/mail-server/Cargo.lock ./
 # This workspace relies on implicit src/lib.rs and src/main.rs targets, so
 # cargo metadata/fetch must see the full crate trees rather than manifests only.
 COPY services/mail-server/crates ./crates
+COPY packages/kiwicaptcha/Cargo.toml /app/packages/kiwicaptcha/Cargo.toml
 
 RUN cargo fetch --locked
 
@@ -34,6 +35,7 @@ FROM deps AS api-server-builder
 
 COPY docs /app/docs
 COPY apps/marketing-zola/public /app/apps/marketing-zola/public
+COPY packages/kiwicaptcha /app/packages/kiwicaptcha
 
 RUN cargo build --release --bin api-server
 

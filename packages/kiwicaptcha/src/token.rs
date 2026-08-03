@@ -91,7 +91,7 @@ impl SolutionToken {
             .parse()
             .map_err(|_| DecodeError::InvalidDuration)?;
         let telemetry: serde_json::Value =
-            serde_json::from_str(telemetry_str).unwrap_or(serde_json::Value::Null);
+            serde_json::from_str(telemetry_str).map_err(|_| DecodeError::Malformed)?;
 
         Ok(Self {
             nonce,

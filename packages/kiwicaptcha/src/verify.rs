@@ -1,11 +1,11 @@
 //! Proof-of-work verification for KiwiCaptcha.
 //!
 //! Given a stored [`ChallengeRecord`] and a client-submitted counter, this
-//! module re-derives the Argon2id hash (`Argon2id(challenge || prefix || counter, salt, m, t, p)`)
+//! module re-derives the PBKDF2-HMAC-SHA256 hash (`PBKDF2(challenge || prefix || counter, salt, iterations)`)
 //! and checks that the raw output has at least `target_bits` leading zero bits.
 //!
-//! Because Argon2id is memory-hard, the server re-derivation costs real time
-//! and memory — but only once per verification (the client pays the brute-force
+//! Because PBKDF2 is CPU-bound, the server re-derivation costs a small fixed
+//! amount of CPU time — but only once per verification (the client pays the brute-force
 //! cost of finding the counter). This is the asymmetry that makes PoW work:
 //! cheap to verify, expensive to solve.
 

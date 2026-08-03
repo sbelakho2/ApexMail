@@ -1,6 +1,6 @@
 [package]
 name = "kiwicaptcha"
-description = "KiwiCaptcha — a native Rust, zero-dependency proof-of-work CAPTCHA engine."
+description = "KiwiCaptcha — a native Rust proof-of-work CAPTCHA engine."
 version = "0.1.0"
 edition = "2021"
 authors = ["Bel Consulting OÜ <hello@apexmail.ee>"]

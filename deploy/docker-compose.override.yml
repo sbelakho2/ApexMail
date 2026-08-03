@@ -21,7 +21,7 @@ services:
       - /opt/apexmail/services/mail-server/target/release/api-server:/usr/local/bin/api-server:ro
     environment:
       KIWI_ENABLED: "true"
-      KIWI_SECRET_KEY: "${KIWI_SECRET_KEY:-kdev-prod-key-change-me}"
+      KIWI_SECRET_KEY_FILE: /run/secrets/kiwi_secret_key
       KIWI_PBKDF2_ITERATIONS: "1"
       KIWI_DIFFICULTY_BITS: "14"
       KIWI_CHALLENGE_TTL_SECS: "120"

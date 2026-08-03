@@ -1339,6 +1339,7 @@ pub fn web_reset_password_page_with_state(
     };
 
     let csrf = csrf_hidden_input(csrf_token);
+    let kiwi_html = kiwicaptcha::kiwi_widget_html();
     let password_hint = password_requirements_hint();
     let form_html = format!(
         "<form class=\"p-8 space-y-5\" action=\"/v1/auth/reset-password\" method=\"POST\" autocomplete=\"off\">\
@@ -1360,6 +1361,7 @@ pub fn web_reset_password_page_with_state(
 <button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"confirm-password\" aria-controls=\"confirm-password\">Show</button>\
 </div>\
 </div>\
+{kiwi_html}\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-2 py-3 rounded-sm shadow-premium-primary/25 mt-2 transition-all disabled:cursor-not-allowed disabled:bg-surface-300 disabled:text-surface-600 disabled:shadow-premium-none\"{submit_state}><span>Reset Password</span>{arrow}</button>\
 <div class=\"text-xs text-muted-foreground text-center\">Remembered your password? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
@@ -1369,6 +1371,7 @@ pub fn web_reset_password_page_with_state(
         header_notice = header_notice,
         submit_state = submit_state,
         arrow = web_auth_arrow_icon(),
+        kiwi_html = kiwi_html,
         password_pattern = password_pattern(),
         password_title = password_requirements_text(),
         password_hint = password_hint,

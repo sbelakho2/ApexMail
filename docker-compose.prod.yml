@@ -355,7 +355,7 @@ services:
       - jwt_public_key_pem
     ports: []
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3002' 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3008' 2>/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3

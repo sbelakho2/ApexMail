@@ -83,8 +83,8 @@ pub fn kiwi_widget_html() -> String {
       if (leadingZeros(bytes) >= targetBits) {{
         return {{ counter: counter, duration: Math.round(performance.now() - solveStart) }};
       }}
-      if (counter % 50 === 0) {{
-        if (fillEl) fillEl.style.width = Math.min(95, counter / 10) + "%";
+      if (counter % 500 === 0) {{
+        if (fillEl) fillEl.style.width = Math.min(95, (counter * 100) / Math.pow(2, targetBits)) + "%";
         await new Promise(function(r) {{ setTimeout(r, 0); }});
       }}
     }}
@@ -108,13 +108,6 @@ pub fn kiwi_widget_html() -> String {
       if (!resp.ok) throw new Error("challenge request failed: " + resp.status);
       var data = await resp.json();
 
-      if (data.challenge === "dev") {{
-        if (tokenEl) tokenEl.value = btoa("dev.0.0.{{}}");
-        setStatus("Dev mode (verification bypassed)", "Dev", "done");
-        if (fillEl) fillEl.style.width = "100%";
-        return;
-      }}
-
       setStatus("Computing proof-of-work\u2026", "Verifying", "solving");
       var result = await solve(data.prefix, data.salt, data.mKib || 50000, data.targetBits);
       if (!result) throw new Error("solver exhausted");
@@ -127,6 +120,8 @@ pub fn kiwi_widget_html() -> String {
         sw: window.screen.width || 0, sh: window.screen.height || 0,
         iw: window.innerWidth || 0, ih: window.innerHeight || 0
       }};
+      // btoa is safe here: nonce (base64), counter (decimal), duration (decimal),
+      // and telemetry (JSON) are all ASCII, so no Latin-1 encoding issues arise.
       var plain = data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry);
       var token = btoa(plain);
       if (tokenEl) tokenEl.value = token;

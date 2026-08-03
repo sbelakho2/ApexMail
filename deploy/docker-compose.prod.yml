@@ -250,7 +250,12 @@ services:
       CSRF_SECRET_FILE: /run/secrets/csrf_secret
       BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:?BILLING_COMPANY_IBAN is required in production}
       BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:?BILLING_COMPANY_PHONE is required in production}
-      # ── mCaptcha (login CAPTCHA protection) ───────────────────────────────
+      # ── KiwiCaptcha (native Rust login CAPTCHA protection) ────────────────
+      KIWI_ENABLED: "true"
+      KIWI_SECRET_KEY_FILE: /run/secrets/kiwi_secret_key
+      KIWI_ARGON_M_KIB: "50000"
+      KIWI_DIFFICULTY_BITS: "16"
+      KIWI_CHALLENGE_TTL_SECS: "120"
       METRICS_PORT: 9090
     depends_on:
       postgres:
@@ -291,6 +296,7 @@ services:
       - session_secret
       - impersonation_secret
       - csrf_secret
+      - kiwi_secret_key
 
   # ===========================================================================
   # MTA (Mail Transfer Agent)
@@ -349,7 +355,7 @@ services:
       - jwt_public_key_pem
     ports: []
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3002' 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3008' 2>/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -510,3 +516,5 @@ secrets:
     file: ${PROD_IMPERSONATION_SECRET_FILE:?PROD_IMPERSONATION_SECRET_FILE is required in production}
   csrf_secret:
     file: ${PROD_CSRF_SECRET_FILE:?PROD_CSRF_SECRET_FILE is required in production}
+  kiwi_secret_key:
+    file: ${PROD_KIWI_SECRET_KEY_FILE:?PROD_KIWI_SECRET_KEY_FILE is required in production}

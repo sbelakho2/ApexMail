@@ -1,6 +1,6 @@
 //! # KiwiCaptcha
 //!
-//! A native Rust, zero-dependency proof-of-work CAPTCHA engine.
+//! A native Rust proof-of-work CAPTCHA engine.
 //!
 //! KiwiCaptcha uses **PBKDF2-HMAC-SHA256** as the client-side hash function
 //! (native WebCrypto API in every modern browser, zero JS dependencies),
