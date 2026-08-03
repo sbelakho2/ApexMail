@@ -1081,10 +1081,22 @@ var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-orig
 var data=null;try{data=await res.json();}catch(_e){}\
 if(res.ok){\
 if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}\
+else if(res.status===202&&data&&data.challenge_token){\
+form.dataset.mfaToken=data.challenge_token;\
+form.dataset.mfaOriginalAction=action;\
+var mfaEl=form.querySelector('[data-mfa-section]');\
+if(mfaEl){mfaEl.classList.remove('hidden');mfaEl.removeAttribute('aria-hidden');mfaEl.removeAttribute('inert');}\
+var sbtn=form.querySelector('button[type=submit]');\
+if(sbtn){sbtn.dataset.originalMfaLabel=sbtn.textContent;sbtn.textContent='Verify MFA';sbtn.disabled=false;}\
+if(btn){btn.disabled=false;btn.textContent=btn.dataset.originalLabel||'Sign In';}\
+}\
+else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}\
+if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}\
 else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}}\
 }else{\
 var msg=(data&&data.error&&(data.error.message||data.error.code))||(data&&data.message)||('Request failed ('+res.status+').');\
 showError(form,msg);\
+delete form.dataset.mfaToken;\
 if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}\
 }\
 }catch(err){showError(form,'Network error. Please try again.');if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}\

@@ -131,10 +131,14 @@ pub async fn verify_kiwi_token(
         "KiwiCaptcha: challenge record found"
     );
 
-    // Single-use: delete immediately regardless of verification outcome, so a
-    // failed attempt cannot be retried with the same challenge.
-    let _: Option<String> =
-        deadpool_redis::redis::AsyncCommands::del(&mut *conn, &key).await?;
+    // Set a short expiry (30s) on first successful verify so the challenge
+    // cannot be replayed, but survives long enough for a MFA retry.
+    let _: () = deadpool_redis::redis::AsyncCommands::expire(
+        &mut *conn,
+        &key,
+        30,
+    )
+    .await?;
 
     // IP binding: the challenge was issued to this IP. A mismatch means a
     // relay attack (token minted elsewhere, submitted from here).
