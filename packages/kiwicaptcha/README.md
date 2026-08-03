@@ -2,7 +2,7 @@
 
 A native Rust proof-of-work CAPTCHA engine.
 
-**Authors**: The KiwiCaptcha Authors
+**Authors**: Bel Consulting OÜ
 **License**: MIT
 
 ## Features
