@@ -1077,7 +1077,6 @@ payload[k]=v;\
 if(form.dataset.mfaToken&&payload.mfaCode){action=form.dataset.mfaOriginalAction.replace('/login','/mfa/verify');payload={challenge_token:form.dataset.mfaToken,mfa_code:payload.mfaCode};form.dataset.mfaToken='';}\
 var headers={'Content-Type':'application/json','Accept':'application/json'};\
 var csrf=fd.get('_csrf');if(csrf)headers['X-CSRF-Token']=csrf;\
-
 try{\
 var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-origin',body:JSON.stringify(payload)});\
 var data=null;try{data=await res.json();}catch(_e){}\
@@ -1092,8 +1091,6 @@ var sbtn=form.querySelector('button[type=submit]');\
 if(sbtn){sbtn.dataset.originalMfaLabel=sbtn.textContent;sbtn.textContent='Verify MFA';sbtn.disabled=false;}\
 if(btn){btn.disabled=false;btn.textContent=btn.dataset.originalLabel||'Sign In';}\
 }\
-else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}\
-if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}\
 else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}}\
 }else{\
 var msg=(data&&data.error&&(data.error.message||data.error.code))||(data&&data.message)||('Request failed ('+res.status+').');\
