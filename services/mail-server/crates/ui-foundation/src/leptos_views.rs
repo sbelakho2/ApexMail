@@ -998,7 +998,7 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
 <div class=\"relative mx-auto flex min-h-screen w-full max-w-7xl items-center justify-center px-6 py-20\">\
 <div class=\"w-full max-w-[480px] mx-auto\">\
 <div class=\"text-center mb-10\">\
-<span class=\"inline-block text-3xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
+<span class=\"inline-block text-3xl font-bold tracking-tighter font-apex\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
 <h1 class=\"mt-3 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1>\
 <p class=\"text-sm text-surface-500 mt-2 font-medium\">{subtitle}</p>\
 </div>\
@@ -3842,8 +3842,9 @@ pub fn web_login_page(
 <div class=\"text-[10px] text-surface-400 font-bold uppercase tracking-[0.2em] flex items-center justify-center gap-2\" role=\"status\" aria-live=\"polite\">\
 <span class=\"inline-block h-1.5 w-1.5 rounded-sm bg-primary animate-pulse\" aria-hidden=\"true\"></span>\
 <span>Security Check Active</span></div>\
-<div id=\"login-mfa\" class=\"hidden\" aria-hidden=\"true\" inert>\
+<div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
 <p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
+<p class=\"text-[10px] text-surface-400 font-medium leading-relaxed mt-1\">Check your spam folder if you haven't received the code.</p>\
 <label class=\"sr-only\" for=\"mfaCode\">MFA code</label>\
 <input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" disabled tabindex=\"-1\" />\
 </div>\
@@ -3893,8 +3894,9 @@ pub fn control_plane_login_page(
 </div>\
 {kiwi_html}\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-tight flex items-center justify-center gap-3 py-4 rounded-sm shadow-premium transition-all group\"><span>Sign In</span>{arrow}</button>\
-<div id=\"login-mfa\" class=\"hidden\" aria-hidden=\"true\" inert>\
+<div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
 <p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
+<p class=\"text-[10px] text-surface-400 font-medium leading-relaxed mt-1\">Check your spam folder if you haven't received the code.</p>\
 <label class=\"sr-only\" for=\"mfaCode\">MFA code</label>\
 <input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" disabled tabindex=\"-1\" />\
 </div>\
