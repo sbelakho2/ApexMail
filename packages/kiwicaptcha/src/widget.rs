@@ -23,7 +23,7 @@ pub fn kiwi_widget_html() -> String {
     let svg = kiwi_mark_svg();
 
     format!(
-        r#"<div class="kiwi-widget rounded-sm border border-surface-200 bg-card p-4 sm:p-6" id="kiwicaptcha-widget" role="status" aria-live="polite">
+        r#"<div class="kiwi-widget rounded-sm border border-surface-200 bg-card p-4 sm:p-6" id="kiwicaptcha-widget" data-kiwi-widget role="status" aria-live="polite">
   <div class="flex items-start gap-4">
     <div class="flex items-center justify-center w-10 h-10 rounded-sm bg-brand-50 text-brand-600 shrink-0">
       {svg}
@@ -90,8 +90,14 @@ pub fn kiwi_widget_html() -> String {
 
       // Instantiate the embedded WASM solver
       var wasmBytes = Uint8Array.from(atob("{wasm_b64}"), function(c){{return c.charCodeAt(0);}});
-      var wasmModule = await WebAssembly.instantiate(wasmBytes, {{}});
-      var solve = wasmModule.instance.exports.solve_challenge;
+      var imports = {{
+        "./kiwicaptcha_wasm_bg.js": {{
+          __wbg_now_c704fcb7b522dabf: function(){{ return performance.now(); }},
+          __wbindgen_init_externref_table: function(){{}}
+        }}
+      }};
+      var result = await WebAssembly.instantiate(wasmBytes, imports);
+      var solve = result.instance.exports.solve_challenge;
 
       setStatus('Computing proof-of-work\\u2026', 'Verifying', 'solving');
 
