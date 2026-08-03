@@ -1943,14 +1943,6 @@ async fn register(
     // Rate-limit only after cheap validation so ordinary form mistakes do not
     // burn the user's sign-up attempts. The limit still protects the database
     // and email queue from repeated valid registration submissions.
-    let client_ip = connect_info
-        .map(|ConnectInfo(addr)| {
-            extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
-        })
-        .unwrap_or_else(|| {
-            tracing::warn!("register request missing ConnectInfo; using shared rate-limit bucket");
-            "unknown".to_string()
-        });
 
     let rate_key = format!("apexmail:register_rate:{client_ip}");
 

@@ -9,13 +9,11 @@ SERVER_HOST := apexmail
 SSH         := ssh $(SERVER_HOST)
 RSYNC       := rsync -avz
 RSYNC_DEST  := $(SERVER_HOST):
-DEPLOY      := $(SSH) /opt/apexmail/scripts/deploy.sh
 ZOLA_DIR    := apps/marketing-zola
 PUBLIC      := $(ZOLA_DIR)/public
 NEXT_DIR    := /var/www/.apexmail.ee.next
 
-.PHONY: help deploy-marketing deploy-auth deploy-nginx deploy-mta deploy-all \
-        build-marketing push-marketing push-auth push-nginx push-configs \
+.PHONY: help deploy-marketing build-marketing push-marketing push-nginx push-configs \
         rollback-marketing verify deploy-clean test-all
 
 help: ## Show this help
@@ -25,20 +23,6 @@ help: ## Show this help
 # ── Full deploy targets ──
 
 deploy-marketing: build-marketing push-marketing ## Build + deploy marketing site
-	$(DEPLOY) marketing
-
-deploy-auth: push-auth ## Push + rebuild + restart auth-server on server
-	$(SSH) 'cd /opt/apexmail/auth-server && cargo build --release 2>&1 | tail -5 && cp target/release/auth-server /opt/apexmail/auth-server/target/release/auth-server'
-	$(DEPLOY) auth-server
-
-deploy-nginx: push-nginx ## Deploy nginx config
-	$(DEPLOY) nginx
-
-deploy-mta: push-auth ## Deploy MTA (rebuilds from source)
-	$(SSH) 'cd /opt/apexmail/services/mail-server && cargo build --release 2>&1 | tail -5'
-	$(DEPLOY) mta
-
-deploy-all: deploy-auth deploy-marketing deploy-nginx deploy-mta ## Full deployment in dependency order
 
 # ── Build + push helpers ──
 
@@ -51,12 +35,6 @@ push-marketing: ## Rsync built marketing files to server staging directory
 	$(RSYNC) --delete $(PUBLIC)/ $(RSYNC_DEST)$(NEXT_DIR)/
 	@echo "Staged $$(find $(PUBLIC) -type f | wc -l) files at $(SERVER_HOST):$(NEXT_DIR)"
 
-push-auth: ## Rsync auth-server source to server
-	$(RSYNC) --delete --exclude='target' --exclude='.git' services/mail-server/ $(RSYNC_DEST)/opt/apexmail/services/mail-server/
-	$(RSYNC) --delete deploy/scripts/ $(RSYNC_DEST)/opt/apexmail/scripts/
-	$(RSYNC) deploy/nginx/apexmail.conf $(RSYNC_DEST)/opt/apexmail/nginx/apexmail.conf
-	$(RSYNC) deploy/systemd/auth-server.service $(RSYNC_DEST)/opt/apexmail/systemd/auth-server.service
-
 push-nginx: ## Rsync nginx config to server
 	$(RSYNC) deploy/nginx/apexmail.conf $(RSYNC_DEST)/opt/apexmail/nginx/apexmail.conf
 
@@ -68,7 +46,6 @@ push-configs: ## Push all configs and scripts
 # ── Rollback ──
 
 rollback-marketing: ## Rollback marketing site to previous snapshot
-	$(DEPLOY) rollback-marketing
 
 # ── Verification ──
 
@@ -133,5 +110,5 @@ deploy-api: deploy-api-build deploy-api-restart deploy-api-health ## Full API de
 
 deploy-nginx-config: ## Deploy nginx config and restart
 	$(RSYNC) deploy/nginx/nginx.conf $(RSYNC_DEST)/opt/apexmail/deploy/nginx/nginx.conf
-	$(SSH) 'docker restart apexmail-nginx-1'
+	$(SSH) 'docker compose -f /opt/apexmail/docker-compose.yml -f /opt/apexmail/docker-compose.prod.yml restart nginx'
 	@echo "Nginx deployed"

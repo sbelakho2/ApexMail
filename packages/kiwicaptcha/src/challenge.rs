@@ -87,19 +87,6 @@ pub struct ChallengeConfig {
     pub ttl_secs: u64,
 }
 
-impl Default for ChallengeConfig {
-    fn default() -> Self {
-        Self {
-            secret_key: String::new(),
-            m_kib: 50_000, // 50,000 PBKDF2 iterations (~300–500ms in browser)
-            t: 2,
-            p: 1,
-            target_bits: 16, // ~65k expected hashes → ~1–3s total solve
-            ttl_secs: 120,
-        }
-    }
-}
-
 /// Hash a client IP address for embedding in the challenge (privacy-preserving:
 /// we never store the raw IP, only its SHA-256 hex digest).
 pub fn hash_ip(ip: &str) -> String {
@@ -317,7 +304,14 @@ mod tests {
 
     #[test]
     fn each_challenge_has_unique_nonce() {
-        let config = ChallengeConfig::default();
+        let config = ChallengeConfig {
+            secret_key: "test-key".into(),
+            m_kib: 65_536,
+            t: 2,
+            p: 1,
+            target_bits: 18,
+            ttl_secs: 120,
+        };
         let a = issue_challenge(&config, "login", "1.1.1.1", 1).unwrap();
         let b = issue_challenge(&config, "login", "1.1.1.1", 1).unwrap();
         assert_ne!(a.record.nonce, b.record.nonce);

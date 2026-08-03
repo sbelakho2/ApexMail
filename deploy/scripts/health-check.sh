@@ -7,7 +7,7 @@ mkdir -p "$STATUS_DIR"
 
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# ─── Probe auth-server ──────────────────────────────────────
+# ─── Probe api-server ──────────────────────────────────────
 AUTH_STATUS="degraded"
 AUTH_DETAIL=""
 if curl -sf --max-time 5 http://localhost:3000/v1/health > /tmp/auth_health.json 2>/dev/null; then
@@ -71,7 +71,7 @@ cat > "$STATUS_FILE" <<EOF
   "status": "$OVERALL",
   "updated": "$NOW",
   "services": [
-    {"name": "auth-server", "status": "$AUTH_STATUS", "detail": $AUTH_DETAIL},
+    {"name": "api-server", "status": "$AUTH_STATUS", "detail": $AUTH_DETAIL},
     {"name": "mail-server", "status": "$MAIL_STATUS"},
     {"name": "clickhouse", "status": "$CLICKHOUSE_STATUS"},
     {"name": "redis", "status": "$REDIS_STATUS"}
