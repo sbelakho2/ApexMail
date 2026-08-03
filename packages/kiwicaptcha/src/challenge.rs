@@ -88,9 +88,13 @@ pub struct ChallengeConfig {
 }
 
 /// Hash a client IP address for embedding in the challenge (privacy-preserving:
-/// we never store the raw IP, only its SHA-256 hex digest).
-pub fn hash_ip(ip: &str) -> String {
+/// we never store the raw IP, only its salted SHA-256 hex digest).
+///
+/// The `salt` prevents identical IPs from producing identical hashes across
+/// deployments that use different secret keys.
+pub fn hash_ip(ip: &str, salt: &str) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
     hasher.update(ip.as_bytes());
     hex::encode(&hasher.finalize())
 }
@@ -171,7 +175,7 @@ pub fn issue_challenge(
     thread_rng().fill_bytes(&mut salt_bytes);
     let salt = B64.encode(salt_bytes);
 
-    let ip_hash = hash_ip(client_ip);
+    let ip_hash = hash_ip(client_ip, &config.secret_key);
 
     let payload = ChallengePayload {
         nonce: nonce.clone(),
@@ -290,7 +294,7 @@ mod tests {
         let payload = ChallengePayload {
             nonce: "n".into(),
             scope: "login".into(),
-            ip_hash: hash_ip("9.9.9.9"),
+            ip_hash: hash_ip("9.9.9.9", "key"),
             issued_at: 123,
         };
         let sig = sign_payload(&payload, "key").unwrap();

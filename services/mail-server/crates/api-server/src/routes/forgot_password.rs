@@ -121,7 +121,10 @@ async fn forgot_password(
         .arg(window_secs)
         .invoke_async::<i64>(&mut *conn)
         .await
-        .unwrap_or(0);
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, ip = %client_ip, email = %email, "forgot-password rate-limit Lua script failed; treating as rate-limited");
+            1
+        });
 
         if count > 0 {
             return Err(ApiError::RateLimited);

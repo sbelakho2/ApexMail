@@ -1024,6 +1024,16 @@ impl Config {
             // only production requirement is a strong HMAC secret key.
             validate_secret("KIWI_SECRET_KEY", &self.kiwi_secret_key, 16, &["dev"])?;
         }
+        if self.placement_enabled && self.placement_encrypt_passwords {
+            validate_secret(
+                "PLACEMENT_ENCRYPTION_SECRET",
+                &self.placement_encryption_secret,
+                16,
+                &["change-me-in-production"],
+            )?;
+        }
+        validate_https_url("BASE_URL", &self.base_url)?;
+        validate_https_url("OAUTH_REDIRECT_BASE_URL", &self.oauth_redirect_base_url)?;
         Ok(())
     }
 }

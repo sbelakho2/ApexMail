@@ -19,6 +19,11 @@ use crate::state::AppState;
 /// (Mirrors the constant in `routes::auth` — kept here so this module is standalone.)
 const KIWI_CHALLENGE_PREFIX: &str = "apexmail:kiwi:";
 
+/// Per-IP rate limit for challenge issuance, preventing a bot from requesting
+/// thousands of challenges to DoS Redis or pre-compute solutions.
+const CHALLENGE_IP_RATE_LIMIT: i64 = 30;
+const CHALLENGE_IP_RATE_LIMIT_WINDOW_SECS: u64 = 15 * 60;
+
 pub fn router() -> Router<AppState> {
     Router::new().route("/challenge", post(issue_challenge_handler))
 }
@@ -92,6 +97,39 @@ async fn issue_challenge_handler(
             extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
         })
         .unwrap_or_else(|| "unknown".to_string());
+
+    // Per-IP rate limiting: prevent bots from requesting thousands of challenges.
+    let ip_rate_key = format!("apexmail:kiwi_challenge_rate:ip:{client_ip}");
+    if let Ok(mut conn) = state.redis.get().await {
+        let count: i64 = deadpool_redis::redis::Script::new(
+            r#"
+                local ip_key = KEYS[1]
+                local max_ip = tonumber(ARGV[1])
+                local window_secs = tonumber(ARGV[2])
+
+                local ip_count = redis.call('INCR', ip_key)
+                if ip_count == 1 then
+                    redis.call('EXPIRE', ip_key, window_secs)
+                end
+
+                if ip_count > max_ip then
+                    return 1
+                end
+                return 0
+            "#,
+        )
+        .key(&ip_rate_key)
+        .arg(CHALLENGE_IP_RATE_LIMIT)
+        .arg(CHALLENGE_IP_RATE_LIMIT_WINDOW_SECS)
+        .invoke_async::<i64>(&mut *conn)
+        .await
+        .unwrap_or(0);
+
+        if count > 0 {
+            tracing::warn!(client_ip = %client_ip, "KiwiCaptcha challenge rate limit exceeded");
+            return Err(ApiError::RateLimited);
+        }
+    }
 
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

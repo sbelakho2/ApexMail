@@ -138,7 +138,7 @@ pub async fn verify_kiwi_token(
 
     // IP binding: the challenge was issued to this IP. A mismatch means a
     // relay attack (token minted elsewhere, submitted from here).
-    let expected_ip_hash = kiwicaptcha::hash_ip(client_ip);
+    let expected_ip_hash = kiwicaptcha::hash_ip(client_ip, &config.kiwi_secret_key);
     if record.ip_hash != expected_ip_hash {
         tracing::warn!(
             expected = %record.ip_hash,
@@ -1239,7 +1239,10 @@ async fn login(
         .arg(LOGIN_IP_RATE_LIMIT_WINDOW_SECS)
         .invoke_async::<i64>(&mut *conn)
         .await
-        .unwrap_or(0);
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, ip = %client_ip, "login IP rate-limit Lua script failed; treating as rate-limited");
+            1
+        });
 
         if count > 0 {
             return Err(ApiError::RateLimited);
@@ -1427,6 +1430,9 @@ async fn complete_mfa_challenge(
     headers: HeaderMap,
     Json(body): Json<CompleteMfaChallengeRequest>,
 ) -> Result<Response, ApiError> {
+    // Validate CSRF token from X-CSRF-Token header (auth form protection)
+    validate_form_csrf(&headers, &state.config.csrf_secret)?;
+
     if body.challenge_token.trim().is_empty() {
         return Err(ApiError::Validation(vec![
             "challenge_token is required".into()
@@ -1662,7 +1668,7 @@ async fn init_mfa_setup(
     let user_id = authenticated_user_id(&auth)?;
 
     let user = sqlx::query_as::<_, MfaUserRow>(
-        "SELECT id, email, name, role, mfa_enabled, mfa_secret, mfa_recovery_hashes
+        "SELECT id, email, name, role, mfa_enabled
          FROM users WHERE id = $1 AND tenant_id = $2",
     )
     .bind(user_id)
@@ -1947,11 +1953,17 @@ async fn register(
     let rate_key = format!("apexmail:register_rate:{client_ip}");
 
     if let Ok(mut conn) = state.redis.get().await {
-        let count: i64 = deadpool_redis::redis::cmd("INCR")
+        let count: i64 = match deadpool_redis::redis::cmd("INCR")
             .arg(&rate_key)
             .query_async(&mut *conn)
             .await
-            .unwrap_or(1);
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, ip = %client_ip, "register rate-limit INCR failed; rejecting request");
+                return Err(ApiError::Internal("rate limit check unavailable".into()));
+            }
+        };
 
         if count == 1 {
             let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
@@ -2354,11 +2366,17 @@ async fn reset_password(
     let max_requests: i64 = 5;
 
     if let Ok(mut conn) = state.redis.get().await {
-        let count: i64 = deadpool_redis::redis::cmd("INCR")
+        let count: i64 = match deadpool_redis::redis::cmd("INCR")
             .arg(&rate_key)
             .query_async(&mut *conn)
             .await
-            .unwrap_or(1);
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, ip = %client_ip, "reset-password rate-limit INCR failed; rejecting request");
+                return Err(ApiError::Internal("rate limit check unavailable".into()));
+            }
+        };
 
         if count == 1 {
             let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")

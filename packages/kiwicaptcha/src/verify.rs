@@ -189,18 +189,52 @@ pub fn sha256_hex(input: &str) -> String {
 }
 
 /// Score telemetry data for bot detection. Returns `true` if the client
-/// appears to be automated/headless.
+/// appears to be automated/headless and should be rejected.
 ///
-/// Only the `webdriver` flag is treated as a hard bot signal (navigator.webdriver
-/// is set by Chrome DevTools Protocol and Selenium).  Other signals (mouse/key
-/// counts and hardware hints) are informative but **not** used as rejection
-/// criteria — they vary too widely across privacy-focused browsers and during
-/// short solve windows where the user may simply be waiting.
-pub fn score_telemetry(telemetry: &serde_json::Value, _duration_ms: u64) -> bool {
+/// Hard rejection signals:
+/// - `webdriver` flag is set (Chrome DevTools Protocol / Selenium).
+/// - Solve completes in >30s with zero mouse/key events (native PBKDF2 bypass).
+/// - Solve takes >120s total (well beyond the ~30s expected for targetBits=14).
+///
+/// Soft signals (logged but NOT rejected):
+/// - `hardwareConcurrency=0` AND `deviceMemory=0` (likely headless browser).
+pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool {
     let wd = telemetry.get("wd").and_then(|v| v.as_bool()).unwrap_or(false);
     if wd {
         return true;
     }
+
+    let me = telemetry.get("me").and_then(|v| v.as_u64()).unwrap_or(0);
+    let ke = telemetry.get("ke").and_then(|v| v.as_u64()).unwrap_or(0);
+    let hc = telemetry.get("hc").and_then(|v| v.as_u64()).unwrap_or(0);
+    let dm = telemetry.get("dm").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    if duration_ms > 30_000 && me == 0 && ke == 0 {
+        tracing::warn!(
+            duration_ms,
+            me,
+            ke,
+            "KiwiCaptcha: bot suspected — solve took >30s with zero interaction"
+        );
+        return true;
+    }
+
+    if duration_ms > 120_000 {
+        tracing::warn!(
+            duration_ms,
+            "KiwiCaptcha: bot suspected — solve took >120s"
+        );
+        return true;
+    }
+
+    if hc == 0 && dm == 0 {
+        tracing::info!(
+            hc,
+            dm,
+            "KiwiCaptcha: possible headless client (hc=0, dm=0) — soft signal, not rejected"
+        );
+    }
+
     false
 }
 
