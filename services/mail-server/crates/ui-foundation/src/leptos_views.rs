@@ -1074,8 +1074,10 @@ if(k==='_csrf')return;\
 if(allowed&&allowed.indexOf(k)===-1)return;\
 payload[k]=v;\
 });\
+if(form.dataset.mfaToken&&payload.mfaCode){action=form.dataset.mfaOriginalAction.replace('/login','/mfa/verify');payload={challenge_token:form.dataset.mfaToken,mfa_code:payload.mfaCode};form.dataset.mfaToken='';}\
 var headers={'Content-Type':'application/json','Accept':'application/json'};\
 var csrf=fd.get('_csrf');if(csrf)headers['X-CSRF-Token']=csrf;\
+
 try{\
 var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-origin',body:JSON.stringify(payload)});\
 var data=null;try{data=await res.json();}catch(_e){}\
