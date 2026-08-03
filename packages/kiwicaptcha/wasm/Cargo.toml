@@ -1,0 +1,16 @@
+[package]
+name = "kiwicaptcha-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+pbkdf2 = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+getrandom = { version = "0.2", features = ["js"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
