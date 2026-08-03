@@ -1082,8 +1082,8 @@ var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-orig
 var data=null;try{data=await res.json();}catch(_e){}\
 if(res.ok){\
 if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}\
-else if(res.status===202&&data&&data.challenge_token){\
-form.dataset.mfaToken=data.challenge_token;\
+else if(res.status===202&&data&&data.challengeToken){\
+form.dataset.mfaToken=data.challengeToken;\
 form.dataset.mfaOriginalAction=action;\
 var mfaEl=form.querySelector('[data-mfa-section]');\
 if(mfaEl){mfaEl.classList.remove('hidden');mfaEl.removeAttribute('aria-hidden');mfaEl.removeAttribute('inert');}\
