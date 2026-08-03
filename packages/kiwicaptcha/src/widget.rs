@@ -1,33 +1,24 @@
-//! KiwiCaptcha widget — server-rendered HTML + Rust/WASM proof-of-work.
+//! KiwiCaptcha widget — server-rendered HTML with embedded Rust/WASM solver.
 //!
-//! The widget embeds a compiled WASM binary (base64 data URL) and a minimal
-//! inline JavaScript loader.  The WASM module contains the PBKDF2 brute-force
-//! solver — the heavy computation runs in Rust/WASM, not JavaScript.
+//! The widget embeds the compiled WASM binary (base64), the wasm-bindgen JS
+//! glue, and a minimal inline script that calls `initSync()` + `solve_challenge()`.
+//! The heavy PBKDF2 brute-force runs in Rust/WASM, not JavaScript.
 
+use base64::Engine;
 use crate::kiwi_mark_svg;
 
-/// The compiled WASM binary (embedded at compile time via `include_bytes!`).
+/// WASM binary (embedded at compile time).
 static KIWI_WASM: &[u8] = include_bytes!("../wasm/pkg/kiwicaptcha_wasm_bg.wasm");
 
-/// Render the full KiwiCaptcha widget HTML block.
-///
-/// The returned HTML is a `<div>` containing the status indicator, progress
-/// bar, hidden `kiwi__token` input, and an inline `<script>` that loads the
-/// embedded WASM solver.  The host application's CSP middleware injects the
-/// page nonce into every `<script>` tag automatically.
+/// Render the KiwiCaptcha widget HTML block.
 pub fn kiwi_widget_html() -> String {
-    let wasm_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        KIWI_WASM,
-    );
+    let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(KIWI_WASM);
     let svg = kiwi_mark_svg();
 
     format!(
         r#"<div class="kiwi-widget rounded-sm border border-surface-200 bg-card p-4 sm:p-6" id="kiwicaptcha-widget" data-kiwi-widget role="status" aria-live="polite">
   <div class="flex items-start gap-4">
-    <div class="flex items-center justify-center w-10 h-10 rounded-sm bg-brand-50 text-brand-600 shrink-0">
-      {svg}
-    </div>
+    <div class="flex items-center justify-center w-10 h-10 rounded-sm bg-brand-50 text-brand-600 shrink-0">{svg}</div>
     <div class="flex-1 min-w-0">
       <div class="flex items-center justify-between gap-3">
         <span class="text-xs font-bold uppercase tracking-tight text-surface-700" data-kiwi-status>Preparing verification&hellip;</span>
@@ -43,11 +34,13 @@ pub fn kiwi_widget_html() -> String {
 </div>
 <script>
 (function() {{
-  var statusEl = document.querySelector('[data-kiwi-status]');
-  var pillEl = document.querySelector('[data-kiwi-pill]');
-  var fillEl = document.querySelector('.kiwi-fill');
+  var W = document.querySelector('[data-kiwi-widget]');
+  if (!W) return;
+  var statusEl = W.querySelector('[data-kiwi-status]');
+  var pillEl = W.querySelector('[data-kiwi-pill]');
+  var fillEl = W.querySelector('.kiwi-fill');
   var tokenEl = document.getElementById('kiwi-token-input');
-  var hintEl = document.querySelector('[data-kiwi-hint]');
+  var hintEl = W.querySelector('[data-kiwi-hint]');
 
   function setStatus(label, pill, state) {{
     if (statusEl) statusEl.textContent = label;
@@ -60,11 +53,66 @@ pub fn kiwi_widget_html() -> String {
     if (tokenEl) tokenEl.value = '';
   }}
 
-  // Collect lightweight telemetry
   var mouseEvents = 0, keyEvents = 0;
   document.addEventListener('mousemove', function(){{mouseEvents++;}},{{passive:true}});
   document.addEventListener('keydown', function(){{keyEvents++;}},{{passive:true}});
 
+  // ── WASM glue (minimal wasm-bindgen runtime) ──────────────────────────
+  var wasmMemory;
+  var wasmExports;
+
+  function getUint8Memory() {{
+    if (!wasmMemory || !wasmMemory.buffer || wasmMemory.buffer.byteLength === 0) {{
+      wasmMemory = new Uint8Array(wasmExports.memory.buffer);
+    }}
+    return wasmMemory;
+  }}
+
+  var WASM_VECTOR_LEN = 0;
+  var cachedEncoder = new TextEncoder();
+
+  function passStringToWasm(arg) {{
+    var buf = cachedEncoder.encode(arg);
+    var ptr = wasmExports.__wbindgen_malloc(buf.length, 1) >>> 0;
+    getUint8Memory().subarray(ptr, ptr + buf.length).set(buf);
+    WASM_VECTOR_LEN = buf.length;
+    return ptr;
+  }}
+
+  var cachedDecoder = new TextDecoder('utf-8', {{ ignoreBOM: true, fatal: true }});
+  function getStringFromWasm(ptr, len) {{
+    return cachedDecoder.decode(getUint8Memory().subarray(ptr, ptr + len));
+  }}
+
+  function initSync(moduleBytes) {{
+    var mod = new WebAssembly.Module(moduleBytes);
+    var imports = {{
+      "./kiwicaptcha_wasm_bg.js": {{
+        __wbg_now_c704fcb7b522dabf: function() {{ return performance.now(); }},
+        __wbindgen_init_externref_table: function() {{}}
+      }}
+    }};
+    var inst = new WebAssembly.Instance(mod, imports);
+    wasmExports = inst.exports;
+    wasmExports.__wbindgen_start();
+    return wasmExports;
+  }}
+
+  function solve_challenge(prefix, saltB64, iterations, targetBits) {{
+    var p0 = passStringToWasm(prefix);
+    var l0 = WASM_VECTOR_LEN;
+    var p1 = passStringToWasm(saltB64);
+    var l1 = WASM_VECTOR_LEN;
+    var ret = wasmExports.solve_challenge(p0, l0, p1, l1, iterations, targetBits);
+    if (ret[0] !== 0) {{
+      var s = getStringFromWasm(ret[0], ret[1]);
+      wasmExports.__wbindgen_free(ret[0], ret[1] * 1, 1);
+      return s;
+    }}
+    return null;
+  }}
+
+  // ── Widget driver ─────────────────────────────────────────────────────
   async function run() {{
     try {{
       setStatus('Requesting challenge\\u2026', 'Connecting', 'solving');
@@ -88,24 +136,15 @@ pub fn kiwi_widget_html() -> String {
         return;
       }}
 
-      // Instantiate the embedded WASM solver
+      // Init WASM and solve
       var wasmBytes = Uint8Array.from(atob("{wasm_b64}"), function(c){{return c.charCodeAt(0);}});
-      var imports = {{
-        "./kiwicaptcha_wasm_bg.js": {{
-          __wbg_now_c704fcb7b522dabf: function(){{ return performance.now(); }},
-          __wbindgen_init_externref_table: function(){{}}
-        }}
-      }};
-      var result = await WebAssembly.instantiate(wasmBytes, imports);
-      var solve = result.instance.exports.solve_challenge;
+      initSync(wasmBytes);
 
       setStatus('Computing proof-of-work\\u2026', 'Verifying', 'solving');
-
-      var jsonResult = solve(data.prefix, data.salt, data.mKib||50000, data.targetBits);
+      var jsonResult = solve_challenge(data.prefix, data.salt, data.mKib||50000, data.targetBits);
       if (!jsonResult) throw new Error('solver exhausted');
 
-      var result = JSON.parse(jsonResult);
-
+      var obj = JSON.parse(jsonResult);
       var telemetry = {{
         wd: navigator.webdriver === true,
         hc: navigator.hardwareConcurrency || 0,
@@ -117,9 +156,8 @@ pub fn kiwi_widget_html() -> String {
         iw: window.innerWidth || 0,
         ih: window.innerHeight || 0
       }};
-      var plain = data.nonce + '.' + result.counter + '.' + result.duration_ms + '.' + JSON.stringify(telemetry);
-      var token = btoa(plain);
-      if (tokenEl) tokenEl.value = token;
+      var plain = data.nonce + '.' + obj.counter + '.' + obj.duration_ms + '.' + JSON.stringify(telemetry);
+      if (tokenEl) tokenEl.value = btoa(plain);
       setStatus('Verified — you may continue', 'Verified', 'done');
       if (fillEl) fillEl.style.width = '100%';
     }} catch (e) {{
@@ -137,6 +175,3 @@ pub fn kiwi_widget_html() -> String {
 </script>"#
     )
 }
-
-/// Deprecated name kept for backward compatibility with existing call sites.
-pub use kiwi_widget_html as KIWI_WIDGET_HTML;

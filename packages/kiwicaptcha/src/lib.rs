@@ -37,4 +37,4 @@ pub use challenge::{
 pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg};
 pub use token::{DecodeError, IssuedChallenge, SolutionToken};
 pub use verify::{score_telemetry, solve_for_test, verify_solution, VerifyContext, VerifyError, VerifyOutcome};
-pub use widget::{kiwi_widget_html, KIWI_WIDGET_HTML};
+pub use widget::kiwi_widget_html;
