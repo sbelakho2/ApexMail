@@ -51,6 +51,8 @@ pub struct ChallengeResponse {
     pub p: u32,
     #[serde(rename = "targetBits")]
     pub target_bits: u32,
+    #[serde(rename = "ttlSecs")]
+    pub ttl_secs: u64,
     pub prefix: String,
 }
 
@@ -74,6 +76,7 @@ async fn issue_challenge_handler(
             t: 1,
             p: 1,
             target_bits: 1,
+            ttl_secs: 120,
             prefix: "dev|dev|".into(),
         }));
     }
@@ -143,9 +146,12 @@ async fn issue_challenge_handler(
         p: state.config.kiwi_argon_p,
         target_bits: state.config.kiwi_difficulty_bits,
         ttl_secs: state.config.kiwi_challenge_ttl_secs,
+        auto_tune: state.config.kiwi_auto_tune,
+        auto_tune_min_bits: state.config.kiwi_auto_tune_min_bits,
+        auto_tune_max_bits: state.config.kiwi_auto_tune_max_bits,
     };
 
-    let issued = kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix)
+    let issued = kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix, 0)
         .map_err(|_| ApiError::Internal("failed to issue KiwiCaptcha challenge".into()))?;
 
     // Store the challenge record in Redis, keyed by nonce, with TTL.
@@ -176,6 +182,7 @@ async fn issue_challenge_handler(
         t: issued.challenge.t,
         p: issued.challenge.p,
         target_bits: issued.challenge.target_bits,
+        ttl_secs: issued.challenge.ttl_secs,
         prefix: issued.challenge.prefix,
     }))
 }

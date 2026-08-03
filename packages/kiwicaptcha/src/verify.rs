@@ -198,6 +198,7 @@ pub fn sha256_hex(input: &str) -> String {
 ///
 /// Soft signals (logged but NOT rejected):
 /// - `hardwareConcurrency=0` AND `deviceMemory=0` (likely headless browser).
+/// - `plugins.length=0` AND `hardwareConcurrency=0` (likely headless).
 pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool {
     let wd = telemetry.get("wd").and_then(|v| v.as_bool()).unwrap_or(false);
     if wd {
@@ -208,6 +209,7 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
     let ke = telemetry.get("ke").and_then(|v| v.as_u64()).unwrap_or(0);
     let hc = telemetry.get("hc").and_then(|v| v.as_u64()).unwrap_or(0);
     let dm = telemetry.get("dm").and_then(|v| v.as_u64()).unwrap_or(0);
+    let pl = telemetry.get("pl").and_then(|v| v.as_u64()).unwrap_or(0);
 
     if duration_ms > 30_000 && me == 0 && ke == 0 {
         tracing::warn!(
@@ -235,6 +237,14 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
         );
     }
 
+    if hc == 0 && pl == 0 {
+        tracing::info!(
+            hc,
+            pl,
+            "KiwiCaptcha: possible headless client (hc=0, pl=0) — soft signal, not rejected"
+        );
+    }
+
     false
 }
 
@@ -251,8 +261,11 @@ mod tests {
             p: 1,
             target_bits,
             ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000).unwrap();
+        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 0).unwrap();
         issued.record
     }
 

@@ -36,6 +36,8 @@ pub struct IssuedChallenge {
     pub p: u32,
     /// Number of leading zero bits required in the Argon2id raw output.
     pub target_bits: u32,
+    /// Challenge lifetime in seconds (for client-side countdown display).
+    pub ttl_secs: u64,
     /// The prefix the client must prepend to the counter when forming inputs
     /// (bound to the challenge so the solver cannot reuse a counter from a
     /// different challenge).

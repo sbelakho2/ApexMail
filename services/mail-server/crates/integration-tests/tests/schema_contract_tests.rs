@@ -262,7 +262,10 @@ fn test_config() -> Config {
         kiwi_argon_p: 1,
         kiwi_difficulty_bits: 16,
         kiwi_challenge_ttl_secs: 120,
-            kiwi_min_duration_ms: None,
+        kiwi_min_duration_ms: None,
+        kiwi_auto_tune: false,
+        kiwi_auto_tune_min_bits: 10,
+        kiwi_auto_tune_max_bits: 24,
     }
 }
 

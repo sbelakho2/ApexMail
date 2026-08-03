@@ -2,9 +2,9 @@
 //!
 //! An elegant, minimal silhouette of a kiwi bird (the flightless bird native to
 //! New Zealand — not the fruit). Rendered as inline `<svg>` markup using
-//! `currentColor` so it inherits the Apex coral (`--primary` / `#dd524c`) when
-//! placed inside a `text-primary` container, matching the rest of the ApexMail
-//! icon system (`viewBox="0 0 24 24"`, `fill`/`stroke="currentColor"`).
+//! `currentColor` so it inherits the host application's theme color when
+//! placed inside a `text-primary` container
+//! (`viewBox="0 0 24 24"`, `fill`/`stroke="currentColor"`).
 
 /// Return the kiwi silhouette as an inline SVG string.
 ///
@@ -44,8 +44,8 @@ mod tests {
     }
 
     #[test]
-    fn logos_use_current_color_for_apex_theming() {
-        // currentColor ensures the kiwi inherits the Apex coral from its parent.
+    fn logos_use_current_color_for_host_theming() {
+        // currentColor ensures the kiwi inherits the theme color from its parent.
         assert!(kiwi_logo_svg().contains("currentColor"));
         assert!(kiwi_mark_svg().contains("currentColor"));
     }

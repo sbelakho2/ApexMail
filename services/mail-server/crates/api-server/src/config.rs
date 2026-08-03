@@ -176,6 +176,12 @@ pub struct Config {
     /// Minimum acceptable solve duration in milliseconds. Rejects solves
     /// faster than this as infeasible. Default 80ms.
     pub kiwi_min_duration_ms: Option<u64>,
+    /// Enable auto-tuning of difficulty based on server load. Default false.
+    pub kiwi_auto_tune: bool,
+    /// Minimum target bits when auto-tuning is idle. Default 10.
+    pub kiwi_auto_tune_min_bits: u32,
+    /// Maximum target bits when auto-tuning is under peak load. Default 24.
+    pub kiwi_auto_tune_max_bits: u32,
 
     // ── HTTP Client ─────────────────────────────────────────
     /// Timeout in seconds for the internal HTTP client used for outbound
@@ -660,6 +666,16 @@ impl Config {
         let kiwi_min_duration_ms = env::var("KIWI_MIN_DURATION_MS")
             .ok()
             .and_then(|v| v.parse().ok());
+        let kiwi_auto_tune = env::var("KIWI_AUTO_TUNE")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let kiwi_auto_tune_min_bits = env_or("KIWI_AUTO_TUNE_MIN_BITS", "10")
+            .parse()
+            .unwrap_or(10);
+        let kiwi_auto_tune_max_bits = env_or("KIWI_AUTO_TUNE_MAX_BITS", "24")
+            .parse()
+            .unwrap_or(24);
         if !environment.is_production() && kiwi_secret_key == "dev" {
             tracing::info!(
                 "KiwiCaptcha configured with dev key — CAPTCHA verification will be bypassed"
@@ -808,6 +824,9 @@ impl Config {
             kiwi_difficulty_bits,
             kiwi_challenge_ttl_secs,
             kiwi_min_duration_ms,
+            kiwi_auto_tune,
+            kiwi_auto_tune_min_bits,
+            kiwi_auto_tune_max_bits,
 
             http_client_timeout_secs: parse_u64(
                 "HTTP_CLIENT_TIMEOUT_SECONDS",
@@ -1180,6 +1199,9 @@ mod tests {
             kiwi_difficulty_bits: 16,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
+            kiwi_auto_tune: false,
+            kiwi_auto_tune_min_bits: 10,
+            kiwi_auto_tune_max_bits: 24,
             http_client_timeout_secs: 30,
             internal_tls_enabled: false,
             internal_tls_ca_cert_path: None,
@@ -1317,6 +1339,9 @@ mod tests {
             kiwi_difficulty_bits: 16,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
+            kiwi_auto_tune: false,
+            kiwi_auto_tune_min_bits: 10,
+            kiwi_auto_tune_max_bits: 24,
             http_client_timeout_secs: 30,
             internal_tls_enabled: false,
             internal_tls_ca_cert_path: None,

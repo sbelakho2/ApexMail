@@ -10,7 +10,7 @@
 //! unfixable. The client solver uses the browser's native
 //! WebCrypto API (`crypto.subtle.deriveBits`).
 //!
-//! License: **MIT** — owned by [Bel Consulting OÜ](https://apexmail.ee)
+//! License: **MIT**
 //!
 //! ## Threat model
 //!
@@ -32,7 +32,7 @@ pub mod widget;
 
 pub use challenge::{
     hash_ip, issue_challenge, payload_from_record, sign_payload, verify_signature,
-    ChallengeConfig, ChallengePayload, ChallengeRecord, Issued,
+    ChallengeCache, ChallengeConfig, ChallengePayload, ChallengeRecord, Issued,
 };
 pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg};
 pub use token::{DecodeError, IssuedChallenge, SolutionToken};

@@ -10,6 +10,9 @@
 //! [`ChallengeRecord`] (the server-side state to persist in Redis). The caller
 //! is responsible for storing the record keyed by nonce.
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hmac::{Hmac, Mac};
 use rand::{thread_rng, RngCore};
@@ -85,6 +88,29 @@ pub struct ChallengeConfig {
     pub target_bits: u32,
     /// Challenge lifetime in seconds.
     pub ttl_secs: u64,
+    /// When enabled, `target_bits` is automatically adjusted based on active
+    /// solver load: higher load -> higher difficulty; idle -> lower difficulty.
+    pub auto_tune: bool,
+    /// Minimum target bits when auto-tuning is idle (no load).
+    pub auto_tune_min_bits: u32,
+    /// Maximum target bits when auto-tuning is under peak load.
+    pub auto_tune_max_bits: u32,
+}
+
+impl ChallengeConfig {
+    /// Compute the adjusted target bits based on current active solver count.
+    /// When `auto_tune` is disabled, returns the static `target_bits`.
+    /// Otherwise linearly interpolates between `auto_tune_min_bits` (0 active)
+    /// and `auto_tune_max_bits` (50+ active solvers).
+    pub fn tuned_target_bits(&self, active_solves: u64) -> u32 {
+        if !self.auto_tune {
+            return self.target_bits;
+        }
+        let load = (active_solves as f64 / 50.0).min(1.0);
+        let range = self.auto_tune_max_bits.saturating_sub(self.auto_tune_min_bits) as f64;
+        let adjusted = self.auto_tune_min_bits as f64 + load * range;
+        adjusted as u32
+    }
 }
 
 /// Hash a client IP address for embedding in the challenge (privacy-preserving:
@@ -150,17 +176,66 @@ pub struct Issued {
     pub record: ChallengeRecord,
 }
 
+/// In-memory challenge cache that reduces Redis writes when the same client
+/// (identified by IP hash + scope) re-requests within a 1-second window.
+///
+/// Entries older than 1 second are automatically pruned on `get` and `prune`.
+pub struct ChallengeCache {
+    entries: HashMap<String, (Issued, Instant)>,
+}
+
+impl ChallengeCache {
+    pub fn new() -> Self {
+        ChallengeCache {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn cache_key(ip_hash: &str, scope: &str) -> String {
+        format!("{ip_hash}|{scope}")
+    }
+
+    pub fn get(&self, ip_hash: &str, scope: &str) -> Option<&Issued> {
+        let key = Self::cache_key(ip_hash, scope);
+        self.entries.get(&key).and_then(|(issued, ts)| {
+            if ts.elapsed() < Duration::from_secs(1) {
+                Some(issued)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn put(&mut self, ip_hash: &str, scope: &str, issued: Issued) {
+        let key = Self::cache_key(ip_hash, scope);
+        self.entries.insert(key, (issued, Instant::now()));
+    }
+
+    pub fn prune(&mut self) {
+        self.entries
+            .retain(|_, (_, ts)| ts.elapsed() < Duration::from_secs(1));
+    }
+}
+
+impl Default for ChallengeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Issue a new challenge.
 ///
 /// - `config` — difficulty + secret key.
 /// - `scope` — the auth flow ("login", "signup", "forgot-password", etc.).
 /// - `client_ip` — the client's IP address (hashed before storage).
 /// - `now_unix` — current Unix timestamp (injected for testability).
+/// - `active_solves` — current number of active solvers (for auto-tuning).
 pub fn issue_challenge(
     config: &ChallengeConfig,
     scope: &str,
     client_ip: &str,
     now_unix: u64,
+    active_solves: u64,
 ) -> Result<Issued, SignError> {
     if scope.contains('|') {
         return Err(SignError::InvalidScope);
@@ -176,6 +251,7 @@ pub fn issue_challenge(
     let salt = B64.encode(salt_bytes);
 
     let ip_hash = hash_ip(client_ip, &config.secret_key);
+    let target_bits = config.tuned_target_bits(active_solves);
 
     let payload = ChallengePayload {
         nonce: nonce.clone(),
@@ -185,7 +261,7 @@ pub fn issue_challenge(
     };
     let signature = sign_payload(&payload, &config.secret_key)?;
 
-    // The challenge string the client folds into Argon2id: it contains the
+    // The challenge string the client folds into PBKDF2: it contains the
     // signed payload so a client cannot tamper with nonce/scope/ip/issued_at
     // without invalidating the signature.
     let challenge = format!("{}.{}", B64.encode(canonical_signing_input(&payload)), signature);
@@ -204,7 +280,7 @@ pub fn issue_challenge(
         m_kib: config.m_kib,
         t: config.t,
         p: config.p,
-        target_bits: config.target_bits,
+        target_bits,
         salt: salt.clone(),
         prefix: prefix.clone(),
         challenge: challenge.clone(),
@@ -217,7 +293,8 @@ pub fn issue_challenge(
         m_kib: config.m_kib,
         t: config.t,
         p: config.p,
-        target_bits: config.target_bits,
+        target_bits,
+        ttl_secs: config.ttl_secs,
         prefix,
     };
 
@@ -271,12 +348,16 @@ mod tests {
             p: 1,
             target_bits: 18,
             ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000).unwrap();
+        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 0).unwrap();
         assert_eq!(issued.challenge.m_kib, 65_536);
         assert_eq!(issued.challenge.t, 2);
         assert_eq!(issued.challenge.p, 1);
         assert_eq!(issued.challenge.target_bits, 18);
+        assert_eq!(issued.challenge.ttl_secs, 120);
         assert!(!issued.challenge.challenge.is_empty());
         assert!(!issued.challenge.salt.is_empty());
         assert!(!issued.challenge.nonce.is_empty());
@@ -315,9 +396,76 @@ mod tests {
             p: 1,
             target_bits: 18,
             ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
         };
-        let a = issue_challenge(&config, "login", "1.1.1.1", 1).unwrap();
-        let b = issue_challenge(&config, "login", "1.1.1.1", 1).unwrap();
+        let a = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        let b = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
         assert_ne!(a.record.nonce, b.record.nonce);
+    }
+
+    #[test]
+    fn auto_tune_adjusts_target_bits() {
+        let config = ChallengeConfig {
+            secret_key: "test-key".into(),
+            m_kib: 65_536,
+            t: 2,
+            p: 1,
+            target_bits: 18,
+            ttl_secs: 120,
+            auto_tune: true,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
+        };
+        // Idle — should be at min.
+        let idle = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        assert_eq!(idle.challenge.target_bits, 10);
+        // Moderate load — roughly midway.
+        let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 25).unwrap();
+        assert!(mid.challenge.target_bits >= 16 && mid.challenge.target_bits <= 18);
+        // Peak load — should be at max.
+        let peak = issue_challenge(&config, "login", "1.1.1.1", 1, 50).unwrap();
+        assert_eq!(peak.challenge.target_bits, 24);
+    }
+
+    #[test]
+    fn challenge_cache_hit_returns_same_challenge() {
+        let config = ChallengeConfig {
+            secret_key: "test-key".into(),
+            m_kib: 65_536,
+            t: 2,
+            p: 1,
+            target_bits: 18,
+            ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
+        };
+        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        let mut cache = ChallengeCache::new();
+        cache.put("hash1", "login", issued.clone());
+        let cached = cache.get("hash1", "login").unwrap();
+        assert_eq!(cached.challenge.nonce, issued.challenge.nonce);
+        assert_eq!(cached.challenge.challenge, issued.challenge.challenge);
+    }
+
+    #[test]
+    fn challenge_cache_miss_on_different_scope() {
+        let config = ChallengeConfig {
+            secret_key: "test-key".into(),
+            m_kib: 65_536,
+            t: 2,
+            p: 1,
+            target_bits: 18,
+            ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
+        };
+        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        let mut cache = ChallengeCache::new();
+        cache.put("hash1", "login", issued);
+        assert!(cache.get("hash1", "signup").is_none());
     }
 }

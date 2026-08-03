@@ -18,6 +18,7 @@ pub fn kiwi_widget_html() -> String {
       <div class="flex items-center justify-between gap-3">
         <span class="text-xs font-bold uppercase tracking-tight text-surface-700" data-kiwi-status>Preparing verification&hellip;</span>
         <span class="kiwi-pill inline-flex items-center gap-1.5 rounded-sm border border-surface-200 bg-card px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-surface-400" data-kiwi-pill>Idle</span>
+        <span class="kiwi-countdown text-[10px] font-mono tabular-nums text-surface-300 ml-1" data-kiwi-countdown></span>
       </div>
       <div class="mt-3 h-1.5 w-full rounded-full bg-surface-100 overflow-hidden">
         <div class="kiwi-fill h-full rounded-full bg-brand-500 transition-all duration-300" style="width:0%"></div>
@@ -45,6 +46,31 @@ pub fn kiwi_widget_html() -> String {
   function fail(msg) {{
     setStatus(msg || "Verification failed — please reload", "Failed", "failed");
     if (tokenEl) tokenEl.value = "";
+    stopCountdown();
+  }}
+
+  var countdownEl = W.querySelector("[data-kiwi-countdown]");
+  var countdownTimer = null;
+
+  function startCountdown(ttlSecs) {{
+    if (!countdownEl) return;
+    var remaining = ttlSecs;
+    function tick() {{
+      if (remaining <= 0) {{ countdownEl.textContent = ""; return; }}
+      countdownEl.textContent = remaining + "s";
+    }}
+    tick();
+    stopCountdown();
+    countdownTimer = setInterval(function() {{
+      remaining--;
+      if (remaining < 0) {{ countdownEl.textContent = "expired"; clearInterval(countdownTimer); countdownTimer = null; return; }}
+      countdownEl.textContent = remaining + "s";
+    }}, 1000);
+  }}
+
+  function stopCountdown() {{
+    if (countdownTimer) {{ clearInterval(countdownTimer); countdownTimer = null; }}
+    if (countdownEl) countdownEl.textContent = "";
   }}
 
   var mouseEvents = 0, keyEvents = 0;
@@ -107,6 +133,7 @@ pub fn kiwi_widget_html() -> String {
       }});
       if (!resp.ok) throw new Error("challenge request failed: " + resp.status);
       var data = await resp.json();
+      if (data.ttlSecs) startCountdown(data.ttlSecs);
 
       setStatus("Computing proof-of-work\u2026", "Verifying", "solving");
       var result = await solve(data.prefix, data.salt, data.mKib || 50000, data.targetBits);
@@ -116,6 +143,9 @@ pub fn kiwi_widget_html() -> String {
         wd: navigator.webdriver === true,
         hc: navigator.hardwareConcurrency || 0,
         dm: navigator.deviceMemory || 0,
+        pl: navigator.plugins ? navigator.plugins.length : 0,
+        la: navigator.language || "",
+        cd: window.screen.colorDepth || 0,
         me: mouseEvents, ke: keyEvents,
         sw: window.screen.width || 0, sh: window.screen.height || 0,
         iw: window.innerWidth || 0, ih: window.innerHeight || 0
@@ -127,6 +157,7 @@ pub fn kiwi_widget_html() -> String {
       if (tokenEl) tokenEl.value = token;
       setStatus("Verified \u2014 you may continue", "Verified", "done");
       if (fillEl) fillEl.style.width = "100%";
+      stopCountdown();
     }} catch (e) {{
       fail("Verification failed \u2014 " + (e.message || "please reload"));
     }}

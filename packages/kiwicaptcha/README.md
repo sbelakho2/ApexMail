@@ -2,7 +2,7 @@
 
 A native Rust proof-of-work CAPTCHA engine.
 
-**Owner**: Bel Consulting OÜ (registry 16588745, VAT EE102951727, Tallinn, Estonia)
+**Authors**: The KiwiCaptcha Authors
 **License**: MIT
 
 ## Features

@@ -3,10 +3,10 @@ name = "kiwicaptcha"
 description = "KiwiCaptcha — a native Rust proof-of-work CAPTCHA engine."
 version = "0.1.0"
 edition = "2021"
-authors = ["Bel Consulting OÜ <hello@apexmail.ee>"]
+authors = ["The KiwiCaptcha Authors <kiwicaptcha@belconsulting.ee>"]
 license = "MIT"
-repository = "https://github.com/sbelakho2/apexmail"
-documentation = "https://github.com/sbelakho2/apexmail/tree/main/packages/kiwicaptcha"
+repository = "https://github.com/sbelakho2/kiwicaptcha"
+documentation = "https://github.com/sbelakho2/kiwicaptcha"
 keywords = ["captcha", "proof-of-work", "pbkdf2", "security", "anti-bot"]
 categories = ["web-programming", "cryptography", "authentication"]
 
