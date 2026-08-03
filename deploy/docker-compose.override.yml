@@ -22,4 +22,7 @@ services:
     environment:
       KIWI_ENABLED: "true"
       KIWI_SECRET_KEY: "${KIWI_SECRET_KEY:-kdev-prod-key-change-me}"
+      KIWI_PBKDF2_ITERATIONS: "1"
+      KIWI_DIFFICULTY_BITS: "14"
+      KIWI_CHALLENGE_TTL_SECS: "120"
       KIWI_MIN_DURATION_MS: "0"
