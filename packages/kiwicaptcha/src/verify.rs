@@ -191,28 +191,16 @@ pub fn sha256_hex(input: &str) -> String {
 /// Score telemetry data for bot detection. Returns `true` if the client
 /// appears to be automated/headless.
 ///
-/// Heuristics (conservative, tuned for low false-positive rate):
-/// - `webdriver` flag set → automated browser
-/// - Zero mouse/key events over a >500ms solve → no human interaction
-/// - Hardware concurrency = 0 and no device memory → likely headless
-pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool {
+/// Only the `webdriver` flag is treated as a hard bot signal (navigator.webdriver
+/// is set by Chrome DevTools Protocol and Selenium).  Other signals (mouse/key
+/// counts and hardware hints) are informative but **not** used as rejection
+/// criteria — they vary too widely across privacy-focused browsers and during
+/// short solve windows where the user may simply be waiting.
+pub fn score_telemetry(telemetry: &serde_json::Value, _duration_ms: u64) -> bool {
     let wd = telemetry.get("wd").and_then(|v| v.as_bool()).unwrap_or(false);
     if wd {
-        return true; // webdriver flag set: navigator.webdriver === true
+        return true;
     }
-
-    let mouse: u64 = telemetry.get("me").and_then(|v| v.as_u64()).unwrap_or(0);
-    let keys: u64 = telemetry.get("ke").and_then(|v| v.as_u64()).unwrap_or(0);
-    if duration_ms > 500 && mouse == 0 && keys == 0 {
-        return true; // no human interaction during solve
-    }
-
-    let hc: u64 = telemetry.get("hc").and_then(|v| v.as_u64()).unwrap_or(0);
-    let dm: u64 = telemetry.get("dm").and_then(|v| v.as_u64()).unwrap_or(0);
-    if hc == 0 && dm == 0 {
-        return true; // no hardware info: likely headless
-    }
-
     false
 }
 

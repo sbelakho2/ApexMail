@@ -81,15 +81,25 @@ pub async fn verify_kiwi_token(
     }
 
     let raw = kiwi_token.filter(|t| !t.is_empty()).ok_or_else(|| {
+        tracing::warn!("KiwiCaptcha: empty token received");
         ApiError::Validation(vec!["CAPTCHA verification token is required".into()])
     })?;
 
+    tracing::info!(token_len = raw.len(), "KiwiCaptcha: decoding token");
+
     let solution = kiwicaptcha::SolutionToken::decode(raw).map_err(|e| {
-        tracing::warn!(error = %e, "KiwiCaptcha token decode failed");
+        tracing::warn!(error = %e, token_len = raw.len(), "KiwiCaptcha: token decode failed");
         ApiError::Validation(vec![
             "CAPTCHA verification failed — please refresh and try again".into(),
         ])
     })?;
+
+    tracing::info!(
+        nonce = %solution.nonce,
+        counter = solution.counter,
+        duration_ms = solution.duration_ms,
+        "KiwiCaptcha: token decoded"
+    );
 
     // Look up the stored challenge by nonce.
     let mut conn = redis_pool.get().await?;
@@ -99,16 +109,27 @@ pub async fn verify_kiwi_token(
 
     let record: kiwicaptcha::ChallengeRecord = stored
         .ok_or_else(|| {
+            tracing::warn!(nonce = %solution.nonce, key = %key, "KiwiCaptcha: challenge not found in Redis");
             ApiError::Validation(vec![
                 "CAPTCHA challenge expired or not found — please refresh and try again".into(),
             ])
         })
         .and_then(|s| {
             serde_json::from_str(&s).map_err(|e| {
-                tracing::warn!(error = %e, "KiwiCaptcha challenge record decode failed");
+                tracing::warn!(error = %e, nonce = %solution.nonce, "KiwiCaptcha: challenge record decode failed");
                 ApiError::Internal("CAPTCHA state corrupted".into())
             })
         })?;
+
+    tracing::info!(
+        nonce = %solution.nonce,
+        scope = %record.scope,
+        expires_at = record.expires_at,
+        ip_hash = %record.ip_hash,
+        m_kib = record.m_kib,
+        target_bits = record.target_bits,
+        "KiwiCaptcha: challenge record found"
+    );
 
     // Single-use: delete immediately regardless of verification outcome, so a
     // failed attempt cannot be retried with the same challenge.
@@ -120,7 +141,10 @@ pub async fn verify_kiwi_token(
     let expected_ip_hash = kiwicaptcha::hash_ip(client_ip);
     if record.ip_hash != expected_ip_hash {
         tracing::warn!(
-            "KiwiCaptcha IP mismatch — challenge was issued to a different client"
+            expected = %record.ip_hash,
+            actual = %expected_ip_hash,
+            client_ip = %client_ip,
+            "KiwiCaptcha: IP mismatch — challenge was issued to a different client"
         );
         return Err(ApiError::Validation(vec![
             "CAPTCHA verification failed — please try again".into(),
@@ -158,13 +182,23 @@ pub async fn verify_kiwi_token(
         expected_scope: scope,
     };
 
+    tracing::info!(
+        counter = solution.counter,
+        duration_ms = solution.duration_ms,
+        min_duration_ms = min_duration_ms,
+        scope = ?scope,
+        target_bits = record.target_bits,
+        m_kib = record.m_kib,
+        "KiwiCaptcha: calling verify_solution"
+    );
+
     match kiwicaptcha::verify_solution(&ctx) {
         kiwicaptcha::VerifyOutcome::Valid => {
-            tracing::debug!(duration_ms = solution.duration_ms, "KiwiCaptcha solution verified");
+            tracing::info!(duration_ms = solution.duration_ms, counter = solution.counter, "KiwiCaptcha: VERIFIED");
             Ok(())
         }
         kiwicaptcha::VerifyOutcome::Invalid(reason) => {
-            tracing::warn!(reason = ?reason, "KiwiCaptcha solution rejected");
+            tracing::warn!(reason = ?reason, counter = solution.counter, duration_ms = solution.duration_ms, target_bits = record.target_bits, "KiwiCaptcha: REJECTED");
             Err(ApiError::Validation(vec![
                 "CAPTCHA verification failed — please try again".into(),
             ]))
