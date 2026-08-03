@@ -71,7 +71,7 @@ pub fn kiwi_widget_html() -> String {
     var password = new TextEncoder().encode(prefix + counter);
     var algo = {{ name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: iterations }};
     var key = await crypto.subtle.importKey("raw", password, {{name:"PBKDF2"}}, false, ["deriveBits"]);
-    return crypto.subtle.deriveBits(algo, key);
+    return crypto.subtle.deriveBits(algo, key, 256);
   }}
 
   async function solve(prefix, saltB64, iterations, targetBits) {{
