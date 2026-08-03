@@ -1300,7 +1300,95 @@ async fn login(
                     ApiError::Forbidden("MFA is not configured for this admin account".into())
                 })?;
 
-            if let Some(mfa_code) = body.mfa_code.as_deref() {
+            // Email-based MFA: generate a one-time code, store in Redis.
+            if secret == "email" {
+                let mut redis_conn = state.redis.get().await?;
+                if let Some(mfa_code) = body.mfa_code.as_deref() {
+                    if mfa_code.trim().is_empty() {
+                        return Err(ApiError::Validation(vec!["MFA code is required".into()]));
+                    }
+                    let key = format!("apexmail:email_mfa:{}", user.id);
+                    let stored: Option<String> = deadpool_redis::redis::AsyncCommands::get(&mut *redis_conn, &key).await?;
+                    match stored {
+                        Some(code) if code == mfa_code => {
+                            let _: () = deadpool_redis::redis::AsyncCommands::del(&mut *redis_conn, &key).await?;
+                        }
+                        _ => {
+                            record_login_failure(&state.redis, &login_identifier).await?;
+                            return Err(ApiError::Unauthorized("invalid MFA code".into()));
+                        }
+                    }
+                } else {
+                    use rand::Rng;
+                    let code: u32 = rand::thread_rng().gen_range(100000..999999);
+                    let code_str = code.to_string();
+                    let key = format!("apexmail:email_mfa:{}", user.id);
+                    let _: () = deadpool_redis::redis::AsyncCommands::set_ex(&mut *redis_conn, &key, &code_str, 300).await?;
+                    tracing::info!(user_id = %user.id, email = %user.email, "Email MFA code generated: {code_str}");
+
+                    // Enqueue MFA email via email_queue (same pattern as forgot_password)
+                    let msg_id = apexmail_lib::id::generate_id("msg", 22);
+                    let safe_email = html_escape(&user.email);
+                    let safe_code = html_escape(&code_str);
+                    let html_body = format!(
+                        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
+<h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Your MFA Code</h2>
+<p>Your one-time verification code for <strong>{safe_email}</strong> is:</p>
+<p style="font-size:28px;font-family:ui-monospace,'JetBrains Mono',monospace;letter-spacing:0.2em;font-weight:700;color:#dc2626">{safe_code}</p>
+<p style="font-size:13px;color:#71717a">This code expires in 5 minutes. If you didn't request this, your account may be at risk.</p>
+<hr style="border:none;border-top:1px solid #000;margin:24px 0"/>
+<p style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:0.05em">&copy; 2026 ApexMail</p>
+</body></html>"#,
+                    );
+                    let text_body = format!("Your MFA Code\n\nYour one-time verification code is: {code_str}\n\nThis code expires in 5 minutes.");
+                    let domain_id = sqlx::query_scalar::<_, String>("SELECT id FROM domains WHERE tenant_id=$1 AND status='verified' LIMIT 1")
+                        .bind(SYSTEM_TENANT_ID)
+                        .fetch_optional(&state.db)
+                        .await
+                        .map_err(|e| { tracing::error!(error=%e, "Failed to look up system domain"); ApiError::Internal("Failed to send MFA email".into()) })?
+                        .unwrap_or_else(|| apexmail_lib::id::generate_id("dom", 22));
+                    let _ = sqlx::query(
+                        "INSERT INTO email_queue (id, message_id, tenant_id, domain_id, \"from\", \"to\", subject, html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 5, 'pending', $13, $13)",
+                    )
+                    .bind(apexmail_lib::id::generate_id("emq", 22))
+                    .bind(&msg_id)
+                    .bind(SYSTEM_TENANT_ID)
+                    .bind(&domain_id)
+                    .bind("noreply@apexmail.ee")
+                    .bind(&user.email)
+                    .bind("Your ApexMail MFA Code")
+                    .bind(&html_body)
+                    .bind(&text_body)
+                    .bind(serde_json::json!(["system", "mfa"]))
+                    .bind(Option::<serde_json::Value>::None)
+                    .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
+                    .bind(chrono::Utc::now())
+                    .execute(&state.db)
+                    .await;
+                    tracing::info!(user_id=%user.id, email=%user.email, "MFA email queued");
+
+                    let challenge_token = store_mfa_challenge(
+                        &state.redis,
+                        &MfaChallengeState {
+                            user_id: user.id.clone(),
+                            tenant_id: user.tenant_id.clone(),
+                            email: user.email.clone(),
+                            name: user.name.clone(),
+                            role: user.role.clone(),
+                            secret: secret.to_string(),
+                            kind: MfaChallengeKind::Verify,
+                        },
+                    )
+                    .await?;
+
+                    return Ok(no_store_json_response(
+                        StatusCode::ACCEPTED,
+                        MfaChallengeResponse::verify(challenge_token),
+                    ));
+                }
+            } else if let Some(mfa_code) = body.mfa_code.as_deref() {
                 // Try TOTP first, then fall back to recovery code
                 let totp_valid = apexmail_lib::mfa::verify_totp_code(secret, mfa_code);
                 let recovery_valid = if !totp_valid {
