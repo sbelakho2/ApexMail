@@ -396,7 +396,9 @@
   function setTheme(theme) {
     if (theme === "dark") {
       htmlEl.classList.add("dark");
+      htmlEl.classList.remove("light");
     } else {
+      htmlEl.classList.add("light");
       htmlEl.classList.remove("dark");
     }
     localStorage.setItem("apexmail-theme", theme);
