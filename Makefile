@@ -1,46 +1,104 @@
 # ApexMail — Deployment
 # ======================
 #
-# There is ONE deploy command: `make deploy`
+# SINGLE SOURCE OF TRUTH for deployments. No GitHub Actions. No manual docker run.
 #
-# Procedure (the proper channel — no GitHub Actions, no manual docker run):
-#   1. `make deploy` rsyncs the repo to the server over SSH
-#   2. SSHes in and runs deploy/scripts/deploy.sh
-#   3. deploy.sh builds all Rust binaries + Docker images locally on the server
-#   4. docker compose up -d recreates all services from the new images
+# Deploy procedure (operator runs from their machine):
+#   1. Code is rsync'd to /opt/apexmail on the server via SSH (with --delete so
+#      stale files are removed; only the exact current repo state exists on server)
+#   2. deploy/scripts/deploy.sh runs on the server — builds images, cleans old
+#      artifacts/containers/images, starts everything via docker compose
 #
 # Usage:
-#   make deploy         — rsync code, then build + deploy on the server
-#   make deploy-quick   — run deploy.sh without rsync (use what's on the server)
-#   make verify         — check live endpoints from your machine
+#   make deploy                         — full deploy (sync all + rebuild all)
+#   make deploy-service S=api-server    — partial: sync only changed code dirs,
+#                                          rebuild only the named service(s)
+#   make deploy-service S=mta,imap-server  — rebuild multiple services
+#   make deploy-quick                   — run deploy.sh without rsync (rebuild
+#                                          whatever is on the server)
+#   make deploy-restart                 — just restart containers (no rebuild)
+#   make verify                         — check live endpoints
+#
+# Server-local files NEVER touched by rsync: .env, secrets/, certs/,
+# deploy/nginx/ssl/, target/ (Docker build cache)
 #
 
 SERVER_HOST := root@95.216.226.51
 SSH         := ssh -o StrictHostKeyChecking=no $(SERVER_HOST)
-RSYNC       := rsync -avz --delete
+RSYNC       := rsync -avz
+RSYNC_SSH   := -e "ssh -o StrictHostKeyChecking=no"
 
-# Exclude directories that shouldn't be synced to the server
-RSYNC_EXCLUDES := \
-	--exclude='target' \
-	--exclude='node_modules' \
-	--exclude='.git' \
-	--exclude='.tmp' \
-	--exclude='.kilo' \
-	--exclude='reports' \
-	--exclude='.env'
+# Code directories that get synced. Each rsync uses --delete so the server
+# has EXACTLY the current repo state — no stale files, no old binaries.
+SYNC_DIRS := services/mail-server packages/kiwicaptcha apps/marketing-zola deploy
+SYNC_FILES := docker-compose.yml docker-compose.prod.yml
 
-.PHONY: deploy deploy-quick verify
+# Map service names to the code directories they depend on (for partial deploys).
+# When you do `make deploy-service S=api-server`, only these dirs are synced.
+SERVICE_DEPS_api-server    := services/mail-server/crates/api-server services/mail-server/crates/ui-foundation services/mail-server/crates/kcaptcha services/mail-server/Cargo.toml packages/kiwicaptcha
+SERVICE_DEPS_mta           := services/mail-server/crates/mta services/mail-server/crates/mail-common services/mail-server/crates/mail-proto services/mail-server/Cargo.toml
+SERVICE_DEPS_imap-server   := services/mail-server/crates/imap-server services/mail-server/crates/mailstore-core services/mail-server/Crates.toml
+SERVICE_DEPS_mailstore     := services/mail-server/crates/mailstore-core services/mail-server/Cargo.toml
+SERVICE_DEPS_worker        := services/mail-server/crates/worker-processors services/mail-server/Cargo.toml
+SERVICE_DEPS_enterprise    := services/mail-server/crates/enterprise services/mail-server/Cargo.toml
+SERVICE_DEPS_observability := services/mail-server/crates/observability-service services/mail-server/Cargo.toml
+SERVICE_DEPS_marketing     := apps/marketing-zola
+SERVICE_DEPS_tracking      := deploy/Dockerfile.tracking services/mail-server/crates/tracking-service
 
-## deploy: Rsync code to server, then build + deploy
+.PHONY: deploy deploy-service deploy-quick deploy-restart verify
+
+## deploy: Full deploy — sync all code + rebuild all images + restart
 deploy:
-	@echo "==> Syncing code to server..."
-	$(RSYNC) $(RSYNC_EXCLUDES) ./ $(SERVER_HOST):/opt/apexmail/
-	@echo "==> Running deploy script on server..."
+	@echo "==> Syncing ALL code to server (clean — stale files removed)..."
+	@for dir in $(SYNC_DIRS); do \
+		echo "  $$dir/"; \
+		$(RSYNC) --delete \
+			--exclude='target' --exclude='node_modules' --exclude='public' \
+			$(RSYNC_SSH) ./$$dir/ $(SERVER_HOST):/opt/apexmail/$$dir/; \
+	done
+	@for file in $(SYNC_FILES); do \
+		echo "  $$file"; \
+		$(RSYNC) $(RSYNC_SSH) ./$$file $(SERVER_HOST):/opt/apexmail/$$file; \
+	done
+	@echo "==> Running full deploy on server..."
 	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh'
 
-## deploy-quick: Run deploy.sh on the server without rsync
+## deploy-service S=name: Partial deploy — sync only changed code + rebuild one service
+deploy-service:
+	@if [ -z "$(S)" ]; then echo "Usage: make deploy-service S=api-server"; exit 1; fi
+	@echo "==> Partial deploy: $(S)"
+	@echo "==> Syncing only changed code directories..."
+	@$(RSYNC) --delete \
+		--exclude='target' --exclude='node_modules' --exclude='public' \
+		$(RSYNC_SSH) \
+		./services/mail-server/ \
+		$(SERVER_HOST):/opt/apexmail/services/mail-server/
+	@$(RSYNC) --delete $(RSYNC_SSH) \
+		./packages/kiwicaptcha/ \
+		$(SERVER_HOST):/opt/apexmail/packages/kiwicaptcha/
+	@$(RSYNC) --delete \
+		--exclude='target' --exclude='node_modules' --exclude='public' \
+		$(RSYNC_SSH) \
+		./apps/marketing-zola/ \
+		$(SERVER_HOST):/opt/apexmail/apps/marketing-zola/
+	@$(RSYNC) --delete \
+		--exclude='ssl' \
+		$(RSYNC_SSH) \
+		./deploy/ \
+		$(SERVER_HOST):/opt/apexmail/deploy/
+	@for file in $(SYNC_FILES); do \
+		$(RSYNC) $(RSYNC_SSH) ./$$file $(SERVER_HOST):/opt/apexmail/$$file; \
+	done
+	@echo "==> Rebuilding service(s): $(S)"
+	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh --service $(S)'
+
+## deploy-quick: Rebuild + deploy whatever code is already on the server
 deploy-quick:
 	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh'
+
+## deploy-restart: Just restart containers (no rebuild, no sync)
+deploy-restart:
+	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh --no-build'
 
 ## verify: Check that all live endpoints respond correctly
 verify:
