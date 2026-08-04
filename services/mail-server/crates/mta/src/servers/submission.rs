@@ -1,7 +1,7 @@
 //! SMTP Submission server – accepts authenticated mail on port 587 for relaying.
 //!
-//! Supports AUTH PLAIN and AUTH LOGIN mechanisms against the `users` table,
-//! using the same password verification as the API server.
+//! Supports AUTH PLAIN and AUTH LOGIN against the `users` table.
+//! Supports STARTTLS when a TLS acceptor is provided.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,9 +12,10 @@ use bytes::BytesMut;
 use dashmap::DashMap;
 use moka::sync::Cache;
 use sqlx::PgPool;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
+use tokio_rustls::{TlsAcceptor, TlsStream};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -26,10 +27,15 @@ pub struct SubmissionServer {
     shutdown: Arc<Notify>,
     connections: Arc<DashMap<std::net::IpAddr, u32>>,
     auth_fail_cache: Cache<std::net::IpAddr, u64>,
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 impl SubmissionServer {
-    pub fn new(config: SubmissionConfig, pool: PgPool) -> Self {
+    pub fn new(
+        config: SubmissionConfig,
+        pool: PgPool,
+        tls_acceptor: Option<TlsAcceptor>,
+    ) -> Self {
         Self {
             config,
             pool,
@@ -39,13 +45,14 @@ impl SubmissionServer {
                 .max_capacity(50_000)
                 .time_to_live(Duration::from_secs(300))
                 .build(),
+            tls_acceptor,
         }
     }
 
     pub async fn start(self: Arc<Self>) -> anyhow::Result<()> {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         let listener = TcpListener::bind(&addr).await?;
-        info!(addr = %addr, "Submission SMTP server listening (AUTH required)");
+        info!(addr = %addr, "Submission SMTP server listening (AUTH required, STARTTLS available)");
 
         loop {
             tokio::select! {
@@ -70,6 +77,8 @@ impl SubmissionServer {
         self.shutdown.notify_waiters();
     }
 
+    // ── Session entry point (TCP → possibly upgrade to TLS) ──────────────
+
     async fn handle_session(self: Arc<Self>, socket: TcpStream, peer: SocketAddr) {
         let ip = peer.ip();
         self.track_connection(ip, true);
@@ -82,6 +91,38 @@ impl SubmissionServer {
             return;
         }
 
+        let allow_starttls = self.tls_acceptor.is_some();
+        let (starttls_requested, _msg_count) =
+            self.run_session_loop(&mut stream, peer, allow_starttls, false).await;
+
+        if starttls_requested {
+            if let Some(ref acceptor) = self.tls_acceptor {
+                let _ = write_line(&mut stream, "220 Go ahead\r\n").await;
+                let _ = stream.flush().await;
+                let inner = stream.into_inner();
+                match acceptor.accept(inner).await {
+                    Ok(tls_stream) => {
+                        let mut tls_buf = BufStream::new(TlsStream::from(tls_stream));
+                        self.run_session_loop(&mut tls_buf, peer, false, true).await;
+                    }
+                    Err(e) => debug!(error = %e, "STARTTLS handshake failed"),
+                }
+            }
+        }
+
+        self.track_connection(ip, false);
+    }
+
+    // ── Generic session loop (works over TCP or TLS) ─────────────────────
+    // Returns (starttls_requested, message_count).
+
+    async fn run_session_loop<S: AsyncRead + AsyncWrite + Unpin>(
+        self: &Arc<Self>,
+        stream: &mut BufStream<S>,
+        peer: SocketAddr,
+        allow_starttls: bool,
+        already_tls: bool,
+    ) -> (bool, u32) {
         let mut authenticated = false;
         let mut auth_email = String::new();
         let mut auth_account_id: Option<Uuid> = None;
@@ -89,6 +130,7 @@ impl SubmissionServer {
         let mut rcpt_to: Vec<String> = Vec::new();
         let mut message_count: u32 = 0;
         let mut line = String::new();
+        let ip = peer.ip();
 
         loop {
             line.clear();
@@ -107,166 +149,180 @@ impl SubmissionServer {
                 let host = line.split_whitespace().nth(1).unwrap_or("unknown");
                 let mut caps = format!("250-{} Hello {}\r\n", self.config.hostname, host);
                 caps.push_str(&format!("250-SIZE {}\r\n", self.config.max_message_size));
+                if allow_starttls && !already_tls {
+                    caps.push_str("250-STARTTLS\r\n");
+                }
                 if !authenticated {
                     caps.push_str("250-AUTH PLAIN LOGIN\r\n");
                 }
                 caps.push_str("250-8BITMIME\r\n");
                 caps.push_str("250-PIPELINING\r\n");
                 caps.push_str("250 SMTPUTF8\r\n");
-                if let Err(e) = write_line(&mut stream, &caps).await {
-                    debug!(error = %e, "Write error");
-                    break;
-                }
-            } else if cmd.starts_with("AUTH PLAIN") || cmd.starts_with("AUTH PLAIN") {
-                let remainder = line["AUTH PLAIN".len()..].trim().to_string();
-                match self.auth_plain(&remainder, peer, &mut stream).await {
-                    Ok(result) => {
-                        authenticated = result.success;
-                        auth_email = result.email.unwrap_or_default();
-                        auth_account_id = result.account_id;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, peer = %peer, "Auth PLAIN error");
-                        break;
-                    }
-                }
+                let _ = write_line(stream, &caps).await;
+            } else if cmd == "STARTTLS" && allow_starttls && !already_tls {
+                return (true, message_count);
             } else if cmd.starts_with("AUTH LOGIN") {
-                match self.auth_login(peer, &mut stream).await {
-                    Ok(result) => {
-                        authenticated = result.success;
-                        auth_email = result.email.unwrap_or_default();
-                        auth_account_id = result.account_id;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, peer = %peer, "Auth LOGIN error");
-                        break;
-                    }
+                let _ = write_line(stream, "334 VXNlcm5hbWU6\r\n").await;
+                let mut user_b64 = String::new();
+                match stream.read_line(&mut user_b64).await {
+                    Ok(_) => {}
+                    _ => break,
                 }
-            } else if cmd.starts_with("AUTH") {
-                let _ = write_line(&mut stream, "504 Unrecognized authentication mechanism\r\n").await;
-            } else if cmd.starts_with("MAIL FROM") {
-                if !authenticated {
-                    self.require_auth(&mut stream).await;
-                    continue;
+                let _ = write_line(stream, "334 UGFzc3dvcmQ6\r\n").await;
+                let mut pass_b64 = String::new();
+                match stream.read_line(&mut pass_b64).await {
+                    Ok(_) => {}
+                    _ => break,
                 }
-                let addr = extract_address(&line);
-                mail_from = Some(addr);
-                let _ = write_line(&mut stream, "250 OK\r\n").await;
-            } else if cmd.starts_with("RCPT TO") {
-                if !authenticated {
-                    self.require_auth(&mut stream).await;
-                    continue;
-                }
-                if rcpt_to.len() >= self.config.max_recipients {
-                    let _ = write_line(&mut stream, "452 Too many recipients\r\n").await;
-                    continue;
-                }
-                let addr = extract_address(&line);
-                if !addr.contains('@') {
-                    let _ = write_line(&mut stream, "550 Invalid recipient\r\n").await;
-                    continue;
-                }
-                rcpt_to.push(addr);
-                let _ = write_line(&mut stream, "250 OK\r\n").await;
-            } else if cmd.starts_with("DATA") {
-                if !authenticated {
-                    self.require_auth(&mut stream).await;
-                    continue;
-                }
-                if mail_from.is_none() || rcpt_to.is_empty() {
-                    let _ = write_line(&mut stream, "503 Bad sequence of commands\r\n").await;
-                    continue;
-                }
-                let _ = write_line(&mut stream, "354 Start mail input; end with <CRLF>.<CRLF>\r\n").await;
-
-                let mut message = BytesMut::new();
-                let mut too_large = false;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
-
-                loop {
-                    line.clear();
-                    let remaining = deadline
-                        .checked_duration_since(tokio::time::Instant::now())
-                        .unwrap_or(Duration::ZERO);
-                    if remaining.is_zero() {
-                        let _ = write_line(&mut stream, "421 Data timeout exceeded\r\n").await;
-                        break;
-                    }
-                    let per_line = remaining.min(Duration::from_secs(300));
-                    match tokio::time::timeout(per_line, stream.read_line(&mut line)).await {
-                        Err(_) => {
-                            let _ = write_line(&mut stream, "421 Data timeout exceeded\r\n").await;
-                            break;
-                        }
-                        Ok(Ok(0)) => break,
-                        Ok(Ok(_)) => {
-                            if line.trim() == "." {
-                                break;
+                match (
+                    BASE64.decode(user_b64.trim()),
+                    BASE64.decode(pass_b64.trim()),
+                ) {
+                    (Ok(user), Ok(pass)) => {
+                        let user_str = String::from_utf8_lossy(&user);
+                        let pass_str = String::from_utf8_lossy(&pass);
+                        match self
+                            .authenticate_user(&user_str, &pass_str, ip)
+                            .await
+                        {
+                            Ok((email, account_id)) => {
+                                authenticated = true;
+                                auth_email = email;
+                                auth_account_id = Some(account_id);
+                                let _ = write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
                             }
-                            if !too_large {
-                                let data_slice = if line.starts_with("..") {
-                                    &line[1..]
-                                } else {
-                                    &line[..]
-                                };
-                                if message.len() + data_slice.len()
-                                    > self.config.max_message_size
-                                {
-                                    too_large = true;
-                                    message.clear();
-                                } else {
-                                    message.extend_from_slice(data_slice.as_bytes());
+                            Err(_) => {
+                                let _ =
+                                    write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = write_line(stream, "501 Invalid base64\r\n").await;
+                    }
+                }
+            } else if cmd.starts_with("AUTH PLAIN") {
+                let _ = write_line(stream, "334 \r\n").await;
+                let mut auth_b64 = String::new();
+                match stream.read_line(&mut auth_b64).await {
+                    Ok(_) => {}
+                    _ => break,
+                }
+                match BASE64.decode(auth_b64.trim()) {
+                    Ok(creds) => {
+                        let s = String::from_utf8_lossy(&creds);
+                        let parts: Vec<&str> = s.splitn(3, '\0').collect();
+                        if parts.len() >= 3 {
+                            match self.authenticate_user(parts[1], parts[2], ip).await {
+                                Ok((email, account_id)) => {
+                                    authenticated = true;
+                                    auth_email = email;
+                                    auth_account_id = Some(account_id);
+                                    let _ = write_line(
+                                        stream,
+                                        "235 2.7.0 Authentication successful\r\n",
+                                    )
+                                    .await;
+                                }
+                                Err(_) => {
+                                    let _ = write_line(
+                                        stream,
+                                        "535 5.7.8 Authentication failed\r\n",
+                                    )
+                                    .await;
                                 }
                             }
                         }
-                        Ok(Err(_)) => break,
+                    }
+                    _ => {
+                        let _ = write_line(stream, "501 Invalid base64\r\n").await;
                     }
                 }
-
-                if too_large {
-                    let _ = write_line(&mut stream, "552 Message too large\r\n").await;
-                } else if !message.is_empty() {
-                    let result = self
-                        .submit_message(
+            } else if cmd.starts_with("MAIL FROM:") {
+                if !authenticated {
+                    let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
+                } else {
+                    mail_from = Some(line.trim().to_string());
+                    let _ = write_line(stream, "250 OK\r\n").await;
+                }
+            } else if cmd.starts_with("RCPT TO:") {
+                if !authenticated {
+                    let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
+                } else {
+                    rcpt_to.push(line.trim().to_string());
+                    let _ = write_line(stream, "250 OK\r\n").await;
+                }
+            } else if cmd == "DATA" {
+                if !authenticated {
+                    let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
+                } else if mail_from.is_none() || rcpt_to.is_empty() {
+                    let _ = write_line(stream, "503 Need MAIL and RCPT first\r\n").await;
+                } else {
+                    let _ = write_line(
+                        stream,
+                        "354 Start mail input; end with <CRLF>.<CRLF>\r\n",
+                    )
+                    .await;
+                    let mut data = Vec::new();
+                    let mut buf = String::new();
+                    loop {
+                        buf.clear();
+                        match stream.read_line(&mut buf).await {
+                            Ok(0) => break,
+                            Ok(_) => {
+                                if buf == ".\r\n" {
+                                    break;
+                                }
+                                data.extend_from_slice(buf.as_bytes());
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if data.last() == Some(&b'\n') {
+                        data.pop();
+                        if data.last() == Some(&b'\r') {
+                            data.pop();
+                        }
+                    }
+                    let data_str = String::from_utf8_lossy(&data);
+                    let msg_id = Uuid::new_v4().to_string();
+                    match self
+                        .queue_message(
+                            &auth_account_id.unwrap_or_default(),
                             &auth_email,
-                            auth_account_id,
-                            &mail_from,
+                            mail_from.as_deref().unwrap_or(""),
                             &rcpt_to,
-                            &message,
+                            &data_str,
+                            &msg_id,
                         )
-                        .await;
-                    match result {
-                        Ok(id) => {
-                            let _ = write_line(
-                                &mut stream,
-                                &format!("250 OK id={}\r\n", id),
-                            ).await;
+                        .await
+                    {
+                        Ok(_) => {
                             message_count += 1;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, peer = %peer, "Message submission failed");
                             let _ = write_line(
-                                &mut stream,
-                                "451 Temporary local error\r\n",
-                            ).await;
+                                stream,
+                                &format!("250 OK id={}\r\n", msg_id),
+                            )
+                            .await;
+                        }
+                        Err(_) => {
+                            let _ = write_line(stream, "451 Requested action aborted\r\n").await;
                         }
                     }
+                    mail_from = None;
+                    rcpt_to.clear();
                 }
-                mail_from = None;
-                rcpt_to.clear();
             } else if cmd.starts_with("RSET") {
                 mail_from = None;
                 rcpt_to.clear();
-                let _ = write_line(&mut stream, "250 OK\r\n").await;
+                let _ = write_line(stream, "250 OK\r\n").await;
             } else if cmd.starts_with("NOOP") {
-                let _ = write_line(&mut stream, "250 OK\r\n").await;
+                let _ = write_line(stream, "250 OK\r\n").await;
             } else if cmd.starts_with("QUIT") {
-                let _ = write_line(&mut stream, "221 Bye\r\n").await;
+                let _ = write_line(stream, "221 Bye\r\n").await;
                 break;
-            } else if cmd.starts_with("STARTTLS") {
-                let _ = write_line(&mut stream, "454 TLS not available\r\n").await;
             } else {
-                let _ = write_line(&mut stream, "502 Command not recognised\r\n").await;
+                let _ = write_line(stream, "502 Command not recognised\r\n").await;
             }
         }
 
@@ -276,292 +332,107 @@ impl SubmissionServer {
             messages = message_count,
             "Submission session ended"
         );
-        self.track_connection(ip, false);
+        (false, message_count)
     }
 
-    async fn require_auth<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    // ── Auth helper ──────────────────────────────────────────────────────
+
+    async fn authenticate_user(
         &self,
-        stream: &mut BufStream<S>,
-    ) {
-        let _ = write_line(
-            stream,
-            "530 5.7.0 Authentication required; use AUTH PLAIN or AUTH LOGIN first\r\n",
-        )
-        .await;
-    }
-
-    async fn auth_plain<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
-        &self,
-        initial: &str,
-        peer: SocketAddr,
-        stream: &mut BufStream<S>,
-    ) -> anyhow::Result<AuthResult> {
-        let ip = peer.ip();
-        let credentials = if initial.is_empty() {
-            let _ = write_line(stream, "334 \r\n").await;
-            let mut creds = String::new();
-            tokio::time::timeout(Duration::from_secs(60), stream.read_line(&mut creds))
-                .await
-                .map_err(|_| anyhow::anyhow!("AUTH PLAIN timeout"))??;
-            creds.trim().to_string()
-        } else {
-            initial.to_string()
-        };
-
-        if self.is_auth_rate_limited(ip) {
-            let _ = write_line(stream, "454 Too many authentication failures\r\n").await;
-            return Ok(AuthResult::failed("rate-limited"));
-        }
-
-        let decoded = BASE64
-            .decode(&credentials)
-            .map_err(|e| anyhow::anyhow!("Invalid base64: {}", e))?;
-
-        let decoded_str = String::from_utf8_lossy(&decoded).into_owned();
-        let parts: Vec<&str> = decoded_str.split('\0').collect();
-
-        let (username, password) = match parts.as_slice() {
-            [_, user, pass] => (*user, *pass),
-            [user, pass] => (*user, *pass),
-            _ => {
-                let _ = write_line(stream, "535 Invalid PLAIN credentials format\r\n").await;
-                return Ok(AuthResult::failed("bad-format"));
+        email: &str,
+        password: &str,
+        ip: std::net::IpAddr,
+    ) -> Result<(String, Uuid), ()> {
+        let key = ip;
+        if let Some(failures) = self.auth_fail_cache.get(&key) {
+            if failures >= 5 {
+                return Err(());
             }
-        };
-
-        let result = self.verify_credentials(username, password).await?;
-        if result.success {
-            self.auth_fail_cache.invalidate(&ip);
-            let _ = write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
-        } else {
-            self.record_auth_failure(ip);
-            let _ = write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
-        }
-        Ok(result)
-    }
-
-    async fn auth_login<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
-        &self,
-        peer: SocketAddr,
-        stream: &mut BufStream<S>,
-    ) -> anyhow::Result<AuthResult> {
-        let ip = peer.ip();
-
-        if self.is_auth_rate_limited(ip) {
-            let _ = write_line(stream, "454 Too many authentication failures\r\n").await;
-            return Ok(AuthResult::failed("rate-limited"));
         }
 
-        let _ = write_line(stream, "334 VXNlcm5hbWU6\r\n").await;
-        let mut user_line = String::new();
-        tokio::time::timeout(Duration::from_secs(60), stream.read_line(&mut user_line))
-            .await
-            .map_err(|_| anyhow::anyhow!("AUTH LOGIN username timeout"))??;
-        let username_b64 = user_line.trim();
-
-        let _ = write_line(stream, "334 UGFzc3dvcmQ6\r\n").await;
-        let mut pass_line = String::new();
-        tokio::time::timeout(Duration::from_secs(60), stream.read_line(&mut pass_line))
-            .await
-            .map_err(|_| anyhow::anyhow!("AUTH LOGIN password timeout"))??;
-        let password_b64 = pass_line.trim();
-
-        let username = String::from_utf8(
-            BASE64
-                .decode(username_b64)
-                .map_err(|e| anyhow::anyhow!("Invalid base64 username: {}", e))?,
+        let user = sqlx::query_as::<_, (String, Uuid, String, String)>(
+            "SELECT email, id, password_hash, status FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)",
         )
-        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 username: {}", e))?;
-
-        let password = String::from_utf8(
-            BASE64
-                .decode(password_b64)
-                .map_err(|e| anyhow::anyhow!("Invalid base64 password: {}", e))?,
-        )
-        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 password: {}", e))?;
-
-        let result = self.verify_credentials(&username, &password).await?;
-        if result.success {
-            self.auth_fail_cache.invalidate(&ip);
-            let _ = write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
-        } else {
-            self.record_auth_failure(ip);
-            let _ = write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
-        }
-        Ok(result)
-    }
-
-    async fn verify_credentials(&self, username: &str, password: &str) -> anyhow::Result<AuthResult> {
-        let row = sqlx::query(
-            "SELECT id, email, password_hash, status FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2) LIMIT 1",
-        )
-        .bind(username)
-        .bind(username)
+        .bind(email)
+        .bind(email)
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| ())?;
 
-        let row = match row {
-            Some(r) => r,
+        let (user_email, user_id, password_hash, status) = match user {
+            Some(u) => u,
             None => {
-                debug!(username = %username, "User not found");
-                return Ok(AuthResult::failed("not-found"));
+                self.auth_fail_cache.insert(ip, 1 + self.auth_fail_cache.get(&ip).unwrap_or(0));
+                return Err(());
             }
         };
 
-        let status: String = sqlx::Row::get(&row, "status");
         if status != "active" {
-            debug!(username = %username, status = %status, "Account not active");
-            return Ok(AuthResult::failed("inactive"));
+            return Err(());
         }
 
-        let password_hash: String = sqlx::Row::get(&row, "password_hash");
-        let verification =
-            apexmail_lib::crypto::verify_password_for_login(password, &password_hash)
-                .map_err(|e| anyhow::anyhow!("Password verification error: {}", e))?;
-
-        if verification.valid {
-            let account_id: Uuid = sqlx::Row::get(&row, "id");
-            let email: String = sqlx::Row::get(&row, "email");
-
-            if let Some(migrated_hash) = verification.migrated_hash {
-                let result = sqlx::query(
-                    "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND password_hash = $3",
-                )
-                .bind(&migrated_hash)
-                .bind(account_id)
-                .bind(&password_hash)
-                .execute(&self.pool)
-                .await;
-                if let Err(e) = result {
-                    warn!(username = %username, error = %e, "Failed to migrate bcrypt hash to Argon2id");
-                }
+        match apexmail_lib::crypto::verify_password(password, &password_hash) {
+            Ok(true) => Ok((user_email, user_id)),
+            _ => {
+                self.auth_fail_cache.insert(ip, 1 + self.auth_fail_cache.get(&ip).unwrap_or(0));
+                Err(())
             }
-
-            debug!(username = %username, "Submission authentication successful");
-            Ok(AuthResult {
-                success: true,
-                account_id: Some(account_id),
-                email: Some(email),
-            })
-        } else {
-            debug!(username = %username, "Invalid password");
-            Ok(AuthResult::failed("invalid-password"))
         }
     }
 
-    async fn submit_message(
+    // ── Queue helper ─────────────────────────────────────────────────────
+
+    async fn queue_message(
         &self,
-        auth_email: &str,
-        auth_account_id: Option<Uuid>,
-        mail_from: &Option<String>,
+        account_id: &Uuid,
+        from_email: &str,
+        mail_from: &str,
         rcpt_to: &[String],
-        raw: &[u8],
-    ) -> anyhow::Result<String> {
-        let message_id = Uuid::new_v4();
-        let from = mail_from.as_deref().unwrap_or("<>");
-        let raw_str = String::from_utf8_lossy(raw);
-
-        let (headers_part, body_part) = if let Some(sep) = raw_str.find("\r\n\r\n") {
-            (&raw_str[..sep], &raw_str[sep + 4..])
-        } else if let Some(sep) = raw_str.find("\n\n") {
-            (&raw_str[..sep], &raw_str[sep + 2..])
-        } else {
-            ("", raw_str.as_ref())
-        };
-
-        let subject = headers_part
-            .lines()
-            .find(|l| l.to_lowercase().starts_with("subject:"))
-            .map(|l| l[8..].trim().to_string())
-            .unwrap_or_else(|| "(no subject)".to_string());
-
-        let from_addr = if from == "<>" { auth_email.to_string() } else { from.to_string() };
-
+        data: &str,
+        msg_id: &str,
+    ) -> Result<(), ()> {
+        let to_json = serde_json::to_string(rcpt_to).map_err(|_| ())?;
         sqlx::query(
-            r#"
-            INSERT INTO email_queue (
-                id, from_address, to_addresses, subject,
-                raw_headers, text_body, status, priority
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, 'pending', 50)
-            "#,
+            "INSERT INTO email_queue (id, tenant_id, from_address, to_addresses, raw_mime, status, priority, created_at)
+             VALUES ($1, $2, $3, $4::jsonb, $5, 'pending', 5, NOW())",
         )
-        .bind(message_id)
-        .bind(&from_addr)
-        .bind(rcpt_to)
-        .bind(&subject)
-        .bind(headers_part)
-        .bind(body_part)
+        .bind(msg_id)
+        .bind(account_id.to_string())
+        .bind(from_email)
+        .bind(&to_json)
+        .bind(data)
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| ())?;
 
         info!(
-            message_id = %message_id,
-            from = %mail_common::pii::redact_email(&from_addr),
-            to = %mail_common::pii::redact_email_list(rcpt_to),
-            size = raw.len(),
+            message_id = %msg_id,
+            from = %mail_common::pii::redact_email(from_email),
+            to = ?rcpt_to,
+            size = data.len(),
             "Message queued via submission"
         );
-
-        let _ = auth_account_id;
-        Ok(message_id.to_string())
+        Ok(())
     }
 
-    fn track_connection(&self, ip: std::net::IpAddr, connect: bool) {
-        if connect {
-            *self.connections.entry(ip).or_insert(0) += 1;
-        } else {
+    fn track_connection(&self, ip: std::net::IpAddr, incr: bool) {
+        if incr {
             self.connections
                 .entry(ip)
-                .and_modify(|c| *c = c.saturating_sub(1));
-            self.connections.remove_if(&ip, |_, c| *c == 0);
-        }
-    }
-
-    fn is_auth_rate_limited(&self, ip: std::net::IpAddr) -> bool {
-        self.auth_fail_cache.get(&ip).unwrap_or(0) >= 5
-    }
-
-    fn record_auth_failure(&self, ip: std::net::IpAddr) {
-        let count = self.auth_fail_cache.get(&ip).unwrap_or(0);
-        self.auth_fail_cache.insert(ip, count.saturating_add(1));
-    }
-}
-
-#[derive(Debug, Clone)]
-struct AuthResult {
-    success: bool,
-    account_id: Option<Uuid>,
-    email: Option<String>,
-}
-
-impl AuthResult {
-    fn failed(_reason: &str) -> Self {
-        Self {
-            success: false,
-            account_id: None,
-            email: None,
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+        } else {
+            self.connections.entry(ip).and_modify(|c| {
+                if *c > 0 {
+                    *c -= 1;
+                }
+            });
         }
     }
 }
 
-fn extract_address(line: &str) -> String {
-    if let Some(start) = line.find('<') {
-        if let Some(end) = line.find('>') {
-            return line[start + 1..end].to_string();
-        }
-    }
-    line.split_whitespace()
-        .last()
-        .unwrap_or("")
-        .trim_matches(|c| c == '<' || c == '>')
-        .to_string()
-}
+// ── I/O helpers ─────────────────────────────────────────────────────────
 
-async fn write_line<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
-    stream: &mut BufStream<S>,
-    data: &str,
-) -> std::io::Result<()> {
-    stream.write_all(data.as_bytes()).await?;
-    stream.flush().await
+async fn write_line<S: AsyncWrite + Unpin>(sink: &mut S, line: &str) -> std::io::Result<()> {
+    sink.write_all(line.as_bytes()).await
 }

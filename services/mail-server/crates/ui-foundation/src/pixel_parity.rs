@@ -247,10 +247,17 @@ pub fn check_parity(expected: &str, actual: &str) -> ParityResult {
         }
     }
 
-    // Check aria attributes
+    // Check aria attributes (symmetric, like the data-attribute check above,
+    // so that a mutation to one of several duplicate aria-labels is detected
+    // even when another copy still matches the original value).
     for (name, val) in &expected_aria {
         if !actual_aria.iter().any(|(n, v)| n == name && v == val) {
             attribute_diffs.push(format!("missing {}=\"{}\"", name, val));
+        }
+    }
+    for (name, val) in &actual_aria {
+        if !expected_aria.iter().any(|(n, v)| n == name && v == val) {
+            attribute_diffs.push(format!("extra {}=\"{}\"", name, val));
         }
     }
 

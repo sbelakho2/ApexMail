@@ -154,8 +154,18 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
                 route.surface,
                 route.pattern
             );
+            // The Zola-built marketing footer opens with
+            // `<footer aria-label="Site footer" class="...">`, so the class
+            // attribute is inside the opening tag but does not directly follow
+            // `<footer`. Verify a footer element whose opening tag carries a
+            // class attribute.
+            let footer_has_class = html.find("<footer ").map_or(false, |start| {
+                html[start..]
+                    .find('>')
+                    .map_or(false, |end| html[start..start + end].contains("class="))
+            });
             assert!(
-                html.contains("<footer class="),
+                footer_has_class,
                 "[{}] {} missing marketing footer",
                 route.surface,
                 route.pattern

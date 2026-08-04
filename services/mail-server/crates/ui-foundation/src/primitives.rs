@@ -1864,7 +1864,10 @@ fn alert_dialog_confirm_class(variant: &str) -> &'static str {
 
 fn tooltip_variant_class(variant: &str) -> &'static str {
     match variant {
-        "light" => "bg-card text-surface-900 border-surface-200",
+        // The "light" variant renders an explicitly white popover (bg-white)
+        // rather than the theme-dependent card token, so a light tooltip stays
+        // legible regardless of dark/light mode.
+        "light" => "bg-white text-surface-900 border-surface-200",
         "glass" => "backdrop-blur-md bg-white/10 border-white/20 text-white ",
         _ => "bg-surface-900 text-white border-surface-800 ",
     }

@@ -994,18 +994,77 @@ fn web_auth_social_footer(agreement_prefix: &str) -> String {
 fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &str) -> String {
     format!(
         "<main class=\"min-h-screen bg-surface-50 relative overflow-hidden\">\
-    <div class=\"pointer-events-none absolute inset-0\"></div>\
-<div class=\"relative mx-auto flex min-h-screen w-full max-w-7xl items-center justify-center px-6 py-20\">\
-<div class=\"w-full max-w-[480px] mx-auto\">\
-<div class=\"text-center mb-10\">\
+<div class=\"relative mx-auto flex min-h-screen w-full max-w-7xl items-center px-6 py-12 lg:px-8 lg:py-20\">\
+<div class=\"grid w-full items-center gap-16 lg:grid-cols-[1.1fr_0.9fr]\">\
+<div class=\"hidden lg:block\">{marketing_panel}</div>\
+<div class=\"w-full max-w-[440px] mx-auto lg:mx-0 lg:ml-auto\">\
+<div class=\"text-center lg:text-left mb-8\">\
 <span class=\"inline-block text-3xl font-bold tracking-tighter font-apex\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
-<h1 class=\"mt-3 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1>\
+<h1 class=\"mt-4 text-[28px] font-bold text-surface-950 tracking-tight leading-tight\">{title}</h1>\
 <p class=\"text-sm text-surface-500 mt-2 font-medium\">{subtitle}</p>\
 </div>\
 <div class=\"bg-card rounded-sm shadow-premium border border-surface-200/80 overflow-hidden\">\
 {form_html}{footer_html}\
-</div></div></div>{auth_form_script}</main>",
+</div></div></div></div>{auth_form_script}</main>",
+        marketing_panel = web_auth_marketing_panel(),
         auth_form_script = web_auth_form_script(),
+    )
+}
+
+/// The left-panel marketing content for the two-column auth layout.
+/// Features a heading, description, and three benefit bullets with coral check icons.
+fn web_auth_marketing_panel() -> String {
+    let bullets = [
+        ("Delivery intelligence", "Monitor every campaign with real-time analytics and inbox placement scoring."),
+        ("Enterprise compliance", "SOC 2 Type II, GDPR, and HIPAA workflows built into every plan."),
+        ("Developer-first API", "REST, gRPC, and SMTP APIs with SDKs for 8 languages."),
+    ];
+    let bullet_html: String = bullets
+        .iter()
+        .map(|(title, desc)| {
+            format!(
+                "<div class=\"flex items-start gap-3\">\
+<div class=\"flex h-6 w-6 items-center justify-center rounded-sm bg-primary text-white shrink-0 mt-0.5\">\
+<svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"3\" stroke-linecap=\"round\" stroke-linejoin=\"round\" class=\"w-3.5 h-3.5\"><path d=\"M5 12l4 4L19 6\"></path></svg>\
+</div>\
+<div>\
+<p class=\"text-sm font-bold text-surface-950\">{title}</p>\
+<p class=\"text-[13px] text-surface-500 mt-0.5 leading-relaxed\">{desc}</p>\
+</div></div>",
+                title = title,
+                desc = desc,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    format!(
+        "<div>\
+<div class=\"inline-flex items-center gap-2 rounded-sm border border-brand-200/60 bg-card px-3.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-brand-700 mb-8 shadow-premium-sm\">\
+<span class=\"inline-block h-1.5 w-1.5 rounded-full bg-primary\"></span>\
+Enterprise Email Infrastructure\
+</div>\
+<h2 class=\"text-4xl font-bold text-surface-950 tracking-tight leading-[1.1]\">Send email that<br/>actually lands in the inbox.</h2>\
+<p class=\"mt-5 max-w-[440px] text-[15px] text-surface-600 leading-relaxed\">ApexMail combines delivery intelligence, compliance workflows, and a developer-first API into a single Rust-native platform trusted by enterprises.</p>\
+<div class=\"mt-10 space-y-5\">{bullets}</div>\
+<div class=\"mt-12 pt-8 border-t border-surface-200\">\
+<div class=\"flex items-center gap-6\">\
+<div>\
+<p class=\"text-2xl font-bold text-surface-950\">99.8<span class=\"text-sm text-surface-400 font-medium ml-0.5\">%</span></p>\
+<p class=\"text-[10px] uppercase tracking-widest text-surface-400 font-bold mt-0.5\">Delivery rate</p>\
+</div>\
+<div>\
+<p class=\"text-2xl font-bold text-surface-950\">50<span class=\"text-sm text-surface-400 font-medium ml-0.5\">ms</span></p>\
+<p class=\"text-[10px] uppercase tracking-widest text-surface-400 font-bold mt-0.5\">Avg. send time</p>\
+</div>\
+<div>\
+<p class=\"text-2xl font-bold text-surface-950\">SOC 2</p>\
+<p class=\"text-[10px] uppercase tracking-widest text-surface-400 font-bold mt-0.5\">Type II</p>\
+</div>\
+</div>\
+</div>\
+</div>",
+        bullets = bullet_html,
     )
 }
 

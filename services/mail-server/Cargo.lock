@@ -4818,6 +4818,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "imap-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "futures",
+ "mail-parser 0.10.2",
+ "mail-proto",
+ "prost",
+ "rustls 0.23.40",
+ "rustls-pemfile 2.2.0",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "inbox-placement"
 version = "0.1.0"
 dependencies = [

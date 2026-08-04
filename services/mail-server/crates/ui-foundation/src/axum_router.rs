@@ -640,7 +640,19 @@ mod tests {
     fn marketing_routes_include_marketing_shell() {
         let html = render_route("marketing", "/pricing").unwrap();
         assert!(html.contains("css/styles.css"));
-        assert!(html.contains("<footer class="));
+        // The Zola-built marketing footer is `<footer aria-label="Site footer"
+        // class="...">`, so the class attribute is inside the opening tag but
+        // does not directly follow `<footer`. Assert a footer element whose
+        // opening tag carries a class attribute.
+        let footer_has_class = html.find("<footer ").map_or(false, |start| {
+            html[start..]
+                .find('>')
+                .map_or(false, |end| html[start..start + end].contains("class="))
+        });
+        assert!(
+            footer_has_class,
+            "marketing /pricing must render a footer with a class attribute"
+        );
         assert!(html.contains("/pricing/calculator"));
     }
 
@@ -807,11 +819,30 @@ mod tests {
                         && opening_tag.contains("defer");
                     // Inline theme bootstrap + toggle script emitted by ALL root
                     // layouts (marketing, web, control-plane) via theme_script().
-                    // Reads localStorage "apexmail-ui:theme" to prevent FOUC, and
-                    // handles toggle clicks on [data-theme-toggle] buttons.
+                    // Reads the theme localStorage key to prevent FOUC, and
+                    // handles toggle clicks on [data-theme-toggle] buttons. The
+                    // web/control-plane shells use the namespaced
+                    // "apexmail-ui:theme" key, while the Zola-built marketing
+                    // site uses its legacy "apexmail-theme" key — accept both.
                     let is_theme_script = !opening_tag.contains("src=")
-                        && script.contains("apexmail-ui:theme")
-                        && script.contains("prefers-color-scheme:dark");
+                        && script.contains("prefers-color-scheme:dark")
+                        && (script.contains("apexmail-ui:theme")
+                            || script.contains("apexmail-theme"));
+                    // Inline footer status indicator script baked into every
+                    // Zola-built marketing page. Self-contained IIFE that polls
+                    // the status page and toggles the `.footer-status-dot` /
+                    // `.footer-status-text` elements.
+                    let is_marketing_footer_status_script = !opening_tag.contains("src=")
+                        && script.contains("footer-status-dot")
+                        && script.contains("footer-status-text");
+                    // Inline interactive marketing widgets baked in by the Zola
+                    // build with a static-render nonce (`nonce=static-build`):
+                    // the API explorer console (`data-api-console-root`) and the
+                    // pricing calculator. Both are self-contained IIFEs with no
+                    // external dependencies.
+                    let is_marketing_static_widget_script = opening_tag.contains("nonce")
+                        && (script.contains("data-api-console-root")
+                            || script.contains("monthlyPrice"));
                     // Inline mobile-menu toggle script injected by shell::mobile_menu_script()
                     // into both web and control-plane shells. It is an inline self-contained IIFE
                     // with no external dependencies and requires no separate CSP nonce exemption
@@ -825,6 +856,15 @@ mod tests {
                     let is_auth_form_script = !opening_tag.contains("src=")
                         && script.contains("authBound")
                         && script.contains("/v1/auth/");
+                    // Inline API-form hydration script injected by `api_form_script`
+                    // (emitted by `web_dashboard_layout` on every web dashboard
+                    // route). Self-contained IIFE that serializes
+                    // `form[data-api-form]` fields to JSON, POSTs them to the
+                    // form's `data-api-action` URL with the CSRF header, and
+                    // redirects on success. Pure Rust SSR, no external JS.
+                    let is_api_form_script = !opening_tag.contains("src=")
+                        && script.contains("apiAction")
+                        && script.contains("data-api-form");
                     // Inline MFA management script injected by `control_plane_security_page`.
                     // Self-contained IIFE that handles MFA setup flow (status check, QR code
                     // display, TOTP verification, recovery codes) via the /v1/auth/mfa/* API.
@@ -849,12 +889,17 @@ mod tests {
                         && opening_tag.contains("defer");
                     let allowed = match route.surface {
                         "marketing" | "marketing-zola" => {
-                            is_json_ld || is_allowed_marketing_js || is_theme_script
+                            is_json_ld
+                                || is_allowed_marketing_js
+                                || is_theme_script
+                                || is_marketing_footer_status_script
+                                || is_marketing_static_widget_script
                         }
                         "web" | "control-plane" => {
                             is_theme_script
                                 || is_mobile_menu_script
                                 || is_auth_form_script
+                                || is_api_form_script
                                 || is_mfa_management_script
                                 || is_kiwi_widget_script
                                 || is_console_js

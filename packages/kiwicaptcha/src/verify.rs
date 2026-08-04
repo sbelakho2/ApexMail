@@ -36,7 +36,7 @@ fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], Verif
     let password = format!("{}{}", record.prefix, counter);
 
     let mut out = [0u8; 32];
-    pbkdf2::<Hmac<Sha256>>(
+    let _ = pbkdf2::<Hmac<Sha256>>(
         password.as_bytes(),
         &salt,
         record.m_kib,

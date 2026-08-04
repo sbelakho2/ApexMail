@@ -9,7 +9,7 @@ use observability_service::otlp_exporter::{
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::signal;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use mta::auth::EmailAuthenticator;
@@ -26,6 +26,10 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    let _ = tokio_rustls::rustls::crypto::CryptoProvider::install_default(
+        tokio_rustls::rustls::crypto::ring::default_provider(),
+    );
 
     // Initialize tracing (with OTLP support)
     let _tracing_guard = init_tracing(&cli.log_level);
@@ -171,9 +175,19 @@ async fn main() -> anyhow::Result<()> {
 
     // Submission server (authenticated SMTP on port 587)
     let (submission_srv, submission_handle) = if config.submission.enabled {
+        let tls_acceptor = if config.inbound.tls.enabled {
+            match load_tls_acceptor(
+                config.inbound.tls.cert_path.as_deref().unwrap_or(""),
+                config.inbound.tls.key_path.as_deref().unwrap_or(""),
+            ) {
+                Ok(a) => Some(a),
+                Err(e) => { warn!(error=%e, "Failed to load submission TLS"); None }
+            }
+        } else { None };
         let srv = Arc::new(SubmissionServer::new(
             config.submission.clone(),
             pool.clone(),
+            tls_acceptor,
         ));
         let s = srv.clone();
         (
