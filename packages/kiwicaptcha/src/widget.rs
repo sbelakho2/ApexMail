@@ -4,26 +4,38 @@
 //! 1. Fetches a challenge from `/api/kcaptcha/challenge`
 //! 2. Solves PBKDF2-HMAC-SHA256 in the browser via WebCrypto
 //! 3. Fills the hidden `kiwi__token` input with the encoded solution
+//!
+//! ## Visual design
+//!
+//! The widget matches the ApexMail design system:
+//! - Coral primary (`bg-brand-500`), surface card background (`bg-card`)
+//! - `rounded-sm` corners (0px radius — the Apex design language)
+//! - `shadow-premium-sm` for subtle depth
+//! - `transition-premium` timing (cubic-bezier easing)
+//! - Kiwi mark in a coral-tinted chip (`bg-brand-50 text-brand-600`)
+//! - Progress bar, status pill, TTL countdown, and contextual hint text
 
-use crate::kiwi_mark_svg;
+use crate::kiwi_shield_svg;
 
 /// Render the full KiwiCaptcha widget HTML block.
 pub fn kiwi_widget_html() -> String {
-    let svg = kiwi_mark_svg();
+    let svg = kiwi_shield_svg();
     format!(
-        r#"<div class="kiwi-widget rounded-sm border border-surface-200 bg-card p-4 sm:p-6" id="kiwicaptcha-widget" data-kiwi-widget role="status" aria-live="polite">
-  <div class="flex items-start gap-4">
-    <div class="flex items-center justify-center w-10 h-10 rounded-sm bg-brand-50 text-brand-600 shrink-0">{svg}</div>
+        r#"<div class="kiwi-widget rounded-sm border border-surface-200 bg-card p-5 transition-premium hover:border-surface-300" id="kiwicaptcha-widget" data-kiwi-widget role="status" aria-live="polite" aria-label="Security verification">
+  <div class="flex items-start gap-3.5">
+    <div class="flex items-center justify-center w-9 h-9 rounded-sm bg-brand-50 text-brand-600 shrink-0 transition-premium" data-kiwi-icon>{svg}</div>
     <div class="flex-1 min-w-0">
-      <div class="flex items-center justify-between gap-3">
-        <span class="text-xs font-bold uppercase tracking-tight text-surface-700" data-kiwi-status>Preparing verification&hellip;</span>
-        <span class="kiwi-pill inline-flex items-center gap-1.5 rounded-sm border border-surface-200 bg-card px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-surface-400" data-kiwi-pill>Idle</span>
-        <span class="kiwi-countdown text-[10px] font-mono tabular-nums text-surface-300 ml-1" data-kiwi-countdown></span>
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-[11px] font-bold uppercase tracking-[0.16em] text-surface-900" data-kiwi-status>Preparing verification&hellip;</span>
+        <span class="kiwi-pill inline-flex items-center gap-1.5 rounded-sm border border-surface-200 bg-surface-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] text-surface-400 transition-premium" data-kiwi-pill>Idle</span>
       </div>
-      <div class="mt-3 h-1.5 w-full rounded-full bg-surface-100 overflow-hidden">
-        <div class="kiwi-fill h-full rounded-full bg-brand-500 transition-all duration-300" style="width:0%"></div>
+      <div class="mt-2.5 h-[3px] w-full rounded-full bg-surface-100 overflow-hidden">
+        <div class="kiwi-fill h-full rounded-full bg-brand-500 transition-all duration-300 ease-premium" style="width:0%"></div>
       </div>
-      <p class="mt-2 text-[11px] leading-[1.5] text-surface-400" data-kiwi-hint></p>
+      <div class="mt-2 flex items-center justify-between gap-2">
+        <p class="text-[10px] leading-[1.45] text-surface-400 font-medium" data-kiwi-hint>Memory-hard proof-of-work runs in your browser.</p>
+        <span class="kiwi-countdown text-[9px] font-mono tabular-nums text-surface-300 shrink-0" data-kiwi-countdown></span>
+      </div>
     </div>
   </div>
   <input type="hidden" name="kiwi__token" id="kiwi-token-input" value="" />
@@ -35,16 +47,49 @@ pub fn kiwi_widget_html() -> String {
   var statusEl = W.querySelector("[data-kiwi-status]");
   var pillEl = W.querySelector("[data-kiwi-pill]");
   var fillEl = W.querySelector(".kiwi-fill");
+  var hintEl = W.querySelector("[data-kiwi-hint]");
+  var iconEl = W.querySelector("[data-kiwi-icon]");
   var tokenEl = document.getElementById("kiwi-token-input");
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  function setStatus(label, pill, state) {{
+  function setStatus(label, pillText, state) {{
     if (statusEl) statusEl.textContent = label;
-    if (pillEl) {{ pillEl.textContent = pill; pillEl.className = pillEl.className.replace(/idle|solving|done|failed/,"") + " " + state; }}
-    if (fillEl) fillEl.style.width = state === "done" ? "100%" : state === "failed" ? "0%" : (parseFloat(fillEl.style.width)||0) + "%";
+    if (pillEl) {{
+      pillEl.textContent = pillText;
+      var baseClass = "kiwi-pill inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] transition-premium ";
+      var stateClasses = {{
+        idle: "border-surface-200 bg-surface-50 text-surface-400",
+        connecting: "border-brand-200 bg-brand-50 text-brand-600",
+        solving: "border-brand-300 bg-brand-100 text-brand-700",
+        done: "border-success-200 bg-success-50 text-success-700",
+        failed: "border-primary/30 bg-primary/5 text-primary"
+      }};
+      pillEl.className = baseClass + (stateClasses[state] || stateClasses.idle);
+    }}
+    if (iconEl) {{
+      var iconBase = "flex items-center justify-center w-9 h-9 rounded-sm shrink-0 transition-premium ";
+      var iconStates = {{
+        idle: "bg-brand-50 text-brand-600",
+        connecting: "bg-brand-100 text-brand-700",
+        solving: "bg-brand-100 text-brand-700",
+        done: "bg-success-50 text-success-600",
+        failed: "bg-primary/10 text-primary"
+      }};
+      iconEl.className = iconBase + (iconStates[state] || iconStates.idle);
+      if (state === "solving" && !reduceMotion) iconEl.className += " animate-pulse";
+    }}
+  }}
+
+  function setHint(text) {{ if (hintEl) hintEl.textContent = text; }}
+
+  function setProgress(pct) {{
+    if (fillEl) fillEl.style.width = Math.max(0, Math.min(100, pct)) + "%";
   }}
 
   function fail(msg) {{
-    setStatus(msg || "Verification failed — please reload", "Failed", "failed");
+    setStatus(msg || "Verification failed", "Failed", "failed");
+    setHint("Please reload the page to retry.");
+    setProgress(0);
     if (tokenEl) tokenEl.value = "";
     stopCountdown();
   }}
@@ -55,10 +100,7 @@ pub fn kiwi_widget_html() -> String {
   function startCountdown(ttlSecs) {{
     if (!countdownEl) return;
     var remaining = ttlSecs;
-    function tick() {{
-      if (remaining <= 0) {{ countdownEl.textContent = ""; return; }}
-      countdownEl.textContent = remaining + "s";
-    }}
+    function tick() {{ if (remaining > 0) countdownEl.textContent = remaining + "s"; }}
     tick();
     stopCountdown();
     countdownTimer = setInterval(function() {{
@@ -103,6 +145,7 @@ pub fn kiwi_widget_html() -> String {
   async function solve(prefix, saltB64, iterations, targetBits) {{
     var salt = b64decode(saltB64);
     var solveStart = performance.now();
+    var expectedHashes = Math.pow(2, targetBits);
     for (var counter = 0; counter < 500000; counter++) {{
       var buf = await deriveHash(prefix, counter, salt, iterations);
       var bytes = new Uint8Array(buf);
@@ -110,7 +153,7 @@ pub fn kiwi_widget_html() -> String {
         return {{ counter: counter, duration: Math.round(performance.now() - solveStart) }};
       }}
       if (counter % 500 === 0) {{
-        if (fillEl) fillEl.style.width = Math.min(95, (counter * 100) / Math.pow(2, targetBits)) + "%";
+        setProgress(Math.min(92, (counter * 100) / expectedHashes));
         await new Promise(function(r) {{ setTimeout(r, 0); }});
       }}
     }}
@@ -120,7 +163,8 @@ pub fn kiwi_widget_html() -> String {
   // ── Widget driver ──────────────────────────────────────────────────
   async function run() {{
     try {{
-      setStatus("Requesting challenge\u2026", "Connecting", "solving");
+      setStatus("Requesting challenge\u2026", "Connecting", "connecting");
+      setHint("Contacting verification server\u2026");
       var scope = "login";
       var p = window.location.pathname.toLowerCase();
       if (p.indexOf("signup")>=0||p.indexOf("register")>=0) scope="signup";
@@ -136,6 +180,7 @@ pub fn kiwi_widget_html() -> String {
       if (data.ttlSecs) startCountdown(data.ttlSecs);
 
       setStatus("Computing proof-of-work\u2026", "Verifying", "solving");
+      setHint("Running memory-hard verification in your browser.");
       var result = await solve(data.prefix, data.salt, data.mKib || 50000, data.targetBits);
       if (!result) throw new Error("solver exhausted");
 
@@ -150,13 +195,12 @@ pub fn kiwi_widget_html() -> String {
         sw: window.screen.width || 0, sh: window.screen.height || 0,
         iw: window.innerWidth || 0, ih: window.innerHeight || 0
       }};
-      // btoa is safe here: nonce (base64), counter (decimal), duration (decimal),
-      // and telemetry (JSON) are all ASCII, so no Latin-1 encoding issues arise.
       var plain = data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry);
       var token = btoa(plain);
       if (tokenEl) tokenEl.value = token;
       setStatus("Verified \u2014 you may continue", "Verified", "done");
-      if (fillEl) fillEl.style.width = "100%";
+      setHint("No tracking. No third parties. Computed locally.");
+      setProgress(100);
       stopCountdown();
     }} catch (e) {{
       fail("Verification failed \u2014 " + (e.message || "please reload"));
@@ -167,7 +211,8 @@ pub fn kiwi_widget_html() -> String {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
     else run();
   }} else {{
-    setStatus("Browser not supported", "Unsupported", "idle");
+    setStatus("Browser not supported", "Unsupported", "failed");
+    setHint("This browser does not support WebCrypto.");
   }}
 }})();
 </script>"#

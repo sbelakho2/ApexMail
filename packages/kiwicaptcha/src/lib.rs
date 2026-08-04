@@ -34,7 +34,7 @@ pub use challenge::{
     hash_ip, issue_challenge, payload_from_record, sign_payload, verify_signature,
     ChallengeCache, ChallengeConfig, ChallengePayload, ChallengeRecord, Issued,
 };
-pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg};
+pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg, kiwi_shield_svg};
 pub use token::{DecodeError, IssuedChallenge, SolutionToken};
 pub use verify::{score_telemetry, solve_for_test, verify_solution, VerifyContext, VerifyError, VerifyOutcome};
 pub use widget::kiwi_widget_html;
