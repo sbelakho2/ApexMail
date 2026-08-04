@@ -1546,7 +1546,7 @@ fn configure_tls(cert_path: Option<&str>, key_path: Option<&str>) -> Result<Opti
         }
     };
 
-    let config = ServerConfig::builder()
+    let config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .with_context(|| "Failed to build TLS server config")?;
