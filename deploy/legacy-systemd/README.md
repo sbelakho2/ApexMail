@@ -33,6 +33,15 @@ compose/GHCR model removes the ambiguity.
 - `deploy.sh` — the old bare-metal deploy entrypoint (read-only reference).
 - `auth-server.service` — the systemd unit for the now-removed `auth-server`
   binary (the auth workload is handled by `api-server` in the canonical stack).
+- `apexmail.conf` — legacy bare-metal nginx config (pushed by the old
+  `push-nginx`/`push-configs` Makefile targets). Reads certs from
+  `/etc/letsencrypt/live/apexmail.ee/` and serves static files from
+  `/var/www/...`, which conflicts with the canonical container nginx at
+  `deploy/nginx/nginx.conf` (mounted by `docker-compose.prod.yml`, reads certs
+  from `/etc/nginx/ssl/`). Kept for reference only.
+- `status.apexmail.ee.conf` — orphan server block that duplicated the
+  `status.apexmail.ee` vhost already defined in the canonical
+  `deploy/nginx/nginx.conf`. Kept for reference only.
 
 ## If you ever need to revive this
 

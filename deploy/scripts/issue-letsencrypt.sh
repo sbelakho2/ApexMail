@@ -30,6 +30,9 @@ DOMAINS=(
   enterprise.apexmail.ee
   track.apexmail.ee
   mail.apexmail.ee
+  smtp.apexmail.ee
+  imap.apexmail.ee
+  autoconfig.apexmail.ee
 )
 
 cd "$DEPLOY_DIR"

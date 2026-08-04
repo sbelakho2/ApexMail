@@ -367,6 +367,11 @@ async fn handle_command(
         "NOOP" => handle_noop(session, tag, args).await,
         "CHECK" => handle_noop(session, tag, args).await,
         "CLOSE" => handle_close(session, tag, args).await,
+        // STARTTLS is handled at the connection level (handle_plaintext_with_starttls),
+        // not here — if it reaches this dispatcher, we're already on a TLS connection
+        // and STARTTLS is not permitted (RFC 3501 §6.2.1: "must not appear in any other
+        // situation [than before authentication on a plaintext connection]").
+        "STARTTLS" => Ok(vec![tagged_bad(tag, "STARTTLS not available on TLS connection")]),
         _ => Ok(vec![tagged_bad(tag, "Unknown command")]),
     }
 }
@@ -1574,22 +1579,123 @@ async fn handle_connection(
     let client = MailstoreServiceClient::new(channel);
     let session = Arc::new(Mutex::new(ImapSession::new(client)));
 
-    if let Some(acceptor) = tls {
-        match acceptor.accept(stream).await {
-            Ok(tls_stream) => {
-                let (reader, writer) = tokio::io::split(tls_stream);
-                serve(session, reader, writer).await?;
-            }
-            Err(e) => {
-                warn!("TLS handshake failed: {}", e);
+    if is_tls {
+        // IMAPS (993): implicit TLS — accept then serve.
+        if let Some(acceptor) = tls {
+            match acceptor.accept(stream).await {
+                Ok(tls_stream) => {
+                    let (reader, writer) = tokio::io::split(tls_stream);
+                    serve(session, reader, writer).await?;
+                }
+                Err(e) => {
+                    warn!("TLS handshake failed: {}", e);
+                }
             }
         }
     } else {
-        let (reader, writer) = tokio::io::split(stream);
-        serve(session, reader, writer).await?;
+        // IMAP (143): plaintext with STARTTLS upgrade.
+        // If we have a TLS acceptor, handle STARTTLS mid-connection.
+        // If not, serve plaintext-only (STARTTLS won't be advertised).
+        if let Some(acceptor) = tls {
+            handle_plaintext_with_starttls(stream, acceptor, session).await?;
+        } else {
+            let (reader, writer) = tokio::io::split(stream);
+            serve(session, reader, writer).await?;
+        }
     }
 
     Ok(())
+}
+
+/// Handle a plaintext IMAP connection (port 143) with STARTTLS upgrade support.
+///
+/// Reads commands line-by-line. When the client sends STARTTLS, responds with
+/// an OK, upgrades the TCP stream to TLS, then delegates to `serve()` for the
+/// rest of the session. Before STARTTLS, only CAPABILITY/NOOP/STARTTLS are
+/// allowed per RFC 3501 §6.2.1.
+async fn handle_plaintext_with_starttls(
+    stream: TcpStream,
+    acceptor: TlsAcceptor,
+    session: Arc<Mutex<ImapSession>>,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
+
+    // Use tokio::io::split (not into_split) so we can reunite via ReadHalf::unsplit.
+    let (read_half, write_half): (ReadHalf<TcpStream>, WriteHalf<TcpStream>) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+    let mut writer = write_half;
+
+    // Send greeting
+    let greeting = "* OK [CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN MOVE IDLE] ApexMail IMAP4rev1 server ready\r\n";
+    writer.write_all(greeting.as_bytes()).await?;
+    writer.flush().await?;
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => return Ok(()), // client disconnected
+            Ok(_) => {}
+            Err(e) => {
+                warn!("Plaintext read error: {}", e);
+                return Ok(());
+            }
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Parse tag and command
+        let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
+        let tag = parts.first().unwrap_or(&"*");
+        let cmd = parts.get(1).unwrap_or(&"").to_uppercase();
+
+        match cmd.as_str() {
+            "STARTTLS" => {
+                // Respond OK, then upgrade to TLS
+                let resp = format!("{tag} OK Begin TLS negotiation now\r\n");
+                writer.write_all(resp.as_bytes()).await?;
+                writer.flush().await?;
+
+                // Reunite the stream and upgrade to TLS
+                let stream = reader.into_inner().unsplit(writer);
+                match acceptor.accept(stream).await {
+                    Ok(tls_stream) => {
+                        info!("STARTTLS upgrade successful");
+                        let (tls_reader, tls_writer) = tokio::io::split(tls_stream);
+                        // Post-STARTTLS, continue the session over TLS.
+                        serve(session, tls_reader, tls_writer).await?;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!("STARTTLS handshake failed: {}", e);
+                        return Ok(());
+                    }
+                }
+            }
+            "CAPABILITY" => {
+                let resp = format!(
+                    "* CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN MOVE IDLE\r\n{tag} OK CAPABILITY completed\r\n"
+                );
+                writer.write_all(resp.as_bytes()).await?;
+                writer.flush().await?;
+            }
+            "NOOP" => {
+                let resp = format!("{tag} OK NOOP completed\r\n");
+                writer.write_all(resp.as_bytes()).await?;
+                writer.flush().await?;
+            }
+            _ => {
+                // Per RFC 3501, before STARTTLS only CAPABILITY, NOOP, and STARTTLS
+                // are allowed. Reject everything else.
+                let resp = format!("{tag} BAD Command not allowed before STARTTLS\r\n");
+                writer.write_all(resp.as_bytes()).await?;
+                writer.flush().await?;
+            }
+        }
+    }
 }
 
 async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
@@ -1720,6 +1826,10 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to bind IMAP on {}", imap_addr))?;
     info!("IMAP listener on {}", imap_addr);
 
+    // Clone the acceptor so both the IMAPS (993) and IMAP (143) paths can use it.
+    // The plaintext IMAP path needs it for STARTTLS upgrade.
+    let plaintext_tls_acceptor = tls_acceptor.clone();
+
     let _imaps = if let Some(acceptor) = tls_acceptor {
         let imaps_addr = format!("{}:{}", cli.listen_addr, cli.imaps_port);
         let imaps_listener = TcpListener::bind(&imaps_addr)
@@ -1754,8 +1864,10 @@ async fn main() -> Result<()> {
         match imap_listener.accept().await {
             Ok((stream, addr)) => {
                 let mailstore = mailstore.clone();
+                let tls_for_plaintext = plaintext_tls_acceptor.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, None, mailstore, false).await {
+                    // Pass the TLS acceptor so STARTTLS can upgrade the connection
+                    if let Err(e) = handle_connection(stream, tls_for_plaintext, mailstore, false).await {
                         error!("Connection error from {}: {}", addr, e);
                     }
                 });

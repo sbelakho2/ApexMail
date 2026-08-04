@@ -310,6 +310,14 @@ services:
     entrypoint: ["/usr/bin/tini", "--", "mta-server"]
     ports:
       - "25:25"
+      - "587:587"
+      - "465:465"
+    volumes:
+      # Bind-mount the full /etc/letsencrypt tree (not just live/<domain>/)
+      # because live/*.pem are symlinks into ../archive/. Mounting only
+      # live/<domain>/ would leave dangling symlinks inside the container.
+      # The MTA reads fullchain/privkey via TLS_CERT_PATH / TLS_KEY_PATH below.
+      - /etc/letsencrypt:/opt/apexmail/certs:ro
     environment:
       RUST_LOG: info
       DB_PASSWORD_FILE: /run/secrets/postgres_password
@@ -317,6 +325,10 @@ services:
       METRICS_PORT: "9090"
       HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
       LOCAL_DOMAINS: ${LOCAL_DOMAINS:-apexmail.ee}
+      # ── TLS (letsencrypt certs bind-mounted at /opt/apexmail/certs) ─────────
+      TLS_ENABLED: "true"
+      TLS_CERT_PATH: /opt/apexmail/certs/live/${MAIL_TLS_DOMAIN:-apexmail.ee}/fullchain.pem
+      TLS_KEY_PATH: /opt/apexmail/certs/live/${MAIL_TLS_DOMAIN:-apexmail.ee}/privkey.pem
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
     secrets:
@@ -339,6 +351,63 @@ services:
           cpus: '2.0'
         reservations:
           memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  # ===========================================================================
+  # IMAP SERVER (Mail access — proxies mailbox ops to mailstore via gRPC)
+  # ===========================================================================
+  # Binary image built from crates/imap-server. The image name follows the same
+  # ghcr.io/sbelakho2/apexmail/<crate> convention as the other production images.
+  imap-server:
+    image: ghcr.io/sbelakho2/apexmail/imap-server:latest
+    restart: unless-stopped
+    entrypoint: ["/usr/bin/tini", "--", "imap-server"]
+    ports:
+      - "143:143"
+      - "993:993"
+    volumes:
+      # Same letsencrypt bind-mount as the MTA. live/*.pem are symlinks into
+      # ../archive/, so the whole /etc/letsencrypt tree is mounted to keep the
+      # symlinks resolvable. IMAP reads the certs via INBOUND_CERT_PATH /
+      # INBOUND_KEY_PATH (its actual env var names — see crates/imap-server).
+      - /etc/letsencrypt:/opt/apexmail/certs:ro
+    environment:
+      RUST_LOG: info
+      # ── Backend datastores (same pattern as mta / api-server) ──────────────
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      # ── gRPC endpoint of the mailstore service ────────────────────────────
+      # The IMAP binary reads MAILSTORE_GRPC_ADDR via clap.
+      MAILSTORE_GRPC_ADDR: ${MAILSTORE_GRPC_ADDR:-http://mailstore:50051}
+      # ── TLS (certs bind-mounted at /opt/apexmail/certs) ───────────────────
+      # The IMAP binary reads INBOUND_CERT_PATH / INBOUND_KEY_PATH via clap.
+      INBOUND_CERT_PATH: /opt/apexmail/certs/live/${MAIL_TLS_DOMAIN:-apexmail.ee}/fullchain.pem
+      INBOUND_KEY_PATH: /opt/apexmail/certs/live/${MAIL_TLS_DOMAIN:-apexmail.ee}/privkey.pem
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/143' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apexmail_frontend
+      - apexmail_data
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 256M
       restart_policy:
         condition: on-failure
         delay: 10s

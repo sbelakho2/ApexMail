@@ -4,19 +4,21 @@ Rust-first transactional email platform with SSR browser surfaces, tracking, ana
 
 ## Architecture Overview
 
-ApexMail runs as a Rust-focused monorepo. The auth-server serves REST APIs, the MTA handles SMTP, the marketing site is built with Zola and served by bare-metal nginx.
+All services run in Docker containers on a single Hetzner host. The full
+architecture — network topology, service map, TLS/cert flow, DNS records, mail
+server config, deployment pipeline, and file locations — is documented in
+**[ARCHITECTURE.md](ARCHITECTURE.md)** (the single source of truth).
 
-### Production Runtime Services
-
-| Service | Description | Port | Management |
-|---------|-------------|------|------------|
-| `auth-server` | REST API gateway (auth, billing, tenants, sandbox, status) | 3000 | systemd (`auth-server`) |
-| `mta-server` | SMTP handling and mail transfer | 25, 465, 587 | systemd (`apexmail-mta`) |
-| `imap-server` | IMAP4rev1 access | — | systemd (`apexmail-imap`) |
-| `status-server` | Monitoring probe aggregation | 9090 | systemd (`apexmail-status`) |
-| `postgres` | Primary database | 5432 (127.0.0.1) | Docker Compose |
-| `redis` | Cache and queue | 6379 (127.0.0.1) | Docker Compose |
-| `nginx` | HTTPS termination, static files, reverse proxy | 80, 443 | systemd (`nginx`) |
+| Service | Purpose | Port(s) |
+|---------|---------|---------|
+| `api-server` | REST API + SSR web UI (Axum) | 3000 (internal) |
+| `mta` | SMTP inbound + submission (STARTTLS) | 25, 587, 465 |
+| `imap-server` | IMAP/IMAPS mail access | 143, 993 |
+| `marketing` | Marketing site (Zola static) | 8080 (internal) |
+| `nginx` | Reverse proxy, TLS termination | 80, 443 |
+| `postgres` | Primary database | 5432 |
+| `redis` | Cache, queues, KiwiCaptcha challenges | 6379 |
+| `clickhouse` | Analytics | 8123, 9000 |
 
 ## Tech Stack
 
@@ -234,46 +236,15 @@ See `.env.example` for all available configuration options.
 
 ## Deployment
 
-### Production (bare-metal Hetzner server at 95.216.226.51)
+ApexMail ships to production via **Docker Compose + GHCR images**, deployed by
+GitHub Actions over SSH to the Hetzner host. The full, authoritative procedure —
+including the service→image map, tag strategy, required secrets, and drift guard —
+lives in **[`deploy/DEPLOYMENT.md`](deploy/DEPLOYMENT.md)**, which is the single
+source of truth for deployment.
 
-**This is the ONLY deployment mechanism.** Do NOT use GitHub Actions, Docker Compose,
-Kubernetes, manual rsync, or any other path. All deploys MUST go through the
-Makefile which invokes the server-side `deploy.sh`.
-
-```bash
-# Build the Zola marketing site, stage it to the server, and atomically deploy
-make deploy-marketing
-
-# Push auth-server source, rebuild on server, restart via systemd
-make deploy-auth
-
-# Deploy nginx config from deploy/nginx/apexmail.conf
-make deploy-nginx
-
-# Full deployment in dependency order
-make deploy-all
-
-# Verify production (run after any deployment)
-make verify
-
-# Instant rollback to previous marketing snapshot
-make rollback-marketing
-```
-
-**Prerequisites:**
-- SSH config at `~/.ssh/config` with a `Host apexmail` block pointing to `95.216.226.51`
-- SSH key at `~/.ssh/hetzner-db-mac`
-- Zola installed locally (`brew install zola`)
-
-**How it works:**
-1. `make build-marketing` → Zola generates `apps/marketing-zola/public/`
-2. `make push-marketing` → rsync to `/var/www/.apexmail.ee.next` (staging)
-3. Server runs `deploy.sh marketing` → snapshot current → atomic `mv` swap → nginx reload → verify
-4. Verification checks: HTTP 200 on all 4 locales, content fingerprint, registry code scan, template leak scan, status API health
-5. Post-deploy cleanup removes staging directories and expires old snapshots
-
-**Rollback:** The previous deployment is kept at `/var/www/.apexmail.ee.prev`.
-`make rollback-marketing` atomically swaps it back into place.
+The legacy bare-metal (systemd) and Kubernetes deployment paths are **superseded**
+but preserved for reference under [`deploy/legacy-systemd/`](deploy/legacy-systemd/)
+and [`deploy/legacy-k8s/`](deploy/legacy-k8s/). Do not use them for production.
 
 ### Local Development
 

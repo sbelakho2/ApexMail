@@ -413,6 +413,19 @@ pub fn build_app(state: AppState) -> Router {
         .route_service(
             "/sitemap.xml",
             ServeFile::new(format!("{marketing_public}/sitemap.xml")),
+        )
+        // Thunderbird / Apple Mail autoconfig — served at the well-known path so
+        // clients auto-discover IMAPS (993) + SMTP submission (587) on mail.apexmail.ee
+        // without requiring a separate autoconfig.apexmail.ee DNS record.
+        .nest_service(
+            "/.well-known/autoconfig",
+            ServeDir::new(format!("{marketing_public}/.well-known/autoconfig")),
+        )
+        .route_service(
+            "/mail/config-v1.1.xml",
+            ServeFile::new(format!(
+                "{marketing_public}/.well-known/autoconfig/mail/config-v1.1.xml"
+            )),
         );
 
     let public = Router::<AppState>::new()

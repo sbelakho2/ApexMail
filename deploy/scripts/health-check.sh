@@ -7,6 +7,10 @@ mkdir -p "$STATUS_DIR"
 
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# Deployment region (reported in the status payload). Override via env; the
+# Hetzner datacenter e.g. fsn1/hel1/nbg1. Do not hardcode a single region.
+REGION="${APEXMAIL_REGION:-eu-hel1}"
+
 # ─── Probe api-server ──────────────────────────────────────
 AUTH_STATUS="degraded"
 AUTH_DETAIL=""
@@ -18,10 +22,19 @@ else
     AUTH_DETAIL='"unreachable"'
 fi
 
-# ─── Probe mail-server API ──────────────────────────────────
+# ─── Probe MTA (SMTP) ───────────────────────────────────────
+# The mail server (MTA) is an SMTP listener on ports 25/587/465 — it does NOT
+# serve HTTP, so probe the SMTP port directly rather than hitting localhost:3000.
+# Prefer 587 (submission); fall back to 25 (MX). The check only needs a TCP
+# connect — we don't complete an SMTP transaction.
+MTA_SMTP_PORT="${MTA_SMTP_PORT:-587}"
 MAIL_STATUS="degraded"
-if curl -sf --max-time 5 http://localhost:3000/health >/dev/null 2>&1; then
+if (exec 3<>/dev/tcp/127.0.0.1/${MTA_SMTP_PORT}) 2>/dev/null; then
     MAIL_STATUS="operational"
+    exec 3>&- 3<&- 2>/dev/null || true
+elif (exec 3<>/dev/tcp/127.0.0.1/25) 2>/dev/null; then
+    MAIL_STATUS="operational"
+    exec 3>&- 3<&- 2>/dev/null || true
 else
     MAIL_STATUS="down"
 fi
@@ -72,11 +85,11 @@ cat > "$STATUS_FILE" <<EOF
   "updated": "$NOW",
   "services": [
     {"name": "api-server", "status": "$AUTH_STATUS", "detail": $AUTH_DETAIL},
-    {"name": "mail-server", "status": "$MAIL_STATUS"},
+    {"name": "mta", "status": "$MAIL_STATUS"},
     {"name": "clickhouse", "status": "$CLICKHOUSE_STATUS"},
     {"name": "redis", "status": "$REDIS_STATUS"}
   ],
-  "region": "eu-hel1"
+  "region": "$REGION"
 }
 EOF
 

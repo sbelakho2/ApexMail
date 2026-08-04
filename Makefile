@@ -36,11 +36,11 @@ push-marketing: ## Rsync built marketing files to server staging directory
 	@echo "Staged $$(find $(PUBLIC) -type f | wc -l) files at $(SERVER_HOST):$(NEXT_DIR)"
 
 push-nginx: ## Rsync nginx config to server
-	$(RSYNC) deploy/nginx/apexmail.conf $(RSYNC_DEST)/opt/apexmail/nginx/apexmail.conf
+	$(RSYNC) deploy/legacy-systemd/apexmail.conf $(RSYNC_DEST)/opt/apexmail/nginx/apexmail.conf
 
 push-configs: ## Push all configs and scripts
 	$(RSYNC) --delete deploy/scripts/ $(RSYNC_DEST)/opt/apexmail/scripts/
-	$(RSYNC) deploy/nginx/apexmail.conf $(RSYNC_DEST)/opt/apexmail/nginx/apexmail.conf
+	$(RSYNC) deploy/legacy-systemd/apexmail.conf $(RSYNC_DEST)/opt/apexmail/nginx/apexmail.conf
 	$(RSYNC) deploy/systemd/ $(RSYNC_DEST)/opt/apexmail/systemd/
 
 # ── Rollback ──
