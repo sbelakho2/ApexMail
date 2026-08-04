@@ -23,6 +23,21 @@ module.exports = {
     'w-16', 'w-56', 'w-60', 'w-64', 'md:ml-56', 'w-72', 'w-80',
     'md:ml-16', 'md:ml-56', 'md:ml-60', 'md:ml-64',
     'min-h-[44px]', 'min-w-[44px]', 'shrink-0',
+    // KiwiCaptcha widget classes — generated at runtime, not in static HTML
+    'bg-brand-50', 'bg-brand-100', 'bg-brand-500',
+    'text-brand-600', 'text-brand-700',
+    'border-brand-200', 'border-brand-300',
+    'ease-premium', 'duration-300',
+    'hover:border-surface-300',
+    'bg-success-50', 'text-success-600', 'text-success-700',
+    'border-success-200', 'border-success-50',
+    'bg-primary/5', 'bg-primary/10',
+    'border-primary/30',
+    'animate-pulse',
+    'tabular-nums',
+    'font-mono',
+    'tracking-[0.12em]',
+    'tracking-[0.16em]',
   ],
   theme: {
     extend: {
