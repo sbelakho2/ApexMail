@@ -1259,15 +1259,15 @@ pub fn web_signup_page(
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"signup-name\">Full name</label>\
-<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground\" />\
+<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"signup-company\">Company</label>\
-<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground\" />\
+<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"signup-email\">Email</label>\
-<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"name@company.com\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground\" />\
+<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"name@company.com\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
@@ -1309,7 +1309,7 @@ pub fn web_forgot_password_page(
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"reset-email\">Email</label>\
-<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"name@company.com\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground\" />\
+<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"name@company.com\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
 </div>\
 {kiwi_html}\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-2 py-3 rounded-sm shadow-premium-primary/25 mt-2 transition-all\"><span>Send Reset Link</span>{arrow}</button>\
@@ -4130,8 +4130,8 @@ mod tests {
         assert!(html.contains("action=\"/api/auth/login\""));
         assert!(html.contains("bg-background px-2 py-1"));
         assert!(html.contains("text-foreground hover:bg-surface-100"));
-        // CP login now shares the centered web auth shell
-        assert!(html.contains("max-w-[480px]"));
+        // CP login now shares the two-column web auth shell
+        assert!(html.contains("max-w-[440px]"));
         assert!(html.contains("Operator access"));
     }
 
