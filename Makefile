@@ -3,26 +3,42 @@
 #
 # There is ONE deploy command: `make deploy`
 #
-# It SSHes to the production server and runs deploy/scripts/deploy.sh,
-# which is the single source of truth for deployments.
+# Procedure (the proper channel — no GitHub Actions, no manual docker run):
+#   1. `make deploy` rsyncs the repo to the server over SSH
+#   2. SSHes in and runs deploy/scripts/deploy.sh
+#   3. deploy.sh builds all Rust binaries + Docker images locally on the server
+#   4. docker compose up -d recreates all services from the new images
 #
 # Usage:
-#   make deploy         — push code to git, SSH to server, run deploy.sh --pull
-#   make deploy-quick   — SSH to server, run deploy.sh (no git push/pull)
-#   make verify         — check live endpoints
+#   make deploy         — rsync code, then build + deploy on the server
+#   make deploy-quick   — run deploy.sh without rsync (use what's on the server)
+#   make verify         — check live endpoints from your machine
 #
 
 SERVER_HOST := root@95.216.226.51
 SSH         := ssh -o StrictHostKeyChecking=no $(SERVER_HOST)
+RSYNC       := rsync -avz --delete
+
+# Exclude directories that shouldn't be synced to the server
+RSYNC_EXCLUDES := \
+	--exclude='target' \
+	--exclude='node_modules' \
+	--exclude='.git' \
+	--exclude='.tmp' \
+	--exclude='.kilo' \
+	--exclude='reports' \
+	--exclude='.env'
 
 .PHONY: deploy deploy-quick verify
 
-## deploy: Push code to git, then deploy on the server
+## deploy: Rsync code to server, then build + deploy
 deploy:
-	git push origin main
-	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh --pull'
+	@echo "==> Syncing code to server..."
+	$(RSYNC) $(RSYNC_EXCLUDES) ./ $(SERVER_HOST):/opt/apexmail/
+	@echo "==> Running deploy script on server..."
+	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh'
 
-## deploy-quick: Deploy current code on the server (no git push/pull)
+## deploy-quick: Run deploy.sh on the server without rsync
 deploy-quick:
 	$(SSH) 'cd /opt/apexmail && bash deploy/scripts/deploy.sh'
 

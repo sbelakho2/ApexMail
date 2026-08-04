@@ -1,28 +1,37 @@
 #!/usr/bin/env bash
 #
+#!/usr/bin/env bash
+#
 # deploy.sh — ApexMail unified deployment script.
 #
 # This is the SINGLE source of truth for deployments. No GitHub Actions,
 # no ad-hoc Makefile targets, no manual docker run. One script, one command,
 # fully reproducible.
 #
-# Usage:
-#   ./deploy/scripts/deploy.sh           # deploy from current repo state
-#   ./deploy/scripts/deploy.sh --pull    # git pull first, then deploy
+# The code on /opt/apexmail is synced from the operator's machine via the
+# Makefile `deploy` target (which rsyncs the repo over SSH). This script does
+# NOT touch git — it builds and deploys whatever code is on disk.
+#
+# Usage (on the server):
+#   ./deploy/scripts/deploy.sh                # full deploy
 #   ./deploy/scripts/deploy.sh --build-only   # build images without restarting
+#
+# Usage (from developer machine):
+#   make deploy          # rsync code to server, then SSH + run this script
+#   make deploy-quick    # SSH + run this script (no rsync)
 #
 # What this script does (in order):
 #   1. Verify prerequisites (running on the server, /opt/apexmail exists)
-#   2. Optionally pull latest code from origin/main
-#   3. Build ALL Rust binaries in a Docker container (full workspace)
-#   4. Build ALL service images from the Dockerfile
-#   5. Stop orphaned containers (created by docker run, not compose)
-#   6. Deploy TLS certs to all service paths
-#   7. docker compose up -d (recreates all services from new images)
-#   8. Reload nginx to pick up new upstreams
-#   9. Verify all services are healthy
+#   2. Build ALL Rust binaries in a Docker container (full workspace)
+#   3. Build ALL service images from the Dockerfile (tagged with GHCR names)
+#   4. Stop orphaned containers (created by docker run, not compose)
+#   5. Deploy TLS certs to all service paths
+#   6. docker compose up -d (recreates all services from new images)
+#   7. Reload nginx to pick up new upstreams
+#   8. Verify all services are healthy
 #
 # The script is idempotent — running it twice produces the same result.
+#
 #
 
 set -euo pipefail
@@ -32,8 +41,6 @@ DEPLOY_DIR="/opt/apexmail"
 MAIL_SERVER_DIR="${DEPLOY_DIR}/services/mail-server"
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.prod.yml"
 ENV_FILE="${DEPLOY_DIR}/.env"
-GIT_REMOTE="origin"
-GIT_BRANCH="main"
 
 # Cert source (Let's Encrypt live cert)
 CERT_SRC="/etc/letsencrypt/live/apexmail.ee"
@@ -54,11 +61,9 @@ error() { echo -e "${RED}[error]${NC} $*" >&2; }
 step()  { echo -e "\n${CYAN}━━━ $* ━━━${NC}"; }
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
-DO_PULL=false
 BUILD_ONLY=false
 for arg in "$@"; do
     case "$arg" in
-        --pull)        DO_PULL=true ;;
         --build-only)  BUILD_ONLY=true ;;
         *) error "Unknown argument: $arg"; exit 1 ;;
     esac
@@ -78,25 +83,11 @@ if [[ ! -f "$ENV_FILE" ]]; then
     exit 1
 fi
 
-# Fix git safe.directory (directory may be owned by a different uid due to rsync)
-git config --global --add safe.directory "$DEPLOY_DIR" 2>/dev/null || true
-
 cd "$DEPLOY_DIR"
 log "Working directory: $(pwd)"
-log "Current commit: $(git log -1 --oneline 2>/dev/null || echo 'unknown')"
+log "Deploy timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
-# ── Step 1: Pull latest code ─────────────────────────────────────────────────
-if $DO_PULL; then
-    step "Step 1: Pull latest code from $GIT_REMOTE/$GIT_BRANCH"
-    git fetch "$GIT_REMOTE" "$GIT_BRANCH"
-    git reset --hard "${GIT_REMOTE}/${GIT_BRANCH}"
-    log "Now at: $(git log -1 --oneline)"
-else
-    step "Step 1: Using current code (pass --pull to fetch latest)"
-    log "At: $(git log -1 --oneline 2>/dev/null || echo 'no git history')"
-fi
-
-# ── Step 2: Build ALL Rust binaries via Docker ───────────────────────────────
+# ── Step 1: Build ALL Rust binaries via Docker ───────────────────────────────
 step "Step 2: Build Rust workspace (all binaries)"
 
 # The Dockerfile's `builder` stage runs `cargo build --release` for the entire
@@ -112,7 +103,7 @@ docker build \
 
 log "Workspace build complete."
 
-# ── Step 3: Build ALL service images ─────────────────────────────────────────
+# ── Step 2: Build ALL service images ─────────────────────────────────────────
 step "Step 3: Build service images"
 
 # Tag images with the EXACT names the compose file references so Docker finds
@@ -162,7 +153,7 @@ if $BUILD_ONLY; then
     exit 0
 fi
 
-# ── Step 4: Stop orphaned containers ─────────────────────────────────────────
+# ── Step 3: Stop orphaned containers ─────────────────────────────────────────
 step "Step 4: Stop orphaned containers"
 
 # Remove containers that were created by `docker run` (not compose-managed).
@@ -180,7 +171,7 @@ for name in "${ORPHANS[@]}"; do
     fi
 done
 
-# ── Step 5: Deploy TLS certs ─────────────────────────────────────────────────
+# ── Step 4: Deploy TLS certs ─────────────────────────────────────────────────
 step "Step 5: Deploy TLS certificates"
 
 if [[ -f "${CERT_SRC}/fullchain.pem" && -f "${CERT_SRC}/privkey.pem" ]]; then
@@ -205,7 +196,7 @@ else
     warn "Let's Encrypt cert not found at ${CERT_SRC} — services will use existing certs."
 fi
 
-# ── Step 6: Docker Compose up ────────────────────────────────────────────────
+# ── Step 5: Docker Compose up ────────────────────────────────────────────────
 step "Step 6: Deploy all services via Docker Compose"
 
 log "Pulling infrastructure images (postgres, redis, clickhouse, nginx, certbot)..."
@@ -216,7 +207,7 @@ docker compose $COMPOSE_FILES --env-file "$ENV_FILE" up -d --remove-orphans 2>&1
 
 log "All services started."
 
-# ── Step 7: Reload nginx ─────────────────────────────────────────────────────
+# ── Step 6: Reload nginx ─────────────────────────────────────────────────────
 step "Step 7: Reload nginx"
 
 sleep 3  # Give containers a moment to start
@@ -227,7 +218,7 @@ else
     warn "Nginx container not found — skipping reload."
 fi
 
-# ── Step 8: Verify ───────────────────────────────────────────────────────────
+# ── Step 7: Verify ───────────────────────────────────────────────────────────
 step "Step 8: Verify deployment"
 
 sleep 5  # Give services time to initialize
