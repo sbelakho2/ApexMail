@@ -1,0 +1,13 @@
+[package]
+name = "smtp-auth-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "smtp-auth-proxy"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+apxmail-lib = { path = "../../services/mail-server/crates/apxmail-lib" }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid"] }
+uuid = "1"

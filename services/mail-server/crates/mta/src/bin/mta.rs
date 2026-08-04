@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 use mta::auth::EmailAuthenticator;
 use mta::config::MtaConfig;
-use mta::servers::{BounceServer, FeedbackLoopServer, InboundServer};
+use mta::servers::{BounceServer, FeedbackLoopServer, InboundServer, SubmissionServer};
 
 #[derive(Parser)]
 #[command(name = "mta-server", about = "ApexMail MTA Server")]
@@ -169,6 +169,25 @@ async fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Submission server (authenticated SMTP on port 587)
+    let (submission_srv, submission_handle) = if config.submission.enabled {
+        let srv = Arc::new(SubmissionServer::new(
+            config.submission.clone(),
+            pool.clone(),
+        ));
+        let s = srv.clone();
+        (
+            Some(srv),
+            Some(tokio::spawn(async move {
+                if let Err(e) = s.start().await {
+                    error!(error = %e, "Submission server failed");
+                }
+            })),
+        )
+    } else {
+        (None, None)
+    };
+
     // Postmaster Tools / SNDS reputation poller (background, never aborts startup).
     let postmaster_pool = pool.clone();
     let postmaster_redis = redis_pool.clone();
@@ -240,6 +259,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref srv) = fbl_srv {
         srv.stop();
     }
+    if let Some(ref srv) = submission_srv {
+        srv.stop();
+    }
 
     // #150:Use .max(5) so grace period is AT LEAST 5s (was .min(5) = at most 5s)
     let grace = std::time::Duration::from_secs(config.graceful_shutdown_timeout.max(5));
@@ -251,6 +273,9 @@ async fn main() -> anyhow::Result<()> {
             let _ = h.await;
         }
         if let Some(h) = fbl_handle {
+            let _ = h.await;
+        }
+        if let Some(h) = submission_handle {
             let _ = h.await;
         }
     })

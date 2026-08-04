@@ -33,6 +33,8 @@ pub struct MtaConfig {
     #[serde(default)]
     pub email_auth: EmailAuthConfig,
     #[serde(default)]
+    pub submission: SubmissionConfig,
+    #[serde(default)]
     pub metrics: MetricsConfig,
     #[serde(default = "default_health_port")]
     pub health_port: u16,
@@ -183,6 +185,24 @@ pub struct EmailAuthConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SubmissionConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_host")]
+    pub host: String,
+    #[serde(default = "default_submission_port")]
+    pub port: u16,
+    #[serde(default = "default_hostname")]
+    pub hostname: String,
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size: usize,
+    #[serde(default = "default_max_recipients")]
+    pub max_recipients: usize,
+    #[serde(default = "default_true")]
+    pub auth_required: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MetricsConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -208,6 +228,7 @@ impl Default for MtaConfig {
             inbound: InboundConfig::default(),
             bounce: BounceConfig::default(),
             feedback: FeedbackConfig::default(),
+            submission: SubmissionConfig::default(),
             dkim: DkimConfig::default(),
             spf: SpfConfig::default(),
             dmarc: DmarcConfig::default(),
@@ -265,6 +286,18 @@ impl_default!(
         port: default_fbl_port(),
         hostname: default_hostname(),
         max_arf_size: default_max_arf_size(),
+    }
+);
+impl_default!(
+    SubmissionConfig,
+    Self {
+        enabled: true,
+        host: default_host(),
+        port: default_submission_port(),
+        hostname: default_hostname(),
+        max_message_size: default_max_message_size(),
+        max_recipients: default_max_recipients(),
+        auth_required: true,
     }
 );
 impl_default!(
@@ -353,6 +386,9 @@ fn default_bounce_port() -> u16 {
 }
 fn default_fbl_port() -> u16 {
     2526
+}
+fn default_submission_port() -> u16 {
+    587
 }
 fn default_max_message_size() -> usize {
     25 * 1024 * 1024
@@ -460,6 +496,15 @@ impl MtaConfig {
                 hostname: std::env::var("FBL_HOSTNAME").unwrap_or_else(|_| default_hostname()),
                 max_arf_size: parse_usize_env("MAX_ARF_SIZE", default_max_arf_size()),
             },
+            submission: SubmissionConfig {
+                enabled: parse_bool_env("SUBMISSION_ENABLED", true),
+                host: std::env::var("SUBMISSION_HOST").unwrap_or_else(|_| default_host()),
+                port: parse_u16_env("SUBMISSION_PORT", default_submission_port()),
+                hostname: std::env::var("SUBMISSION_HOSTNAME").unwrap_or_else(|_| default_hostname()),
+                max_message_size: parse_usize_env("SUBMISSION_MAX_MESSAGE_SIZE", default_max_message_size()),
+                max_recipients: parse_usize_env("SUBMISSION_MAX_RECIPIENTS", default_max_recipients()),
+                auth_required: parse_bool_env("SUBMISSION_AUTH_REQUIRED", true),
+            },
             dkim: DkimConfig {
                 selector: std::env::var("DKIM_SELECTOR").unwrap_or_else(|_| default_selector()),
                 default_key_path: std::env::var("DKIM_KEY_PATH").ok(),
@@ -529,6 +574,7 @@ impl MtaConfig {
             ("inbound.secure_port", self.inbound.secure_port),
             ("bounce.port", self.bounce.port),
             ("feedback.port", self.feedback.port),
+            ("submission.port", self.submission.port),
             ("health_port", self.health_port),
             ("metrics.port", self.metrics.port),
         ];
@@ -552,6 +598,9 @@ impl MtaConfig {
             }
             if self.feedback.enabled {
                 active_ports.push(("feedback.port", self.feedback.port));
+            }
+            if self.submission.enabled {
+                active_ports.push(("submission.port", self.submission.port));
             }
             active_ports.push(("health_port", self.health_port));
             if self.metrics.enabled {
