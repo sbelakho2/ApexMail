@@ -214,6 +214,22 @@ ENTRYPOINT ["/usr/bin/tini", "--", "mta-server"]
 CMD ["--listen", "0.0.0.0:3003"]
 
 # =============================================================================
+# IMAP Server
+# =============================================================================
+FROM runtime-base AS imap-server
+
+COPY --from=builder /app/target/release/imap-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 143 993
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 993 || nc -z 127.0.0.1 143"]
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["imap-server"]
+
+# =============================================================================
 # Template Renderer
 # =============================================================================
 FROM runtime-base AS template-renderer
