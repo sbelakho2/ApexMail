@@ -1274,13 +1274,13 @@ pub fn web_signup_page(
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"signup-password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-background text-foreground pr-10\" />\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-10\" />\
 <button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"signup-password\" aria-controls=\"signup-password\">Show</button>\
 </div>\
 {password_hint}\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-2 py-3 rounded-sm shadow-premium-primary/25 mt-2 transition-all\"><span>Create Account</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-tight flex items-center justify-center gap-3 py-4 rounded-sm shadow-premium transition-all mt-2\"><span>Create Account</span>{arrow}</button>\
 <div class=\"text-xs text-muted-foreground text-center\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
 </form>",
         csrf = csrf,
@@ -1312,7 +1312,7 @@ pub fn web_forgot_password_page(
 <input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"name@company.com\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-2 py-3 rounded-sm shadow-premium-primary/25 mt-2 transition-all\"><span>Send Reset Link</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-tight flex items-center justify-center gap-3 py-4 rounded-sm shadow-premium transition-all mt-2\"><span>Send Reset Link</span>{arrow}</button>\
 <div class=\"text-xs text-muted-foreground text-center\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
@@ -1379,7 +1379,7 @@ pub fn web_reset_password_page_with_state(
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"new-password\">New password</label>\
 <div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-background text-foreground pr-10\" />\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-10\" />\
 <button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"new-password\" aria-controls=\"new-password\">Show</button>\
 </div>\
 {password_hint}\
@@ -1387,7 +1387,7 @@ pub fn web_reset_password_page_with_state(
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"confirm-password\">Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-background text-foreground pr-10\" />\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-10\" />\
 <button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"confirm-password\" aria-controls=\"confirm-password\">Show</button>\
 </div>\
 </div>\
@@ -4203,7 +4203,7 @@ mod tests {
         assert!(html.contains("id=\"signup-name\""));
         assert!(html.contains("id=\"signup-email\""));
         assert!(html.contains("id=\"signup-password\""));
-        assert!(html.contains("bg-background text-foreground pr-10"));
+        assert!(html.contains("bg-surface-50/30 text-surface-950 pr-10"));
         assert!(!html.contains("bg-white/90 text-foreground pr-10"));
         assert!(html.contains("bg-background px-2 py-1"));
         assert!(html.contains("text-foreground hover:bg-surface-100"));
@@ -4801,3 +4801,5 @@ mod tests {
         }
     }
 }
+
+

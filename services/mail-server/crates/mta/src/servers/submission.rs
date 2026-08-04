@@ -434,5 +434,6 @@ impl SubmissionServer {
 // ── I/O helpers ─────────────────────────────────────────────────────────
 
 async fn write_line<S: AsyncWrite + Unpin>(sink: &mut S, line: &str) -> std::io::Result<()> {
-    sink.write_all(line.as_bytes()).await
+    sink.write_all(line.as_bytes()).await?;
+    sink.flush().await
 }
