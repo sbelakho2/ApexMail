@@ -225,7 +225,7 @@ services:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
       RUST_LOG: info
-      ENVIRONMENT: production
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
       HOST: 0.0.0.0
       PORT: 3000
       BASE_URL: ${BASE_URL:?BASE_URL is required in production}

@@ -26,6 +26,14 @@ COPY services/mail-server/Cargo.toml  services/mail-server/Cargo.lock  ./
 
 COPY services/mail-server/crates ./crates
 
+# The workspace crates reference ../../../../packages/kiwicaptcha (relative to
+# services/mail-server/crates/<crate>/). Inside the builder at /build/, that
+# resolves to /packages/kiwicaptcha/. Create a symlink so the path resolves.
+COPY packages/kiwicaptcha/Cargo.toml /build/packages/kiwicaptcha/Cargo.toml
+RUN mkdir -p /build/packages/kiwicaptcha/src && \
+    echo "#![allow(dead_code)] pub fn _placeholder() {}" > /build/packages/kiwicaptcha/src/lib.rs && \
+    mkdir -p /packages && ln -sf /build/packages/kiwicaptcha /packages/kiwicaptcha
+
 RUN cargo fetch --locked
 
 # ── Stage 2: real build ────────────────────────────────────────────────────────

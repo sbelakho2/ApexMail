@@ -1,17 +1,29 @@
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.93-bookworm AS builder
 
 WORKDIR /app
 
 # Copy workspace Cargo files for dependency caching
 COPY Cargo.toml Cargo.lock ./
 
-# Copy Cargo.toml files for pdf-renderer and its workspace dependencies
+# Copy ALL workspace member Cargo.toml files so cargo can resolve the workspace.
+# The pdf-renderer only depends on a few crates, but the workspace Cargo.toml
+# references all members, so we need stub manifests for all of them.
+RUN grep -oP '"crates/[^"]+' Cargo.toml | sed 's/"crates\///' | while read -r crate; do \
+        mkdir -p "crates/$crate/src" && \
+        printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n\n[lib]\npath = "src/lib.rs"\n' "$crate" > "crates/$crate/Cargo.toml" && \
+        echo "" > "crates/$crate/src/lib.rs"; \
+    done && \
+    # Handle the patched imap-proto crate (it's named imap-proto-patched in the path
+    # but publishes as imap-proto)
+    printf '[package]\nname = "imap-proto"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\npath = "src/lib.rs"\n' > crates/imap-proto-patched/Cargo.toml
+
+# Overwrite with the REAL Cargo.toml for the crates we actually need
 COPY crates/pdf-renderer/Cargo.toml crates/pdf-renderer/Cargo.toml
 COPY crates/apexmail-lib/Cargo.toml crates/apexmail-lib/Cargo.toml
 COPY crates/apexmail-db/Cargo.toml crates/apexmail-db/Cargo.toml
 COPY crates/observability-service/Cargo.toml crates/observability-service/Cargo.toml
 
-# Create stub libs to pre-compile dependencies
+# Create real stub libs for the crates we need
 RUN mkdir -p crates/pdf-renderer/src && \
     echo "fn main() {}" > crates/pdf-renderer/src/main.rs && \
     echo "" > crates/pdf-renderer/src/lib.rs && \

@@ -23,6 +23,10 @@ COPY services/mail-server/Cargo.toml services/mail-server/Cargo.lock ./
 # cargo metadata/fetch must see the full crate trees rather than manifests only.
 COPY services/mail-server/crates ./crates
 COPY packages/kiwicaptcha/Cargo.toml /app/packages/kiwicaptcha/Cargo.toml
+# Create a dummy src/lib.rs so cargo can resolve the kiwicaptcha target during
+# the deps/fetch stage. The real source is copied in the builder stages below.
+RUN mkdir -p /app/packages/kiwicaptcha/src && \
+    echo "#![allow(dead_code)] pub fn _placeholder() {}" > /app/packages/kiwicaptcha/src/lib.rs
 
 RUN cargo fetch --locked
 
@@ -44,6 +48,7 @@ FROM deps AS builder
 
 COPY docs /app/docs
 COPY apps/marketing-zola/public /app/apps/marketing-zola/public
+COPY packages/kiwicaptcha /app/packages/kiwicaptcha
 
 RUN cargo build --release
 

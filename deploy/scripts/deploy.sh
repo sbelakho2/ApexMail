@@ -37,6 +37,10 @@ set -euo pipefail
 DEPLOY_DIR="/opt/apexmail"
 MAIL_SERVER_DIR="${DEPLOY_DIR}/services/mail-server"
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.prod.yml"
+# The Dockerfile expects the REPO ROOT as build context (COPY paths are
+# services/mail-server/..., packages/kiwicaptcha/..., apps/marketing-zola/...)
+BUILD_CONTEXT="${DEPLOY_DIR}"
+DOCKERFILE="${MAIL_SERVER_DIR}/Dockerfile"
 ENV_FILE="${DEPLOY_DIR}/.env"
 CERT_SRC="/etc/letsencrypt/live/apexmail.ee"
 CERT_DIR="${DEPLOY_DIR}/certs"
@@ -68,6 +72,13 @@ done
 ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observability)
 ALL_IMAGES="${GHCR_NS}/marketing:latest ${GHCR_NS}/tracking-service:latest"
 for s in "${ALL_SERVICES[@]}"; do ALL_IMAGES+=" ${GHCR_NS}/${s}:latest"; done
+
+# Services with separate Dockerfiles
+declare -A SEPARATE_DOCKERFILES=(
+    [marketing]="${DEPLOY_DIR}/apps/marketing-zola/Dockerfile"
+    [tracking-service]="${DEPLOY_DIR}/deploy/Dockerfile.tracking"
+    [pdf-renderer]="${MAIL_SERVER_DIR}/crates/pdf-renderer/Dockerfile"
+)
 
 # Determine which services to build
 if [[ -n "$SERVICES_TO_BUILD" ]]; then
@@ -129,7 +140,8 @@ if ! $NO_BUILD; then
     docker build \
         --target builder \
         --tag apexmail-builder:latest \
-        "$MAIL_SERVER_DIR" 2>&1 | tail -5
+        -f "$DOCKERFILE" \
+        "$BUILD_CONTEXT" 2>&1 | tail -5
 
     log "Workspace build complete."
 
@@ -142,25 +154,42 @@ if ! $NO_BUILD; then
         docker build \
             --target "$svc" \
             --tag "$image" \
-            "$MAIL_SERVER_DIR" 2>&1 | tail -2
+            -f "$DOCKERFILE" \
+            "$BUILD_CONTEXT" 2>&1 | tail -2
     done
 
-    # Always rebuild marketing if it's a full deploy or explicitly requested
-    if [[ -z "$SERVICES_TO_BUILD" ]] || echo "$SERVICES_TO_BUILD" | grep -q "marketing"; then
-        log "Building: ${GHCR_NS}/marketing:latest"
-        docker build --tag "${GHCR_NS}/marketing:latest" \
-            "${DEPLOY_DIR}/apps/marketing-zola" 2>&1 | tail -2
-    fi
-
-    # Always rebuild tracking-service if full deploy or explicitly requested
-    if [[ -f "${DEPLOY_DIR}/deploy/Dockerfile.tracking" ]]; then
-        if [[ -z "$SERVICES_TO_BUILD" ]] || echo "$SERVICES_TO_BUILD" | grep -q "tracking"; then
-            log "Building: ${GHCR_NS}/tracking-service:latest"
-            docker build --tag "${GHCR_NS}/tracking-service:latest" \
-                -f "${DEPLOY_DIR}/deploy/Dockerfile.tracking" \
-                "${DEPLOY_DIR}" 2>&1 | tail -2
+    # Build services with separate Dockerfiles (marketing, tracking, pdf-renderer)
+    for separate_svc in marketing tracking-service pdf-renderer; do
+        should_build=false
+        if [[ -z "$SERVICES_TO_BUILD" ]] || echo "$SERVICES_TO_BUILD" | grep -q "$separate_svc"; then
+            should_build=true
         fi
-    fi
+
+        if $should_build; then
+            case "$separate_svc" in
+                marketing)
+                    log "Building: ${GHCR_NS}/marketing:latest"
+                    docker build --tag "${GHCR_NS}/marketing:latest" \
+                        "${DEPLOY_DIR}/apps/marketing-zola" 2>&1 | tail -2
+                    ;;
+                tracking-service)
+                    if [[ -f "${DEPLOY_DIR}/deploy/Dockerfile.tracking" ]]; then
+                        log "Building: ${GHCR_NS}/tracking-service:latest"
+                        docker build --tag "${GHCR_NS}/tracking-service:latest" \
+                            -f "${DEPLOY_DIR}/deploy/Dockerfile.tracking" \
+                            "${DEPLOY_DIR}" 2>&1 | tail -2
+                    fi
+                    ;;
+                pdf-renderer)
+                    if [[ -f "${MAIL_SERVER_DIR}/crates/pdf-renderer/Dockerfile" ]]; then
+                        log "Building: apexmail-pdf-renderer:latest"
+                        docker build --tag "apexmail-pdf-renderer:latest" \
+                            "${MAIL_SERVER_DIR}" 2>&1 | tail -2
+                    fi
+                    ;;
+            esac
+        fi
+    done
 else
     step "Step 2-3: Skipped (--no-build)"
 fi

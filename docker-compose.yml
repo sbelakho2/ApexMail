@@ -549,12 +549,11 @@ services:
       context: .
       dockerfile: services/mail-server/Dockerfile
       target: smtp-edge
-    container_name: apexmail-mta
     restart: unless-stopped
     ports:
-      - "${SMTP_PORT:-127.0.0.1:25}:25"
-      - "${SMTP_SUBMISSION_PORT:-127.0.0.1:587}:587"
-      - "${SMTP_SMTPS_PORT:-127.0.0.1:465}:465"
+      - "25:25"
+      - "587:587"
+      - "465:465"
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
@@ -590,6 +589,7 @@ services:
   # PDF RENDERER (Typst-based PDF generation)
   # ===========================================================================
   pdf-renderer:
+    profiles: ["dev", "full-stack"]
     build:
       context: services/mail-server
       dockerfile: crates/pdf-renderer/Dockerfile
