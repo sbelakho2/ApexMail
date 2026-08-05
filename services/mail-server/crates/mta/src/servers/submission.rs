@@ -143,7 +143,12 @@ impl SubmissionServer {
                 }
             }
 
-            let cmd = line.trim().to_uppercase();
+            // IMPORTANT: Only uppercase the command verb, NOT the arguments.
+            // Base64 payloads in AUTH PLAIN are case-sensitive — uppercasing
+            // the entire line corrupts the credentials.
+            let trimmed = line.trim();
+            let cmd_upper = trimmed.to_uppercase();
+            let cmd = cmd_upper.as_str();
 
             if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
                 let host = line.split_whitespace().nth(1).unwrap_or("unknown");
@@ -205,7 +210,8 @@ impl SubmissionServer {
                 // RFC 4954: AUTH PLAIN can include the initial response inline:
                 //   "AUTH PLAIN <base64>"  — one-line form (what most clients use)
                 //   "AUTH PLAIN"           — two-step form (server sends 334, client responds)
-                let inline_b64 = cmd.strip_prefix("AUTH PLAIN").unwrap_or("").trim();
+                // IMPORTANT: use the ORIGINAL line (not uppercased cmd) to preserve base64 case.
+                let inline_b64 = trimmed.strip_prefix("AUTH PLAIN").or_else(|| trimmed.strip_prefix("auth plain")).unwrap_or("").trim();
                 let auth_b64 = if !inline_b64.is_empty() {
                     // One-line form: use the inline base64 directly
                     inline_b64.to_string()
