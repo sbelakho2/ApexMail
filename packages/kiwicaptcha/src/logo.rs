@@ -11,12 +11,12 @@
 /// Compact kiwi mark for the widget icon chip (24x24).
 pub fn kiwi_mark_svg() -> &'static str {
     r##"<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-  <ellipse cx="9" cy="14" rx="6" ry="5.5" fill="currentColor"/>
-  <path d="M14.5 11.5 L23 10.5 L23 11.5 L14.8 13 Z" fill="currentColor"/>
-  <circle cx="11.5" cy="11.5" r="1" fill="#fff"/>
-  <circle cx="11.8" cy="11.2" r="0.4" fill="currentColor"/>
-  <line x1="7" y1="19" x2="6" y2="22" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-  <line x1="10" y1="19.5" x2="9.5" y2="22.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <ellipse cx="8.5" cy="13" rx="6.5" ry="5.5" fill="currentColor"/>
+  <path d="M14 10 Q19 9 23 10.5 L23 12.5 Q19 13 14 12.5 Z" fill="currentColor"/>
+  <circle cx="11" cy="10.5" r="1.1" fill="#fff"/>
+  <circle cx="11.3" cy="10.2" r="0.5" fill="currentColor"/>
+  <line x1="6.5" y1="18" x2="5.5" y2="22" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+  <line x1="9.5" y1="18.5" x2="9" y2="22.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
 </svg>"##
 }
 
