@@ -47,6 +47,10 @@ pub struct SessionContext {
     pub rcpt_to: Vec<String>,
     /// Whether SPF result was served from cache or freshly evaluated.
     pub spf_status: Option<SpfStatus>,
+    /// AUTH LOGIN state machine: None = not in auth login, Some(email) = waiting for password.
+    pub auth_login_user: Option<String>,
+    /// AUTH PLAIN two-step: true when waiting for the base64 response after sending 334.
+    pub auth_plain_pending: bool,
 }
 
 /// Inbound SMTP server.
@@ -205,6 +209,8 @@ impl InboundServer {
             mail_from: None,
             rcpt_to: Vec::new(),
             spf_status: None,
+            auth_login_user: None,
+            auth_plain_pending: false,
         };
 
         let allow_starttls = tls.is_some();
@@ -386,6 +392,8 @@ impl InboundServer {
             mail_from: None,
             rcpt_to: Vec::new(),
             spf_status: None,
+            auth_login_user: None,
+            auth_plain_pending: false,
         };
 
         let mut stream = BufStream::new(tls_stream);
@@ -427,39 +435,48 @@ impl InboundServer {
             "454 TLS not available\r\n".into()
         } else if cmd_upper.starts_with("AUTH PLAIN") && ctx.tls_active {
             // Handle AUTH PLAIN on TLS connections (port 465 submission).
-            // Supports both inline ("AUTH PLAIN <b64>") and two-step forms.
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
             let inline = raw_line.trim().strip_prefix("AUTH PLAIN").unwrap_or("").trim();
             let auth_b64 = if !inline.is_empty() {
                 inline.to_string()
             } else {
+                // Two-step: send 334 challenge, set pending flag
+                ctx.auth_plain_pending = true;
                 return "334 \r\n".into();
             };
-            match BASE64.decode(auth_b64.trim()) {
-                Ok(creds) => {
-                    let s = String::from_utf8_lossy(&creds);
-                    let parts: Vec<&str> = s.splitn(3, '\0').collect();
-                    if parts.len() >= 3 {
-                        match self.authenticate_user(parts[1], parts[2], ctx.client_ip).await {
-                            Ok(_) => {
-                                ctx.authenticated = true;
-                                "235 2.7.0 Authentication successful\r\n".into()
-                            }
-                            Err(_) => "535 5.7.8 Authentication failed\r\n".into(),
-                        }
-                    } else {
-                        "535 5.7.8 Authentication failed\r\n".into()
-                    }
-                }
-                Err(_) => "501 Invalid base64\r\n".into(),
-            }
+            return self.do_auth_plain(&auth_b64, ctx).await;
+        } else if ctx.auth_plain_pending && ctx.tls_active {
+            // AUTH PLAIN two-step: client sent the base64 response after our 334
+            ctx.auth_plain_pending = false;
+            return self.do_auth_plain(raw_line.trim(), ctx).await;
         } else if cmd_upper.starts_with("AUTH LOGIN") && ctx.tls_active {
-            // Two-step AUTH LOGIN: prompt for username, then password.
+            // AUTH LOGIN multi-step: prompt for username (base64 "VXNlcm5hbWU6")
+            ctx.auth_login_user = Some(String::new()); // marker: waiting for username
             return "334 VXNlcm5hbWU6\r\n".into();
-        } else if cmd_upper == "" && ctx.tls_active && !ctx.authenticated {
-            // Could be the second step of AUTH LOGIN — not fully implemented.
-            // Return error to avoid hanging.
-            "535 5.7.8 Authentication failed\r\n".into()
+        } else if ctx.auth_login_user.is_some() && ctx.tls_active {
+            // AUTH LOGIN state machine: we're waiting for username or password
+            use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+            let decoded = BASE64.decode(raw_line.trim()).unwrap_or_default();
+            let value = String::from_utf8_lossy(&decoded).to_string();
+
+            if ctx.auth_login_user.as_deref() == Some("") {
+                // Username received, now prompt for password
+                ctx.auth_login_user = Some(value);
+                return "334 UGFzc3dvcmQ6\r\n".into();
+            } else {
+                // Password received, attempt authentication
+                let user = ctx.auth_login_user.take().unwrap_or_default();
+                match self.authenticate_user(&user, &value, ctx.client_ip).await {
+                    Ok(_) => {
+                        ctx.authenticated = true;
+                        "235 2.7.0 Authentication successful\r\n".into()
+                    }
+                    Err(_) => "535 5.7.8 Authentication failed\r\n".into(),
+                }
+            }
+        } else if cmd_upper.starts_with("AUTH PLAIN") && !ctx.tls_active {
+            // AUTH PLAIN before TLS — reject for security
+            "538 5.7.11 Encryption required for requested authentication\r\n".into()
         } else if cmd_upper.starts_with("MAIL FROM") {
             if self.config.auth_required && !ctx.authenticated {
                 return "530 Authentication required\r\n".into();
@@ -695,6 +712,29 @@ impl InboundServer {
         result
     }
 
+    /// Process AUTH PLAIN base64 credentials.
+    async fn do_auth_plain(&self, auth_b64: &str, ctx: &mut SessionContext) -> String {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        match BASE64.decode(auth_b64.trim()) {
+            Ok(creds) => {
+                let s = String::from_utf8_lossy(&creds);
+                let parts: Vec<&str> = s.splitn(3, '\0').collect();
+                if parts.len() >= 3 {
+                    match self.authenticate_user(parts[1], parts[2], ctx.client_ip).await {
+                        Ok(_) => {
+                            ctx.authenticated = true;
+                            "235 2.7.0 Authentication successful\r\n".into()
+                        }
+                        Err(_) => "535 5.7.8 Authentication failed\r\n".into(),
+                    }
+                } else {
+                    "535 5.7.8 Authentication failed\r\n".into()
+                }
+            }
+            Err(_) => "501 Invalid base64\r\n".into(),
+        }
+    }
+
     /// Authenticate a user against the users table (same logic as submission server).
     async fn authenticate_user(
         &self,
@@ -926,6 +966,8 @@ mod tests {
             mail_from: None,
             rcpt_to: Vec::new(),
             spf_status: None,
+            auth_login_user: None,
+            auth_plain_pending: false,
         };
         assert!(!ctx.authenticated);
         assert_eq!(ctx.message_count, 0);
@@ -945,6 +987,8 @@ mod tests {
             mail_from: None,
             rcpt_to: Vec::new(),
             spf_status: None,
+            auth_login_user: None,
+            auth_plain_pending: false,
         };
 
         assert!(starttls_is_available(true, &ctx));
