@@ -1,41 +1,55 @@
-//! The KiwiCaptcha kiwi bird logo.
+//! KiwiCaptcha logo — a clean, instantly recognizable kiwi bird.
 //!
-//! Clean, simple kiwi bird silhouettes — the flightless bird with its
-//! signature long curved beak. Instantly recognizable at any size.
+//! The kiwi's defining features captured in simple geometry:
+//! - Egg-shaped body
+//! - Long, slender, slightly curved beak (the unmistakable kiwi signature)
+//! - Small eye dot
+//! - Two short legs
+//!
+//! At 24px the silhouette reads clearly as a bird with a long beak.
 
-/// Compact kiwi mark — the bird in profile with the distinctive long beak.
-/// This is what appears in the widget icon chip.
+/// Compact kiwi mark for the widget icon chip (24x24).
 pub fn kiwi_mark_svg() -> &'static str {
-    r##"<svg viewBox="0 0 24 24" fill="none" aria-hidden="true" role="img" aria-label="KiwiCaptcha">
-  <path d="M4 14.5c0-3.6 2.9-6.5 6.5-6.5 1.6 0 3 .6 4.1 1.5l3.7-3.7c.3-.3.7-.3 1 0 .3.3.3.7 0 1L16 10.6c.9 1.1 1.5 2.5 1.5 4.1 0 .6-.1 1.2-.3 1.7l.8.3c.4.1.5.5.4.9-.1.4-.5.6-.9.4l-.7-.3c-1.1 1.8-3 3-5.3 3-3.6 0-6.5-2.9-6.5-6.5z" fill="currentColor"/>
-  <circle cx="13.5" cy="11" r=".8" fill="#fff"/>
-  <path d="M9.5 19.5l-.5 2M11.5 19.5l-.5 2" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+    r##"<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+  <ellipse cx="9" cy="14" rx="6" ry="5.5" fill="currentColor"/>
+  <path d="M14.5 11.5 L23 10.5 L23 11.5 L14.8 13 Z" fill="currentColor"/>
+  <circle cx="11.5" cy="11.5" r="1" fill="#fff"/>
+  <circle cx="11.8" cy="11.2" r="0.4" fill="currentColor"/>
+  <line x1="7" y1="19" x2="6" y2="22" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="10" y1="19.5" x2="9.5" y2="22.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
 </svg>"##
 }
 
-/// The full kiwi bird — side profile with body, long beak, and legs.
+/// Full kiwi bird — same as mark, available for larger displays.
 pub fn kiwi_logo_svg() -> &'static str {
     kiwi_mark_svg()
 }
 
-/// The full "KiwiCaptcha" lockup: kiwi mark + wordmark text.
+/// Lockup: kiwi mark + wordmark text.
 pub fn kiwi_lockup_svg() -> &'static str {
-    r##"<svg viewBox="0 0 140 24" fill="none" aria-hidden="true" role="img" aria-label="KiwiCaptcha">
+    r##"<svg viewBox="0 0 140 24" fill="none" aria-hidden="true">
   <g>
-    <path d="M4 14.5c0-3.6 2.9-6.5 6.5-6.5 1.6 0 3 .6 4.1 1.5l3.7-3.7c.3-.3.7-.3 1 0 .3.3.3.7 0 1L16 10.6c.9 1.1 1.5 2.5 1.5 4.1 0 .6-.1 1.2-.3 1.7l.8.3c.4.1.5.5.4.9-.1.4-.5.6-.9.4l-.7-.3c-1.1 1.8-3 3-5.3 3-3.6 0-6.5-2.9-6.5-6.5z" fill="currentColor"/>
-    <circle cx="13.5" cy="11" r=".8" fill="#fff"/>
+    <ellipse cx="9" cy="14" rx="6" ry="5.5" fill="currentColor"/>
+    <path d="M14.5 11.5 L23 10.5 L23 11.5 L14.8 13 Z" fill="currentColor"/>
+    <circle cx="11.5" cy="11.5" r="1" fill="#fff"/>
+    <circle cx="11.8" cy="11.2" r="0.4" fill="currentColor"/>
+    <line x1="7" y1="19" x2="6" y2="22" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="10" y1="19.5" x2="9.5" y2="22.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
   </g>
-  <text x="28" y="16" font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="700" letter-spacing="0.04em" fill="currentColor">KiwiCaptcha</text>
+  <text x="28" y="16" font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="700" fill="currentColor">KiwiCaptcha</text>
 </svg>"##
 }
 
-/// A shield variant — the kiwi mark inside a shield outline.
+/// Shield variant — kiwi inside a shield outline for "protected by" badges.
 pub fn kiwi_shield_svg() -> &'static str {
-    r##"<svg viewBox="0 0 24 24" fill="none" aria-hidden="true" role="img" aria-label="Protected by KiwiCaptcha">
-  <path d="M12 2L4 5v6c0 5 3.5 9 8 11 4.5-2 8-6 8-11V5l-8-3z" fill="currentColor" opacity="0.12" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-  <g transform="translate(3.5, 3) scale(0.7)">
-    <path d="M4 14.5c0-3.6 2.9-6.5 6.5-6.5 1.6 0 3 .6 4.1 1.5l3.7-3.7c.3-.3.7-.3 1 0 .3.3.3.7 0 1L16 10.6c.9 1.1 1.5 2.5 1.5 4.1 0 .6-.1 1.2-.3 1.7l.8.3c.4.1.5.5.4.9-.1.4-.5.6-.9.4l-.7-.3c-1.1 1.8-3 3-5.3 3-3.6 0-6.5-2.9-6.5-6.5z" fill="currentColor"/>
-    <circle cx="13.5" cy="11" r=".8" fill="#fff"/>
+    r##"<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+  <path d="M12 2L4 5v6c0 5 3.5 9 8 11 4.5-2 8-6 8-11V5l-8-3z" fill="currentColor" opacity="0.1" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+  <g transform="translate(0.5, 1)">
+    <ellipse cx="9" cy="14" rx="5" ry="4.5" fill="currentColor"/>
+    <path d="M13.5 11.5 L21 10.5 L21 11.5 L13.7 13 Z" fill="currentColor"/>
+    <circle cx="10.5" cy="11.5" r="0.8" fill="#fff"/>
+    <line x1="7" y1="18.5" x2="6.5" y2="21" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+    <line x1="9.5" y1="19" x2="9" y2="21.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
   </g>
 </svg>"##
 }
@@ -45,17 +59,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logos_are_valid_svg_markup() {
-        assert!(kiwi_logo_svg().starts_with("<svg"));
-        assert!(kiwi_logo_svg().ends_with("</svg>"));
-        assert!(kiwi_mark_svg().starts_with("<svg"));
-        assert!(kiwi_mark_svg().ends_with("</svg>"));
-        assert!(kiwi_lockup_svg().contains("KiwiCaptcha"));
-        assert!(kiwi_shield_svg().starts_with("<svg"));
+    fn logos_are_valid_svg() {
+        for svg in [kiwi_mark_svg(), kiwi_logo_svg(), kiwi_lockup_svg(), kiwi_shield_svg()] {
+            assert!(svg.starts_with("<svg"));
+            assert!(svg.ends_with("</svg>"));
+        }
     }
 
     #[test]
-    fn logos_use_current_color_for_host_theming() {
+    fn logos_use_current_color() {
         assert!(kiwi_mark_svg().contains("currentColor"));
         assert!(kiwi_shield_svg().contains("currentColor"));
     }
