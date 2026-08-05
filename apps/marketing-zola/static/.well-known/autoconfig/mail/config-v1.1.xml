@@ -11,20 +11,6 @@
       <username>%EMAILADDRESS%</username>
       <authentication>password-cleartext</authentication>
     </incomingServer>
-    <incomingServer type="imap">
-      <hostname>mail.apexmail.ee</hostname>
-      <port>143</port>
-      <socketType>STARTTLS</socketType>
-      <username>%EMAILADDRESS%</username>
-      <authentication>password-cleartext</authentication>
-    </incomingServer>
-    <outgoingServer type="smtp">
-      <hostname>mail.apexmail.ee</hostname>
-      <port>587</port>
-      <socketType>STARTTLS</socketType>
-      <username>%EMAILADDRESS%</username>
-      <authentication>password-cleartext</authentication>
-    </outgoingServer>
     <outgoingServer type="smtp">
       <hostname>mail.apexmail.ee</hostname>
       <port>465</port>
@@ -32,8 +18,5 @@
       <username>%EMAILADDRESS%</username>
       <authentication>password-cleartext</authentication>
     </outgoingServer>
-    <documentation url="https://apexmail.ee/docs/email-setup">
-      <descr lang="en">ApexMail email setup guide</descr>
-    </documentation>
   </emailProvider>
 </clientConfig>
