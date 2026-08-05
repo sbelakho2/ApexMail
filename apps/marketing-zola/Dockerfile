@@ -29,6 +29,10 @@ COPY . .
 
 # Build CSS and Zola site
 RUN tailwindcss -i static/css/input.css -o static/css/styles.css --minify
+# Patch: ensure dark-mode media query has :not(.light) guard so the JS toggle
+# can override OS-level dark mode. Tailwind's minifier normalizes :root:not(.light)
+# back to :root inside @media, so we fix it AFTER the Tailwind build.
+RUN sed -i 's/@media(prefers-color-scheme:dark){:root/@media(prefers-color-scheme:dark){:root:not(.light)/g; s/@media (prefers-color-scheme:dark){:root/@media (prefers-color-scheme:dark){:root:not(.light)/g' static/css/styles.css
 RUN zola build
 
 # =============================================================================
