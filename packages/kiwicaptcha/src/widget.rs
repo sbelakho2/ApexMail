@@ -22,22 +22,17 @@ use crate::kiwi_mark_svg;
 pub fn kiwi_widget_html() -> String {
     let svg = kiwi_mark_svg();
     format!(
-        r#"<div class="kiwi-widget rounded-sm border border-surface-200 bg-card p-5 transition-premium hover:border-surface-300" id="kiwicaptcha-widget" data-kiwi-widget role="status" aria-live="polite" aria-label="Security verification">
-  <div class="flex items-start gap-3.5">
-    <div class="flex items-center justify-center w-9 h-9 rounded-sm bg-brand-50 text-brand-600 shrink-0 transition-premium" data-kiwi-icon>{svg}</div>
-    <div class="flex-1 min-w-0">
-      <div class="flex items-center justify-between gap-2">
-        <span class="text-[11px] font-bold uppercase tracking-[0.16em] text-surface-900" data-kiwi-status>Preparing verification&hellip;</span>
-        <span class="kiwi-pill inline-flex items-center gap-1.5 rounded-sm border border-surface-200 bg-surface-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] text-surface-400 transition-premium" data-kiwi-pill>Idle</span>
-      </div>
-      <div class="mt-2.5 h-[3px] w-full rounded-full bg-surface-100 overflow-hidden">
-        <div class="kiwi-fill h-full rounded-full bg-brand-500 transition-all duration-300 ease-premium" style="width:0%"></div>
-      </div>
-      <div class="mt-2 flex items-center justify-between gap-2">
-        <p class="text-[10px] leading-[1.45] text-surface-400 font-medium" data-kiwi-hint>Secure verification runs in your browser.</p>
-        <span class="kiwi-countdown text-[9px] font-mono tabular-nums text-surface-300 shrink-0" data-kiwi-countdown></span>
-      </div>
+        r#"<div class="kiwi-widget" id="kiwicaptcha-widget" data-kiwi-widget role="status" aria-live="polite" aria-label="Security verification" style="border:1px solid rgba(0,0,0,.08);border-radius:8px;padding:16px;background:#fff;display:flex;align-items:center;gap:12px;">
+  <div data-kiwi-icon style="flex-shrink:0;width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#fef2f2,#fee2e2);color:#dd524c;transition:all .3s ease;">{svg}</div>
+  <div style="flex:1;min-width:0;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <span data-kiwi-status style="font-size:12px;font-weight:600;color:#0f1116;">Preparing verification…</span>
+      <span class="kiwi-pill" data-kiwi-pill style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:2px 8px;border-radius:4px;background:#f4f4f5;color:#71717a;border:1px solid #e4e4e7;transition:all .3s ease;">Idle</span>
     </div>
+    <div style="margin-top:8px;height:3px;width:100%;border-radius:2px;background:#e4e4e7;overflow:hidden;">
+      <div class="kiwi-fill" style="height:100%;border-radius:2px;background:#dd524c;transition:width .3s cubic-bezier(.23,1,.32,1);width:0%;"></div>
+    </div>
+    <p data-kiwi-hint style="margin:6px 0 0;font-size:10px;color:#a1a1aa;font-weight:500;">Secure verification runs in your browser.</p>
   </div>
   <input type="hidden" name="kiwi__token" id="kiwi-token-input" value="" />
 </div>
@@ -58,27 +53,24 @@ pub fn kiwi_widget_html() -> String {
     if (statusEl) statusEl.textContent = label;
     if (pillEl) {{
       pillEl.textContent = pillText;
-      var baseClass = "kiwi-pill inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] transition-premium ";
-      var stateClasses = {{
-        idle: "border-surface-200 bg-surface-50 text-surface-400",
-        connecting: "border-brand-200 bg-brand-50 text-brand-600",
-        solving: "border-brand-300 bg-brand-100 text-brand-700",
-        done: "border-success-200 bg-success-50 text-success-700",
-        failed: "border-primary/30 bg-primary/5 text-primary"
+      var styles = {{
+        idle: "background:#f4f4f5;color:#71717a;border:1px solid #e4e4e7;",
+        connecting: "background:#fef2f2;color:#dd524c;border:1px solid #fecaca;",
+        solving: "background:#fef2f2;color:#dd524c;border:1px solid #fca5a5;",
+        done: "background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0;",
+        failed: "background:#fef2f2;color:#dc2626;border:1px solid #fecaca;"
       }};
-      pillEl.className = baseClass + (stateClasses[state] || stateClasses.idle);
+      pillEl.style.cssText = "font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:2px 8px;border-radius:4px;transition:all .3s ease;" + (styles[state] || styles.idle);
     }}
     if (iconEl) {{
-      var iconBase = "flex items-center justify-center w-9 h-9 rounded-sm shrink-0 transition-premium ";
-      var iconStates = {{
-        idle: "bg-brand-50 text-brand-600",
-        connecting: "bg-brand-100 text-brand-700",
-        solving: "bg-brand-100 text-brand-700",
-        done: "bg-success-50 text-success-600",
-        failed: "bg-primary/10 text-primary"
+      var iconStyles = {{
+        idle: "background:linear-gradient(135deg,#fef2f2,#fee2e2);color:#dd524c;",
+        connecting: "background:linear-gradient(135deg,#fef2f2,#fee2e2);color:#dd524c;",
+        solving: "background:linear-gradient(135deg,#fef2f2,#fecaca);color:#dc2626;",
+        done: "background:linear-gradient(135deg,#f0fdf4,#dcfce7);color:#16a34a;",
+        failed: "background:linear-gradient(135deg,#fef2f2,#fecaca);color:#dc2626;"
       }};
-      iconEl.className = iconBase + (iconStates[state] || iconStates.idle);
-      if (state === "solving" && !reduceMotion) iconEl.className += " animate-pulse";
+      iconEl.style.cssText = "flex-shrink:0;width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;transition:all .3s ease;" + (iconStyles[state] || iconStyles.idle);
     }}
   }}
 
