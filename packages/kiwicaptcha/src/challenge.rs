@@ -1,7 +1,7 @@
 //! Challenge issuance for KiwiCaptcha.
 //!
 //! A challenge is an HMAC-signed, nonce-stamped, IP-bound token that the client
-//! must fold into a PBKDF2 proof-of-work. The signature binds the challenge
+//! must fold into a SHA-256 proof-of-work. The signature binds the challenge
 //! to the server's secret key (so clients cannot forge challenges), the issuing
 //! time (for TTL enforcement), the client IP hash (for replay-across-clients
 //! prevention), and the scope (so a login challenge can't be used for signup).
@@ -52,7 +52,7 @@ pub struct ChallengeRecord {
     pub ip_hash: String,
     pub issued_at: u64,
     pub expires_at: u64,
-    /// The PBKDF2 difficulty parameters this challenge was issued with, so a
+    /// The difficulty parameters this challenge was issued with, so a
     /// difficulty downgrade attack (client claims a lower target_bits) is
     /// rejected — the server always verifies against the parameters it issued.
     pub m_kib: u32,
@@ -75,16 +75,13 @@ pub struct ChallengeConfig {
     /// HMAC secret key (server-side). Challenges signed with this key cannot
     /// be verified by a server using a different key.
     pub secret_key: String,
-    /// PBKDF2 iteration count (repurposed from the `m_kib` field name for
-    /// wire compatibility — the client receives this as `mKib` and passes it
-    /// to WebCrypto's `PBKDF2.iterations`). Tuned so a real browser takes
-    /// ~300–500ms per hash invocation.
+    /// Reserved difficulty parameter (kept for struct/wire stability).
     pub m_kib: u32,
-    /// Reserved (unused by PBKDF2; kept for struct stability).
+    /// Reserved difficulty parameter (kept for struct stability).
     pub t: u32,
-    /// Reserved (unused by PBKDF2; kept for struct stability).
+    /// Reserved difficulty parameter (kept for struct stability).
     pub p: u32,
-    /// Required leading zero bits in the PBKDF2 output (difficulty).
+    /// Required leading zero bits in the SHA-256 output (difficulty).
     pub target_bits: u32,
     /// Challenge lifetime in seconds.
     pub ttl_secs: u64,
@@ -261,7 +258,7 @@ pub fn issue_challenge(
     };
     let signature = sign_payload(&payload, &config.secret_key)?;
 
-    // The challenge string the client folds into PBKDF2: it contains the
+    // The challenge string the client folds into SHA-256: it contains the
     // signed payload so a client cannot tamper with nonce/scope/ip/issued_at
     // without invalidating the signature.
     let challenge = format!("{}.{}", B64.encode(canonical_signing_input(&payload)), signature);

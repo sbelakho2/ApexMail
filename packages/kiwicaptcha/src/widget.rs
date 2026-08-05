@@ -2,24 +2,25 @@
 //!
 //! The widget renders a self-contained `<div>` with an inline `<script>` that:
 //! 1. Fetches a challenge from `/api/kcaptcha/challenge`
-//! 2. Solves PBKDF2-HMAC-SHA256 in the browser via WebCrypto
+//! 2. Solves a SHA-256 proof-of-work in the browser using a compact,
+//!    synchronous pure-JS implementation that yields periodically via
+//!    `setTimeout(0)` to keep the UI responsive
 //! 3. Fills the hidden `kiwi__token` input with the encoded solution
 //!
 //! ## Visual design
 //!
-//! The widget matches the ApexMail design system:
-//! - Coral primary (`bg-brand-500`), surface card background (`bg-card`)
-//! - `rounded-sm` corners (0px radius — the Apex design language)
-//! - `shadow-premium-sm` for subtle depth
+//! Clean, minimal card:
+//! - `rounded-sm border border-surface-200 bg-card p-5`
+//! - Kiwi mark in a brand-tinted chip (`bg-brand-50 text-brand-600`)
 //! - `transition-premium` timing (cubic-bezier easing)
-//! - Kiwi mark in a coral-tinted chip (`bg-brand-50 text-brand-600`)
-//! - Progress bar, status pill, TTL countdown, and contextual hint text
+//! - Status text + pill badge, thin `h-[3px]` brand progress bar
+//! - TTL countdown, contextual hint text, hidden `kiwi__token` input
 
-use crate::kiwi_shield_svg;
+use crate::kiwi_mark_svg;
 
 /// Render the full KiwiCaptcha widget HTML block.
 pub fn kiwi_widget_html() -> String {
-    let svg = kiwi_shield_svg();
+    let svg = kiwi_mark_svg();
     format!(
         r#"<div class="kiwi-widget rounded-sm border border-surface-200 bg-card p-5 transition-premium hover:border-surface-300" id="kiwicaptcha-widget" data-kiwi-widget role="status" aria-live="polite" aria-label="Security verification">
   <div class="flex items-start gap-3.5">
@@ -33,7 +34,7 @@ pub fn kiwi_widget_html() -> String {
         <div class="kiwi-fill h-full rounded-full bg-brand-500 transition-all duration-300 ease-premium" style="width:0%"></div>
       </div>
       <div class="mt-2 flex items-center justify-between gap-2">
-        <p class="text-[10px] leading-[1.45] text-surface-400 font-medium" data-kiwi-hint>Memory-hard proof-of-work runs in your browser.</p>
+        <p class="text-[10px] leading-[1.45] text-surface-400 font-medium" data-kiwi-hint>Secure verification runs in your browser.</p>
         <span class="kiwi-countdown text-[9px] font-mono tabular-nums text-surface-300 shrink-0" data-kiwi-countdown></span>
       </div>
     </div>
@@ -51,6 +52,7 @@ pub fn kiwi_widget_html() -> String {
   var iconEl = W.querySelector("[data-kiwi-icon]");
   var tokenEl = document.getElementById("kiwi-token-input");
   var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var encoder = new TextEncoder();
 
   function setStatus(label, pillText, state) {{
     if (statusEl) statusEl.textContent = label;
@@ -119,8 +121,60 @@ pub fn kiwi_widget_html() -> String {
   document.addEventListener("mousemove", function(){{mouseEvents++;}},{{passive:true}});
   document.addEventListener("keydown", function(){{keyEvents++;}},{{passive:true}});
 
-  // ── SHA-256 via WebCrypto (fast hash, high difficulty — same model as
-  //    FriendlyCaptcha, Anubis, ALTCHA) ──────────────────────────────
+  // ── Compact synchronous SHA-256 (pure JS, typed-array based) ────────
+  //    Returns a Uint8Array(32). Synchronous execution avoids the
+  //    per-hash Promise allocation that caps async hashing throughput.
+  function sha256sync(data) {{
+    var h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+    var k = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+    var msg = [];
+    var i = 0;
+    for (i = 0; i < data.length; i++) msg.push(data[i]);
+    var l = msg.length * 8;
+    msg.push(0x80);
+    while (msg.length % 64 != 56) msg.push(0);
+    // 64-bit big-endian bit length. The high 32 bits are always 0 for our
+    // message sizes; >>> masks its shift count to 5 bits, so a naive
+    // (l >>> 56) would be wrong — emit the low 32 bits explicitly.
+    msg.push(0, 0, 0, 0);
+    msg.push((l >>> 24) & 0xff, (l >>> 16) & 0xff, (l >>> 8) & 0xff, l & 0xff);
+    var w = new Array(64);
+    var a, b, c, d, e, f, g, hh;
+    var s0, s1, ch, maj, t1, t2;
+    for (i = 0; i < msg.length; i += 64) {{
+      for (var j = 0; j < 16; j++) {{
+        w[j] = (msg[i + j * 4] << 24) | (msg[i + j * 4 + 1] << 16) | (msg[i + j * 4 + 2] << 8) | msg[i + j * 4 + 3];
+      }}
+      for (j = 16; j < 64; j++) {{
+        var x = w[j - 15];
+        s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+        var y = w[j - 2];
+        s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+        w[j] = (w[j - 16] + s0 + w[j - 7] + s1) | 0;
+      }}
+      a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4]; f = h[5]; g = h[6]; hh = h[7];
+      for (j = 0; j < 64; j++) {{
+        s1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+        ch = (e & f) ^ (~e & g);
+        t1 = (hh + s1 + ch + k[j] + w[j]) | 0;
+        s0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+        maj = (a & b) ^ (a & c) ^ (b & c);
+        t2 = (s0 + maj) | 0;
+        hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }}
+      h[0] = (h[0] + a) | 0; h[1] = (h[1] + b) | 0; h[2] = (h[2] + c) | 0; h[3] = (h[3] + d) | 0;
+      h[4] = (h[4] + e) | 0; h[5] = (h[5] + f) | 0; h[6] = (h[6] + g) | 0; h[7] = (h[7] + hh) | 0;
+    }}
+    var result = new Uint8Array(32);
+    for (i = 0; i < 8; i++) {{
+      result[i * 4] = (h[i] >>> 24) & 0xff;
+      result[i * 4 + 1] = (h[i] >>> 16) & 0xff;
+      result[i * 4 + 2] = (h[i] >>> 8) & 0xff;
+      result[i * 4 + 3] = h[i] & 0xff;
+    }}
+    return result;
+  }}
+
   function b64decode(str) {{
     str = str.replace(/-/g, "+").replace(/_/g, "/");
     while (str.length % 4) str += "=";
@@ -136,29 +190,40 @@ pub fn kiwi_widget_html() -> String {
     return n;
   }}
 
-  async function deriveHash(prefix, counter, saltBytes) {{
-    var input = new Uint8Array(new TextEncoder().encode(prefix + counter).length + saltBytes.length);
-    input.set(new TextEncoder().encode(prefix + counter), 0);
-    input.set(saltBytes, new TextEncoder().encode(prefix + counter).length);
-    return crypto.subtle.digest("SHA-256", input);
+  // SHA-256(prefix || counter || salt) — synchronous.
+  function deriveHash(prefix, counter, saltBytes) {{
+    var head = encoder.encode(prefix + counter);
+    var input = new Uint8Array(head.length + saltBytes.length);
+    input.set(head, 0);
+    input.set(saltBytes, head.length);
+    return sha256sync(input);
   }}
 
-  async function solve(prefix, saltB64, targetBits) {{
-    var salt = b64decode(saltB64);
-    var solveStart = performance.now();
-    var expectedHashes = Math.pow(2, targetBits);
-    for (var counter = 0; counter < 5000000; counter++) {{
-      var buf = await deriveHash(prefix, counter, salt);
-      var bytes = new Uint8Array(buf);
-      if (leadingZeros(bytes) >= targetBits) {{
-        return {{ counter: counter, duration: Math.round(performance.now() - solveStart) }};
-      }}
-      if (counter % 1000 === 0) {{
+  // Synchronous hash crunching in ~5000-hash chunks, yielding to the UI
+  // via setTimeout(0) between chunks. Resolves with {{counter, duration}}
+  // or null if the search space is exhausted.
+  function solve(prefix, saltBytes, targetBits) {{
+    return new Promise(function(resolve) {{
+      var expectedHashes = Math.pow(2, targetBits);
+      var solveStart = performance.now();
+      var counter = 0;
+      var CHUNK = 5000;
+      var MAX = 5000000;
+      function chunk() {{
+        var end = counter + CHUNK;
+        if (end > MAX) end = MAX;
+        for (; counter < end; counter++) {{
+          if (leadingZeros(deriveHash(prefix, counter, saltBytes)) >= targetBits) {{
+            resolve({{ counter: counter, duration: Math.round(performance.now() - solveStart) }});
+            return;
+          }}
+        }}
+        if (counter >= MAX) {{ resolve(null); return; }}
         setProgress(Math.min(92, (counter * 100) / expectedHashes));
-        await new Promise(function(r) {{ setTimeout(r, 0); }});
+        setTimeout(chunk, 0);
       }}
-    }}
-    return null;
+      setTimeout(chunk, 0);
+    }});
   }}
 
   // ── Widget driver ──────────────────────────────────────────────────
@@ -180,9 +245,9 @@ pub fn kiwi_widget_html() -> String {
       var data = await resp.json();
       if (data.ttlSecs) startCountdown(data.ttlSecs);
 
-      setStatus("Computing proof-of-work\u2026", "Verifying", "solving");
-      setHint("Running SHA-256 verification in your browser.");
-      var result = await solve(data.prefix, data.salt, data.targetBits);
+      setStatus("Proof-of-work verification\u2026", "Verifying", "solving");
+      setHint("Running a short hash challenge locally.");
+      var result = await solve(data.prefix, b64decode(data.salt), data.targetBits);
       if (!result) throw new Error("solver exhausted");
 
       var telemetry = {{
@@ -208,13 +273,8 @@ pub fn kiwi_widget_html() -> String {
     }}
   }}
 
-  if (window.crypto && window.crypto.subtle) {{
-    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
-    else run();
-  }} else {{
-    setStatus("Browser not supported", "Unsupported", "failed");
-    setHint("This browser does not support WebCrypto.");
-  }}
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
+  else run();
 }})();
 </script>"#
     )

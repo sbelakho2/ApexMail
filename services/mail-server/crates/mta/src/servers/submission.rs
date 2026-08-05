@@ -202,12 +202,22 @@ impl SubmissionServer {
                     }
                 }
             } else if cmd.starts_with("AUTH PLAIN") {
-                let _ = write_line(stream, "334 \r\n").await;
-                let mut auth_b64 = String::new();
-                match stream.read_line(&mut auth_b64).await {
-                    Ok(_) => {}
-                    _ => break,
-                }
+                // RFC 4954: AUTH PLAIN can include the initial response inline:
+                //   "AUTH PLAIN <base64>"  — one-line form (what most clients use)
+                //   "AUTH PLAIN"           — two-step form (server sends 334, client responds)
+                let inline_b64 = cmd.strip_prefix("AUTH PLAIN").unwrap_or("").trim();
+                let auth_b64 = if !inline_b64.is_empty() {
+                    // One-line form: use the inline base64 directly
+                    inline_b64.to_string()
+                } else {
+                    // Two-step form: send challenge, wait for response
+                    let _ = write_line(stream, "334 \r\n").await;
+                    let mut b64 = String::new();
+                    match stream.read_line(&mut b64).await {
+                        Ok(_) => b64,
+                        _ => break,
+                    }
+                };
                 match BASE64.decode(auth_b64.trim()) {
                     Ok(creds) => {
                         let s = String::from_utf8_lossy(&creds);

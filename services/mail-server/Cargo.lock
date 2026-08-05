@@ -5133,7 +5133,6 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
- "pbkdf2",
  "rand 0.8.6",
  "serde",
  "serde_json",

@@ -15,26 +15,26 @@ use serde::{Deserialize, Serialize};
 /// A single issued challenge, returned by `POST /api/kcaptcha/challenge`.
 ///
 /// The `challenge` field is the HMAC-signed challenge string the client must
-/// fold into the Argon2id preimage. All difficulty parameters are included so
-/// the client solver and the server verifier run identical Argon2id configs.
+/// fold into the SHA-256 proof-of-work. The difficulty target is included so
+/// the client solver and the server verifier run identical computations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssuedChallenge {
     /// Single-use nonce (base64, 32 random bytes). The client must include this
     /// in the solution token so the server can look up the stored challenge record.
     pub nonce: String,
     /// Opaque challenge string (base64 of the signed payload). The client
-    /// passes this verbatim as the PBKDF2 preimage input.
+    /// passes this verbatim into the SHA-256 preimage.
     pub challenge: String,
-    /// Base64-encoded salt (16 bytes). Reused across the nonce's lifetime so
-    /// the server can re-derive the hash deterministically.
+    /// Base64-encoded salt (16 bytes). Folded into the SHA-256 input so that
+    /// identical challenge + counter pairs still vary across challenges.
     pub salt: String,
-    /// Argon2id memory cost in KiB (e.g. 65536 = 64 MiB).
+    /// Reserved difficulty parameter (kept for wire compatibility).
     pub m_kib: u32,
-    /// Argon2id time cost (iterations).
+    /// Reserved difficulty parameter (kept for wire compatibility).
     pub t: u32,
-    /// Argon2id parallelism (lanes).
+    /// Reserved difficulty parameter (kept for wire compatibility).
     pub p: u32,
-    /// Number of leading zero bits required in the Argon2id raw output.
+    /// Number of leading zero bits required in the SHA-256 output (difficulty).
     pub target_bits: u32,
     /// Challenge lifetime in seconds (for client-side countdown display).
     pub ttl_secs: u64,

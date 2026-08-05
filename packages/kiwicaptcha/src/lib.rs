@@ -2,27 +2,14 @@
 //!
 //! A native Rust proof-of-work CAPTCHA engine.
 //!
-//! KiwiCaptcha uses **PBKDF2-HMAC-SHA256** as the client-side hash function
-//! (native WebCrypto API in every modern browser, zero JS dependencies),
-//! **HMAC-signed + single-use + IP-bound** challenges to defeat token replay
-//! and relay attacks, and an inline widget script (no external JS, no iframes)
-//! to avoid the same-origin CSP cascade that made third-party CAPTCHAs
-//! unfixable. The client solver uses the browser's native
-//! WebCrypto API (`crypto.subtle.deriveBits`).
+//! KiwiCaptcha combines **SHA-256 proof-of-work** (quantum-safe — a hash
+//! function, not a factoring or discrete-log scheme that quantum computers
+//! could break), **HMAC-signed single-use IP-bound challenges** to defeat
+//! token replay and relay attacks, and an **inline widget** (no external JS,
+//! no iframes, no third-party hosts) to avoid the same-origin CSP cascade
+//! that made hosted CAPTCHAs unfixable.
 //!
 //! License: **MIT**
-//!
-//! ## Threat model
-//!
-//! | Threat | Defense |
-//! |---|---|
-//! | GPU/ASIC brute-force | PBKDF2 at 50,000 iterations — sequential CPU work |
-//! | Token replay | HMAC-signed, single-use (Redis DEL), 120s TTL, IP-bound |
-//! | ML-based solvers | PoW is mathematical and unlearnable |
-//! | CAPTCHA-solving farms | PoW can't be outsourced to humans |
-//! | Browser automation | Telemetry scoring: webdriver flag, interaction metrics |
-//! | Timing attacks | Reject solves below configurable min_duration_ms |
-//! | Cross-scope replay | Scope validation rejects tokens from different flows |
 
 pub mod challenge;
 pub mod logo;

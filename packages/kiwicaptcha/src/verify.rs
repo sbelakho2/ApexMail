@@ -1,36 +1,33 @@
 //! Proof-of-work verification for KiwiCaptcha.
 //!
 //! Given a stored [`ChallengeRecord`] and a client-submitted counter, this
-//! module re-derives the PBKDF2-HMAC-SHA256 hash (`PBKDF2(challenge || prefix || counter, salt, iterations)`)
+//! module re-derives the SHA-256 hash (`SHA-256(challenge_prefix || counter || salt)`)
 //! and checks that the raw output has at least `target_bits` leading zero bits.
 //!
-//! Because PBKDF2 is CPU-bound, the server re-derivation costs a small fixed
-//! amount of CPU time — but only once per verification (the client pays the brute-force
-//! cost of finding the counter). This is the asymmetry that makes PoW work:
+//! Because SHA-256 is a fast hash, the server re-derivation costs a single
+//! hash — but the client pays the brute-force cost of finding a counter whose
+//! hash meets the target. This is the asymmetry that makes PoW work:
 //! cheap to verify, expensive to solve.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use hmac::Hmac;
-use pbkdf2::pbkdf2;
 use sha2::{Digest, Sha256};
 
 use crate::challenge::{payload_from_record, verify_signature, ChallengeRecord};
 
 /// Compute the SHA-256 hash for the given record + counter.
 ///
-/// This matches what leading PoW CAPTCHA systems (FriendlyCaptcha, Anubis,
-/// ALTCHA) use: a fast hash with high difficulty (many attempts), NOT a slow
-/// hash (PBKDF2) with low difficulty. A fast hash means the legitimate browser
-/// and a bot have comparable per-hash cost, making the difficulty meaningful.
+/// KiwiCaptcha uses a fast hash (SHA-256) with high difficulty (many brute-force
+/// attempts required), rather than a slow KDF with low difficulty. A fast hash
+/// means a legitimate browser and a bot have comparable per-hash cost, so the
+/// difficulty target is meaningful and tunable.
 ///
 /// The input is `SHA-256(challenge_prefix || counter || salt)`:
 /// - challenge_prefix embeds the signed challenge (binds to nonce/IP/scope)
 /// - counter is the brute-force variable
 /// - salt is the challenge's base64-decoded salt
 ///
-/// At 20-bit difficulty (~1M expected hashes), a browser using WebCrypto
-/// `crypto.subtle.digest('SHA-256', ...)` solves in ~2-5 seconds. The server
-/// re-derives ONE hash for verification — effectively free.
+/// At 20-bit difficulty (~1M expected hashes), a browser solves in ~2-5
+/// seconds. The server re-derives ONE hash for verification — effectively free.
 fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], VerifyError> {
     let salt = B64
         .decode(&record.salt)
@@ -112,7 +109,7 @@ pub enum VerifyError {
 /// 1. Re-verify the HMAC signature (defends against forged records).
 /// 2. Check the TTL (defends against stale challenges).
 /// 3. Check the minimum duration (defends against impossibly-fast solves).
-/// 4. Re-derive the PBKDF2 hash and check leading zero bits (the actual PoW).
+/// 4. Re-derive the SHA-256 hash and check leading zero bits (the actual PoW).
 pub fn verify_solution(ctx: &VerifyContext<'_>) -> VerifyOutcome {
     // 1. Signature re-check.
     let payload = payload_from_record(ctx.record);
@@ -194,7 +191,7 @@ pub fn sha256_hex(input: &str) -> String {
 ///
 /// Hard rejection signals:
 /// - `webdriver` flag is set (Chrome DevTools Protocol / Selenium).
-/// - Solve completes in >30s with zero mouse/key events (native PBKDF2 bypass).
+/// - Solve completes in >30s with zero mouse/key events (headless solver).
 /// - Solve takes >120s total (well beyond the ~30s expected for targetBits=14).
 ///
 /// Soft signals (logged but NOT rejected):
@@ -257,7 +254,7 @@ mod tests {
     fn make_record(target_bits: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
-            m_kib: 100, // 100 PBKDF2 iterations — fast enough for tests
+            m_kib: 100, // reserved param — fast enough for tests
             t: 1,
             p: 1,
             target_bits,

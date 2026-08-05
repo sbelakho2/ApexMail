@@ -1,17 +1,15 @@
 [package]
 name = "kiwicaptcha"
-description = "KiwiCaptcha — a native Rust proof-of-work CAPTCHA engine."
+description = "A quantum-safe SHA-256 proof-of-work CAPTCHA engine"
 version = "0.1.0"
 edition = "2021"
-authors = ["Bel Consulting OÜ <hello@apexmail.ee>"]
+authors = ["KiwiCaptcha Contributors"]
 license = "MIT"
 repository = "https://github.com/sbelakho2/kiwicaptcha"
-documentation = "https://github.com/sbelakho2/kiwicaptcha"
-keywords = ["captcha", "proof-of-work", "pbkdf2", "security", "anti-bot"]
+keywords = ["captcha", "proof-of-work", "sha256", "security", "anti-bot"]
 categories = ["web-programming", "cryptography", "authentication"]
 
 [dependencies]
-pbkdf2 = "0.12"
 sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"

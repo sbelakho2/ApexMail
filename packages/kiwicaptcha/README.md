@@ -1,29 +1,24 @@
 # KiwiCaptcha
 
-A native Rust proof-of-work CAPTCHA engine.
-
-**Authors**: Bel Consulting OÜ
-**License**: MIT
+A quantum-safe SHA-256 proof-of-work CAPTCHA. No external services, no tracking, no WASM.
 
 ## Features
 
-- **No external services** — runs entirely in your infrastructure, no third-party calls, no iframes
-- **No external JavaScript** — the browser widget uses only the native WebCrypto API (`crypto.subtle.deriveBits`)
-- **CSP-compatible** — widget scripts receive nonce from host CSP middleware; no `script-src` carve-outs needed
-- **PBKDF2-HMAC-SHA256** proof-of-work — CPU-bound, sequential, tunable difficulty
-- **Single-use tokens** — Redis-backed, HMAC-signed, IP-bound challenges prevent replay and relay attacks
-- **Telemetry scoring** — detects headless browsers via webdriver flag, hardware concurrency, and interaction metrics
-- **Scope isolation** — a challenge minted for "login" cannot be reused on "signup"
-- **Dev-mode bypass** — use KIWI_SECRET_KEY=dev with cfg!(debug_assertions)
+- **SHA-256 proof-of-work** — a hash function, not a factoring/discrete-log scheme, so it is quantum-safe.
+- **HMAC-signed, single-use challenges** — every challenge is bound to a server secret, nonce, and timestamp, so a token can only be redeemed once.
+- **IP-bound** — challenges are bound to the requesting client's IP hash, defeating relay attacks.
+- **Inline widget, zero dependencies** — the browser solver ships as a self-contained inline `<script>`. No external JS, no iframes, no third-party hosts.
+- **Telemetry scoring** — detects headless browsers via the `webdriver` flag, hardware signals, and interaction metrics.
+- **Auto-tuning difficulty** — the target bits scale automatically with current solver load.
 
 ## Protocol
 
 ```
 ┌──────────┐   POST /api/kcaptcha/challenge {scope}   ┌─────────────┐
 │ Browser  │ ─────────────────────────────────────────▶│  Your App    │
-│ (widget) │◀─── {nonce, challenge, salt, mKib, ...}──│              │
+│ (widget) │◀─── {nonce, challenge, salt, targetBits}─│              │
 │          │                                           │ Redis SET    │
-│ PBKDF2   │   POST /auth/login {kiwi__token}          │ kcaptcha:{   │
+│ SHA-256  │   POST /auth/login {kiwi__token}          │ kcaptcha:{   │
 │ brute-   │ ─────────────────────────────────────────▶│   nonce} →   │
 │ force    │                                           │ record       │
 │ counter  │                                           │              │
@@ -31,11 +26,11 @@ A native Rust proof-of-work CAPTCHA engine.
 │          │                                           │ 1. HMAC check│
 │          │                                           │ 2. TTL check │
 │          │                                           │ 3. IP binding│
-│          │                                           │ 4. PBKDF2 re-│
-│          │                                           │    derivation │
-└──────────┘                                           │ 5. Telemetry │
-                                                       │    scoring   │
-                                                       └─────────────┘
+│          │                                           │ 4. SHA-256   │
+│          │                                           │    re-hash   │
+│ └─────────┘                                           │ 5. Telemetry │
+│                                                       │    scoring   │
+└───────────────────────────────────────────────────────┴──────────────┘
 ```
 
 ## Quick Start
@@ -52,32 +47,31 @@ use kiwicaptcha::{ChallengeConfig, issue_challenge};
 
 let config = ChallengeConfig {
     secret_key: "your-hmac-secret-key".into(),
-    m_kib: 50_000,        // PBKDF2 iterations
-    target_bits: 16,       // ~1-3s solve on commodity CPU
+    target_bits: 16,      // ~1-3s solve on a commodity CPU
     ttl_secs: 120,
     ..Default::default()
 };
 
-let issued = issue_challenge(&config, "login", &client_ip, now_unix)?;
+let issued = issue_challenge(&config, "login", &client_ip, now_unix, 0)?;
 
-// Store issued.record in Redis keyed by nonce
-// Send issued.challenge to the client
+// Store issued.record in Redis keyed by nonce.
+// Send issued.challenge to the client.
 ```
 
-### 2. Render the Widget (Server-Side)
+### 2. Render the Widget
 
 ```rust
 use kiwicaptcha::kiwi_widget_html;
 
-// The widget handles challenge fetch + solving via inline script
-// Just render it inside your login/signup form:
+// The inline widget fetches the challenge and solves it in-browser
+// using the native WebCrypto SHA-256. Just render it inside your form:
 let html = kiwi_widget_html();
 ```
 
 ### 3. Verify the Solution
 
 ```rust
-use kiwicaptcha::{VerifyContext, verify_solution};
+use kiwicaptcha::{SolutionToken, VerifyContext, verify_solution, VerifyOutcome};
 
 let solution = SolutionToken::decode(&body.kiwi_token)?;
 let record = redis.get(&format!("kcaptcha:{}", solution.nonce))?;
@@ -98,7 +92,7 @@ match verify_solution(&ctx) {
 }
 ```
 
-## API Overview
+## API Reference
 
 | Type | Purpose |
 |------|---------|
@@ -108,6 +102,6 @@ match verify_solution(&ctx) {
 | `ChallengeRecord` | Server-side state (store in Redis) |
 | `SolutionToken` | Client-submitted solution (from `kiwi__token`) |
 | `VerifyContext` | Parameters for server-side verification |
-| `verify_solution()` | Re-derive PBKDF2 hash and check leading zero bits |
+| `verify_solution()` | Re-derive the SHA-256 hash and check leading zero bits |
 | `score_telemetry()` | Detect headless/automated clients |
 | `kiwi_widget_html()` | Inline HTML + JS widget for auth pages |
