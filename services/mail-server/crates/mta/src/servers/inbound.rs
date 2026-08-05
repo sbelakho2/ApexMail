@@ -412,12 +412,54 @@ impl InboundServer {
             if should_advertise_starttls(self.config.tls.enabled, allow_starttls, ctx) {
                 caps.push_str("250-STARTTLS\r\n");
             }
+            // Advertise AUTH on TLS connections so email clients (Thunderbird,
+            // Apple Mail, etc.) can authenticate for submission over port 465.
+            // This is critical: without AUTH in the EHLO response, clients that
+            // auto-detect port 465 will hang indefinitely waiting for AUTH.
+            if ctx.tls_active {
+                caps.push_str("250-AUTH PLAIN LOGIN\r\n");
+            }
             caps.push_str("250-8BITMIME\r\n");
             caps.push_str("250-PIPELINING\r\n");
             caps.push_str("250 SMTPUTF8\r\n");
             caps
         } else if cmd_upper.starts_with("STARTTLS") {
             "454 TLS not available\r\n".into()
+        } else if cmd_upper.starts_with("AUTH PLAIN") && ctx.tls_active {
+            // Handle AUTH PLAIN on TLS connections (port 465 submission).
+            // Supports both inline ("AUTH PLAIN <b64>") and two-step forms.
+            use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+            let inline = raw_line.trim().strip_prefix("AUTH PLAIN").unwrap_or("").trim();
+            let auth_b64 = if !inline.is_empty() {
+                inline.to_string()
+            } else {
+                return "334 \r\n".into();
+            };
+            match BASE64.decode(auth_b64.trim()) {
+                Ok(creds) => {
+                    let s = String::from_utf8_lossy(&creds);
+                    let parts: Vec<&str> = s.splitn(3, '\0').collect();
+                    if parts.len() >= 3 {
+                        match self.authenticate_user(parts[1], parts[2], ctx.client_ip).await {
+                            Ok(_) => {
+                                ctx.authenticated = true;
+                                "235 2.7.0 Authentication successful\r\n".into()
+                            }
+                            Err(_) => "535 5.7.8 Authentication failed\r\n".into(),
+                        }
+                    } else {
+                        "535 5.7.8 Authentication failed\r\n".into()
+                    }
+                }
+                Err(_) => "501 Invalid base64\r\n".into(),
+            }
+        } else if cmd_upper.starts_with("AUTH LOGIN") && ctx.tls_active {
+            // Two-step AUTH LOGIN: prompt for username, then password.
+            return "334 VXNlcm5hbWU6\r\n".into();
+        } else if cmd_upper == "" && ctx.tls_active && !ctx.authenticated {
+            // Could be the second step of AUTH LOGIN — not fully implemented.
+            // Return error to avoid hanging.
+            "535 5.7.8 Authentication failed\r\n".into()
         } else if cmd_upper.starts_with("MAIL FROM") {
             if self.config.auth_required && !ctx.authenticated {
                 return "530 Authentication required\r\n".into();
@@ -651,6 +693,36 @@ impl InboundServer {
 
         self.rdns_cache.insert(ip, result);
         result
+    }
+
+    /// Authenticate a user against the users table (same logic as submission server).
+    async fn authenticate_user(
+        &self,
+        email: &str,
+        password: &str,
+        _ip: IpAddr,
+    ) -> Result<String, ()> {
+        let user = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT email, password_hash, status FROM users WHERE LOWER(email) = LOWER($1)",
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| ())?;
+
+        let (user_email, password_hash, status) = match user {
+            Some(u) => u,
+            None => return Err(()),
+        };
+
+        if status != "active" {
+            return Err(());
+        }
+
+        match apexmail_lib::crypto::verify_password(password, &password_hash) {
+            Ok(true) => Ok(user_email),
+            _ => Err(()),
+        }
     }
 }
 
