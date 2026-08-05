@@ -16,32 +16,33 @@ use sha2::{Digest, Sha256};
 
 use crate::challenge::{payload_from_record, verify_signature, ChallengeRecord};
 
-/// Compute the PBKDF2-HMAC-SHA256 hash for the given record + counter.
+/// Compute the SHA-256 hash for the given record + counter.
 ///
-/// This matches the browser's WebCrypto `deriveBits` call exactly:
-///   - password = `record.prefix || counter` (prefix embeds the signed challenge + salt)
-///   - salt = the challenge's base64-decoded salt
-///   - iterations = `record.m_kib` (repurposed as iteration count; the client
-///     receives it as `mKib` and passes it to `PBKDF2.iterations`)
-///   - output length = 32 bytes (256 bits)
+/// This matches what leading PoW CAPTCHA systems (FriendlyCaptcha, Anubis,
+/// ALTCHA) use: a fast hash with high difficulty (many attempts), NOT a slow
+/// hash (PBKDF2) with low difficulty. A fast hash means the legitimate browser
+/// and a bot have comparable per-hash cost, making the difficulty meaningful.
 ///
-/// PBKDF2 is chosen because it is natively available in every modern browser
-/// via the WebCrypto API (`crypto.subtle.deriveBits`), so the widget needs no
-/// external JS or WASM. The iteration count is tuned so a real browser takes
-/// ~300–500ms per hash invocation.
+/// The input is `SHA-256(challenge_prefix || counter || salt)`:
+/// - challenge_prefix embeds the signed challenge (binds to nonce/IP/scope)
+/// - counter is the brute-force variable
+/// - salt is the challenge's base64-decoded salt
+///
+/// At 20-bit difficulty (~1M expected hashes), a browser using WebCrypto
+/// `crypto.subtle.digest('SHA-256', ...)` solves in ~2-5 seconds. The server
+/// re-derives ONE hash for verification — effectively free.
 fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], VerifyError> {
     let salt = B64
         .decode(&record.salt)
         .map_err(|_| VerifyError::MalformedRecord)?;
-    let password = format!("{}{}", record.prefix, counter);
+    let input = format!("{}{}", record.prefix, counter);
 
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hasher.update(&salt);
+    let result = hasher.finalize();
     let mut out = [0u8; 32];
-    let _ = pbkdf2::<Hmac<Sha256>>(
-        password.as_bytes(),
-        &salt,
-        record.m_kib,
-        &mut out,
-    );
+    out.copy_from_slice(&result);
     Ok(out)
 }
 

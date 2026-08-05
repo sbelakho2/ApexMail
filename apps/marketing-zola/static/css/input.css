@@ -163,7 +163,7 @@
    The media query provides automatic system-level switching. */
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not(.light) {
     --background: 9 9 11;
     --foreground: 250 250 250;
     --surface-50: 9 9 11;

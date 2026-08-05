@@ -119,7 +119,8 @@ pub fn kiwi_widget_html() -> String {
   document.addEventListener("mousemove", function(){{mouseEvents++;}},{{passive:true}});
   document.addEventListener("keydown", function(){{keyEvents++;}},{{passive:true}});
 
-  // ── PBKDF2-HMAC-SHA256 via WebCrypto (zero dependencies) ──────────
+  // ── SHA-256 via WebCrypto (fast hash, high difficulty — same model as
+  //    FriendlyCaptcha, Anubis, ALTCHA) ──────────────────────────────
   function b64decode(str) {{
     str = str.replace(/-/g, "+").replace(/_/g, "/");
     while (str.length % 4) str += "=";
@@ -135,24 +136,24 @@ pub fn kiwi_widget_html() -> String {
     return n;
   }}
 
-  async function deriveHash(prefix, counter, saltBytes, iterations) {{
-    var password = new TextEncoder().encode(prefix + counter);
-    var algo = {{ name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: iterations }};
-    var key = await crypto.subtle.importKey("raw", password, {{name:"PBKDF2"}}, false, ["deriveBits"]);
-    return crypto.subtle.deriveBits(algo, key, 256);
+  async function deriveHash(prefix, counter, saltBytes) {{
+    var input = new Uint8Array(new TextEncoder().encode(prefix + counter).length + saltBytes.length);
+    input.set(new TextEncoder().encode(prefix + counter), 0);
+    input.set(saltBytes, new TextEncoder().encode(prefix + counter).length);
+    return crypto.subtle.digest("SHA-256", input);
   }}
 
-  async function solve(prefix, saltB64, iterations, targetBits) {{
+  async function solve(prefix, saltB64, targetBits) {{
     var salt = b64decode(saltB64);
     var solveStart = performance.now();
     var expectedHashes = Math.pow(2, targetBits);
-    for (var counter = 0; counter < 500000; counter++) {{
-      var buf = await deriveHash(prefix, counter, salt, iterations);
+    for (var counter = 0; counter < 5000000; counter++) {{
+      var buf = await deriveHash(prefix, counter, salt);
       var bytes = new Uint8Array(buf);
       if (leadingZeros(bytes) >= targetBits) {{
         return {{ counter: counter, duration: Math.round(performance.now() - solveStart) }};
       }}
-      if (counter % 500 === 0) {{
+      if (counter % 1000 === 0) {{
         setProgress(Math.min(92, (counter * 100) / expectedHashes));
         await new Promise(function(r) {{ setTimeout(r, 0); }});
       }}
@@ -180,8 +181,8 @@ pub fn kiwi_widget_html() -> String {
       if (data.ttlSecs) startCountdown(data.ttlSecs);
 
       setStatus("Computing proof-of-work\u2026", "Verifying", "solving");
-      setHint("Running memory-hard verification in your browser.");
-      var result = await solve(data.prefix, data.salt, data.mKib || 50000, data.targetBits);
+      setHint("Running SHA-256 verification in your browser.");
+      var result = await solve(data.prefix, data.salt, data.targetBits);
       if (!result) throw new Error("solver exhausted");
 
       var telemetry = {{

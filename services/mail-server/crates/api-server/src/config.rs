@@ -649,17 +649,21 @@ impl Config {
 
         let kiwi_enabled = env_or("KIWI_ENABLED", "false").parse().unwrap_or(false);
         let kiwi_secret_key = env_or("KIWI_SECRET_KEY", "dev");
-        // Backward-compat: accept KIWI_ARGON_M_KIB as fallback for KIWI_PBKDF2_ITERATIONS
+        // KiwiCaptcha uses SHA-256 (fast hash, high difficulty) — same model as
+        // FriendlyCaptcha, Anubis, ALTCHA. The m_kib field is no longer used
+        // for iterations but kept for wire-format compatibility.
         let kiwi_pbkdf2_iterations = env::var("KIWI_PBKDF2_ITERATIONS")
             .or_else(|_| env::var("KIWI_ARGON_M_KIB"))
-            .unwrap_or_else(|_| "50000".into())
+            .unwrap_or_else(|_| "1".into())
             .parse()
-            .unwrap_or(50_000);
-        let kiwi_argon_t = env_or("KIWI_ARGON_T", "2").parse().unwrap_or(2);
+            .unwrap_or(1);
+        let kiwi_argon_t = env_or("KIWI_ARGON_T", "1").parse().unwrap_or(1);
         let kiwi_argon_p = env_or("KIWI_ARGON_P", "1").parse().unwrap_or(1);
-        let kiwi_difficulty_bits = env_or("KIWI_DIFFICULTY_BITS", "16")
+        // 20-bit difficulty = ~1M expected SHA-256 hashes = ~2-5s on a browser.
+        // This matches FriendlyCaptcha (~2.5s) and Anubis difficulty-5 (~1M hashes).
+        let kiwi_difficulty_bits = env_or("KIWI_DIFFICULTY_BITS", "20")
             .parse()
-            .unwrap_or(16);
+            .unwrap_or(20);
         let kiwi_challenge_ttl_secs = env_or("KIWI_CHALLENGE_TTL_SECS", "120")
             .parse()
             .unwrap_or(120);
@@ -1193,10 +1197,10 @@ mod tests {
 
             kiwi_enabled: true,
             kiwi_secret_key: "prod-kiwi-secret-key-67890".into(),
-            kiwi_pbkdf2_iterations: 50_000,
-            kiwi_argon_t: 2,
+            kiwi_pbkdf2_iterations: 1,
+            kiwi_argon_t: 1,
             kiwi_argon_p: 1,
-            kiwi_difficulty_bits: 16,
+            kiwi_difficulty_bits: 20,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
             kiwi_auto_tune: false,
@@ -1333,10 +1337,10 @@ mod tests {
 
             kiwi_enabled: false,
             kiwi_secret_key: "dev".into(),
-            kiwi_pbkdf2_iterations: 50_000,
-            kiwi_argon_t: 2,
+            kiwi_pbkdf2_iterations: 1,
+            kiwi_argon_t: 1,
             kiwi_argon_p: 1,
-            kiwi_difficulty_bits: 16,
+            kiwi_difficulty_bits: 20,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
             kiwi_auto_tune: false,
