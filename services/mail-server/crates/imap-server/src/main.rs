@@ -1579,11 +1579,13 @@ async fn handle_connection(
     let peer = stream.peer_addr()?;
     info!("New connection from {} (TLS: {})", peer, is_tls);
 
+    // CRITICAL: Connect to mailstore with a timeout so mobile clients
+    // don't hang waiting for the IMAP greeting while gRPC connects.
+    // Use a lazy channel (connects on first use) so the greeting is sent
+    // immediately without waiting for mailstore to be reachable.
     let channel = Channel::from_shared(mailstore_addr.clone())
         .with_context(|| "Invalid mailstore address")?
-        .connect()
-        .await
-        .with_context(|| "Failed to connect to mailstore")?;
+        .connect_lazy();
 
     let client = MailstoreServiceClient::new(channel);
     let session = Arc::new(Mutex::new({
