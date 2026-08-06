@@ -366,7 +366,6 @@ services:
     restart: unless-stopped
     entrypoint: ["/usr/bin/tini", "--", "imap-server"]
     ports:
-      - "143:143"
       - "993:993"
     volumes:
       # Same letsencrypt bind-mount as the MTA. live/*.pem are symlinks into
