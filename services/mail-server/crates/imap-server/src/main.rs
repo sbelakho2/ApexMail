@@ -60,6 +60,7 @@ struct ImapSession {
     client: MailstoreServiceClient<Channel>,
     tag: String,
     idle: bool,
+    tls_active: bool,
 }
 
 impl ImapSession {
@@ -84,6 +85,7 @@ impl ImapSession {
             client,
             tag: String::new(),
             idle: false,
+            tls_active: false,
         }
     }
 
@@ -403,19 +405,26 @@ async fn handle_uid_command(
 // ── CAPABILITY ──────────────────────────────────────────────────────────────
 
 async fn handle_capability(
-    _session: &mut ImapSession,
+    session: &mut ImapSession,
     tag: &str,
     _args: &str,
 ) -> Result<Vec<String>> {
-    let caps = vec![
+    // Only advertise STARTTLS on plaintext (non-TLS) connections.
+    // RFC 3501 §6.2.1: "Once STARTTLS has been completed, the server MUST NOT
+    // issue a STARTTLS advertisement in any CAPABILITY response."
+    // Advertising STARTTLS on an already-TLS connection (port 993) causes
+    // Thunderbird and Apple Mail to hang or timeout.
+    let mut caps = vec![
         "IMAP4rev1",
-        "STARTTLS",
         "AUTH=PLAIN",
         "MOVE",
         "UIDPLUS",
         "IDLE",
         "LITERAL+",
     ];
+    if !session.tls_active {
+        caps.insert(1, "STARTTLS");
+    }
     Ok(vec![
         format!("* CAPABILITY {}\r\n", caps.join(" ")),
         tagged_ok(tag, "CAPABILITY completed"),
@@ -1577,7 +1586,11 @@ async fn handle_connection(
         .with_context(|| "Failed to connect to mailstore")?;
 
     let client = MailstoreServiceClient::new(channel);
-    let session = Arc::new(Mutex::new(ImapSession::new(client)));
+    let session = Arc::new(Mutex::new({
+        let mut s = ImapSession::new(client);
+        s.tls_active = is_tls;
+        s
+    }));
 
     if is_tls {
         // IMAPS (993): implicit TLS — accept then serve.
@@ -1706,7 +1719,14 @@ async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin
     let mut reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
 
-    let greeting = format!("* OK [CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN MOVE IDLE] ApexMail IMAP4rev1 server ready\r\n");
+    // Peek at session.tls_active to decide whether to advertise STARTTLS.
+    // RFC 3501 §6.2.1 forbids advertising STARTTLS on an already-TLS connection.
+    let is_tls_session = session.lock().await.tls_active;
+    let greeting = if is_tls_session {
+        "* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN MOVE IDLE] ApexMail IMAP4rev1 server ready\r\n".to_string()
+    } else {
+        "* OK [CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN MOVE IDLE] ApexMail IMAP4rev1 server ready\r\n".to_string()
+    };
     writer.write_all(greeting.as_bytes()).await?;
     writer.flush().await?;
 
