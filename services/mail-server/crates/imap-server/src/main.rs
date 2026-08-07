@@ -1560,10 +1560,14 @@ fn configure_tls(cert_path: Option<&str>, key_path: Option<&str>) -> Result<Opti
         }
     };
 
-    let config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+    let mut config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .with_context(|| "Failed to build TLS server config")?;
+
+    // Enable TLS session tickets — some mobile clients hang during TLS
+    // post-handshake if no NewSessionTicket message is sent.
+    config.session_storage = rustls::server::ServerSessionMemoryCache::new(256);
 
     Ok(Some(TlsAcceptor::from(Arc::new(config))))
 }
