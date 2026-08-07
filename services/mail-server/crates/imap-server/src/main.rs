@@ -1641,7 +1641,7 @@ async fn handle_plaintext_with_starttls(
     let mut writer = write_half;
 
     // Send greeting
-    let greeting = "* OK [CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN MOVE IDLE] ApexMail IMAP4rev1 server ready\r\n";
+    let greeting = "* OK [CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN MOVE UIDPLUS IDLE LITERAL+] ApexMail IMAP4rev1 server ready\r\n";
     writer.write_all(greeting.as_bytes()).await?;
     writer.flush().await?;
 
@@ -1725,9 +1725,9 @@ async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin
     // RFC 3501 §6.2.1 forbids advertising STARTTLS on an already-TLS connection.
     let is_tls_session = session.lock().await.tls_active;
     let greeting = if is_tls_session {
-        "* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN MOVE IDLE] ApexMail IMAP4rev1 server ready\r\n".to_string()
+        "* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN MOVE UIDPLUS IDLE LITERAL+] ApexMail IMAP4rev1 server ready\r\n".to_string()
     } else {
-        "* OK [CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN MOVE IDLE] ApexMail IMAP4rev1 server ready\r\n".to_string()
+        "* OK [CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN MOVE UIDPLUS IDLE LITERAL+] ApexMail IMAP4rev1 server ready\r\n".to_string()
     };
     writer.write_all(greeting.as_bytes()).await?;
     writer.flush().await?;
