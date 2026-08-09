@@ -210,13 +210,15 @@ FROM runtime-base AS mta
 COPY --from=builder /app/target/release/mta-server /usr/local/bin/
 
 USER apexmail
-EXPOSE 3003
+EXPOSE 25 587 465
 
+# mta-server binds 25 (inbound, STARTTLS) and 587 (submission) unconditionally.
+# The old probe targeted port 3003 which no service ever binds, marking the
+# container unhealthy despite functioning SMTP.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3003"]
+    CMD ["sh", "-c", "nc -z 127.0.0.1 25 || nc -z 127.0.0.1 587"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "mta-server"]
-CMD ["--listen", "0.0.0.0:3003"]
 
 # =============================================================================
 # IMAP Server
