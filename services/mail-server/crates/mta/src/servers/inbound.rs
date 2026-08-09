@@ -21,7 +21,9 @@ use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
-use crate::auth::{EmailAuthenticator, SpfStatus};
+use crate::auth::{
+    verify_against_dummy, AuthError, AuthFailTracker, EmailAuthenticator, SpfStatus,
+};
 use crate::config::{InboundConfig, RateLimitConfig};
 use mail_proto::mailstore_service_client::MailstoreServiceClient;
 use mail_proto::{GetAccountRequest, MessageFlags, StoreMessageRequest};
@@ -67,6 +69,9 @@ pub struct InboundServer {
     connections: Arc<DashMap<IpAddr, u32>>,
     /// Bounded PTR/FCrDNS cache to avoid repeated DNS lookups per source IP.
     rdns_cache: Cache<IpAddr, bool>,
+    /// Failed-AUTH lockout tracking (per-IP + per-account), shared with
+    /// the submission server.
+    auth_fail_tracker: AuthFailTracker,
     shutdown: Arc<Notify>,
     /// gRPC client for mailbox delivery to the mailstore service.
     mailstore: MailstoreServiceClient<Channel>,
@@ -102,6 +107,7 @@ impl InboundServer {
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(600))
                 .build(),
+            auth_fail_tracker: AuthFailTracker::new(),
             shutdown: Arc::new(Notify::new()),
             mailstore: MailstoreServiceClient::new(channel),
         }
@@ -430,7 +436,11 @@ impl InboundServer {
             "454 TLS not available\r\n".into()
         } else if cmd_upper.starts_with("AUTH PLAIN") && ctx.tls_active {
             // Handle AUTH PLAIN on TLS connections (port 465 submission).
-            let inline = raw_line.trim().strip_prefix("AUTH PLAIN").unwrap_or("").trim();
+            let inline = raw_line
+                .trim()
+                .strip_prefix("AUTH PLAIN")
+                .unwrap_or("")
+                .trim();
             let auth_b64 = if !inline.is_empty() {
                 inline.to_string()
             } else {
@@ -465,7 +475,10 @@ impl InboundServer {
                         ctx.authenticated = true;
                         "235 2.7.0 Authentication successful\r\n".into()
                     }
-                    Err(_) => "535 5.7.8 Authentication failed\r\n".into(),
+                    Err(AuthError::LockedOut) => {
+                        "454 4.7.0 Too many failed authentication attempts\r\n".into()
+                    }
+                    Err(AuthError::Failed) => "535 5.7.8 Authentication failed\r\n".into(),
                 }
             }
         } else if cmd_upper.starts_with("AUTH PLAIN") && !ctx.tls_active {
@@ -573,8 +586,14 @@ impl InboundServer {
             .and_then(|m| m.subject())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "(no subject)".to_string());
-        let text_body = parsed.as_ref().and_then(|m| m.body_text(0)).map(|b| b.into_owned());
-        let html_body = parsed.as_ref().and_then(|m| m.body_html(0)).map(|b| b.into_owned());
+        let text_body = parsed
+            .as_ref()
+            .and_then(|m| m.body_text(0))
+            .map(|b| b.into_owned());
+        let html_body = parsed
+            .as_ref()
+            .and_then(|m| m.body_html(0))
+            .map(|b| b.into_owned());
         let headers = parsed.as_ref().map(|m| {
             let mut map = serde_json::Map::new();
             for (name, value) in m.headers_raw() {
@@ -692,7 +711,12 @@ impl InboundServer {
     /// stored into the recipient's Inbox via the mailstore gRPC service so the
     /// message is visible over IMAP. Best-effort: failures are logged, never
     /// propagated to the SMTP session.
-    async fn deliver_to_mailstore(&self, ctx: &SessionContext, raw: &[u8], auth_results_header: &str) {
+    async fn deliver_to_mailstore(
+        &self,
+        ctx: &SessionContext,
+        raw: &[u8],
+        auth_results_header: &str,
+    ) {
         let mut client = self.mailstore.clone();
         let mut final_message = Vec::with_capacity(auth_results_header.len() + raw.len());
         final_message.extend_from_slice(auth_results_header.as_bytes());
@@ -846,12 +870,18 @@ impl InboundServer {
                 let s = String::from_utf8_lossy(&creds);
                 let parts: Vec<&str> = s.splitn(3, '\0').collect();
                 if parts.len() >= 3 {
-                    match self.authenticate_user(parts[1], parts[2], ctx.client_ip).await {
+                    match self
+                        .authenticate_user(parts[1], parts[2], ctx.client_ip)
+                        .await
+                    {
                         Ok(_) => {
                             ctx.authenticated = true;
                             "235 2.7.0 Authentication successful\r\n".into()
                         }
-                        Err(_) => "535 5.7.8 Authentication failed\r\n".into(),
+                        Err(AuthError::LockedOut) => {
+                            "454 4.7.0 Too many failed authentication attempts\r\n".into()
+                        }
+                        Err(AuthError::Failed) => "535 5.7.8 Authentication failed\r\n".into(),
                     }
                 } else {
                     "535 5.7.8 Authentication failed\r\n".into()
@@ -866,29 +896,48 @@ impl InboundServer {
         &self,
         email: &str,
         password: &str,
-        _ip: IpAddr,
-    ) -> Result<String, ()> {
+        ip: IpAddr,
+    ) -> Result<String, AuthError> {
+        // FIX-4: lockout short-circuit BEFORE any work, identical to the
+        // submission server (shared tracker). Per-IP + per-account keys;
+        // counters decay after the tracker's TTL (the lockout window).
+        if self.auth_fail_tracker.is_locked(ip, email) {
+            return Err(AuthError::LockedOut);
+        }
+
         let user = sqlx::query_as::<_, (String, String, String)>(
             "SELECT email, password_hash, status FROM users WHERE LOWER(email) = LOWER($1)",
         )
         .bind(email)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| AuthError::Failed)?;
 
         let (user_email, password_hash, status) = match user {
             Some(u) => u,
-            None => return Err(()),
+            None => {
+                // FIX-4: unknown-account attempts count toward the
+                // lockout (no brute-force bypass via nonexistent users).
+                self.auth_fail_tracker.record_failure(ip, email);
+                // FIX-5: spend the same verification time as a real
+                // account so the response cannot reveal whether the
+                // account exists (user-enumeration side channel).
+                let _ = verify_against_dummy(password);
+                return Err(AuthError::Failed);
+            }
         };
 
         if status != "active" {
-            return Err(());
+            self.auth_fail_tracker.record_failure(ip, email);
+            let _ = verify_against_dummy(password);
+            return Err(AuthError::Failed);
         }
 
         // Same scheme handling as the submission server: accept Argon2id and
         // legacy bcrypt hashes, and migrate bcrypt rows to Argon2id on success.
         match apexmail_lib::crypto::verify_password_for_login(password, &password_hash) {
             Ok(verification) if verification.valid => {
+                self.auth_fail_tracker.reset(ip, email);
                 if let Some(new_hash) = verification.migrated_hash {
                     let _ = sqlx::query(
                         "UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2)",
@@ -900,7 +949,10 @@ impl InboundServer {
                 }
                 Ok(user_email)
             }
-            _ => Err(()),
+            _ => {
+                self.auth_fail_tracker.record_failure(ip, email);
+                Err(AuthError::Failed)
+            }
         }
     }
 }
@@ -1159,5 +1211,225 @@ mod tests {
         assert!(!ptr_verification_exempt(IpAddr::V6(
             "2606:4700:4700::1111".parse().unwrap()
         )));
+    }
+
+    // ── FIX-4/FIX-5: lockout + timing parity on the 465 AUTH path ───────────
+
+    use base64::Engine as _;
+
+    async fn test_inbound(ip: IpAddr) -> (InboundServer, SessionContext) {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .expect("lazy pool construction cannot fail with a well-formed URL");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool construction");
+        let config = InboundConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 25,
+            secure_port: 465,
+            hostname: "mail.test".into(),
+            max_message_size: 10 * 1024 * 1024,
+            max_recipients: 100,
+            auth_required: false,
+            tls: Default::default(),
+        };
+        let rate_limit = RateLimitConfig {
+            enabled: true,
+            max_connections_per_ip: 10,
+            max_messages_per_connection: 100,
+            max_recipients_per_message: 100,
+        };
+        let authenticator = Arc::new(
+            crate::auth::EmailAuthenticator::new(
+                crate::config::EmailAuthConfig {
+                    require_spf: false,
+                    require_dkim: false,
+                    enforce_dmarc: false,
+                    allow_soft_fail: true,
+                    trusted_relays: Vec::new(),
+                    spf_cache_max_entries: 10_000,
+                },
+                "mail.test".into(),
+            )
+            .await
+            .expect("authenticator construction"),
+        );
+        let ctx = SessionContext {
+            id: "test".into(),
+            client_ip: ip,
+            authenticated: false,
+            tls_active: true,
+            tenant_id: None,
+            message_count: 0,
+            start_time: chrono::Utc::now(),
+            helo_hostname: String::new(),
+            mail_from: None,
+            rcpt_to: Vec::new(),
+            spf_status: None,
+            auth_login_user: None,
+            auth_plain_pending: false,
+        };
+        let server = InboundServer::new(
+            config,
+            rate_limit,
+            pool,
+            redis,
+            authenticator,
+            "mail.test".into(),
+            "http://127.0.0.1:1".into(),
+        );
+        (server, ctx)
+    }
+
+    #[tokio::test]
+    async fn test_inbound_auth_plain_locked_returns_454() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ctx.client_ip, "alice@example.com");
+        }
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(b"\0alice@example.com\0correct-password");
+        let resp = server
+            .handle_command("AUTH PLAIN", &format!("AUTH PLAIN {b64}"), &mut ctx, false)
+            .await;
+        assert!(
+            resp.contains("454"),
+            "locked account must get 454, got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_auth_plain_two_step_locked_returns_454() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ctx.client_ip, "alice@example.com");
+        }
+        let first = server
+            .handle_command("AUTH PLAIN", "AUTH PLAIN", &mut ctx, false)
+            .await;
+        assert!(first.contains("334"), "two-step challenge: {first:?}");
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(b"\0alice@example.com\0correct-password");
+        let resp = server.handle_command("", &b64, &mut ctx, false).await;
+        assert!(
+            resp.contains("454"),
+            "locked account must get 454, got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_auth_login_locked_returns_454() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ctx.client_ip, "alice@example.com");
+        }
+        let step1 = server
+            .handle_command("AUTH LOGIN", "AUTH LOGIN", &mut ctx, false)
+            .await;
+        assert!(step1.contains("334"), "username challenge: {step1:?}");
+        let step2 = server
+            .handle_command("", "YWxpY2VAZXhhbXBsZS5jb20=", &mut ctx, false)
+            .await;
+        assert!(step2.contains("334"), "password challenge: {step2:?}");
+        let step3 = server
+            .handle_command("", "Y29ycmVjdC1wYXNzd29yZA==", &mut ctx, false)
+            .await;
+        assert!(
+            step3.contains("454"),
+            "locked account must get 454, got {step3:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_lockout_is_per_account() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ctx.client_ip, "bob@example.com");
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\0alice@example.com\0secret");
+        let resp = server
+            .handle_command("AUTH PLAIN", &format!("AUTH PLAIN {b64}"), &mut ctx, false)
+            .await;
+        assert!(
+            !resp.contains("454"),
+            "account A must not be locked by account B failures, got {resp:?}"
+        );
+        assert!(resp.contains("535"), "expected auth failure, got {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn test_inbound_lockout_is_per_ip() {
+        let locked_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let other_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (server, mut ctx) = test_inbound(other_ip).await;
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(locked_ip, "alice@example.com");
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\0alice@example.com\0secret");
+        let resp = server
+            .handle_command("AUTH PLAIN", &format!("AUTH PLAIN {b64}"), &mut ctx, false)
+            .await;
+        assert!(
+            !resp.contains("454"),
+            "IP Y must not be locked by failures from IP X, got {resp:?}"
+        );
+        assert!(resp.contains("535"), "expected auth failure, got {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn test_inbound_unknown_email_counts_toward_lockout() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ctx.client_ip, "ghost@example.com");
+        }
+        let b64 =
+            base64::engine::general_purpose::STANDARD.encode(b"\0ghost@example.com\0anything");
+        let resp = server
+            .handle_command("AUTH PLAIN", &format!("AUTH PLAIN {b64}"), &mut ctx, false)
+            .await;
+        assert!(
+            resp.contains("454"),
+            "unknown-account attempts must count toward lockout, got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_authenticate_user_returns_locked_out() {
+        let (server, ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ctx.client_ip, "alice@example.com");
+        }
+        let result = server
+            .authenticate_user("alice@example.com", "correct-password", ctx.client_ip)
+            .await;
+        assert_eq!(result, Err(crate::auth::AuthError::LockedOut));
+    }
+
+    #[tokio::test]
+    async fn test_inbound_authenticate_user_not_locked_is_failed_not_locked_out() {
+        let (server, ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        // No prior failures: the attempt reaches the (unreachable) DB and
+        // must surface as a plain failure, never as a lockout.
+        let result = server
+            .authenticate_user("alice@example.com", "secret", ctx.client_ip)
+            .await;
+        assert_eq!(result, Err(crate::auth::AuthError::Failed));
     }
 }

@@ -4,10 +4,12 @@ pub mod arc;
 pub mod bimi;
 pub mod dane;
 pub mod email_authentication;
+pub mod lockout;
 pub mod mta_sts;
 
 pub use arc::*;
 pub use bimi::*;
 pub use dane::*;
 pub use email_authentication::*;
+pub use lockout::*;
 pub use mta_sts::*;

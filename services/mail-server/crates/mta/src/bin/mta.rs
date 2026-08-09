@@ -9,7 +9,7 @@ use observability_service::otlp_exporter::{
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use mta::auth::EmailAuthenticator;
@@ -176,17 +176,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Submission server (authenticated SMTP on port 587)
     let (submission_srv, submission_handle) = if config.submission.enabled {
-        let tls_acceptor = if config.inbound.tls.enabled {
-            match load_tls_acceptor(
-                config.inbound.tls.cert_path.as_deref().unwrap_or(""),
-                config.inbound.tls.key_path.as_deref().unwrap_or(""),
-            ) {
-                Ok(a) => Some(a),
-                Err(e) => { warn!(error=%e, "Failed to load submission TLS"); None }
-            }
-        } else { None };
+        // FIX-1: TLS load failure is FATAL (propagates and aborts startup),
+        // mirroring the inbound server. A warn-and-continue here would leave
+        // the server accepting AUTH PLAIN/LOGIN with no TLS gate — sending
+        // credentials in cleartext on the publicly published port 587.
+        let tls_acceptor = submission_tls_acceptor(&config.inbound.tls)?;
         let srv = Arc::new(SubmissionServer::new(
             config.submission.clone(),
+            config.rate_limit.clone(),
             pool.clone(),
             tls_acceptor,
         ));
@@ -326,6 +323,20 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> anyhow::Result<tokio_ru
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
+/// Build the submission server's TLS acceptor, or `None` when TLS is
+/// disabled. Any load failure propagates as an error: submission must
+/// never run with AUTH but no TLS gate.
+fn submission_tls_acceptor(
+    tls: &mta::config::TlsConfig,
+) -> anyhow::Result<Option<tokio_rustls::TlsAcceptor>> {
+    if !tls.enabled {
+        return Ok(None);
+    }
+    let cert_path = tls.cert_path.as_deref().unwrap_or("cert.pem");
+    let key_path = tls.key_path.as_deref().unwrap_or("key.pem");
+    Ok(Some(load_tls_acceptor(cert_path, key_path)?))
+}
+
 /// Initialize tracing subscriber with OTLP support.
 /// Falls back to JSON logging when OTLP is not configured.
 fn init_tracing(log_level: &str) -> Option<TracingGuard> {
@@ -350,4 +361,48 @@ fn init_tracing(log_level: &str) -> Option<TracingGuard> {
         )
         .init();
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_dir() -> String {
+        format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn test_submission_tls_disabled_returns_none() {
+        let tls = mta::config::TlsConfig::default();
+        assert!(submission_tls_acceptor(&tls).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_submission_tls_missing_cert_is_fatal() {
+        // FIX-1: TLS cert load failure must propagate (fatal startup),
+        // never warn-and-continue with tls_acceptor: None (which would
+        // leave AUTH PLAIN/LOGIN accepted in cleartext on port 587).
+        let tls = mta::config::TlsConfig {
+            enabled: true,
+            cert_path: Some(format!("{}/missing-cert.pem", fixture_dir())),
+            key_path: Some(format!("{}/missing-key.pem", fixture_dir())),
+        };
+        assert!(
+            submission_tls_acceptor(&tls).is_err(),
+            "TLS load failure must be fatal"
+        );
+    }
+
+    #[test]
+    fn test_submission_tls_loads_valid_cert() {
+        // main() installs the ring provider; tests must do the same so
+        // ServerConfig::builder() has a default CryptoProvider.
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let tls = mta::config::TlsConfig {
+            enabled: true,
+            cert_path: Some(format!("{}/cert.pem", fixture_dir())),
+            key_path: Some(format!("{}/key.pem", fixture_dir())),
+        };
+        assert!(submission_tls_acceptor(&tls).unwrap().is_some());
+    }
 }

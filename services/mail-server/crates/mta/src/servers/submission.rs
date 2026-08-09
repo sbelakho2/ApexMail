@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dashmap::DashMap;
-use moka::sync::Cache;
 use sqlx::PgPool;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
@@ -18,6 +17,7 @@ use tokio_rustls::{TlsAcceptor, TlsStream};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::auth::{verify_against_dummy, AuthError, AuthFailTracker};
 use crate::config::{RateLimitConfig, SubmissionConfig};
 
 /// Maximum length of a single SMTP command line (RFC 5321 §4.5.3.1.4 limits
@@ -55,7 +55,7 @@ pub struct SubmissionServer {
     pool: PgPool,
     shutdown: Arc<Notify>,
     connections: Arc<DashMap<std::net::IpAddr, u32>>,
-    auth_fail_cache: Cache<std::net::IpAddr, u64>,
+    auth_fail_tracker: AuthFailTracker,
     tls_acceptor: Option<TlsAcceptor>,
 }
 
@@ -72,10 +72,7 @@ impl SubmissionServer {
             pool,
             shutdown: Arc::new(Notify::new()),
             connections: Arc::new(DashMap::new()),
-            auth_fail_cache: Cache::builder()
-                .max_capacity(50_000)
-                .time_to_live(Duration::from_secs(300))
-                .build(),
+            auth_fail_tracker: AuthFailTracker::new(),
             tls_acceptor,
         }
     }
@@ -123,8 +120,9 @@ impl SubmissionServer {
         }
 
         let allow_starttls = self.tls_acceptor.is_some();
-        let (starttls_requested, _msg_count) =
-            self.run_session_loop(&mut stream, peer, allow_starttls, false).await;
+        let (starttls_requested, _msg_count) = self
+            .run_session_loop(&mut stream, peer, allow_starttls, false)
+            .await;
 
         if starttls_requested {
             if let Some(ref acceptor) = self.tls_acceptor {
@@ -195,7 +193,10 @@ impl SubmissionServer {
                 if allow_starttls && !already_tls {
                     caps.push_str("250-STARTTLS\r\n");
                 }
-                if !authenticated {
+                // FIX-2: only advertise AUTH once the session is on TLS;
+                // advertising it on a plaintext session invites clients
+                // to send credentials in cleartext.
+                if already_tls && !authenticated {
                     caps.push_str("250-AUTH PLAIN LOGIN\r\n");
                 }
                 caps.push_str("250-8BITMIME\r\n");
@@ -210,14 +211,22 @@ impl SubmissionServer {
                 if !helo_seen {
                     // RFC 4954 §4: AUTH must not be used before EHLO.
                     let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
+                } else if !already_tls {
+                    // FIX-2: refuse AUTH on a plaintext session — the
+                    // credentials would traverse the network in cleartext.
+                    let _ = write_line(stream, "530 5.7.0 Must issue STARTTLS first\r\n").await;
                 } else if authenticated {
                     let _ = write_line(stream, "503 5.5.1 Already authenticated\r\n").await;
                 } else if cmd.starts_with("AUTH LOGIN") {
-                    if let Some((email, _account_id)) = self.handle_auth_login(stream, trimmed, ip).await {
+                    if let Some((email, _account_id)) =
+                        self.handle_auth_login(stream, trimmed, ip).await
+                    {
                         authenticated = true;
                         auth_email = email;
                     }
-                } else if let Some((email, _account_id)) = self.handle_auth_plain(stream, trimmed, ip).await {
+                } else if let Some((email, _account_id)) =
+                    self.handle_auth_plain(stream, trimmed, ip).await
+                {
                     authenticated = true;
                     auth_email = email;
                 }
@@ -250,7 +259,8 @@ impl SubmissionServer {
                     // Store only the recipient address, not the full command line.
                     let addr = extract_address(trimmed);
                     if !is_valid_envelope_address(&addr) {
-                        let _ = write_line(stream, "501 5.1.3 Bad recipient address syntax\r\n").await;
+                        let _ =
+                            write_line(stream, "501 5.1.3 Bad recipient address syntax\r\n").await;
                     } else {
                         rcpt_to.push(addr);
                         let _ = write_line(stream, "250 OK\r\n").await;
@@ -264,11 +274,8 @@ impl SubmissionServer {
                 } else if mail_from.is_none() || rcpt_to.is_empty() {
                     let _ = write_line(stream, "503 5.5.1 Need MAIL and RCPT first\r\n").await;
                 } else {
-                    let _ = write_line(
-                        stream,
-                        "354 Start mail input; end with <CRLF>.<CRLF>\r\n",
-                    )
-                    .await;
+                    let _ = write_line(stream, "354 Start mail input; end with <CRLF>.<CRLF>\r\n")
+                        .await;
 
                     // Receive the message body with:
                     //  - a total deadline (slow-loris protection),
@@ -358,11 +365,8 @@ impl SubmissionServer {
                         {
                             Ok(_) => {
                                 message_count += 1;
-                                let _ = write_line(
-                                    stream,
-                                    &format!("250 OK id={}\r\n", msg_id),
-                                )
-                                .await;
+                                let _ =
+                                    write_line(stream, &format!("250 OK id={}\r\n", msg_id)).await;
                                 if message_count >= self.rate_limit.max_messages_per_connection {
                                     let _ = write_line(
                                         stream,
@@ -373,7 +377,9 @@ impl SubmissionServer {
                                 }
                             }
                             Err(_) => {
-                                let _ = write_line(stream, "451 4.3.0 Requested action aborted\r\n").await;
+                                let _ =
+                                    write_line(stream, "451 4.3.0 Requested action aborted\r\n")
+                                        .await;
                             }
                         }
                         mail_from = None;
@@ -435,23 +441,28 @@ impl SubmissionServer {
         let _ = write_line(stream, "334 UGFzc3dvcmQ6\r\n").await;
         let pass_b64 = self.read_auth_line(stream).await?;
 
-        match (BASE64.decode(user_b64.trim()), BASE64.decode(pass_b64.trim())) {
+        match (
+            BASE64.decode(user_b64.trim()),
+            BASE64.decode(pass_b64.trim()),
+        ) {
             (Ok(user), Ok(pass)) => {
                 let user_str = String::from_utf8_lossy(&user);
                 let pass_str = String::from_utf8_lossy(&pass);
                 match self.authenticate_user(&user_str, &pass_str, ip).await {
                     Ok((email, account_id)) => {
-                        self.auth_fail_cache.remove(&ip);
-                        let _ = write_line(
-                            stream,
-                            "235 2.7.0 Authentication successful\r\n",
-                        )
-                        .await;
+                        let _ = write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
                         Some((email, account_id))
                     }
-                    Err(_) => {
-                        let _ =
-                            write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
+                    Err(AuthError::LockedOut) => {
+                        let _ = write_line(
+                            stream,
+                            "454 4.7.0 Too many failed authentication attempts\r\n",
+                        )
+                        .await;
+                        None
+                    }
+                    Err(AuthError::Failed) => {
+                        let _ = write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
                         None
                     }
                 }
@@ -492,30 +503,26 @@ impl SubmissionServer {
                 if parts.len() >= 3 {
                     match self.authenticate_user(parts[1], parts[2], ip).await {
                         Ok((email, account_id)) => {
-                            self.auth_fail_cache.remove(&ip);
-                            let _ = write_line(
-                                stream,
-                                "235 2.7.0 Authentication successful\r\n",
-                            )
-                            .await;
+                            let _ =
+                                write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
                             Some((email, account_id))
                         }
-                        Err(_) => {
+                        Err(AuthError::LockedOut) => {
                             let _ = write_line(
                                 stream,
-                                "535 5.7.8 Authentication failed\r\n",
+                                "454 4.7.0 Too many failed authentication attempts\r\n",
                             )
                             .await;
+                            None
+                        }
+                        Err(AuthError::Failed) => {
+                            let _ = write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
                             None
                         }
                     }
                 } else {
                     // Malformed authcid (fewer than three NUL fields).
-                    let _ = write_line(
-                        stream,
-                        "535 5.7.8 Authentication failed\r\n",
-                    )
-                    .await;
+                    let _ = write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
                     None
                 }
             }
@@ -531,7 +538,12 @@ impl SubmissionServer {
         &self,
         stream: &mut BufStream<S>,
     ) -> Option<String> {
-        match tokio::time::timeout(AUTH_LINE_TIMEOUT, read_line_capped(stream, MAX_COMMAND_LINE)).await {
+        match tokio::time::timeout(
+            AUTH_LINE_TIMEOUT,
+            read_line_capped(stream, MAX_COMMAND_LINE),
+        )
+        .await
+        {
             Ok(Ok(LineRead::Line(l))) => Some(l),
             Ok(Ok(LineRead::TooLong)) => {
                 let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
@@ -548,13 +560,17 @@ impl SubmissionServer {
         email: &str,
         password: &str,
         ip: std::net::IpAddr,
-    ) -> Result<(String, Uuid), ()> {
-        // NOTE: no early-return lockout short-circuit. When an IP has >=5
-        // recent failures we STILL verify the presented credentials: a
-        // legitimate user behind a shared (NAT) IP must be able to log in
-        // with the correct password, which resets the counter below.
-        // Incorrect credentials simply keep the lockout in place (and the
-        // counter entry expires after the cache TTL anyway).
+    ) -> Result<(String, Uuid), AuthError> {
+        // FIX-3: lockout short-circuit BEFORE any work. Once an (IP,
+        // account) pair — or an IP across all accounts — has accumulated
+        // enough recent failures, further attempts are rejected without
+        // touching the database or verifying the presented password.
+        // Counters decay after the tracker's TTL, which is the lockout
+        // window after which legitimate users can authenticate again.
+        if self.auth_fail_tracker.is_locked(ip, email) {
+            return Err(AuthError::LockedOut);
+        }
+
         let user = sqlx::query_as::<_, (String, Uuid, String, String)>(
             "SELECT email, id, password_hash, status FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)",
         )
@@ -562,18 +578,26 @@ impl SubmissionServer {
         .bind(email)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| AuthError::Failed)?;
 
         let (user_email, user_id, password_hash, status) = match user {
             Some(u) => u,
             None => {
-                self.auth_fail_cache.insert(ip, 1 + self.auth_fail_cache.get(&ip).unwrap_or(0));
-                return Err(());
+                // FIX-3: unknown-account attempts count toward the
+                // lockout (no brute-force bypass via nonexistent users).
+                self.auth_fail_tracker.record_failure(ip, email);
+                // FIX-5: spend the same verification time as a real
+                // account so the response cannot reveal whether the
+                // account exists (user-enumeration side channel).
+                let _ = verify_against_dummy(password);
+                return Err(AuthError::Failed);
             }
         };
 
         if status != "active" {
-            return Err(());
+            self.auth_fail_tracker.record_failure(ip, email);
+            let _ = verify_against_dummy(password);
+            return Err(AuthError::Failed);
         }
 
         // verify_password_for_login accepts both Argon2id and legacy bcrypt
@@ -582,7 +606,7 @@ impl SubmissionServer {
         // Argon2id replacement hash, which we persist so the row migrates.
         match apexmail_lib::crypto::verify_password_for_login(password, &password_hash) {
             Ok(verification) if verification.valid => {
-                self.auth_fail_cache.remove(&ip);
+                self.auth_fail_tracker.reset(ip, email);
                 if let Some(new_hash) = verification.migrated_hash {
                     let _ = sqlx::query(
                         "UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2)",
@@ -595,9 +619,8 @@ impl SubmissionServer {
                 Ok((user_email, user_id))
             }
             _ => {
-                self.auth_fail_cache
-                    .insert(ip, 1 + self.auth_fail_cache.get(&ip).unwrap_or(0));
-                Err(())
+                self.auth_fail_tracker.record_failure(ip, email);
+                Err(AuthError::Failed)
             }
         }
     }
@@ -632,7 +655,10 @@ impl SubmissionServer {
             .and_then(|m| m.subject())
             .map(|s| s.to_string())
             .unwrap_or_else(|| extract_subject(headers_part));
-        let html_body = parsed.as_ref().and_then(|m| m.body_html(0)).map(|b| b.into_owned());
+        let html_body = parsed
+            .as_ref()
+            .and_then(|m| m.body_html(0))
+            .map(|b| b.into_owned());
         let text_body = parsed
             .as_ref()
             .and_then(|m| m.body_text(0))
@@ -896,4 +922,479 @@ fn extract_subject(headers: &str) -> String {
 async fn write_line<S: AsyncWrite + Unpin>(sink: &mut S, line: &str) -> std::io::Result<()> {
     sink.write_all(line.as_bytes()).await?;
     sink.flush().await
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    fn fixture_dir() -> String {
+        format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn test_peer(octet: u8) -> SocketAddr {
+        format!("10.0.0.{octet}:2525").parse().unwrap()
+    }
+
+    fn test_server(tls_acceptor: Option<TlsAcceptor>) -> SubmissionServer {
+        // connect_lazy: the URL is never actually connected in tests;
+        // any real query fails and maps to AuthError::Failed (535). The
+        // short acquire timeout keeps DB-touching tests fast.
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .expect("lazy pool construction cannot fail with a well-formed URL");
+        let config = SubmissionConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 587,
+            hostname: "submission.test".into(),
+            max_message_size: 10 * 1024 * 1024,
+            max_recipients: 100,
+            auth_required: true,
+        };
+        let rate_limit = RateLimitConfig {
+            enabled: true,
+            max_connections_per_ip: 10,
+            max_messages_per_connection: 100,
+            max_recipients_per_message: 100,
+        };
+        SubmissionServer::new(config, rate_limit, pool, tls_acceptor)
+    }
+
+    fn fixture_acceptor() -> TlsAcceptor {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let cert_pem = std::fs::read(format!("{}/cert.pem", fixture_dir())).unwrap();
+        let key_pem = std::fs::read(format!("{}/key.pem", fixture_dir())).unwrap();
+        let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(&cert_pem[..]))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(&key_pem[..]))
+            .unwrap()
+            .unwrap();
+        let config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap();
+        TlsAcceptor::from(Arc::new(config))
+    }
+
+    fn auth_plain_b64(user: &str, pass: &str) -> String {
+        let payload = format!("\0{user}\0{pass}");
+        BASE64.encode(payload.as_bytes())
+    }
+
+    async fn read_smtp_response<S: AsyncRead + AsyncWrite + Unpin>(
+        stream: &mut BufStream<S>,
+    ) -> String {
+        let mut resp = String::new();
+        loop {
+            let mut line = String::new();
+            if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break;
+            }
+            let multiline = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            resp.push_str(&line);
+            if !multiline {
+                break;
+            }
+        }
+        resp
+    }
+
+    /// Drive one submission session: send each command, read the full
+    /// (possibly multi-line) response, and assert it contains the
+    /// expected substring. Ends with QUIT. Returns the transcript.
+    async fn run_session(
+        server: Arc<SubmissionServer>,
+        peer: SocketAddr,
+        allow_starttls: bool,
+        already_tls: bool,
+        steps: &[(&str, &str)],
+    ) -> String {
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, peer, allow_starttls, already_tls)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+        let mut transcript = String::new();
+        for (cmd, expected) in steps {
+            client_buf.write_all(cmd.as_bytes()).await.unwrap();
+            client_buf.write_all(b"\r\n").await.unwrap();
+            client_buf.flush().await.unwrap();
+            let resp = read_smtp_response(&mut client_buf).await;
+            transcript.push_str(&resp);
+            assert!(
+                resp.contains(expected),
+                "expected {expected:?} in response, got {resp:?} (transcript: {transcript:?})"
+            );
+        }
+        client_buf.write_all(b"QUIT\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client_buf).await;
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session loop must finish")
+            .expect("session loop must not panic");
+        transcript
+    }
+
+    // ── FIX-2: AUTH must require TLS (port 587 STARTTLS gate) ────────────────
+
+    #[tokio::test]
+    async fn test_plaintext_ehlo_does_not_advertise_auth() {
+        let server = Arc::new(test_server(None));
+        let transcript = run_session(
+            server,
+            test_peer(1),
+            true,
+            false,
+            &[("EHLO client.example", "250-")],
+        )
+        .await;
+        assert!(
+            !transcript.contains("AUTH"),
+            "plaintext EHLO must not advertise AUTH: {transcript:?}"
+        );
+        assert!(
+            transcript.contains("STARTTLS"),
+            "plaintext EHLO must still advertise STARTTLS: {transcript:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_auth_plain_refused_with_530() {
+        let server = Arc::new(test_server(None));
+        let b64 = auth_plain_b64("alice@example.com", "secret");
+        run_session(
+            server,
+            test_peer(1),
+            true,
+            false,
+            &[
+                ("EHLO client.example", "250-"),
+                (
+                    &format!("AUTH PLAIN {b64}"),
+                    "530 5.7.0 Must issue STARTTLS first",
+                ),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_auth_login_refused_with_530() {
+        let server = Arc::new(test_server(None));
+        let user = BASE64.encode("alice@example.com");
+        run_session(
+            server,
+            test_peer(1),
+            true,
+            false,
+            &[
+                ("EHLO client.example", "250-"),
+                (
+                    &format!("AUTH LOGIN {user}"),
+                    "530 5.7.0 Must issue STARTTLS first",
+                ),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_tls_session_ehlo_advertises_auth_and_not_starttls() {
+        let server = Arc::new(test_server(None));
+        let transcript = run_session(
+            server,
+            test_peer(1),
+            false,
+            true,
+            &[("EHLO client.example", "250-")],
+        )
+        .await;
+        assert!(
+            transcript.contains("AUTH PLAIN LOGIN"),
+            "post-TLS EHLO must advertise AUTH: {transcript:?}"
+        );
+        assert!(
+            !transcript.contains("STARTTLS"),
+            "post-TLS EHLO must not advertise STARTTLS: {transcript:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tls_session_auth_is_processed_not_gated() {
+        // With TLS active the AUTH command must reach credential
+        // verification (here the unreachable DB yields 535) instead of
+        // being refused by the pre-TLS gate.
+        let server = Arc::new(test_server(None));
+        let b64 = auth_plain_b64("alice@example.com", "secret");
+        run_session(
+            server,
+            test_peer(1),
+            false,
+            true,
+            &[
+                ("EHLO client.example", "250-"),
+                (&format!("AUTH PLAIN {b64}"), "535"),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_mail_before_auth_still_refused_530() {
+        // No regression: MAIL FROM before authentication keeps the
+        // existing 530/503 behavior.
+        let server = Arc::new(test_server(None));
+        run_session(
+            server,
+            test_peer(1),
+            false,
+            true,
+            &[
+                ("EHLO client.example", "250-"),
+                (
+                    "MAIL FROM:<a@example.com>",
+                    "530 5.7.0 Authentication required",
+                ),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_full_starttls_upgrade_handshake_gates_auth() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let server = Arc::new(test_server(Some(fixture_acceptor())));
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move {
+                let mut stream = BufStream::new(server_side);
+                let _ = write_line(
+                    &mut stream,
+                    &format!(
+                        "220 {} ESMTP ApexMail Submission\r\n",
+                        server.config.hostname
+                    ),
+                )
+                .await;
+                let (starttls_requested, _) = server
+                    .run_session_loop(&mut stream, test_peer(1), true, false)
+                    .await;
+                assert!(starttls_requested);
+                let _ = write_line(&mut stream, "220 Go ahead\r\n").await;
+                let _ = stream.flush().await;
+                let inner = stream.into_inner();
+                match server.tls_acceptor.as_ref().unwrap().accept(inner).await {
+                    Ok(tls_stream) => {
+                        let mut tls_buf = BufStream::new(TlsStream::from(tls_stream));
+                        server
+                            .run_session_loop(&mut tls_buf, test_peer(1), false, true)
+                            .await;
+                    }
+                    Err(e) => panic!("STARTTLS handshake failed: {e}"),
+                }
+            }
+        });
+
+        let mut client_buf = BufStream::new(client);
+        let greeting = read_smtp_response(&mut client_buf).await;
+        assert!(greeting.contains("220"), "greeting: {greeting:?}");
+
+        client_buf
+            .write_all(b"EHLO client.example\r\n")
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+        let ehlo_plain = read_smtp_response(&mut client_buf).await;
+        assert!(ehlo_plain.contains("STARTTLS"));
+        assert!(!ehlo_plain.contains("AUTH"));
+
+        client_buf.write_all(b"STARTTLS\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let starttls = read_smtp_response(&mut client_buf).await;
+        assert!(starttls.contains("220 Go ahead"));
+
+        let cert_pem = std::fs::read(format!("{}/cert.pem", fixture_dir())).unwrap();
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(&cert_pem[..]))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        roots.add(certs[0].clone()).unwrap();
+        let client_config = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::client::TlsConnector::from(Arc::new(client_config));
+        let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost")
+            .expect("localhost is a valid server name");
+        let tls_client = connector
+            .connect(server_name, client_buf.into_inner())
+            .await
+            .expect("client TLS handshake must succeed");
+        let mut tls_buf = BufStream::new(tls_client);
+
+        tls_buf.write_all(b"EHLO client.example\r\n").await.unwrap();
+        tls_buf.flush().await.unwrap();
+        let ehlo_tls = read_smtp_response(&mut tls_buf).await;
+        assert!(
+            ehlo_tls.contains("250-AUTH PLAIN LOGIN"),
+            "post-STARTTLS EHLO must advertise AUTH: {ehlo_tls:?}"
+        );
+        assert!(!ehlo_tls.contains("STARTTLS"));
+
+        let b64 = auth_plain_b64("alice@example.com", "secret");
+        tls_buf
+            .write_all(format!("AUTH PLAIN {b64}\r\n").as_bytes())
+            .await
+            .unwrap();
+        tls_buf.flush().await.unwrap();
+        let auth = read_smtp_response(&mut tls_buf).await;
+        assert!(
+            auth.contains("535"),
+            "AUTH after STARTTLS must be processed (DB unreachable -> 535), got {auth:?}"
+        );
+
+        tls_buf.write_all(b"QUIT\r\n").await.unwrap();
+        tls_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut tls_buf).await;
+        tokio::time::timeout(Duration::from_secs(10), server_task)
+            .await
+            .expect("server task must finish")
+            .expect("server task must not panic");
+    }
+
+    // ── FIX-3: lockout after repeated failures ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_locked_account_rejected_with_454_even_with_credentials() {
+        // 5 wrong passwords -> lockout; the 6th attempt (even with the
+        // correct password) is rejected with 454 until the window passes.
+        let server = Arc::new(test_server(None));
+        let ip = test_peer(1).ip();
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ip, "alice@example.com");
+        }
+        let b64 = auth_plain_b64("alice@example.com", "correct-password");
+        run_session(
+            server,
+            test_peer(1),
+            false,
+            true,
+            &[
+                ("EHLO client.example", "250-"),
+                (&format!("AUTH PLAIN {b64}"), "454"),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_lockout_is_per_account() {
+        let server = Arc::new(test_server(None));
+        let ip = test_peer(1).ip();
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ip, "bob@example.com");
+        }
+        let b64 = auth_plain_b64("alice@example.com", "secret");
+        run_session(
+            server,
+            test_peer(1),
+            false,
+            true,
+            &[
+                ("EHLO client.example", "250-"),
+                (&format!("AUTH PLAIN {b64}"), "535"),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_lockout_is_per_ip() {
+        let server = Arc::new(test_server(None));
+        let locked_ip = test_peer(1).ip();
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(locked_ip, "alice@example.com");
+        }
+        // The same account authenticating from a different IP is not locked.
+        let b64 = auth_plain_b64("alice@example.com", "secret");
+        run_session(
+            server,
+            test_peer(2),
+            false,
+            true,
+            &[
+                ("EHLO client.example", "250-"),
+                (&format!("AUTH PLAIN {b64}"), "535"),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_unknown_email_attempts_count_toward_lockout() {
+        // An unknown account is recorded under its own key, so brute
+        // forcing nonexistent users cannot bypass the lockout.
+        let server = Arc::new(test_server(None));
+        let ip = test_peer(1).ip();
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ip, "ghost@example.com");
+        }
+        let b64 = auth_plain_b64("ghost@example.com", "anything");
+        run_session(
+            server,
+            test_peer(1),
+            false,
+            true,
+            &[
+                ("EHLO client.example", "250-"),
+                (&format!("AUTH PLAIN {b64}"), "454"),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_auth_login_locked_account_rejected_with_454() {
+        let server = Arc::new(test_server(None));
+        let ip = test_peer(1).ip();
+        for _ in 0..5 {
+            server
+                .auth_fail_tracker
+                .record_failure(ip, "alice@example.com");
+        }
+        let user = BASE64.encode("alice@example.com");
+        let pass = BASE64.encode("correct-password");
+        run_session(
+            server,
+            test_peer(1),
+            false,
+            true,
+            &[
+                ("EHLO client.example", "250-"),
+                (&format!("AUTH LOGIN {user}"), "334"),
+                (&pass, "454"),
+            ],
+        )
+        .await;
+    }
 }
