@@ -1398,8 +1398,34 @@ async fn process_message(
         let payload = final_message.clone();
         let custom_flags = custom_flags.clone();
         async move {
+            // Resolve the recipient email to the mailstore account UUID. The
+            // mailstore requires account_id to be a UUID; passing the raw
+            // email address causes every store to be rejected.
+            let lookup = mail_proto::GetAccountRequest {
+                account_id: String::new(),
+                email: recipient.clone(),
+            };
+            let account_id = recipient_client
+                .get_account(lookup)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to resolve account for recipient {}: {}",
+                        recipient,
+                        e
+                    )
+                })?
+                .into_inner()
+                .account_id;
+            if account_id.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No mailstore account for recipient {}",
+                    recipient
+                ));
+            }
+
             let request = StoreMessageRequest {
-                account_id: recipient.clone(),
+                account_id,
                 mailbox: "Inbox".to_string(),
                 raw_message: payload,
                 flags: Some(MessageFlags {

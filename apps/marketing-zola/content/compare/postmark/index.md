@@ -9,7 +9,7 @@ competitor_slug = "postmark"
 competitor_name = "Postmark"
 competitor_description = "Postmark by ActiveCampaign focuses on fast, reliable transactional email delivery."
 pricing_as_of = "2026-05-09"
-og_image = "/images/og-compare-postmark.png"
+og_image = "/images/og-image.svg"
 apexmail_wins = 0
 competitor_wins = 0
 
@@ -107,7 +107,7 @@ competitor_wins = 0
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Inbound Processing</div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Scale+ plans</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Developer+ plans</span></div>
   <div class="text-center text-sm self-center"><span class="text-brand-600">✓</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
 </div>
@@ -129,7 +129,7 @@ competitor_wins = 0
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">SSO/SAML</div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Scale & Enterprise</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Business & Enterprise</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Available on request</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-500">—</span></div>
 </div>

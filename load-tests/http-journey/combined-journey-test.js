@@ -1,9 +1,9 @@
 // ApexMail Combined HTTP Journey Load Test — k6 script
 // Exercises all 4 critical API paths with realistic traffic distribution:
-//   1. GET  /v1/health/liveness   — Health liveness check  (10%)
-//   2. GET  /v1/health/readiness  — Health readiness check  (10%)
+//   1. GET  /health/live   — Health liveness check  (10%)
+//   2. GET  /health/ready  — Health readiness check  (10%)
 //   3. POST /v1/auth/login        — Authentication          (30%)
-//   4. POST /v1/email/send        — Email sending           (50%)
+//   4. POST /v1/messages        — Email sending           (50%)
 //
 // Ramp-up stages: 10 → 50 → 100 concurrent users.
 //
@@ -121,7 +121,7 @@ function flowAuthLogin() {
 function flowEmailSend() {
   group('Email Send', function () {
     const payload = emailPayload();
-    const res = http.post(`${API_BASE}/v1/email/send`, payload, {
+    const res = http.post(`${API_BASE}/v1/messages`, payload, {
       headers: AUTH_HEADERS,
       tags: { flow: 'email', action: 'send' },
     });
@@ -141,7 +141,7 @@ function flowEmailSend() {
 // ── Flow 3: Health Liveness ─────────────────────────────────────────────────
 function flowLiveness() {
   group('Health Liveness', function () {
-    const res = http.get(`${API_BASE}/v1/health/liveness`, {
+    const res = http.get(`${API_BASE}/health/live`, {
       tags: { flow: 'health', action: 'liveness' },
     });
     livenessDuration.add(res.timings.duration);
@@ -156,7 +156,7 @@ function flowLiveness() {
 // ── Flow 4: Health Readiness ────────────────────────────────────────────────
 function flowReadiness() {
   group('Health Readiness', function () {
-    const res = http.get(`${API_BASE}/v1/health/readiness`, {
+    const res = http.get(`${API_BASE}/health/ready`, {
       tags: { flow: 'health', action: 'readiness' },
     });
     readinessDuration.add(res.timings.duration);

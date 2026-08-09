@@ -30,7 +30,7 @@ impl SubAccountService {
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
-        parent_id: Uuid,
+        parent_id: String,
         name: &str,
         email: Option<&str>,
         domain: Option<&str>,
@@ -41,7 +41,7 @@ impl SubAccountService {
         // Check sub-account limit
         let count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM ent_sub_accounts WHERE parent_id = $1")
-                .bind(parent_id)
+                 .bind(&parent_id)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| format!("Count sub-accounts: {e}"))?;
@@ -59,7 +59,7 @@ impl SubAccountService {
              VALUES ($1,$2,$3,'active',$4,$5,$6,$7,0,$8,NOW(),NOW())
              RETURNING *"
         )
-        .bind(id).bind(parent_id).bind(name).bind(email)
+        .bind(id) .bind(&parent_id).bind(name).bind(email)
         .bind(domain).bind(plan).bind(volume_limit).bind(inherit_parent_settings)
         .fetch_one(&self.db)
         .await
@@ -86,7 +86,7 @@ impl SubAccountService {
     /// List sub-accounts for a parent
     pub async fn list(
         &self,
-        parent_id: Uuid,
+        parent_id: String,
         status: Option<&str>,
         limit: i64,
         offset: i64,
@@ -95,14 +95,14 @@ impl SubAccountService {
             sqlx::query_as::<_, SubAccount>(
                 "SELECT * FROM ent_sub_accounts WHERE parent_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4"
             )
-            .bind(parent_id).bind(s).bind(limit).bind(offset)
+             .bind(&parent_id).bind(s).bind(limit).bind(offset)
             .fetch_all(&self.db)
             .await
         } else {
             sqlx::query_as::<_, SubAccount>(
                 "SELECT * FROM ent_sub_accounts WHERE parent_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
             )
-            .bind(parent_id).bind(limit).bind(offset)
+             .bind(&parent_id).bind(limit).bind(offset)
             .fetch_all(&self.db)
             .await
         }.map_err(|e| format!("List sub-accounts: {e}"))?;
@@ -182,13 +182,13 @@ impl SubAccountService {
     }
 
     /// Get aggregate stats for all sub-accounts of a parent
-    pub async fn get_stats(&self, parent_id: Uuid) -> Result<ApiResult<SubAccountStats>, String> {
+    pub async fn get_stats(&self, parent_id: String) -> Result<ApiResult<SubAccountStats>, String> {
         let row: (i64, i64, Option<i64>, Option<i64>) = sqlx::query_as(
             "SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'active'),
              SUM(volume_used)::bigint, SUM(volume_limit)::bigint
              FROM ent_sub_accounts WHERE parent_id = $1",
         )
-        .bind(parent_id)
+         .bind(&parent_id)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Get sub-account stats: {e}"))?;
@@ -396,7 +396,7 @@ mod tests {
     fn test_sub_account_serialization() {
         let sa = SubAccount {
             id: Uuid::new_v4(),
-            parent_id: Uuid::new_v4(),
+            parent_id: "b7039256-711d-486d-8c65-cc".into(),
             name: "Agency Client 1".into(),
             status: "active".into(),
             email: Some("client@agency.com".into()),

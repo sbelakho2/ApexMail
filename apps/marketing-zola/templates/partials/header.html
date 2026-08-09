@@ -85,7 +85,7 @@
                 <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["documentation_desc"] %}{{ i18n_data[l]["header"]["documentation_desc"] }}{% else %}API reference & guides{% endif %}</div>
               </div>
             </a>
-            <a href="/api-console/" {% if current_path_value == "/api-console" or current_path_value == "/api-console/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group" role="menuitem" tabindex="-1">
+            <a href="/api-explorer/" {% if current_path_value == "/api-explorer" or current_path_value == "/api-explorer/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group" role="menuitem" tabindex="-1">
               <div class="w-8 h-8 rounded-sm bg-surface-100 flex items-center justify-center text-surface-600 group-hover:text-white group-hover:bg-surface-800 transition-colors">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
               </div>
@@ -170,7 +170,7 @@
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
             <span class="text-surface-950 font-medium text-sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["documentation"] %}{{ i18n_data[l]["header"]["documentation"] }}{% else %}Documentation{% endif %}</span>
           </a>
-          <a href="/api-console/" {% if current_path_value == "/api-console" or current_path_value == "/api-console/" %}aria-current="page"{% endif %} class="flex items-center gap-3 p-4 rounded-sm hover:bg-surface-100 transition-colors">
+          <a href="/api-explorer/" {% if current_path_value == "/api-explorer" or current_path_value == "/api-explorer/" %}aria-current="page"{% endif %} class="flex items-center gap-3 p-4 rounded-sm hover:bg-surface-100 transition-colors">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
             <span class="text-surface-950 font-medium text-sm">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["api_console"] %}{{ i18n_data[l]["header"]["api_console"] }}{% else %}API Explorer{% endif %}</span>
           </a>

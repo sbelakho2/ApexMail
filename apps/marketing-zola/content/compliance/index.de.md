@@ -4,5 +4,5 @@ description = "Compliance-Workflow-Unterstützung für E-Mail: Einwilligungsdate
 template = "compliance.html"
 
 [extra]
-og_image = "/images/og-compliance.png"
+og_image = "/images/og-image.svg"
 +++

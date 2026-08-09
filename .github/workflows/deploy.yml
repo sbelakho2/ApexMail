@@ -128,8 +128,11 @@ jobs:
           set -euo pipefail
           # Canonical image basenames (after the registry/namespace path).
           # Mirrors deploy/DEPLOYMENT.md exactly — update both together.
+          # Must cover EVERY ghcr.io image referenced in docker-compose.prod.yml
+          # (api-server mta imap-server mailstore worker enterprise
+          #  tracking-service observability marketing).
           canonical=(
-            api-server mta worker enterprise tracking-service
+            api-server mta imap-server mailstore worker enterprise tracking-service
             observability marketing
           )
           # Third-party images that are allowed as-is (pinned upstream images).
@@ -162,9 +165,11 @@ jobs:
             done
             (( skip )) && continue
 
-            # For GHCR refs, the basename is the last path component before the tag.
+            # For GHCR refs, the basename is the last path component before the
+            # tag (e.g. ghcr.io/<owner>/<repo>/api-server:latest -> api-server).
             if [[ "$ref" == ghcr.io/* ]]; then
-              base="$(printf '%s' "${ref#ghcr.io/*/}" | sed -E 's/:[^:/]+$//' )"
+              base="${ref##*/}"
+              base="${base%%:*}"
               found=0
               for c in "${canonical[@]}"; do
                 if [[ "$base" == "$c" ]]; then found=1; break; fi
@@ -348,6 +353,36 @@ jobs:
           push: true
           target: observability
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/observability:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/observability:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          attestations: |
+            type=sbom,enabled=true
+            type=provenance,enabled=true
+
+      - name: Build and push IMAP server image
+        uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
+        with:
+          context: .
+          file: services/mail-server/Dockerfile
+          push: true
+          target: imap-server
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/imap-server:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/imap-server:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          attestations: |
+            type=sbom,enabled=true
+            type=provenance,enabled=true
+
+      - name: Build and push mailstore image
+        uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
+        with:
+          context: .
+          file: services/mail-server/Dockerfile
+          push: true
+          target: mailstore
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mailstore:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mailstore:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max

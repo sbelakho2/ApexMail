@@ -329,6 +329,23 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "observability-service"]
 
 # =============================================================================
+# Auth Server / Status Server — serves the public status page (/status),
+# status API (/status/api) and history (/status/history) for the status
+# backend (status.apexmail.ee + apexmail.ee/api/status-data).
+# =============================================================================
+FROM runtime-base AS auth-server
+
+COPY --from=builder /app/target/release/auth-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 3000
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3000"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "auth-server"]
+
+# =============================================================================
 # Ops Service
 # =============================================================================
 FROM runtime-base AS ops

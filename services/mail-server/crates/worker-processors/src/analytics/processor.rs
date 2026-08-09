@@ -153,9 +153,9 @@ impl AnalyticsProcessor {
             SET processing = true, processing_at = NOW()
             WHERE id IN (SELECT id FROM claimed)
             RETURNING
-                id, tenant_id, event_type,
+                id::text AS id, COALESCE(tenant_id, '') AS tenant_id, event_type,
                 message_id, domain_id, campaign_id,
-                recipient_email, metadata, timestamp
+                recipient, metadata, timestamp
             "#,
         )
         .bind(limit as i64)
@@ -175,7 +175,7 @@ impl AnalyticsProcessor {
             r#"
             UPDATE analytics_queue
             SET processed = true, processed_at = NOW(), processing = false
-            WHERE id = ANY($1)
+            WHERE id = ANY($1::bigint[])
             "#,
         )
         .bind(event_ids)
@@ -195,7 +195,7 @@ impl AnalyticsProcessor {
             r#"
             UPDATE analytics_queue
             SET processing = false, processing_at = NULL
-            WHERE id = ANY($1)
+            WHERE id = ANY($1::bigint[])
             "#,
         )
         .bind(event_ids)
@@ -687,7 +687,7 @@ impl AnalyticsProcessor {
                 NOW(),
                 NOW()
             FROM events
-            WHERE created_at >= $1 AND created_at < $2
+            WHERE timestamp >= $1 AND timestamp < $2
             GROUP BY tenant_id, domain_id
             ON CONFLICT (tenant_id, COALESCE(domain_id, ''), COALESCE(campaign_id, ''), period_start)
             DO UPDATE SET

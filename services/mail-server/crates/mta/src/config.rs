@@ -40,6 +40,9 @@ pub struct MtaConfig {
     pub health_port: u16,
     #[serde(default = "default_shutdown_timeout")]
     pub graceful_shutdown_timeout: u64,
+    /// gRPC endpoint of the mailstore service (mailbox delivery for inbound).
+    #[serde(default = "default_mailstore_addr")]
+    pub mailstore_addr: String,
 }
 
 // ── sub configs ────────────────────────────────────────────────────────────────
@@ -239,6 +242,7 @@ impl Default for MtaConfig {
             metrics: MetricsConfig::default(),
             health_port: default_health_port(),
             graceful_shutdown_timeout: default_shutdown_timeout(),
+            mailstore_addr: default_mailstore_addr(),
         }
     }
 }
@@ -423,8 +427,10 @@ fn default_metrics_port() -> u16 {
 fn default_health_port() -> u16 {
     8081
 }
-fn default_shutdown_timeout() -> u64 {
-    30
+fn default_shutdown_timeout() -> u64 {    30
+}
+fn default_mailstore_addr() -> String {
+    "http://mailstore:50051".into()
 }
 fn default_true() -> bool {
     true
@@ -559,6 +565,8 @@ impl MtaConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(default_shutdown_timeout()),
+            mailstore_addr: std::env::var("MAILSTORE_GRPC_ADDR")
+                .unwrap_or_else(|_| default_mailstore_addr()),
         };
         cfg.validate()?;
         Ok(cfg)

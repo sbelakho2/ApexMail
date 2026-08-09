@@ -18,8 +18,7 @@ pub struct AnalyticsEvent {
     pub domain_id: Option<String>,
     #[sqlx(rename = "campaign_id")]
     pub campaign_id: Option<String>,
-    #[sqlx(rename = "recipient_email")]
-    pub recipient_email: Option<String>,
+    pub recipient: Option<String>,
     pub metadata: Option<serde_json::Value>,
     pub timestamp: DateTime<Utc>,
 }

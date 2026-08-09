@@ -148,17 +148,15 @@ async fn create_domain(
 
     let id = Uuid::new_v4();
     let now = Utc::now();
-    let dkim_selector = format!("apexmail{}", &id.to_string()[..8]);
 
     sqlx::query(
         "INSERT INTO domains (id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified,
-         return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, dkim_selector, created_at, updated_at)
-         VALUES ($1,$2,$3,'pending',false,false,false,false,false,false,false,$4,$5,$5)",
+         return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, created_at, updated_at)
+         VALUES ($1,$2,$3,'pending',false,false,false,false,false,false,false,$4,$4)",
     )
     .bind(&id)
     .bind(&auth.tenant_id)
     .bind(&body.name)
-    .bind(&dkim_selector)
     .bind(now)
     .execute(&state.db)
     .await?;
@@ -187,7 +185,7 @@ async fn list_domains(
 
     let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, DomainRow>(
-        "SELECT id, name, status, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
+        "SELECT id::text AS id, name, status, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
          FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(&auth.tenant_id)
@@ -207,8 +205,8 @@ async fn get_domain(
     require_scopes(&auth, &["domains:read"])?;
 
     let row = sqlx::query_as::<_, DomainRow>(
-        "SELECT id, name, status, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
-         FROM domains WHERE id = $1 AND tenant_id = $2",
+        "SELECT id::text AS id, name, status, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
+         FROM domains WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(&id)
     .bind(&auth.tenant_id)
@@ -228,13 +226,13 @@ async fn delete_domain(
 
     // Fetch domain name before deleting (for SES cleanup)
     let domain_name: Option<(String,)> =
-        sqlx::query_as("SELECT name FROM domains WHERE id = $1 AND tenant_id = $2")
+        sqlx::query_as("SELECT name FROM domains WHERE id = $1::uuid AND tenant_id = $2")
             .bind(&id)
             .bind(&auth.tenant_id)
             .fetch_optional(&state.db)
             .await?;
 
-    let result = sqlx::query("DELETE FROM domains WHERE id = $1 AND tenant_id = $2")
+    let result = sqlx::query("DELETE FROM domains WHERE id = $1::uuid AND tenant_id = $2")
         .bind(&id)
         .bind(&auth.tenant_id)
         .execute(&state.db)
@@ -265,7 +263,7 @@ async fn verify_domain(
     require_scopes(&auth, &["domains:write"])?;
 
     let row = sqlx::query_as::<_, DomainFullRow>(
-        "SELECT id, name, dkim_selector FROM domains WHERE id = $1 AND tenant_id = $2",
+        "SELECT id::text AS id, name, NULL::text AS dkim_selector FROM domains WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(&id)
     .bind(&auth.tenant_id)
@@ -381,7 +379,7 @@ async fn get_dns_records(
     require_scopes(&auth, &["domains:read"])?;
 
     let row = sqlx::query_as::<_, DomainFullRow>(
-        "SELECT id, name, dkim_selector FROM domains WHERE id = $1 AND tenant_id = $2",
+        "SELECT id::text AS id, name, NULL::text AS dkim_selector FROM domains WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(&id)
     .bind(&auth.tenant_id)
@@ -622,8 +620,8 @@ async fn get_auth_status(
     require_scopes(&auth, &["domains:read"])?;
 
     let domain = sqlx::query_as::<_, DomainAuthRow>(
-        "SELECT id, name, spf_verified, dkim_verified, dmarc_verified, mx_verified, return_path_verified
-         FROM domains WHERE id = $1 AND tenant_id = $2",
+        "SELECT id::text AS id, name, spf_verified, dkim_verified, dmarc_verified, mx_verified, return_path_verified
+         FROM domains WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(id.to_string())
     .bind(auth.tenant_id.to_string())

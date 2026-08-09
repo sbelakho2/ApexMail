@@ -71,20 +71,39 @@ Start from `.env.production.example` and fill in real values
 (generate secrets with `openssl rand -base64 32`). The result is what
 goes into the `APEXMAIL_PROD_ENV` GitHub secret as a single blob.
 
-Required vars (validated by `docker-compose.prod.yml` with `${VAR:?}`):
+`docker-compose.prod.yml` requires **14 `PROD_*_FILE` variables** (`${VAR:?}`)
+that point at the rendered secret files; each must have its value defined
+as a plain variable in the `.env`:
 
-- `INTERNAL_SERVICE_TOKEN`, `TRACKING_SECRET_KEY`, `API_KEY_HASH_SECRET`,
-  `WEBHOOK_SIGNING_SECRET`, `SESSION_SECRET`, `IMPERSONATION_SECRET`,
-  `CSRF_SECRET`, `JWT_SECRET`
-- `JWT_PRIVATE_KEY_PEM`, `JWT_PUBLIC_KEY_PEM` (RSA keypair, PEM with `\n`
-  as literal newlines inside the value)
+| Secret value var in `.env`      | `PROD_*_FILE` var pointing to the rendered file |
+| ------------------------------- | ----------------------------------------------- |
+| `POSTGRES_PASSWORD`             | `PROD_POSTGRES_PASSWORD_FILE`                   |
+| `REDIS_PASSWORD`                | `PROD_REDIS_PASSWORD_FILE`                      |
+| `CLICKHOUSE_PASSWORD`           | `PROD_CLICKHOUSE_PASSWORD_FILE`                 |
+| `API_KEY_HASH_SECRET`           | `PROD_API_KEY_HASH_SECRET_FILE`                 |
+| `WEBHOOK_SIGNING_SECRET`        | `PROD_WEBHOOK_SIGNING_SECRET_FILE`              |
+| `TRACKING_SECRET_KEY`           | `PROD_TRACKING_SECRET_KEY_FILE`                 |
+| `INTERNAL_SERVICE_TOKEN`        | `PROD_INTERNAL_SERVICE_TOKEN_FILE`              |
+| `JWT_SECRET`                    | `PROD_JWT_SECRET_FILE`                          |
+| `JWT_PRIVATE_KEY_PEM`           | `PROD_JWT_PRIVATE_KEY_FILE`                     |
+| `JWT_PUBLIC_KEY_PEM`            | `PROD_JWT_PUBLIC_KEY_FILE`                      |
+| `SESSION_SECRET`                | `PROD_SESSION_SECRET_FILE`                      |
+| `IMPERSONATION_SECRET`          | `PROD_IMPERSONATION_SECRET_FILE`                |
+| `CSRF_SECRET`                   | `PROD_CSRF_SECRET_FILE`                         |
+| `KIWI_SECRET_KEY`               | `PROD_KIWI_SECRET_KEY_FILE`                     |
+
+The workflow renders **all 14** secret files on the host from these values
+(see `deploy-hetzner.yml` — "Render docker secret files"), writing each to
+the exact path its `PROD_*_FILE` var points at. The `JWT_*_PEM` values must
+be quoted PEM blocks (literal newlines inside the quoted value; the workflow
+writes them to files verbatim).
+
+Non-file variables also validated by the compose overlay:
+
 - `DATABASE_URL`, `REDIS_URL`, `CLICKHOUSE_URL`
-- `API_BASE_URL`, `APP_BASE_URL`, `TRACKING_BASE_URL`,
-  `OAUTH_REDIRECT_BASE_URL`, `CORS_ORIGINS`
+- `BASE_URL`, `OAUTH_REDIRECT_BASE_URL`
 - `BILLING_COMPANY_IBAN`, `BILLING_COMPANY_PHONE`
-- `KIWI_ENABLED`, `KIWI_SECRET_KEY`
-- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_*`
-- `GF_SECURITY_ADMIN_PASSWORD`
+- `GF_SECURITY_ADMIN_PASSWORD` (grafana, when the monitoring profile is up)
 
 ---
 
@@ -132,16 +151,22 @@ gh run watch
 The workflow:
 1. Validates all required secrets exist (fails fast if host/user/key absent)
 2. Configures SSH with strict host-key checking from `HETZNER_KNOWN_HOSTS`
-3. rsyncs `docker-compose*.yml` + `deploy/` to `/opt/apexmail/`
+3. rsyncs `docker-compose*.yml` + `deploy/` to `/opt/apexmail/` (the Let's
+   Encrypt store under `deploy/nginx/ssl/` is protected from `--delete`)
 4. Pipes `APEXMAIL_PROD_ENV` to `/opt/apexmail/.env` (mode 0600) without
    touching the runner filesystem
-5. Logs in to GHCR on the host, `docker compose pull`, `up -d --remove-orphans`
-   over the canonical service set (`api-server mta worker enterprise
-   tracking-service observability marketing nginx postgres redis clickhouse
-   certbot`)
-6. Reloads nginx to re-resolve upstream container IPs
-7. Verifies the rollout and the TLS certificate (warns if self-signed)
-8. Shreds the SSH key from the runner
+5. Renders **all 14 secret files** required by the compose (`PROD_*_FILE`,
+   incl. `api_key_hash_secret`, `webhook_signing_secret`, `tracking_secret_key`,
+   `internal_service_token`, `jwt_secret`, `jwt_private_key`, `jwt_public_key`,
+   `session_secret`, `impersonation_secret`, `csrf_secret`, `kiwi_secret_key`)
+   into `secrets/` on the host
+6. Logs in to GHCR on the host, `docker compose pull`, `up -d --remove-orphans`
+   over the canonical service set (`api-server mta imap-server mailstore worker
+   enterprise tracking-service observability marketing postgres-backup nginx
+   postgres redis clickhouse certbot`)
+7. Reloads nginx to re-resolve upstream container IPs
+8. Verifies the rollout and the TLS certificate (warns if self-signed)
+9. Shreds the SSH key from the runner
 
 ---
 

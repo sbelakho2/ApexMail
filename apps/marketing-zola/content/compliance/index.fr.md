@@ -4,5 +4,5 @@ description = "Support des workflows de conformité pour l'email : enregistremen
 template = "compliance.html"
 
 [extra]
-og_image = "/images/og-compliance.png"
+og_image = "/images/og-image.svg"
 +++

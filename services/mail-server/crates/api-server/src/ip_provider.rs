@@ -544,8 +544,8 @@ impl DedicatedIpProvider {
         tenant_id: &str,
     ) -> Option<String> {
         let domain: Option<String> = sqlx::query_scalar(
-            "SELECT domain FROM domains
-               WHERE tenant_id = $1 AND is_verified = true
+            "SELECT name FROM domains
+               WHERE tenant_id = $1 AND verified = true
              ORDER BY created_at LIMIT 1",
         )
         .bind(tenant_id)

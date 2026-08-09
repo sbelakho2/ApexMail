@@ -4,5 +4,5 @@ description = "Explore the ApexMail API interactively. Browse endpoints, see req
 template = "api-explorer.html"
 
 [extra]
-og_image = "/images/og-api-console.png"
+og_image = "/images/og-image.svg"
 +++

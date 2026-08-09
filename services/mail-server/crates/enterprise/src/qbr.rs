@@ -13,7 +13,7 @@ pub struct QBRService {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct QuarterlyBusinessReviewDbRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     quarter: i32,
     year: i32,
     status: String,
@@ -41,7 +41,7 @@ impl From<QuarterlyBusinessReviewDbRow> for QuarterlyBusinessReview {
     fn from(row: QuarterlyBusinessReviewDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             quarter: row.quarter,
             year: row.year,
             status: row.status,
@@ -67,10 +67,6 @@ impl From<QuarterlyBusinessReviewDbRow> for QuarterlyBusinessReview {
     }
 }
 
-fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
-}
-
 impl QBRService {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -85,14 +81,13 @@ impl QBRService {
         scheduled_date: Option<chrono::NaiveDate>,
         attendees: Option<serde_json::Value>,
     ) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
             "INSERT INTO ent_qbrs (id, tenant_id, quarter, year, status, scheduled_date, attendees, created_at, updated_at)
              VALUES ($1,$2,$3,$4,'scheduled',$5,$6,NOW(),NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(quarter).bind(year)
+        .bind(id).bind(&tenant_id).bind(quarter).bind(year)
         .bind(scheduled_date).bind(&attendees)
         .fetch_one(&self.db)
         .await
@@ -125,11 +120,10 @@ impl QBRService {
         limit: i64,
         offset: i64,
     ) -> Result<ApiResult<Vec<QuarterlyBusinessReview>>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
             "SELECT * FROM ent_qbrs WHERE tenant_id = $1 ORDER BY year DESC, quarter DESC LIMIT $2 OFFSET $3"
         )
-        .bind(tenant_uuid).bind(limit).bind(offset)
+        .bind(&tenant_id).bind(limit).bind(offset)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("List QBRs: {e}"))?;
@@ -290,7 +284,7 @@ impl QBRService {
     /// Gather metrics for a quarter (internal)
     async fn gather_quarter_metrics(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         start: chrono::DateTime<Utc>,
         end: chrono::DateTime<Utc>,
     ) -> Result<serde_json::Value, String> {

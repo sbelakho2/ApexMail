@@ -96,7 +96,7 @@ async fn complete_sso(state: &AppState, email: &str, name: &str, provider: &str,
     let email_lower = email.to_lowercase();
 
     let existing: Option<(uuid::Uuid, String, String, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT id, tenant_id, email, name, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1")
+        "SELECT id::text, tenant_id, email, name, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1")
         .bind(&email_lower).fetch_optional(&state.db).await?;
 
     let (user_id, tenant_id, role) = match existing {
@@ -105,7 +105,7 @@ async fn complete_sso(state: &AppState, email: &str, name: &str, provider: &str,
             {
                 use sqlx::Row;
                 let mfa_row = sqlx::query(
-                    "SELECT mfa_enabled, role FROM users WHERE id = $1 AND tenant_id = $2",
+                    "SELECT mfa_enabled, role FROM users WHERE id = $1::uuid AND tenant_id = $2",
                 )
                 .bind(id)
                 .bind(&tid)
@@ -119,7 +119,7 @@ async fn complete_sso(state: &AppState, email: &str, name: &str, provider: &str,
                     }
                 }
             }
-            sqlx::query("UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2")
+            sqlx::query("UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2::uuid::uuid")
                 .bind(serde_json::json!({"last_sso_provider":provider,"last_sso_login":Utc::now().to_rfc3339()}))
                 .bind(id).execute(&state.db).await?;
             (id, tid, role)

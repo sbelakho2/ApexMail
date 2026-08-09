@@ -109,7 +109,7 @@ export default function () {
   // ── Group: Health Checks ──────────────────────────────────────────────────
   group('health checks', function () {
     const livenessResp = http.get(
-      `${BASE_URL}/v1/health/liveness`,
+      `${BASE_URL}/health/live`,
       {
         headers: getDefaultHeaders(),
         tags: { endpoint: 'liveness' },
@@ -123,7 +123,7 @@ export default function () {
     // Custom metric for health check duration
     // k6 will aggregate this under 'health_duration'
     const readinessResp = http.get(
-      `${BASE_URL}/v1/health/readiness`,
+      `${BASE_URL}/health/ready`,
       {
         headers: getDefaultHeaders(),
         tags: { endpoint: 'readiness' },
@@ -191,7 +191,7 @@ export default function () {
     });
 
     const emailResp = http.post(
-      `${BASE_URL}/v1/email/send`,
+      `${BASE_URL}/v1/messages`,
       emailPayload,
       {
         headers: getAuthHeaders(token),

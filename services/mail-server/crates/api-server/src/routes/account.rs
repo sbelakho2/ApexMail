@@ -61,8 +61,8 @@ async fn get_profile(
         String,
         chrono::DateTime<Utc>,
     )> = sqlx::query_as(
-        "SELECT id, tenant_id, email, name, role, created_at 
-             FROM users WHERE id = $1",
+        "SELECT id::text, tenant_id, email, name, role, created_at 
+             FROM users WHERE id = $1::uuid",
     )
     .bind(&auth.user_id)
     .fetch_optional(&state.db)
@@ -100,7 +100,7 @@ async fn delete_account(
 
     // Verify password
     let user: Option<(String,)> =
-        sqlx::query_as("SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2")
+        sqlx::query_as("SELECT password_hash FROM users WHERE id = $1::uuid AND tenant_id = $2")
             .bind(&auth.user_id)
             .bind(&auth.tenant_id)
             .fetch_optional(&state.db)

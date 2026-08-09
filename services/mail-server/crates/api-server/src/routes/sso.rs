@@ -366,7 +366,7 @@ async fn complete_sso_login(
     // Look up existing user
     let existing: Option<(uuid::Uuid, uuid::Uuid, String, Option<String>, String, String)> =
         sqlx::query_as(
-            "SELECT id, tenant_id, email, name, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+            "SELECT id::text, tenant_id, email, name, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
         )
         .bind(&email_lower)
         .fetch_optional(&state.db)
@@ -379,7 +379,7 @@ async fn complete_sso_login(
             }
             // Update SSO metadata
             sqlx::query(
-                "UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2",
+                "UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2::uuid",
             )
             .bind(serde_json::json!({
                 "last_sso_provider": provider,

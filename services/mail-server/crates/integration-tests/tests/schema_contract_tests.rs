@@ -536,7 +536,7 @@ async fn metering_events_table_exists() {
     // usage.rs:50-65 INSERTs into metering_events
     let result = sqlx::query(
         "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
-         VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(event_id)

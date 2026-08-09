@@ -4,5 +4,5 @@ description = "Monitoreo en tiempo real del estado y disponibilidad de la infrae
 template = "status.html"
 
 [extra]
-og_image = "/images/og-status.png"
+og_image = "/images/og-image.svg"
 +++

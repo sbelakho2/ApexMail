@@ -1,5 +1,6 @@
 //! Health-check endpoints.
 //!
+//! - `GET /health` and `GET /health/` — liveness alias (always 200)
 //! - `GET /health/live` — liveness probe (always 200)
 //! - `GET /health/ready` — readiness:DB + Redis (uses circuit breaker for DB check)
 //! - `GET /health/deep` — comprehensive with response times
@@ -17,6 +18,7 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/", get(liveness))
         .route("/live", get(liveness))
         .route("/ready", get(readiness))
         .route("/deep", get(deep_check))

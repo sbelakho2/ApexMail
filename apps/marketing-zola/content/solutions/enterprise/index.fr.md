@@ -4,5 +4,5 @@ description = "Infrastructure email Enterprise avec contr√¥les SOC 2, tenance d√
 template = "page.html"
 
 [extra]
-og_image = "/images/og-enterprise.png"
+og_image = "/images/og-image.svg"
 +++

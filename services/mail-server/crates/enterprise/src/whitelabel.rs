@@ -248,7 +248,7 @@ pub struct WhiteLabelService {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct WhiteLabelConfigDbRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     company_name: Option<String>,
     logo_url: Option<String>,
     primary_color: Option<String>,
@@ -270,7 +270,7 @@ impl From<WhiteLabelConfigDbRow> for WhiteLabelConfigRow {
     fn from(row: WhiteLabelConfigDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             company_name: row.company_name,
             logo_url: row.logo_url,
             primary_color: row.primary_color,
@@ -293,7 +293,7 @@ impl From<WhiteLabelConfigDbRow> for WhiteLabelConfigRow {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct WhiteLabelDomainDbRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     domain: String,
     domain_type: String,
     verification_status: String,
@@ -310,7 +310,7 @@ impl From<WhiteLabelDomainDbRow> for WhiteLabelDomain {
     fn from(row: WhiteLabelDomainDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             domain: row.domain,
             domain_type: row.domain_type,
             verification_status: row.verification_status,
@@ -328,7 +328,7 @@ impl From<WhiteLabelDomainDbRow> for WhiteLabelDomain {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct WhiteLabelEmailTemplateDbRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     template_type: String,
     subject_template: Option<String>,
     html_template: Option<String>,
@@ -341,7 +341,7 @@ impl From<WhiteLabelEmailTemplateDbRow> for WhiteLabelEmailTemplate {
     fn from(row: WhiteLabelEmailTemplateDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             template_type: row.template_type,
             subject_template: row.subject_template,
             html_template: row.html_template,
@@ -350,10 +350,6 @@ impl From<WhiteLabelEmailTemplateDbRow> for WhiteLabelEmailTemplate {
             updated_at: row.updated_at,
         }
     }
-}
-
-fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
 }
 
 impl WhiteLabelService {
@@ -377,7 +373,6 @@ impl WhiteLabelService {
         support_email: Option<&str>,
         support_url: Option<&str>,
     ) -> Result<ApiResult<WhiteLabelConfigRow>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         // #254:Sanitize custom_css to prevent stored XSS
         let sanitized_css = custom_css.map(sanitize_css);
         let css_ref = sanitized_css.as_deref();
@@ -399,7 +394,7 @@ impl WhiteLabelService {
              updated_at = NOW()
              RETURNING *"
         )
-           .bind(id).bind(tenant_uuid)
+           .bind(id).bind(&tenant_id)
         .bind(company_name).bind(logo_url).bind(favicon_url)
         .bind(primary_color).bind(secondary_color)
         .bind(css_ref).bind(footer_text)
@@ -417,11 +412,10 @@ impl WhiteLabelService {
         &self,
         tenant_id: String,
     ) -> Result<ApiResult<WhiteLabelConfigRow>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let row = sqlx::query_as::<_, WhiteLabelConfigDbRow>(
             "SELECT * FROM ent_whitelabel_config WHERE tenant_id = $1",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Get whitelabel config: {e}"))?;
@@ -439,7 +433,6 @@ impl WhiteLabelService {
         domain: &str,
         domain_type: &str,
     ) -> Result<ApiResult<WhiteLabelDomain>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let dns_records = generate_dns_records(domain, domain_type);
         let dns_json = serde_json::to_value(&dns_records)
@@ -450,7 +443,7 @@ impl WhiteLabelService {
              VALUES ($1,$2,$3,$4,'pending',$5,NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(domain).bind(domain_type).bind(&dns_json)
+        .bind(id).bind(&tenant_id).bind(domain).bind(domain_type).bind(&dns_json)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Add domain: {e}"))?;
@@ -497,11 +490,10 @@ impl WhiteLabelService {
         limit: i64,
         offset: i64,
     ) -> Result<ApiResult<Vec<WhiteLabelDomain>>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = sqlx::query_as::<_, WhiteLabelDomainDbRow>(
             "SELECT * FROM ent_whitelabel_domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.db)
@@ -518,11 +510,10 @@ impl WhiteLabelService {
         id: Uuid,
         tenant_id: String,
     ) -> Result<ApiResult<serde_json::Value>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let result =
             sqlx::query("DELETE FROM ent_whitelabel_domains WHERE id = $1 AND tenant_id = $2")
                 .bind(id)
-                .bind(tenant_uuid)
+                .bind(&tenant_id)
                 .execute(&self.db)
                 .await
                 .map_err(|e| format!("Delete domain: {e}"))?;
@@ -546,7 +537,6 @@ impl WhiteLabelService {
         html_template: Option<&str>,
         text_template: Option<&str>,
     ) -> Result<ApiResult<WhiteLabelEmailTemplate>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, WhiteLabelEmailTemplateDbRow>(
             "INSERT INTO ent_whitelabel_email_templates (id, tenant_id, template_type, subject_template, html_template, text_template, created_at, updated_at)
@@ -558,7 +548,7 @@ impl WhiteLabelService {
              updated_at = NOW()
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(template_type)
+        .bind(id).bind(&tenant_id).bind(template_type)
         .bind(subject_template).bind(html_template).bind(text_template)
         .fetch_one(&self.db)
         .await
@@ -572,11 +562,10 @@ impl WhiteLabelService {
         &self,
         tenant_id: String,
     ) -> Result<ApiResult<Vec<WhiteLabelEmailTemplate>>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = sqlx::query_as::<_, WhiteLabelEmailTemplateDbRow>(
             "SELECT * FROM ent_whitelabel_email_templates WHERE tenant_id = $1 ORDER BY template_type"
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("Get email templates: {e}"))?;

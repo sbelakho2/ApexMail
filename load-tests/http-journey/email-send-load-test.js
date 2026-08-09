@@ -1,5 +1,5 @@
 // ApexMail Email Send API Load Test — k6 script
-// Targets POST /v1/email/send with ramp-up stages: 10 → 50 → 100 concurrent users.
+// Targets POST /v1/messages with ramp-up stages: 10 → 50 → 100 concurrent users.
 //
 // Thresholds:
 //   - p95 http_req_duration < 500ms
@@ -76,7 +76,7 @@ function emailPayload() {
 // ── Main test function ───────────────────────────────────────────────────────
 export default function () {
   group('Email Send', function () {
-    const url = `${API_BASE}/v1/email/send`;
+    const url = `${API_BASE}/v1/messages`;
     const payload = emailPayload();
     const res = http.post(url, payload, { headers: AUTH_HEADERS });
 

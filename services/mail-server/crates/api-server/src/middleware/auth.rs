@@ -316,7 +316,7 @@ async fn authenticate_api_key(
 
     // DB look-up: try HMAC hash first, fall back to legacy SHA-256, then Argon2id
     let row = sqlx::query_as::<_, ApiKeyRow>(
-        "SELECT id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE key_hash = $1",
+        "SELECT id::text AS id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE key_hash = $1",
     )
     .bind(&hmac_hash)
     .fetch_optional(&state.db)
@@ -332,7 +332,7 @@ async fn authenticate_api_key(
         None => {
             // Try legacy SHA-256 lookup
             let legacy_row = sqlx::query_as::<_, ApiKeyRow>(
-                "SELECT id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE key_hash = $1",
+                "SELECT id::text AS id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE key_hash = $1",
             )
             .bind(&legacy_hash)
             .fetch_optional(&state.db)
@@ -421,7 +421,7 @@ async fn authenticate_api_key_argon2_fallback(
 
     // Scan all active keys (limited scope — only runs when HMAC lookup fails)
     let rows = sqlx::query_as::<_, ApiKeyRow>(
-        "SELECT id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE expires_at IS NULL OR expires_at > NOW()",
+        "SELECT id::text AS id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE expires_at IS NULL OR expires_at > NOW()",
     )
     .fetch_all(db)
     .await
@@ -476,7 +476,7 @@ async fn authenticate_api_key_argon2_fallback(
         let new_hash =
             apexmail_lib::hash_api_key_with_secret(key, &state.config.api_key_hash_secret);
 
-        if let Err(e) = sqlx::query("UPDATE api_keys SET key_hash = $1 WHERE id = $2")
+        if let Err(e) = sqlx::query("UPDATE api_keys SET key_hash = $1 WHERE id = $2::uuid")
             .bind(&new_hash)
             .bind(&row.id)
             .execute(db)
@@ -512,7 +512,7 @@ async fn upgrade_api_key_hash(
 ) {
     match apexmail_lib::hash_api_key_argon2(&raw_key) {
         Ok(new_hash) => {
-            match sqlx::query("UPDATE api_keys SET key_hash = $1 WHERE id = $2")
+            match sqlx::query("UPDATE api_keys SET key_hash = $1 WHERE id = $2::uuid")
                 .bind(&new_hash)
                 .bind(&api_key_id)
                 .execute(&db)
@@ -551,7 +551,43 @@ async fn touch_api_key_last_used(
     key_hash: &str,
     state: &AppState,
 ) -> Result<(), ApiError> {
-    let result = sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1")
+    // Throttle: at most one DB write per API key every 5 minutes, tracked in
+    // Redis. This removes a write from every authenticated request. Redis
+    // failures degrade to the unthrottled path (fail open).
+    //
+    // Atomicity: `SET key 1 NX EX <window>` is a single Redis command, so
+    // concurrent requests for the same API key cannot both win the throttle
+    // (the previous EXISTS + SETEX pair had a race window). Exactly one
+    // request per key per window performs the DB write.
+    const TOUCH_WINDOW_SECS: u64 = 300;
+    let throttle_key = format!("api_key:last_used:{}", api_key_id);
+
+    let mut skip_write = false;
+    if let Ok(mut conn) = state.redis.get().await {
+        let won: bool = match redis::cmd("SET")
+            .arg(&throttle_key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(TOUCH_WINDOW_SECS)
+            .query_async::<Option<String>>(&mut *conn)
+            .await
+        {
+            Ok(value) => value.is_some(),
+            Err(e) => {
+                tracing::debug!(error = %e, "Redis SET NX failed in last_used throttle");
+                // Fail open: let the DB write happen.
+                true
+            }
+        };
+        skip_write = !won;
+    }
+
+    if skip_write {
+        return Ok(());
+    }
+
+    let result = sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1::uuid")
         .bind(api_key_id)
         .execute(&state.db)
         .await
@@ -789,7 +825,7 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
         Ok(Some(CachedUserStatus::Present(status))) => status,
         _ => {
             let user_status: Option<(String,)> =
-                sqlx::query_as("SELECT status FROM users WHERE id = $1 AND tenant_id = $2")
+                sqlx::query_as("SELECT status FROM users WHERE id = $1::uuid AND tenant_id = $2")
                     .bind(&user_id)
                     .bind(&tenant_id)
                     .fetch_optional(&state.db)

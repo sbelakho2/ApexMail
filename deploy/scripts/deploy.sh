@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — ApexMail unified deployment script (single source of truth).
+# deploy.sh — ApexMail manual deployment script (emergency/hotfix path only).
+#
+# ⚠️  CANONICAL deployment is CI/CD: deploy.yml builds + pushes images to GHCR,
+#     deploy-hetzner.yml pulls + `docker compose up -d` on the host.
+#     See deploy/DEPLOYMENT.md — the single source of truth.
+#     This script builds images LOCALLY and tags them with GHCR-style names;
+#     they are NEVER pushed to GHCR. Use it only for manual hotfixes.
 #
 # Usage (from developer machine via Makefile):
 #   make deploy              — full deploy: sync all code + rebuild all images
@@ -107,7 +113,6 @@ step "Step 1: Clean old artifacts"
 # Remove stray host-built binaries (we use Docker images now, not bind-mounts)
 rm -f "${DEPLOY_DIR}/api-server" "${DEPLOY_DIR}/api-server-new" 2>/dev/null || true
 rm -f "${DEPLOY_DIR}/"*.log 2>/dev/null || true
-rm -rf "${DEPLOY_DIR}/\$(dirname apps" 2>/dev/null || true
 
 # Remove old target/ binaries that are no longer bind-mounted
 log "Removing stale host binaries..."

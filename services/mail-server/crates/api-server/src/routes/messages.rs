@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::error::{success, ApiError, ApiResponse};
 use crate::middleware::auth::{require_scopes, AuthUser};
+use crate::middleware::rate_limiter::INCR_EXPIRE_LUA;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -196,6 +197,75 @@ fn canonical_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
 
+/// Extract the lowercased sender domain from a `from` address.
+fn sender_domain(from: &str) -> Option<String> {
+    from.rsplit_once('@')
+        .map(|(_, domain)| domain.to_lowercase())
+        .filter(|domain| !domain.is_empty())
+}
+
+/// Resolve the verified `domains.id` for a sender domain.
+///
+/// Production domains.id is UUID; unknown/unverified sender domains yield
+/// `None` (the worker skips DKIM signing for unknown domains).
+async fn resolve_sender_domain_id(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    from: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let Some(sender_domain) = sender_domain(from) else {
+        return Ok(None);
+    };
+    sqlx::query_scalar(
+        "SELECT id::text FROM domains
+         WHERE tenant_id = $1 AND name = $2 AND (status = 'verified' OR verified = true)
+         LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(&sender_domain)
+    .fetch_optional(db)
+    .await
+}
+
+/// Resolve verified domain IDs for every unique sender domain in a batch with
+/// one query per batch (instead of one query per message — the previous code
+/// performed an N+1 lookup inside `insert_message_and_queue` for each item).
+async fn resolve_batch_domain_ids(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    bodies: &[SendMessageRequest],
+) -> Result<std::collections::HashMap<String, Option<String>>, sqlx::Error> {
+    let mut unique: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for body in bodies {
+        if let Some(domain) = sender_domain(&body.from) {
+            unique.insert(domain);
+        }
+    }
+
+    let mut map: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    if unique.is_empty() {
+        return Ok(map);
+    }
+
+    let domains: Vec<String> = unique.into_iter().collect();
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, id::text FROM domains
+         WHERE tenant_id = $1 AND name = ANY($2) AND (status = 'verified' OR verified = true)",
+    )
+    .bind(tenant_id)
+    .bind(&domains)
+    .fetch_all(db)
+    .await?;
+
+    for domain in domains {
+        map.insert(domain, None);
+    }
+    for (name, id) in rows {
+        map.insert(name, Some(id));
+    }
+    Ok(map)
+}
+
 async fn suppressed_recipients(
     db: &sqlx::PgPool,
     tenant_id: &str,
@@ -233,29 +303,16 @@ async fn insert_message_and_queue(
     tenant_id: &str,
     body: &SendMessageRequest,
     metadata: &Option<serde_json::Value>,
+    domain_id: Option<String>,
 ) -> Result<PersistedMessage, sqlx::Error> {
-    let message_id = apexmail_lib::id::generate_id("msg", 22);
+    let message_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let status = message_status(body);
-    let sender_domain = body
-        .from
-        .rsplit_once('@')
-        .map(|(_, domain)| domain.to_lowercase())
-        .unwrap_or_default();
-    let domain_id = sqlx::query_scalar::<_, String>(
-        "SELECT id FROM domains
-         WHERE tenant_id = $1 AND domain = $2 AND (status = 'verified' OR is_verified = true)
-         LIMIT 1",
-    )
-    .bind(tenant_id)
-    .bind(&sender_domain)
-    .fetch_one(&mut **tx)
-    .await?;
 
     sqlx::query(
         "INSERT INTO messages (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
          subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
     )
     .bind(&message_id)
     .bind(tenant_id)
@@ -285,14 +342,14 @@ async fn insert_message_and_queue(
     for recipient in delivery_recipients(body) {
         sqlx::query(
             "INSERT INTO email_queue (
-                id, message_id, tenant_id, domain_id, \"from\", \"to\", subject,
-                html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
+                id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
+                \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
              ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7,
-                $8, $9, $10, $11, $12, 5, 'pending', $13, $13
+                $1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7,
+                $5, $6, $8, $9, $10, $11, $12, 5, 'pending', $13, $13
              )",
         )
-        .bind(apexmail_lib::id::generate_id("emq", 22))
+        .bind(Uuid::new_v4())
         .bind(&message_id)
         .bind(tenant_id)
         .bind(&domain_id)
@@ -301,7 +358,7 @@ async fn insert_message_and_queue(
         .bind(&body.subject)
         .bind(&body.html)
         .bind(&body.text)
-        .bind(body.tags.as_ref().map(|tags| serde_json::json!(tags)))
+        .bind(body.tags.clone())
         .bind(metadata)
         .bind(body.scheduled_at)
         .bind(created_at)
@@ -322,7 +379,7 @@ async fn cancel_message_and_queue(
     message_id: &str,
 ) -> Result<CancelDeliveryResult, sqlx::Error> {
     let row: Option<(String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT status, created_at FROM messages WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+        "SELECT status, created_at FROM messages WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE",
     )
     .bind(message_id)
     .bind(tenant_id)
@@ -340,7 +397,7 @@ async fn cancel_message_and_queue(
     let non_pending_queue_rows = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint
          FROM email_queue
-         WHERE message_id = $1 AND tenant_id = $2 AND status NOT IN ('pending', 'cancelled')",
+         WHERE message_id = $1::uuid AND tenant_id = $2 AND status NOT IN ('pending', 'cancelled')",
     )
     .bind(message_id)
     .bind(tenant_id)
@@ -354,14 +411,14 @@ async fn cancel_message_and_queue(
     sqlx::query(
         "UPDATE email_queue
          SET status = 'cancelled', locked_until = NULL, updated_at = NOW()
-         WHERE message_id = $1 AND tenant_id = $2 AND status = 'pending'",
+         WHERE message_id = $1::uuid AND tenant_id = $2 AND status = 'pending'",
     )
     .bind(message_id)
     .bind(tenant_id)
     .execute(&mut **tx)
     .await?;
 
-    sqlx::query("UPDATE messages SET status = 'cancelled' WHERE id = $1 AND tenant_id = $2")
+    sqlx::query("UPDATE messages SET status = 'cancelled' WHERE id = $1::uuid AND tenant_id = $2")
         .bind(message_id)
         .bind(tenant_id)
         .execute(&mut **tx)
@@ -385,7 +442,7 @@ async fn send_message(
     if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
         if !idem_key.is_empty() && idem_key.len() <= 255 {
             let existing: Option<(String, String, DateTime<Utc>)> = sqlx::query_as(
-                "SELECT id, status, created_at FROM messages
+                "SELECT id::text AS id, status, created_at FROM messages
                  WHERE tenant_id = $1 AND metadata->>'idempotency_key' = $2
                  LIMIT 1",
             )
@@ -431,7 +488,15 @@ async fn send_message(
         ApiError::Internal("database error".into())
     })?;
 
-    let persisted = match insert_message_and_queue(&mut tx, &auth.tenant_id, &body, &metadata).await
+    // Resolve the sender domain once (shared by validation and the insert).
+    let domain_id = resolve_sender_domain_id(&state.db, &auth.tenant_id, &body.from)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to resolve sender domain");
+            ApiError::Internal("database error".into())
+        })?;
+
+    let persisted = match insert_message_and_queue(&mut tx, &auth.tenant_id, &body, &metadata, domain_id).await
     {
         Ok(persisted) => persisted,
         Err(error) => {
@@ -509,8 +574,17 @@ async fn send_batch(
         ApiError::Internal("database error".into())
     })?;
 
+    // Resolve every unique sender domain once per batch instead of once per
+    // message (removes the N+1 domain lookups from validation and inserts).
+    let domain_ids = resolve_batch_domain_ids(&state.db, &auth.tenant_id, &body.messages)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to resolve batch sender domains");
+            ApiError::Internal("database error".into())
+        })?;
+
     for (i, msg) in body.messages.iter().enumerate() {
-        if let Err(e) = validate_send(msg, &state.db, &auth.tenant_id).await {
+        if let Err(e) = validate_send_with_domain_cache(msg, &state.db, &auth.tenant_id, Some(&domain_ids)).await {
             rejected += 1;
             results.push(BatchResult {
                 index: i,
@@ -536,7 +610,10 @@ async fn send_batch(
             Err(err) => return Err(err),
         };
 
-        match insert_message_and_queue(&mut tx, &auth.tenant_id, msg, &msg.metadata).await {
+        let domain_id = sender_domain(&msg.from)
+            .and_then(|domain| domain_ids.get(&domain).cloned())
+            .flatten();
+        match insert_message_and_queue(&mut tx, &auth.tenant_id, msg, &msg.metadata, domain_id).await {
             Ok(persisted) => {
                 accepted += 1;
                 committed_quota_reservations.push(quota_reservation);
@@ -620,7 +697,7 @@ async fn list_messages(
         // Cursor-based: WHERE created_at < $cursor (for created_at DESC ordering)
         if let Some(ref status) = params.status {
             let query = format!(
-                "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
+                "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
                  FROM messages WHERE tenant_id = $1 AND status = $2 AND created_at < $3::timestamp
                  ORDER BY {} DESC LIMIT $4",
                 sort_column
@@ -634,7 +711,7 @@ async fn list_messages(
                 .await?
         } else {
             let query = format!(
-                "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
+                "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
                  FROM messages WHERE tenant_id = $1 AND created_at < $2::timestamp
                  ORDER BY {} DESC LIMIT $3",
                 sort_column
@@ -651,7 +728,7 @@ async fn list_messages(
         let offset = params.offset.clamp(0, 100_000);
         if let Some(ref status) = params.status {
             let query = format!(
-                "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
+                "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
                  FROM messages WHERE tenant_id = $1 AND status = $2 ORDER BY {} DESC LIMIT $3 OFFSET $4",
                 sort_column
             );
@@ -664,7 +741,7 @@ async fn list_messages(
                 .await?
         } else {
             let query = format!(
-                "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
+                "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
                  FROM messages WHERE tenant_id = $1 ORDER BY {} DESC LIMIT $2 OFFSET $3",
                 sort_column
             );
@@ -720,8 +797,8 @@ async fn get_message(
     require_scopes(&auth, &["messages:read"])?;
 
     let row = sqlx::query_as::<_, MessageRow>(
-        "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
-         FROM messages WHERE id = $1 AND tenant_id = $2",
+        "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
+         FROM messages WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(&id)
     .bind(&auth.tenant_id)
@@ -803,6 +880,18 @@ async fn validate_send(
     db: &sqlx::PgPool,
     tenant_id: &str,
 ) -> Result<(), ApiError> {
+    validate_send_with_domain_cache(body, db, tenant_id, None).await
+}
+
+/// Like [`validate_send`], but skips the per-message domain query when the
+/// caller already resolved the batch's sender domains (see
+/// [`resolve_batch_domain_ids`]).
+async fn validate_send_with_domain_cache(
+    body: &SendMessageRequest,
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    domain_cache: Option<&std::collections::HashMap<String, Option<String>>>,
+) -> Result<(), ApiError> {
     let mut errors = Vec::new();
     if body.from.is_empty() {
         errors.push("from is required".into());
@@ -853,22 +942,28 @@ async fn validate_send(
 
     // Extract domain from the "from" email.
     if !body.from.is_empty() {
-        if let Some(domain) = body.from.split('@').nth(1) {
-            let exists: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM domains
-                 WHERE tenant_id = $1 AND domain = $2 AND (status = 'verified' OR is_verified = true)
-                 LIMIT 1",
-            )
-            .bind(tenant_id)
-            .bind(domain.to_lowercase())
-            .fetch_optional(db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "domain ownership check failed");
-                ApiError::Internal("domain verification error".into())
-            })?;
+        if let Some(domain) = sender_domain(&body.from) {
+            let verified = match domain_cache {
+                Some(cache) => cache.get(&domain).is_some_and(|id| id.is_some()),
+                None => {
+                    let exists: Option<String> = sqlx::query_scalar(
+                        "SELECT id::text FROM domains
+                         WHERE tenant_id = $1 AND name = $2 AND (status = 'verified' OR verified = true)
+                         LIMIT 1",
+                    )
+                    .bind(tenant_id)
+                    .bind(&domain)
+                    .fetch_optional(db)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "domain ownership check failed");
+                        ApiError::Internal("domain verification error".into())
+                    })?;
+                    exists.is_some()
+                }
+            };
 
-            if exists.is_none() {
+            if !verified {
                 errors.push(format!(
                     "domain '{domain}' is not verified for this account"
                 ));
@@ -977,9 +1072,10 @@ async fn record_tenant_message_circuit_failure(state: &AppState, tenant_id: &str
     };
 
     let failure_key = tenant_message_circuit_failure_key(tenant_id);
-    let failures: i64 = match deadpool_redis::redis::cmd("INCR")
-        .arg(&failure_key)
-        .query_async(&mut *conn)
+    let failures: i64 = match deadpool_redis::redis::Script::new(INCR_EXPIRE_LUA)
+        .key(&failure_key)
+        .arg(TENANT_MESSAGE_CIRCUIT_FAILURE_WINDOW_SECONDS)
+        .invoke_async(&mut *conn)
         .await
     {
         Ok(failures) => failures,
@@ -988,14 +1084,6 @@ async fn record_tenant_message_circuit_failure(state: &AppState, tenant_id: &str
             return;
         }
     };
-
-    if failures == 1 {
-        let _: Result<i64, _> = deadpool_redis::redis::cmd("EXPIRE")
-            .arg(&failure_key)
-            .arg(TENANT_MESSAGE_CIRCUIT_FAILURE_WINDOW_SECONDS)
-            .query_async(&mut *conn)
-            .await;
-    }
 
     if failures >= TENANT_MESSAGE_CIRCUIT_FAILURE_THRESHOLD {
         let _: Result<(), _> = deadpool_redis::redis::cmd("SETEX")
@@ -1220,7 +1308,7 @@ mod tests {
             .begin()
             .await
             .expect("failed to begin message transaction");
-        let persisted = insert_message_and_queue(&mut tx, &tenant_id, &body, &body.metadata)
+        let persisted = insert_message_and_queue(&mut tx, &tenant_id, &body, &body.metadata, None)
             .await
             .expect("failed to persist message delivery");
         tx.commit()
@@ -1228,7 +1316,7 @@ mod tests {
             .expect("failed to commit message transaction");
 
         let message_row: (String, Option<DateTime<Utc>>) = sqlx::query_as(
-            "SELECT status, scheduled_at FROM messages WHERE id = $1 AND tenant_id = $2",
+            "SELECT status, scheduled_at FROM messages WHERE id = $1::uuid AND tenant_id = $2",
         )
         .bind(&persisted.id)
         .bind(&tenant_id)
@@ -1490,7 +1578,7 @@ mod tests {
             .begin()
             .await
             .expect("failed to begin create transaction");
-        let persisted = insert_message_and_queue(&mut create_tx, &tenant_id, &body, &body.metadata)
+        let persisted = insert_message_and_queue(&mut create_tx, &tenant_id, &body, &body.metadata, None)
             .await
             .expect("failed to persist message delivery");
         create_tx
@@ -1513,7 +1601,7 @@ mod tests {
         assert!(matches!(result, CancelDeliveryResult::Cancelled(_)));
 
         let message_status: (String,) =
-            sqlx::query_as("SELECT status FROM messages WHERE id = $1 AND tenant_id = $2")
+            sqlx::query_as("SELECT status FROM messages WHERE id = $1::uuid AND tenant_id = $2")
                 .bind(&persisted.id)
                 .bind(&tenant_id)
                 .fetch_one(&pool)

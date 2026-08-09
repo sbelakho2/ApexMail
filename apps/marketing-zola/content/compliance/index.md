@@ -4,5 +4,5 @@ description = "Compliance workflow support for email: consent records, DSR proce
 template = "compliance.html"
 
 [extra]
-og_image = "/images/og-compliance.png"
+og_image = "/images/og-image.svg"
 +++

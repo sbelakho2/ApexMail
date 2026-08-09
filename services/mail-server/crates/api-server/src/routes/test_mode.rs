@@ -171,7 +171,7 @@ async fn test_send(
             format!("'{}' is not a valid test address. Use GET /v1/test/addresses to list available test addresses.", body.to)
         ]))?;
 
-    let message_id = apexmail_lib::id::generate_id("test_msg", 22);
+    let message_id = uuid::Uuid::new_v4().to_string();
     let now: DateTime<Utc> = Utc::now();
 
     let events: Vec<serde_json::Value> = ta.event_sequence.iter().enumerate().map(|(i, evt)| {
@@ -190,7 +190,7 @@ async fn test_send(
     // Persist message record
     let _ = sqlx::query(
         "INSERT INTO messages (id, tenant_id, from_address, to_address, subject, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'test', $6)"
+         VALUES ($1::uuid, $2, $3, $4, $5, 'test', $6)"
     )
     .bind(&message_id)
     .bind(&auth.tenant_id)
@@ -205,16 +205,19 @@ async fn test_send(
     for (i, evt) in ta.event_sequence.iter().enumerate() {
         let evt_time = now + chrono::Duration::seconds(i as i64 * 2);
         let _ = sqlx::query(
-            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, smtp_code, smtp_enhanced_code, test_mode, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8)"
+            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, metadata, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)"
         )
         .bind(apexmail_lib::id::generate_id("evt", 22))
         .bind(&auth.tenant_id)
         .bind(&message_id)
         .bind(evt)
         .bind(&ta.address)
-        .bind(&ta.smtp_code)
-        .bind(&ta.smtp_enhanced_code)
+        .bind(serde_json::json!({
+            "smtp_code": ta.smtp_code,
+            "smtp_enhanced_code": ta.smtp_enhanced_code,
+            "test_mode": true,
+        }))
         .bind(evt_time)
         .execute(&state.db)
         .await;

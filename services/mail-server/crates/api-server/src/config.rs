@@ -5,6 +5,8 @@
 use std::env;
 use std::time::Duration;
 
+use kiwicaptcha::SOLVER_MAX_TARGET_BITS;
+
 /// Top-level configuration for the API server.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -677,9 +679,10 @@ impl Config {
         let kiwi_auto_tune_min_bits = env_or("KIWI_AUTO_TUNE_MIN_BITS", "10")
             .parse()
             .unwrap_or(10);
-        let kiwi_auto_tune_max_bits = env_or("KIWI_AUTO_TUNE_MAX_BITS", "24")
+        let kiwi_auto_tune_max_bits = env_or("KIWI_AUTO_TUNE_MAX_BITS", "20")
             .parse()
-            .unwrap_or(24);
+            .unwrap_or(20)
+            .min(SOLVER_MAX_TARGET_BITS);
         if !environment.is_production() && kiwi_secret_key == "dev" {
             tracing::info!(
                 "KiwiCaptcha configured with dev key — CAPTCHA verification will be bypassed"
@@ -897,11 +900,20 @@ impl Config {
     }
 
     /// Build a Redis connection URL from the config.
+    ///
+    /// The password is percent-encoded per RFC 3986 (via `urlencoding`, which
+    /// encodes every non-unreserved byte including `%`, `@`, `:`, `/`, `+`
+    /// and space) so that special characters in the password cannot corrupt
+    /// the URL. The redis crate percent-decodes the password component
+    /// before authenticating, so the encoding round-trips exactly.
     pub fn redis_url(&self) -> String {
         match &self.redis_password {
             Some(pw) => format!(
                 "redis://:{}@{}:{}/{}",
-                pw, self.redis_host, self.redis_port, self.redis_db
+                urlencoding::encode(pw),
+                self.redis_host,
+                self.redis_port,
+                self.redis_db
             ),
             None => format!(
                 "redis://{}:{}/{}",
@@ -1062,7 +1074,7 @@ impl Config {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1086,6 +1098,59 @@ mod tests {
 
         let v = parse_csv("");
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn test_redis_url_no_password() {
+        let cfg = Config {
+            redis_host: "redis".into(),
+            redis_port: 6379,
+            redis_password: None,
+            redis_db: 0,
+            ..valid_production_config()
+        };
+        assert_eq!(cfg.redis_url(), "redis://redis:6379/0");
+    }
+
+    #[test]
+    fn test_redis_url_plain_password() {
+        let cfg = Config {
+            redis_host: "redis".into(),
+            redis_port: 6379,
+            redis_password: Some("secret".into()),
+            redis_db: 2,
+            ..valid_production_config()
+        };
+        assert_eq!(cfg.redis_url(), "redis://:secret@redis:6379/2");
+    }
+
+    #[test]
+    fn test_redis_url_percent_encodes_special_characters() {
+        // `@`, `:`, `/`, `+`, space and `%` must not corrupt the URL. The
+        // redis crate percent-decodes the password component before
+        // authenticating, so the encoded form must round-trip to the original.
+        for (password, expected) in [
+            ("p@ss:word", "p%40ss%3Aword"),
+            ("a/b+c d", "a%2Fb%2Bc%20d"),
+            ("100%Secure", "100%25Secure"),
+            ("emoji🦄key", "emoji%F0%9F%A6%84key"),
+        ] {
+            let cfg = Config {
+                redis_host: "redis.example.com".into(),
+                redis_port: 6380,
+                redis_password: Some(password.into()),
+                redis_db: 4,
+                ..valid_production_config()
+            };
+            let url = cfg.redis_url();
+            assert_eq!(url, format!("redis://:{expected}@redis.example.com:6380/4"));
+            // The URL must parse, and the password component must decode back
+            // to the original value (the redis crate decodes it on connect).
+            let parsed = url::Url::parse(&url).unwrap();
+            assert_eq!(parsed.password(), Some(expected));
+            let decoded = urlencoding::decode(parsed.password().unwrap()).unwrap();
+            assert_eq!(decoded, password);
+        }
     }
 
     #[test]
@@ -1118,7 +1183,7 @@ mod tests {
         assert!(validate_db_connection_budget(20, 0, 3, Some(60)).is_err());
     }
 
-    fn valid_production_config() -> Config {
+    pub(crate) fn valid_production_config() -> Config {
         Config {
             port: 3000,
             host: "0.0.0.0".into(),
@@ -1205,7 +1270,7 @@ mod tests {
             kiwi_min_duration_ms: None,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,
-            kiwi_auto_tune_max_bits: 24,
+            kiwi_auto_tune_max_bits: 20,
             http_client_timeout_secs: 30,
             internal_tls_enabled: false,
             internal_tls_ca_cert_path: None,
@@ -1345,7 +1410,7 @@ mod tests {
             kiwi_min_duration_ms: None,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,
-            kiwi_auto_tune_max_bits: 24,
+            kiwi_auto_tune_max_bits: 20,
             http_client_timeout_secs: 30,
             internal_tls_enabled: false,
             internal_tls_ca_cert_path: None,

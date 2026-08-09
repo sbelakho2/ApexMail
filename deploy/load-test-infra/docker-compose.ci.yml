@@ -1,0 +1,100 @@
+# =============================================================================
+# ApexMail — CI Load-Gate Environment
+# =============================================================================
+# Used by .github/workflows/load-gate.yml ONLY.
+#
+# Brings up PostgreSQL + Redis + the REAL api-server image (built from the
+# repo's services/mail-server/Dockerfile) bound to localhost:3000, so the k6
+# smoke/load/stress/spike suites run against an actual API server instead of
+# an empty port.
+#
+# Secrets are injected by the workflow via `--env-file`:
+#   JWT_PRIVATE_KEY_PEM, JWT_PUBLIC_KEY_PEM, API_KEY_HASH_SECRET,
+#   WEBHOOK_SIGNING_SECRET, SESSION_SECRET, IMPERSONATION_SECRET,
+#   CSRF_SECRET, TRACKING_SECRET_KEY, INTERNAL_SERVICE_TOKEN
+# =============================================================================
+
+name: apexmail-loadgate
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: apexmail_loadtest
+      POSTGRES_USER: apexmail
+      POSTGRES_PASSWORD: apexmail-loadtest
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apexmail -d apexmail_loadtest"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - loadgate
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass apexmail-loadtest
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a apexmail-loadtest ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - loadgate
+
+  api-server:
+    build:
+      context: ../../
+      dockerfile: services/mail-server/Dockerfile
+      target: api-server
+      cache_from:
+        - type=gha
+    image: apexmail-loadgate/api-server:ci
+    environment:
+      ENVIRONMENT: development
+      HOST: 0.0.0.0
+      PORT: "3000"
+      BASE_URL: https://localhost:3000
+      OAUTH_REDIRECT_BASE_URL: https://localhost:3000
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: apexmail_loadtest
+      DB_USER: apexmail
+      DB_PASSWORD: apexmail-loadtest
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: apexmail-loadtest
+      JWT_PRIVATE_KEY_PEM: ${JWT_PRIVATE_KEY_PEM}
+      JWT_PUBLIC_KEY_PEM: ${JWT_PUBLIC_KEY_PEM}
+      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET}
+      WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET}
+      SESSION_SECRET: ${SESSION_SECRET}
+      IMPERSONATION_SECRET: ${IMPERSONATION_SECRET}
+      CSRF_SECRET: ${CSRF_SECRET}
+      TRACKING_SECRET_KEY: ${TRACKING_SECRET_KEY}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
+      KIWI_ENABLED: "false"
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks:
+      - loadgate
+
+networks:
+  loadgate:
+    driver: bridge

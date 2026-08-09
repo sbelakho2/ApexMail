@@ -108,7 +108,7 @@ impl ReplyHandler {
         let messages = sqlx::query_as::<_, InboundMessage>(
             r#"
             UPDATE inbound_messages
-            SET processing = true, processing_at = NOW()
+            SET processing = true
             WHERE id IN (
                 SELECT id
                 FROM inbound_messages
@@ -120,7 +120,7 @@ impl ReplyHandler {
             RETURNING
                 id, tenant_id as "tenantId", lead_id as "leadId",
                 from_email as "fromEmail", to_email as "toEmail",
-                subject,
+                COALESCE(subject, '') as subject,
                 -- O-16.5: Truncate body fields at the SQL level to enforce max_reply_size
                 LEFT(body_text, $2::int) as "bodyText",
                 LEFT(body_html, $2::int) as "bodyHtml",
@@ -245,7 +245,7 @@ impl ReplyHandler {
                 if let Some(ref lead_id) = msg.lead_id {
                     let snooze_until = Utc::now() + chrono::Duration::days(days);
                     sqlx::query(
-                        "UPDATE leads SET snoozed_until = $1, status = 'snoozed' WHERE id = $2",
+                        "UPDATE sales_leads SET snoozed_until = $1, status = 'snoozed' WHERE id = $2",
                     )
                     .bind(snooze_until)
                     .bind(lead_id)
@@ -256,7 +256,12 @@ impl ReplyHandler {
                 Ok(Some(format!("snoozed_for_{}_days", days)))
             }
             ActionType::Suppress => {
-                // Add to suppressions
+                // Add to suppressions (needs a tenant; rows from unknown
+                // tenants are skipped so the NOT NULL FK is never violated).
+                let Some(ref tenant_id) = msg.tenant_id else {
+                    warn!(msg_id = %msg.id, "Suppress action skipped — inbound message has no tenant_id");
+                    return Ok(Some("skipped_no_tenant".to_string()));
+                };
                 sqlx::query(
                     r#"
                     INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
@@ -264,8 +269,10 @@ impl ReplyHandler {
                     ON CONFLICT (tenant_id, email) DO NOTHING
                     "#,
                 )
-                .bind(format!("sup_{}", uuid::Uuid::new_v4()))
-                .bind(&msg.tenant_id)
+                // suppressions.id is VARCHAR(26), so use a short random
+                // suffix ("sup_" + 18 hex chars = 22 chars).
+                .bind(format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]))
+                .bind(tenant_id)
                 .bind(&msg.from_email)
                 .bind("not_interested")
                 .execute(&self.db)
@@ -274,6 +281,10 @@ impl ReplyHandler {
                 Ok(Some("suppressed".to_string()))
             }
             ActionType::Unsubscribe => {
+                let Some(ref tenant_id) = msg.tenant_id else {
+                    warn!(msg_id = %msg.id, "Unsubscribe action skipped — inbound message has no tenant_id");
+                    return Ok(Some("skipped_no_tenant".to_string()));
+                };
                 // Add to suppressions with unsubscribe reason
                 sqlx::query(
                     r#"
@@ -282,8 +293,8 @@ impl ReplyHandler {
                     ON CONFLICT (tenant_id, email) DO UPDATE SET reason = 'unsubscribe'
                     "#,
                 )
-                .bind(format!("sup_{}", uuid::Uuid::new_v4()))
-                .bind(&msg.tenant_id)
+                .bind(format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]))
+                .bind(tenant_id)
                 .bind(&msg.from_email)
                 .execute(&self.db)
                 .await?;
@@ -293,7 +304,7 @@ impl ReplyHandler {
             ActionType::FlagSales => {
                 if let Some(ref lead_id) = msg.lead_id {
                     sqlx::query(
-                        "UPDATE leads SET status = 'interested', priority = 'high', updated_at = NOW() WHERE id = $1",
+                        "UPDATE sales_leads SET status = 'interested', priority = 'high', updated_at = NOW() WHERE id = $1",
                     )
                     .bind(lead_id)
                     .execute(&self.db)
@@ -338,7 +349,7 @@ impl ReplyHandler {
         };
 
         sqlx::query(
-            "UPDATE leads SET status = $1, last_reply_at = NOW(), updated_at = NOW() WHERE id = $2",
+            "UPDATE sales_leads SET status = $1, last_reply_at = NOW(), updated_at = NOW() WHERE id = $2",
         )
         .bind(new_status)
         .bind(lead_id)

@@ -4,7 +4,7 @@ template = "page.html"
 description = "ApexMail polls Google Postmaster Tools and Microsoft SNDS every six hours, scores your sender reputation, and throttles outbound automatically when the data says back off."
 
 [extra]
-og_image = "/images/og-inbox-placement.png"
+og_image = "/images/og-image.svg"
 +++
 
 # Inbox Placement, Backed By the Mailbox Providers Themselves

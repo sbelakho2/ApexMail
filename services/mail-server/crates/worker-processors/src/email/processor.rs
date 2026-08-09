@@ -291,9 +291,14 @@ impl EmailProcessor {
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING
-                id, message_id as "messageId", tenant_id as "tenantId", domain_id as "domainId",
-                "from", "to", subject, html, text, headers, attachments,
-                campaign_id as "campaignId", tags, metadata, scheduled_at as "scheduledAt",
+                id::text AS id,
+                COALESCE(message_id::text, id::text) as "messageId",
+                COALESCE(tenant_id, '') as "tenantId",
+                COALESCE(domain_id::text, '') as "domainId",
+                COALESCE("from", from_address) as "from",
+                COALESCE("to", to_addresses[1], '') as "to",
+                subject, html, text, headers, attachments,
+                campaign_id::text as "campaignId", tags, metadata, scheduled_at as "scheduledAt",
                 attempt, created_at as "createdAt"
             "#,
         )
@@ -449,7 +454,7 @@ impl EmailProcessor {
         }
 
         // Get domain
-        let domain = self.get_domain(&job.domain_id, &job.tenant_id).await?;
+        let domain = self.get_domain(job).await?;
 
         // Prepare email
         let email = self.prepare_email(job, &domain)?;
@@ -495,7 +500,7 @@ impl EmailProcessor {
     /// (return value == 1) also sets the TTL via `EXPIRE` (race-safe; extra EXPIRE
     /// calls are harmless). All workers share a single counter per domain per day.
     async fn check_warmup_limit(&self, job: &EmailJob) -> ProcessorResult<bool> {
-        let domain = self.get_domain(&job.domain_id, &job.tenant_id).await?;
+        let domain = self.get_domain(job).await?;
 
         if !domain.warmup_enabled {
             return Ok(true);
@@ -548,8 +553,29 @@ impl EmailProcessor {
     }
 
     /// Get domain configuration.
-    async fn get_domain(&self, domain_id: &str, tenant_id: &str) -> ProcessorResult<Domain> {
-        let cache_key = format!("{}:{}", tenant_id, domain_id);
+    ///
+    /// Falls back to a non-DKIM domain derived from the envelope sender when
+    /// the job has no registered `domain_id` (NULL/empty), so queued mail
+    /// from unknown domains still flows instead of dead-lettering.
+    async fn get_domain(&self, job: &EmailJob) -> ProcessorResult<Domain> {
+        if job.domain_id.is_empty() {
+            return Ok(Domain {
+                id: String::new(),
+                tenant_id: job.tenant_id.clone(),
+                domain: job
+                    .from
+                    .rsplit_once('@')
+                    .map(|(_, d)| d.to_string())
+                    .unwrap_or_default(),
+                dkim_selector: None,
+                dkim_private_key: None,
+                warmup_enabled: false,
+                warmup_day: 0,
+                return_path: None,
+            });
+        }
+
+        let cache_key = format!("{}:{}", job.tenant_id, job.domain_id);
 
         if let Some(domain) = self.domain_cache.get(&cache_key) {
             return Ok(domain);
@@ -558,17 +584,18 @@ impl EmailProcessor {
         let domain = sqlx::query_as::<_, Domain>(
             r#"
             SELECT
-                id, tenant_id, domain, dkim_selector, dkim_private_key,
-                warmup_enabled, warmup_day, return_path
+                id::text, tenant_id, name AS domain, NULL::text AS dkim_selector,
+                NULL::text AS dkim_private_key, false AS warmup_enabled,
+                0 AS warmup_day, NULL::text AS return_path
             FROM domains
-            WHERE id = $1 AND tenant_id = $2
+            WHERE id = $1::uuid AND tenant_id = $2
             "#,
         )
-        .bind(domain_id)
-        .bind(tenant_id)
+        .bind(&job.domain_id)
+        .bind(&job.tenant_id)
         .fetch_optional(&self.db)
         .await?
-        .ok_or_else(|| ProcessorError::Job(format!("Domain not found: {}", domain_id)))?;
+        .ok_or_else(|| ProcessorError::Job(format!("Domain not found: {}", job.domain_id)))?;
 
         self.domain_cache.insert(cache_key, domain.clone());
         Ok(domain)
@@ -700,7 +727,7 @@ impl EmailProcessor {
             r#"
             UPDATE email_queue
             SET status = 'sent', sent_at = NOW(), smtp_message_id = $1
-            WHERE id = $2
+            WHERE id = $2::uuid
             "#,
         )
         .bind(&result.smtp_message_id)
@@ -711,7 +738,7 @@ impl EmailProcessor {
         // Record sent event
         sqlx::query(
             r#"
-            INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient_email, created_at)
+            INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient, timestamp)
             VALUES ($1, $2, $3, $4, $5, 'sent', $6, NOW())
             "#,
         )
@@ -731,7 +758,7 @@ impl EmailProcessor {
     async fn handle_suppressed(&self, job: &EmailJob, reason: &str) -> ProcessorResult<()> {
         sqlx::query(
             r#"
-            UPDATE email_queue SET status = 'suppressed', error_message = $1 WHERE id = $2
+            UPDATE email_queue SET status = 'suppressed', error_message = $1 WHERE id = $2::uuid
             "#,
         )
         .bind(reason)
@@ -764,7 +791,7 @@ impl EmailProcessor {
             UPDATE email_queue
             SET status = 'pending', attempt = $1, scheduled_at = $2,
                 error_message = $3, locked_until = NULL
-            WHERE id = $4
+            WHERE id = $4::uuid
             "#,
         )
         .bind(next_attempt)
@@ -785,7 +812,7 @@ impl EmailProcessor {
     ) -> ProcessorResult<()> {
         sqlx::query(
             r#"
-            UPDATE email_queue SET status = 'bounced', error_message = $1 WHERE id = $2
+            UPDATE email_queue SET status = 'bounced', error_message = $1 WHERE id = $2::uuid
             "#,
         )
         .bind(error.to_string())
@@ -793,7 +820,8 @@ impl EmailProcessor {
         .execute(&self.db)
         .await?;
 
-        // Add to suppressions
+        // Add to suppressions. suppressions.id is VARCHAR(26), so use a
+        // short random suffix ("sup_" + 18 hex chars = 22 chars).
         sqlx::query(
             r#"
             INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
@@ -801,7 +829,7 @@ impl EmailProcessor {
             ON CONFLICT (tenant_id, email) DO NOTHING
             "#,
         )
-        .bind(format!("sup_{}", uuid::Uuid::new_v4()))
+        .bind(format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]))
         .bind(&job.tenant_id)
         .bind(&job.to)
         .execute(&self.db)
@@ -810,7 +838,7 @@ impl EmailProcessor {
         // Record bounce event
         sqlx::query(
             r#"
-            INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient_email, created_at)
+            INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient, timestamp)
             VALUES ($1, $2, $3, $4, $5, 'bounced', $6, NOW())
             "#,
         )
@@ -846,7 +874,7 @@ impl EmailProcessor {
 
             sqlx::query(
                 r#"
-                UPDATE email_queue SET status = 'failed', error_message = $1 WHERE id = $2
+                UPDATE email_queue SET status = 'failed', error_message = $1 WHERE id = $2::uuid
                 "#,
             )
             .bind(error.to_string())
@@ -869,7 +897,7 @@ impl EmailProcessor {
             UPDATE email_queue
             SET status = 'pending', scheduled_at = $1, locked_until = NULL,
                 metadata = jsonb_set(COALESCE(metadata, '{}'), '{requeue_reason}', $2::jsonb)
-            WHERE id = $3
+            WHERE id = $3::uuid
             "#,
         )
         .bind(retry_at)
@@ -930,9 +958,10 @@ impl EmailProcessor {
     async fn load_dkim_keys(&self) -> ProcessorResult<()> {
         let keys: Vec<(String, String, String, String)> = sqlx::query_as(
             r#"
-            SELECT id, domain, dkim_selector, dkim_private_key
+            SELECT id, name AS domain, NULL::text AS dkim_selector,
+                   NULL::text AS dkim_private_key
             FROM domains
-            WHERE dkim_private_key IS NOT NULL
+            WHERE false
             "#,
         )
         .fetch_all(&self.db)

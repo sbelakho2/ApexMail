@@ -21,7 +21,7 @@ pub struct ComplianceService {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct ComplianceConfigRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     enabled_frameworks: Option<Vec<String>>,
     status: String,
     zero_retention_mode: bool,
@@ -45,7 +45,7 @@ impl From<ComplianceConfigRow> for ComplianceConfig {
     fn from(row: ComplianceConfigRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             enabled_frameworks: row.enabled_frameworks,
             status: row.status,
             zero_retention_mode: row.zero_retention_mode,
@@ -70,7 +70,7 @@ impl From<ComplianceConfigRow> for ComplianceConfig {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct AuditLogEntryRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     user_id: Option<String>,
     action: String,
     resource_type: String,
@@ -89,7 +89,7 @@ impl From<AuditLogEntryRow> for AuditLogEntry {
     fn from(row: AuditLogEntryRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             user_id: row.user_id,
             action: row.action,
             resource_type: row.resource_type,
@@ -109,7 +109,7 @@ impl From<AuditLogEntryRow> for AuditLogEntry {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct DataAccessRequestRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     #[sqlx(rename = "type")]
     request_type: String,
     status: String,
@@ -134,7 +134,7 @@ impl From<DataAccessRequestRow> for DataAccessRequest {
     fn from(row: DataAccessRequestRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             request_type: row.request_type,
             status: row.status,
             requester_id: row.requester_id,
@@ -156,10 +156,6 @@ impl From<DataAccessRequestRow> for DataAccessRequest {
     }
 }
 
-fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
-}
-
 impl ComplianceService {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -175,7 +171,6 @@ impl ComplianceService {
         frameworks: Vec<String>,
         hipaa_enabled: bool,
     ) -> Result<ApiResult<ComplianceConfig>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let now = Utc::now();
 
@@ -201,7 +196,7 @@ impl ComplianceService {
                updated_at=$7
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(&frameworks).bind(encryption_at_rest).bind(encryption_in_transit)
+        .bind(id).bind(&tenant_id).bind(&frameworks).bind(encryption_at_rest).bind(encryption_in_transit)
         .bind(retention_days).bind(now)
         .fetch_one(&self.db)
         .await
@@ -216,11 +211,10 @@ impl ComplianceService {
         &self,
         tenant_id: String,
     ) -> Result<ApiResult<ComplianceConfig>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let row = sqlx::query_as::<_, ComplianceConfigRow>(
             "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Get compliance config: {e}"))?;
@@ -239,13 +233,12 @@ impl ComplianceService {
         signatory_title: &str,
         signatory_email: &str,
     ) -> Result<ApiResult<ComplianceConfig>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let row = sqlx::query_as::<_, ComplianceConfigRow>(
             "UPDATE ent_compliance_configs SET baa_signed = true, baa_signed_at = NOW(),
              baa_signatory_name = $2, baa_signatory_title = $3, baa_signatory_email = $4, updated_at = NOW()
              WHERE tenant_id = $1 RETURNING *"
         )
-        .bind(tenant_uuid).bind(signatory_name).bind(signatory_title).bind(signatory_email)
+        .bind(&tenant_id).bind(signatory_name).bind(signatory_title).bind(signatory_email)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Sign BAA: {e}"))?;
@@ -264,12 +257,11 @@ impl ComplianceService {
         &self,
         tenant_id: String,
     ) -> Result<ApiResult<ComplianceConfig>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let row = sqlx::query_as::<_, ComplianceConfigRow>(
             "UPDATE ent_compliance_configs SET zero_retention_mode = true, updated_at = NOW()
              WHERE tenant_id = $1 RETURNING *",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Enable zero retention: {e}"))?;
@@ -300,13 +292,12 @@ impl ComplianceService {
         request_id: Option<&str>,
         metadata: Option<serde_json::Value>,
     ) -> Result<(), String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO ent_compliance_audit_logs (id, tenant_id, user_id, action, resource_type, resource_id, old_value, new_value, ip_address, user_agent, session_id, request_id, metadata, created_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::inet,$10,$11,$12,$13,NOW())"
         )
-        .bind(id).bind(tenant_uuid).bind(user_id).bind(action)
+        .bind(id).bind(&tenant_id).bind(user_id).bind(action)
         .bind(resource_type).bind(resource_id)
         .bind(&old_value).bind(&new_value)
         .bind(ip_address).bind(user_agent).bind(session_id).bind(request_id)
@@ -326,7 +317,6 @@ impl ComplianceService {
         limit: i64,
         offset: i64,
     ) -> Result<ApiResult<Vec<AuditLogEntry>>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
 
         // H-01: Use CASE WHEN / COALESCE patterns instead of dynamic SQL via format!()
         // to prevent SQL injection. All parameters remain strongly typed and bound via sqlx.
@@ -338,7 +328,7 @@ impl ComplianceService {
              ORDER BY created_at DESC
              LIMIT $4 OFFSET $5",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .bind(action)
         .bind(resource_type)
         .bind(limit)
@@ -363,14 +353,13 @@ impl ComplianceService {
         justification: Option<&str>,
         identifiers: Option<serde_json::Value>,
     ) -> Result<ApiResult<DataAccessRequest>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, DataAccessRequestRow>(
             "INSERT INTO ent_data_access_requests (id, tenant_id, type, status, requester_id, requester_email, resource_type, justification, identifiers, created_at)
              VALUES ($1,$2,$3,'pending',$4,$5,$6,$7,$8,NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(request_type)
+        .bind(id).bind(&tenant_id).bind(request_type)
         .bind(requester_id).bind(requester_email)
         .bind(resource_type).bind(justification).bind(&identifiers)
         .fetch_one(&self.db)
@@ -418,14 +407,13 @@ impl ComplianceService {
         requester_email: &str,
         identifiers: Option<serde_json::Value>,
     ) -> Result<ApiResult<DataAccessRequest>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, DataAccessRequestRow>(
             "INSERT INTO ent_data_access_requests (id, tenant_id, type, status, requester_id, requester_email, identifiers, created_at)
              VALUES ($1,$2,'deletion','pending',$3,$4,$5,NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(requester_id).bind(requester_email).bind(&identifiers)
+        .bind(id).bind(&tenant_id).bind(requester_id).bind(requester_email).bind(&identifiers)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Create data deletion request: {e}"))?;
@@ -439,11 +427,10 @@ impl ComplianceService {
         &self,
         tenant_id: String,
     ) -> Result<ApiResult<serde_json::Value>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let config = sqlx::query_as::<_, ComplianceConfigRow>(
             "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Get config for report: {e}"))?;
@@ -456,14 +443,14 @@ impl ComplianceService {
         // Aggregate audit log counts
         let audit_count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM ent_compliance_audit_logs WHERE tenant_id = $1")
-                .bind(tenant_uuid)
+                .bind(&tenant_id)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| format!("Count audit logs: {e}"))?;
 
         let access_requests: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM ent_data_access_requests WHERE tenant_id = $1")
-                .bind(tenant_uuid)
+                .bind(&tenant_id)
                 .fetch_one(&self.db)
                 .await
                 .map_err(|e| format!("Count access requests: {e}"))?;
@@ -492,11 +479,10 @@ impl ComplianceService {
         &self,
         tenant_id: String,
     ) -> Result<ApiResult<serde_json::Value>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let config = sqlx::query_as::<_, ComplianceConfigRow>(
             "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Get status: {e}"))?;

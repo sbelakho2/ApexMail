@@ -47,7 +47,26 @@ fn init_tracing() -> Option<TracingGuard> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install the ring CryptoProvider for rustls before any TLS-capable code
+    // runs. The workspace enables both `ring` (workspace rustls) and
+    // aws-lc-rs (via reqwest's `rustls-tls`, sqlx, mail-send), so rustls
+    // cannot pick a default provider on its own and would panic on the first
+    // TLS handshake (email SMTP TLS verify, webhook HTTPS delivery, SES).
+    // Installing explicitly keeps the provider deterministic across builds.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     let _guard = init_tracing();
+
+    // Install the ring crypto provider for rustls BEFORE any TLS use.
+    // The workspace enables rustls with the `ring` feature, but other
+    // dependencies (reqwest/rustls-tls, redis/tokio-rustls-comp) can pull
+    // rustls in with aws-lc-rs too, leaving no unambiguous process-level
+    // default. Without an explicit install, the first TLS connection
+    // panics with "Could not automatically determine the process-level
+    // CryptoProvider" and kills the email processor task.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     info!("Starting ApexMail Worker (Rust)");
 
@@ -149,8 +168,13 @@ async fn main() -> Result<()> {
             secure: env::var("SMTP_TLS")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(true),
-            username: env::var("SMTP_USERNAME").ok(),
-            password: env::var("SMTP_PASSWORD").ok().map(zeroize::Zeroizing::new),
+            username: env::var("SMTP_USERNAME")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            password: env::var("SMTP_PASSWORD")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(zeroize::Zeroizing::new),
             ..Default::default()
         };
 
@@ -247,10 +271,13 @@ async fn main() -> Result<()> {
 
     info!("All processors running. Press Ctrl+C to stop.");
 
-    // Start health check server for Kubernetes probes
+    // Start health check server for Kubernetes probes. Honors HEALTH_PORT and
+    // falls back to METRICS_PORT (the compose file configures 9093) so the
+    // container healthcheck and the listener always agree.
     let health_port: u16 = env::var("HEALTH_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
+        .or_else(|| env::var("METRICS_PORT").ok().and_then(|s| s.parse().ok()))
         .unwrap_or(9090);
 
     let health_app = Router::new().route("/health", get(|| async { "OK" }));

@@ -46,6 +46,7 @@ metrics-exporter-prometheus.workspace = true
 # Redis (key eviction monitoring)
 deadpool-redis.workspace = true
 redis.workspace = true
+urlencoding.workspace = true
 
 # OpenTelemetry (distributed tracing)
 opentelemetry.workspace = true

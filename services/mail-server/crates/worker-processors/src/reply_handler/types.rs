@@ -166,7 +166,7 @@ pub struct ClassificationResult {
 pub struct InboundMessage {
     pub id: String,
     #[sqlx(rename = "tenantId")]
-    pub tenant_id: String,
+    pub tenant_id: Option<String>,
     #[sqlx(rename = "leadId")]
     pub lead_id: Option<String>,
     #[sqlx(rename = "fromEmail")]

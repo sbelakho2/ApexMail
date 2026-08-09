@@ -24,7 +24,7 @@ const ENCRYPTED_PREFIX: &str = "$AES256GCM$";
 // across similar queries and do not introduce SQL injection risk.
 const ACCOUNT_COLUMNS: &str = "id, email, domain, password_hash, display_name, quota_bytes, used_bytes, is_active, created_at, updated_at";
 const MAILBOX_COLUMNS: &str = "id, account_id, name, parent_id, mailbox_type, total_messages, unread_messages, uidnext, created_at, updated_at";
-const MESSAGE_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, subject, date, text_body, html_body, raw_size, is_read, is_starred, is_deleted, is_spam, labels, headers, attachments, created_at, updated_at";
+const MESSAGE_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, subject, date, text_body, html_body, raw_message, raw_size, is_read, is_starred, is_deleted, is_spam, labels, headers, attachments, created_at, updated_at";
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Message storage
@@ -105,6 +105,48 @@ impl MessageStorage {
             let result = String::from_utf8(plaintext)
                 .map_err(|e| anyhow!("Decrypted body is not valid UTF-8: {e}"))?;
             Ok(Some(result))
+        } else {
+            // Legacy plaintext value – return as-is
+            Ok(Some(stored))
+        }
+    }
+
+    /// Encrypt raw RFC5322 message bytes at rest when encryption is enabled.
+    /// The `$AES256GCM$` prefix distinguishes ciphertext from legacy values.
+    fn encrypt_raw(&self, raw: Option<Vec<u8>>) -> Result<Option<Vec<u8>>> {
+        let plaintext = match raw {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let key = match &self.encryption_key {
+            Some(k) => k,
+            None => return Ok(Some(plaintext)),
+        };
+        let ciphertext = encryption::encrypt(&plaintext, key)?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
+        let mut result = Vec::with_capacity(ENCRYPTED_PREFIX.len() + encoded.len());
+        result.extend_from_slice(ENCRYPTED_PREFIX.as_bytes());
+        result.extend_from_slice(encoded.as_bytes());
+        Ok(Some(result))
+    }
+
+    /// Decrypt raw message bytes previously encrypted by [`encrypt_raw`].
+    /// Values without the `$AES256GCM$` prefix are passed through unchanged.
+    fn decrypt_raw(&self, raw: Option<Vec<u8>>) -> Result<Option<Vec<u8>>> {
+        let stored = match raw {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let key = match &self.encryption_key {
+            Some(k) => k,
+            None => return Ok(Some(stored)),
+        };
+        if let Some(encoded) = stored.strip_prefix(ENCRYPTED_PREFIX.as_bytes()) {
+            let ciphertext = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|e| anyhow!("Failed to decode encrypted raw message: {e}"))?;
+            let plaintext = encryption::decrypt(&ciphertext, key)?;
+            Ok(Some(plaintext))
         } else {
             // Legacy plaintext value – return as-is
             Ok(Some(stored))
@@ -489,7 +531,7 @@ impl MessageStorage {
     pub async fn store_message(&self, message: &StoredMessage) -> Result<(Uuid, i64)> {
         let mut tx = self.pool.begin().await?;
 
-        let mailbox_ok: Option<i64> = sqlx::query_scalar(
+        let mailbox_ok: Option<i32> = sqlx::query_scalar(
             r#"
             SELECT 1 FROM mail_mailboxes WHERE id = $1 AND account_id = $2
         "#,
@@ -553,15 +595,16 @@ impl MessageStorage {
         // O‑4.3:Encrypt body content before storing if encryption is enabled
         let encrypted_text = self.encrypt_body(message.text_body.clone())?;
         let encrypted_html = self.encrypt_body(message.html_body.clone())?;
+        let encrypted_raw = self.encrypt_raw(message.raw_message.clone())?;
 
         let id = sqlx::query_scalar::<_, Uuid>(r#"
             INSERT INTO mail_messages (
                 id, account_id, mailbox_id, uid, message_id, from_address, from_name,
                 to_addresses, cc_addresses, bcc_addresses, subject, date,
-                text_body, html_body, raw_size, is_read, is_starred, is_deleted,
+                text_body, html_body, raw_message, raw_size, is_read, is_starred, is_deleted,
                 is_spam, labels, headers, attachments
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
             RETURNING id
         "#)
         .bind(message.id)
@@ -578,6 +621,7 @@ impl MessageStorage {
         .bind(message.date)
         .bind(&encrypted_text)
         .bind(&encrypted_html)
+        .bind(&encrypted_raw)
         .bind(message.raw_size)
         .bind(message.is_read)
         .bind(message.is_starred)
@@ -1155,6 +1199,8 @@ impl MessageStorage {
         let html_body: Option<String> = row.get("html_body");
         let text_body = self.decrypt_body(text_body)?;
         let html_body = self.decrypt_body(html_body)?;
+        let raw_message: Option<Vec<u8>> = row.get("raw_message");
+        let raw_message = self.decrypt_raw(raw_message)?;
 
         Ok(StoredMessage {
             id: row.get("id"),
@@ -1171,6 +1217,7 @@ impl MessageStorage {
             date: row.get("date"),
             text_body,
             html_body,
+            raw_message,
             raw_size: row.get("raw_size"),
             is_read: row.get("is_read"),
             is_starred: row.get("is_starred"),

@@ -78,7 +78,7 @@ pub async fn record_usage(
         sqlx::query(
             r#"
             INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
-            VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
@@ -587,7 +587,7 @@ pub async fn record_with_quota_check(
         sqlx::query(
             r#"
             INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
-            VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (id) DO NOTHING
             "#,
         )

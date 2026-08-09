@@ -25,11 +25,14 @@
 //!   incremented. All other metric gauges retain their previous values.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use deadpool_redis::Pool as RedisPool;
 use parking_lot::RwLock;
 use tracing::warn;
+
+use crate::metrics_collector::MetricsCollector;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -157,6 +160,9 @@ pub struct RedisKeyMonitor {
     eviction_rate_threshold: f64,
     /// Whether a high-eviction warning is currently active (prevents log spam).
     high_eviction_warning_active: AtomicBool,
+    /// Optional collector mirrored with the same metrics so they also appear
+    /// in the service's `/metrics` output and alert-rule evaluations.
+    collector: Option<Arc<MetricsCollector>>,
 }
 
 impl RedisKeyMonitor {
@@ -171,6 +177,19 @@ impl RedisKeyMonitor {
             eviction_rate_threshold: eviction_rate_threshold
                 .unwrap_or(DEFAULT_EVICTION_RATE_THRESHOLD),
             high_eviction_warning_active: AtomicBool::new(false),
+            collector: None,
+        }
+    }
+
+    /// Create a monitor that also mirrors its gauges into a
+    /// [`MetricsCollector`] (for `/metrics` output and alert evaluation).
+    pub fn with_collector(
+        eviction_rate_threshold: Option<f64>,
+        collector: Arc<MetricsCollector>,
+    ) -> Self {
+        Self {
+            collector: Some(collector),
+            ..Self::new(eviction_rate_threshold)
         }
     }
 
@@ -199,6 +218,31 @@ impl RedisKeyMonitor {
 
         // cumulative evicted_keys as a counter
         metrics::counter!("redis_evicted_keys_total").increment(info.evicted_keys);
+
+        // --- Mirror into the in-memory collector (if attached) ---
+
+        if let Some(collector) = &self.collector {
+            collector.record_gauge(
+                "redis_used_memory_bytes",
+                info.used_memory as f64,
+                "Current used_memory from Redis INFO",
+            );
+            collector.record_gauge(
+                "redis_maxmemory_bytes",
+                info.maxmemory as f64,
+                "maxmemory configured on the Redis server (0 = no limit)",
+            );
+            collector.record_gauge(
+                "redis_memory_utilization_ratio",
+                utilization,
+                "used_memory / maxmemory (0.0 when maxmemory is 0)",
+            );
+            collector.record_counter(
+                "redis_evicted_keys_total",
+                info.evicted_keys as f64,
+                "Cumulative evicted_keys from Redis INFO",
+            );
+        }
 
         // --- Compute eviction rate ---
 
@@ -234,6 +278,14 @@ impl RedisKeyMonitor {
         };
 
         metrics::gauge!("redis_eviction_rate_per_minute").set(rate_per_minute);
+
+        if let Some(collector) = &self.collector {
+            collector.record_gauge(
+                "redis_eviction_rate_per_minute",
+                rate_per_minute,
+                "Evicted keys per minute (computed from delta)",
+            );
+        }
 
         // --- Threshold check ---
 

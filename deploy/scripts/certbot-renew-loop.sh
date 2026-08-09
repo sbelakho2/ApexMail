@@ -18,17 +18,31 @@ set -eu
 
 LIVE_DIR="/etc/letsencrypt/live/apexmail.ee"
 OUT_DIR="/etc/letsencrypt"
-
-cat > /usr/local/bin/apexmail-deploy-hook.sh <<'HOOK'
+# The nginx container runs as uid 101 (nginx); the certbot container runs as
+# root, so install with mode 600 owned by uid 101 — owner-only read (SEC-107)
+# while remaining readable by the nginx master process.
+NGINX_UID=101
+cat > /usr/local/bin/apexmail-deploy-hook.sh <<HOOK
 #!/bin/sh
 set -eu
 LIVE_DIR="/etc/letsencrypt/live/apexmail.ee"
 OUT_DIR="/etc/letsencrypt"
+NGINX_UID=${NGINX_UID}
 # SECURITY (SEC-107): Private key is 600 (owner-only) to prevent unauthorized reads.
-install -m 644 "$LIVE_DIR/fullchain.pem" "$OUT_DIR/fullchain.pem"
-install -m 600 "$LIVE_DIR/privkey.pem"   "$OUT_DIR/privkey.pem"
-install -m 644 "$LIVE_DIR/chain.pem"     "$OUT_DIR/ca-chain.pem"
-echo "[certbot] deploy-hook installed new cert at $OUT_DIR ($(date -u +%FT%TZ))"
+install -m 644 "\$LIVE_DIR/fullchain.pem" "\$OUT_DIR/fullchain.pem"
+install -m 600 "\$LIVE_DIR/privkey.pem"   "\$OUT_DIR/privkey.pem"
+install -m 644 "\$LIVE_DIR/chain.pem"     "\$OUT_DIR/ca-chain.pem"
+chown \${NGINX_UID}:\${NGINX_UID} "\$OUT_DIR/fullchain.pem" "\$OUT_DIR/privkey.pem" "\$OUT_DIR/ca-chain.pem"
+# Reopen the certbot tree for the mta/imap containers, which run as uid 10001
+# (apexmail) and load fullchain/privkey from live/<domain>/ at startup.
+# certbot creates live/ and archive/ as 0700 root:root — reopen the dirs and
+# make the pem files 0644 so the non-root mail containers can read them
+# (the OUT_DIR copies above stay 0600/101 for nginx).
+chmod 0755 "\$OUT_DIR/live" "\$OUT_DIR/archive"
+for d in "\$OUT_DIR"/live/* "\$OUT_DIR"/archive/*; do
+  [ -d "\$d" ] && chmod 0755 "\$d" && chmod 0644 "\$d"/*.pem 2>/dev/null || true
+done
+echo "[certbot] deploy-hook installed new cert at \$OUT_DIR (\$(date -u +%FT%TZ))"
 HOOK
 chmod +x /usr/local/bin/apexmail-deploy-hook.sh
 

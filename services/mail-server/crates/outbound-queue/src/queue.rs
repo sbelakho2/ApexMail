@@ -326,52 +326,16 @@ impl EmailQueue {
 
     /// Initialize queue tables
     pub async fn initialize(&self) -> Result<()> {
+        // Canonical email_queue shape is owned by the SQL migrations
+        // (services/mail-server/migrations/, incl. 088/089): a partitioned
+        // table carrying BOTH the outbound-queue/base column family
+        // (from_address, to_addresses, text_body, html_body, attempts, ...)
+        // and the worker family (message_id, domain_id, "from", "to", html,
+        // text, scheduled_at, attempt, locked_until, error_message,
+        // smtp_message_id). Nothing is created or altered at runtime anymore;
+        // this only verifies the deployed schema is the canonical one and
+        // backfills missing indexes (no-ops when already present).
         self.ensure_compatible_email_queue_schema().await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS email_queue (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                from_address TEXT NOT NULL,
-                to_addresses TEXT[] NOT NULL,
-                subject TEXT NOT NULL,
-                text_body TEXT,
-                html_body TEXT,
-                headers JSONB DEFAULT '{}'::jsonb,
-                status TEXT NOT NULL DEFAULT 'pending',
-                attempts INT NOT NULL DEFAULT 0,
-                max_attempts INT NOT NULL DEFAULT 5,
-                last_error TEXT,
-                next_retry_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                sent_at TIMESTAMPTZ,
-                campaign_id UUID,
-                sequence_id UUID,
-                contact_id UUID,
-                priority INT NOT NULL DEFAULT 0,
-                tenant_id TEXT
-            )
-        "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::raw_sql(
-            r#"
-            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
-            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS sequence_id UUID;
-            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS contact_id UUID;
-            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
-            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS last_error TEXT;
-            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS text_body TEXT;
-            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS html_body TEXT;
-            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS from_address TEXT;
-            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS to_addresses TEXT[];
-        "#,
-        )
-        .execute(&self.pool)
-        .await?;
 
         sqlx::query(
             r#"
@@ -401,21 +365,11 @@ impl EmailQueue {
         .await?;
 
         // MI-008: Dead-letter queue for permanently failed bounce emails.
-        // The dead_letter_queue table is now created via SQL migration
+        // The dead_letter_queue table is created via SQL migration
         // (migration 052/056), not at runtime. This ensures the schema is
         // version-controlled and available before the application starts.
 
-        // Add tenant_id column for existing deployments (idempotent)
-        sqlx::query(
-            r#"
-            ALTER TABLE email_queue
-            ADD COLUMN IF NOT EXISTS tenant_id TEXT
-        "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        info!("Email queue tables initialized (including dead-letter queue)");
+        info!("Email queue tables verified (canonical schema)");
         Ok(())
     }
 
@@ -454,22 +408,19 @@ impl EmailQueue {
             return Ok(());
         }
 
+        // The canonical email_queue always carries from_address/to_addresses.
+        // A table without them is a foreign/legacy schema — never drop it
+        // (it may be partitioned, referenced by FKs, or hold data). Fail
+        // loudly instead of destroying it.
         let row_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM email_queue")
             .fetch_one(&self.pool)
             .await?;
 
-        if row_count > 0 {
-            bail!(
-                "email_queue uses the legacy schema and contains {row_count} rows; migrate it before starting outbound-queue"
-            );
-        }
-
-        warn!("Dropping empty legacy email_queue table so outbound-queue can create its runtime schema");
-        sqlx::query("DROP TABLE email_queue CASCADE")
-            .execute(&self.pool)
-            .await?;
-
-        Ok(())
+        bail!(
+            "email_queue uses a legacy schema without from_address/to_addresses \
+             (currently {row_count} rows); apply the canonical migrations \
+             (services/mail-server/migrations/088) before starting outbound-queue"
+        );
     }
 
     /// Enqueue an email

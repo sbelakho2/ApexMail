@@ -417,7 +417,7 @@ pub struct BYOIPVerifyBody {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubAccountCreateBody {
-    pub parent_id: Uuid,
+    pub parent_id: String,
     pub name: String,
     pub email: Option<String>,
     pub domain: Option<String>,
@@ -1940,7 +1940,7 @@ async fn sub_account_create(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<SubAccountCreateBody>,
 ) -> impl IntoResponse {
-    if let Err(e) = verify_tenant_access(&auth, &body.parent_id.to_string()) {
+    if let Err(e) = verify_tenant_access(&auth, &body.parent_id) {
         return e;
     }
     service_result(
@@ -1968,7 +1968,7 @@ async fn sub_account_get(
     let result = state.sub_accounts.get(id).await;
     if let Ok(ref api_result) = result {
         if let Some(ref sub) = api_result.data {
-            if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+            if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                 return e;
             }
         }
@@ -1986,7 +1986,7 @@ async fn sub_account_update(
     match state.sub_accounts.get(id).await {
         Ok(api_result) => {
             if let Some(ref sub) = api_result.data {
-                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                     return e;
                 }
             } else {
@@ -2018,7 +2018,7 @@ async fn sub_account_delete(
     match state.sub_accounts.get(id).await {
         Ok(api_result) => {
             if let Some(ref sub) = api_result.data {
-                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                     return e;
                 }
             } else {
@@ -2033,10 +2033,10 @@ async fn sub_account_delete(
 async fn sub_account_list(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
-    Path(parent_id): Path<Uuid>,
+    Path(parent_id): Path<String>,
     Query(q): Query<StatusFilterParams>,
 ) -> impl IntoResponse {
-    if let Err(e) = verify_tenant_access(&auth, &parent_id.to_string()) {
+    if let Err(e) = verify_tenant_access(&auth, &parent_id) {
         return e;
     }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
@@ -2059,7 +2059,7 @@ async fn sub_account_suspend(
     match state.sub_accounts.get(id).await {
         Ok(api_result) => {
             if let Some(ref sub) = api_result.data {
-                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                     return e;
                 }
             } else {
@@ -2074,9 +2074,9 @@ async fn sub_account_suspend(
 async fn sub_account_stats(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
-    Path(parent_id): Path<Uuid>,
+    Path(parent_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = verify_tenant_access(&auth, &parent_id.to_string()) {
+    if let Err(e) = verify_tenant_access(&auth, &parent_id) {
         return e;
     }
     service_result(state.sub_accounts.get_stats(parent_id).await)
@@ -2092,7 +2092,7 @@ async fn sub_account_api_key(
     match state.sub_accounts.get(id).await {
         Ok(api_result) => {
             if let Some(ref sub) = api_result.data {
-                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                     return e;
                 }
             } else {

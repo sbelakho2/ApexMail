@@ -93,9 +93,9 @@ export default function () {
   // ── Health Check (lightweight, no auth) ───────────────────────────────────
   group('health check', function () {
     // Alternate between liveness and readiness to distribute load
-    const endpoint = iter % 2 === 0 ? 'liveness' : 'readiness';
+    const endpoint = iter % 2 === 0 ? 'live' : 'ready';
     const resp = http.get(
-      `${BASE_URL}/v1/health/${endpoint}`,
+      `${BASE_URL}/health/${endpoint}`,
       {
         headers: {
           'Content-Type': 'application/json',
@@ -162,7 +162,7 @@ export default function () {
     });
 
     const emailResp = http.post(
-      `${BASE_URL}/v1/email/send`,
+      `${BASE_URL}/v1/messages`,
       emailPayload,
       {
         headers: {

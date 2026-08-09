@@ -105,7 +105,7 @@ impl LogAggregator {
             .into_iter()
             .map(|(_, idx)| guard[idx].clone())
             .collect();
-        results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        results.sort_by_key(|entry| Reverse(entry.timestamp));
         results
     }
 

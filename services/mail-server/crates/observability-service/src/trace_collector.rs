@@ -59,7 +59,7 @@ impl TraceCollector {
     pub fn list_recent(&self, limit: usize) -> Vec<TraceSpan> {
         let guard = self.spans.read();
         let mut sorted: Vec<&TraceSpan> = guard.iter().collect();
-        sorted.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+        sorted.sort_by_key(|span| std::cmp::Reverse(span.start_time));
         sorted.into_iter().take(limit).cloned().collect()
     }
 

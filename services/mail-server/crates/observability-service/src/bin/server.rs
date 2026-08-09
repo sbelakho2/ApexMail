@@ -6,56 +6,141 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use deadpool_redis::{Config as RedisConfig, Runtime};
-use observability_service::alerting::AlertManager;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use observability_service::alerting::{AlertManager, ComparisonOperator, AlertRule};
 use observability_service::config::ObservabilityConfig;
 use observability_service::log_aggregator::LogAggregator;
 use observability_service::metrics_collector::MetricsCollector;
+use observability_service::otlp_exporter::{init_otlp_tracing, is_otlp_enabled, OtlpConfig};
 use observability_service::redis_monitor::{RedisKeyMonitor, DEFAULT_POLL_INTERVAL_SECS};
 use observability_service::routes::{self, AppState};
 use observability_service::slo::SloMonitor;
 use observability_service::trace_collector::TraceCollector;
+use observability_service::types::AlertSeverity;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-    // Initialise tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .json()
-        .init();
-
     let config = match ObservabilityConfig::from_env() {
         Ok(config) => config,
         Err(err) => {
-            tracing::error!(error = %err, "Invalid observability configuration");
-            return;
+            eprintln!("Invalid observability configuration: {err}");
+            std::process::exit(1);
         }
     };
+
+    // ── Tracing ─────────────────────────────────────────────────────────
+
+    // When an OTLP endpoint is configured, install a registry that combines
+    // JSON stdout logs with an OTLP span exporter (same pattern as every
+    // other ApexMail service). Fall back to plain JSON logs otherwise.
+    let _otlp_guard = if is_otlp_enabled() && config.tracing.enabled {
+        match init_otlp_tracing(OtlpConfig {
+            service_name: "observability-service".into(),
+            service_version: Some(config.version.clone()),
+            environment: Some(config.environment.clone()),
+            ..Default::default()
+        }) {
+            Ok(guard) => Some(guard),
+            Err(err) => {
+                tracing::error!(error = %err, "failed to initialize OTLP tracing");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if _otlp_guard.is_none() {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .json()
+            .init();
+    }
 
     tracing::info!(
         port = config.port,
         env = %config.environment,
         redis_host = %config.redis_host,
         redis_port = config.redis_port,
+        redis_db = config.redis_db,
         "Starting observability service"
     );
 
+    // ── Global metrics recorder (backs the `metrics` crate used by the
+    //    Redis monitor and rendered on `/metrics`) ──────────────────────
+
+    let metrics_recorder = PrometheusBuilder::new().build_recorder();
+    let metrics_handle = metrics_recorder.handle();
+    if let Err(err) = metrics::set_global_recorder(Box::new(metrics_recorder)) {
+        tracing::warn!(error = %err, "metrics recorder already installed");
+    }
+
     // ── Redis connection pool ──────────────────────────────────────────
 
-    let redis_url = format!("redis://{}:{}", config.redis_host, config.redis_port);
+    let redis_url = config.redis_url();
     let redis_cfg = RedisConfig::from_url(&redis_url);
     let redis_pool = match redis_cfg.create_pool(Some(Runtime::Tokio1)) {
         Ok(pool) => Arc::new(pool),
         Err(err) => {
             tracing::error!(error = %err, redis_url = %redis_url, "failed to create Redis pool");
-            return;
+            std::process::exit(1);
         }
     };
 
+    // ── Core state ─────────────────────────────────────────────────────
+
+    let default_buckets = config.metrics.histogram_buckets.clone();
+    let metrics_collector = Arc::new(MetricsCollector::new(default_buckets));
+
+    let state = AppState::new(
+        metrics_collector.clone(),
+        Arc::new(TraceCollector::new()),
+        Arc::new(LogAggregator::new()),
+        Arc::new(AlertManager::new()),
+        Arc::new(SloMonitor::new()),
+        config.internal_service_token.clone(),
+    )
+    .with_redis_pool(redis_pool.clone())
+    .with_metrics_handle(metrics_handle);
+
+    // ── Default SLOs ───────────────────────────────────────────────────
+
+    state.slos.define_slo("api_availability", 99.9, 30);
+    state.slos.define_slo("api_latency_p99", 99.0, 7);
+    tracing::info!(slos = state.slos.list_slos().len(), "Defined default SLOs");
+
+    // ── Default alert rules ────────────────────────────────────────────
+
+    if config.alerting.enabled {
+        state.alerts.add_rule(AlertRule {
+            name: "high_redis_eviction_rate".into(),
+            condition_description: "Redis eviction rate exceeds 100 keys/minute".into(),
+            metric_name: "redis_eviction_rate_per_minute".into(),
+            operator: ComparisonOperator::Gt,
+            threshold: 100.0,
+            severity: AlertSeverity::Warning,
+            cooldown_secs: 300,
+        });
+        state.alerts.add_rule(AlertRule {
+            name: "high_log_error_rate".into(),
+            condition_description: "Aggregated log error rate exceeds 5% over 5 minutes".into(),
+            metric_name: "observability_log_error_rate".into(),
+            operator: ComparisonOperator::Gt,
+            threshold: 0.05,
+            severity: AlertSeverity::Critical,
+            cooldown_secs: 600,
+        });
+        tracing::info!(rules = state.alerts.list_rules().len(), "Defined default alert rules");
+    }
+
     // ── Redis key eviction monitor ─────────────────────────────────────
 
-    let eviction_monitor = Arc::new(RedisKeyMonitor::new(None)); // uses default threshold of 100 keys/min
+    let eviction_monitor = Arc::new(RedisKeyMonitor::with_collector(
+        None,
+        metrics_collector.clone(),
+    ));
     let shutdown_flag = Arc::new(AtomicBool::new(false));
 
     // Spawn periodic Redis eviction check task
@@ -83,18 +168,64 @@ async fn main() {
         tracing::info!("Redis key eviction monitor task shut down");
     });
 
-    // ── Core state ─────────────────────────────────────────────────────
+    // ── Periodic self-monitoring + alert evaluation task ───────────────
 
-    let default_buckets = config.metrics.histogram_buckets.clone();
+    let eval_state = state.clone();
+    let alerting_enabled = config.alerting.enabled;
+    let eval_flag = shutdown_flag.clone();
+    let eval_interval_ms = config.metrics.aggregation_interval_ms.max(1_000);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(eval_interval_ms));
+        loop {
+            ticker.tick().await;
+            if eval_flag.load(Ordering::Acquire) {
+                break;
+            }
 
-    let state = AppState::new(
-        Arc::new(MetricsCollector::new(default_buckets)),
-        Arc::new(TraceCollector::new()),
-        Arc::new(LogAggregator::new()),
-        Arc::new(AlertManager::new()),
-        Arc::new(SloMonitor::new()),
-        config.internal_service_token.clone(),
-    );
+            let collector = eval_state.metrics.clone();
+            collector.record_gauge(
+                "observability_uptime_seconds",
+                collector.uptime_secs() as f64,
+                "Seconds since the observability service started",
+            );
+            let error_rate = eval_state.logs.get_error_rate(300);
+            collector.record_gauge(
+                "observability_log_error_rate",
+                error_rate,
+                "Error rate (errors / total) over the last 5 minutes of aggregated logs",
+            );
+            collector.record_gauge(
+                "observability_traces_stored",
+                eval_state.traces.len() as f64,
+                "Number of trace spans currently retained",
+            );
+            collector.record_gauge(
+                "observability_logs_stored",
+                eval_state.logs.len() as f64,
+                "Number of log entries currently retained",
+            );
+            collector.record_gauge(
+                "observability_active_alerts",
+                eval_state.alerts.list_active_alerts().len() as f64,
+                "Number of currently firing alerts",
+            );
+
+            if alerting_enabled {
+                let fired = eval_state.alerts.evaluate_all(&collector.get_summary());
+                for alert in fired {
+                    tracing::warn!(
+                        rule = %alert.rule_name,
+                        severity = %alert.severity,
+                        value = alert.value,
+                        threshold = alert.threshold,
+                        "ALERT FIRED"
+                    );
+                }
+            }
+        }
+    });
+
+    // ── HTTP server ────────────────────────────────────────────────────
 
     let app = routes::router(state);
 
@@ -105,7 +236,7 @@ async fn main() {
         Ok(listener) => listener,
         Err(err) => {
             tracing::error!(error = %err, %addr, "failed to bind listener");
-            return;
+            std::process::exit(1);
         }
     };
 

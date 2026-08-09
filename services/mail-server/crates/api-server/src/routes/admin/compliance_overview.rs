@@ -287,10 +287,10 @@ async fn get_compliance_overview(
         let row: Option<(i64, i64, i64, i64, i64)> = if tenant_scoped {
             sqlx::query_as(
                 "SELECT COUNT(*)::bigint,
-                    COUNT(*) FILTER (WHERE spf_configured = true)::bigint,
-                    COUNT(*) FILTER (WHERE dkim_selector IS NOT NULL AND dkim_selector <> '')::bigint,
-                    COUNT(*) FILTER (WHERE dmarc_configured = true)::bigint,
-                    COUNT(*) FILTER (WHERE is_verified = true)::bigint
+                    COUNT(*) FILTER (WHERE spf_verified = true)::bigint,
+                    COUNT(*) FILTER (WHERE dkim_enabled = true)::bigint,
+                    COUNT(*) FILTER (WHERE dmarc_verified = true)::bigint,
+                    COUNT(*) FILTER (WHERE verified = true)::bigint
              FROM domains
              WHERE tenant_id = $1",
             )
@@ -300,10 +300,10 @@ async fn get_compliance_overview(
         } else {
             sqlx::query_as(
                 "SELECT COUNT(*)::bigint,
-                    COUNT(*) FILTER (WHERE spf_configured = true)::bigint,
-                    COUNT(*) FILTER (WHERE dkim_selector IS NOT NULL AND dkim_selector <> '')::bigint,
-                    COUNT(*) FILTER (WHERE dmarc_configured = true)::bigint,
-                    COUNT(*) FILTER (WHERE is_verified = true)::bigint
+                    COUNT(*) FILTER (WHERE spf_verified = true)::bigint,
+                    COUNT(*) FILTER (WHERE dkim_enabled = true)::bigint,
+                    COUNT(*) FILTER (WHERE dmarc_verified = true)::bigint,
+                    COUNT(*) FILTER (WHERE verified = true)::bigint
              FROM domains",
             )
             .fetch_optional(db)

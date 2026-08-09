@@ -1,5 +1,5 @@
 // ApexMail Health API Load Test — k6 script
-// Targets GET /v1/health/liveness and GET /v1/health/readiness
+// Targets GET /health/live and GET /health/ready
 // with ramp-up stages: 10 → 50 → 100 concurrent users.
 //
 // Health endpoints are critical for orchestration (k8s probes, load balancer checks)
@@ -53,7 +53,7 @@ export const options = {
 export default function () {
   // ── Liveness check ────────────────────────────────────────────────────────
   group('Health Liveness', function () {
-    const res = http.get(`${API_BASE}/v1/health/liveness`);
+    const res = http.get(`${API_BASE}/health/live`);
 
     livenessDuration.add(res.timings.duration);
     totalRequests.add(1);
@@ -67,7 +67,7 @@ export default function () {
 
   // ── Readiness check ───────────────────────────────────────────────────────
   group('Health Readiness', function () {
-    const res = http.get(`${API_BASE}/v1/health/readiness`);
+    const res = http.get(`${API_BASE}/health/ready`);
 
     readinessDuration.add(res.timings.duration);
     totalRequests.add(1);

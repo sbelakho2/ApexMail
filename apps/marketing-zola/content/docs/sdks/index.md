@@ -188,4 +188,4 @@ These are design goals, not committed guarantees, until the 1.0 release.
 
 ## Getting Started
 
-Until the SDKs are published, use the [API Reference](/docs/api/) for the wire contract and validate payloads in the [API Explorer](/api-console/). The HTTP API is the source of truth; the SDKs are a convenience layer on top of it.
+Until the SDKs are published, use the [API Reference](/docs/api/) for the wire contract and validate payloads in the [API Explorer](/api-explorer/). The HTTP API is the source of truth; the SDKs are a convenience layer on top of it.

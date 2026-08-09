@@ -28,12 +28,20 @@
   <title>{% block title %}{{ config.title }}{% endblock title %}</title>
   <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}" />
   {% block canonical_tag %}<link rel="canonical" href="{{ current_url | default(value=config.base_url) }}" />{% endblock canonical_tag %}
-  {% set_global supported_langs = [config.default_language] %}
+  {% set_global supported_langs = [l] %}
   {% for lcode, lang_cfg in config.languages %}
     {% set_global supported_langs = supported_langs | concat(with=[lcode]) %}
   {% endfor %}
+  {% set_global current_translations = [] %}
+  {% if page %}{% set_global current_translations = page.translations %}{% elif section %}{% set_global current_translations = section.translations %}{% endif %}
   {% for lcode in supported_langs | unique %}
-  <link rel="alternate" hreflang="{{ lcode }}" href="{{ current_url | default(value=config.base_url) }}" />
+    {% set_global alt_url = current_url | default(value=config.base_url) %}
+    {% for t in current_translations %}
+      {% if t.lang | default(value=config.default_language) == lcode %}
+        {% set_global alt_url = t.permalink %}
+      {% endif %}
+    {% endfor %}
+  <link rel="alternate" hreflang="{{ lcode }}" href="{{ alt_url }}" />
   {% endfor %}
   <link rel="alternate" hreflang="x-default" href="{{ config.base_url }}" />
   <meta name="robots" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />

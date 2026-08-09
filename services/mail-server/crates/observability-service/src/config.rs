@@ -104,6 +104,7 @@ pub struct ObservabilityConfig {
     // Redis
     pub redis_host: String,
     pub redis_port: u16,
+    pub redis_db: i64,
     pub redis_password: Option<String>,
 
     // Sub-configs
@@ -134,6 +135,7 @@ impl Default for ObservabilityConfig {
 
             redis_host: "127.0.0.1".into(),
             redis_port: 6379,
+            redis_db: 0,
             redis_password: None,
 
             tracing: TracingConfig {
@@ -205,6 +207,22 @@ impl ObservabilityConfig {
             std::env::var(key).unwrap_or_else(|_| default.to_string())
         }
 
+        /// Read a secret from `<KEY>` or, when unset, from the file named by
+        /// `<KEY>_FILE` (Docker secret convention). Returns `None` when both
+        /// are absent so callers can distinguish "unset" from "empty".
+        fn env_or_file(key: &str, default: &str) -> String {
+            if let Ok(value) = std::env::var(key) {
+                return value;
+            }
+            if let Ok(path) = std::env::var(format!("{key}_FILE")) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    return content.trim().to_string();
+                }
+                tracing::warn!(key, path = %path, "Secret file configured but unreadable");
+            }
+            default.to_string()
+        }
+
         let default = Self::default();
 
         let config = Self {
@@ -213,7 +231,10 @@ impl ObservabilityConfig {
                 .unwrap_or(default.port),
             environment: env_or("NODE_ENV", &default.environment),
             version: env_or("APP_VERSION", &default.version),
-            internal_service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
+            internal_service_token: env_or_file(
+                "INTERNAL_SERVICE_TOKEN",
+                &default.internal_service_token,
+            ),
 
             db_host: env_or("DB_HOST", &default.db_host),
             db_port: env_or("DB_PORT", &default.db_port.to_string())
@@ -230,7 +251,17 @@ impl ObservabilityConfig {
             redis_port: env_or("REDIS_PORT", &default.redis_port.to_string())
                 .parse()
                 .unwrap_or(default.redis_port),
-            redis_password: std::env::var("REDIS_PASSWORD").ok(),
+            redis_db: env_or("REDIS_DB", &default.redis_db.to_string())
+                .parse()
+                .unwrap_or(default.redis_db),
+            redis_password: {
+                let value = env_or_file("REDIS_PASSWORD", "");
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            },
 
             tracing: TracingConfig {
                 enabled: env_or("TRACING_ENABLED", "true") != "false",
@@ -315,6 +346,29 @@ impl ObservabilityConfig {
         Ok(config)
     }
 
+    /// Build a Redis connection URL from the config.
+    ///
+    /// The password is percent-encoded per RFC 3986 (via `urlencoding`, which
+    /// encodes every non-unreserved byte including `%`, `@`, `:`, `/`, `+`
+    /// and space) so that special characters in the password cannot corrupt
+    /// the URL. The redis crate percent-decodes the password component
+    /// before authenticating, so the encoding round-trips exactly.
+    pub fn redis_url(&self) -> String {
+        match &self.redis_password {
+            Some(pw) => format!(
+                "redis://:{}@{}:{}/{}",
+                urlencoding::encode(pw),
+                self.redis_host,
+                self.redis_port,
+                self.redis_db
+            ),
+            None => format!(
+                "redis://{}:{}/{}",
+                self.redis_host, self.redis_port, self.redis_db
+            ),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.port == 0 {
             return Err("OBSERVABILITY_PORT must be > 0".into());
@@ -339,6 +393,9 @@ impl ObservabilityConfig {
         }
         if self.redis_port == 0 {
             return Err("REDIS_PORT must be > 0".into());
+        }
+        if self.redis_db < 0 {
+            return Err("REDIS_DB must be >= 0".into());
         }
         if self.metrics.prometheus_port == 0 {
             return Err("PROMETHEUS_PORT must be > 0".into());
@@ -430,5 +487,57 @@ mod tests {
         let err = cfg.validate().unwrap_err();
 
         assert_eq!(err, "INTERNAL_SERVICE_TOKEN must be set");
+    }
+
+    #[test]
+    fn test_redis_url_no_password() {
+        let cfg = ObservabilityConfig::default();
+        assert_eq!(cfg.redis_url(), "redis://127.0.0.1:6379/0");
+    }
+
+    #[test]
+    fn test_redis_url_with_password_encoded() {
+        let cfg = ObservabilityConfig {
+            redis_password: Some("p@ss:w/ord+%".into()),
+            redis_db: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.redis_url(),
+            "redis://:p%40ss%3Aw%2Ford%2B%25@127.0.0.1:6379/2"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_negative_redis_db() {
+        let cfg = ObservabilityConfig {
+            redis_db: -1,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_internal_service_token_reads_file_fallback() {
+        use std::sync::{Mutex, OnceLock};
+
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned");
+
+        std::env::remove_var("INTERNAL_SERVICE_TOKEN");
+        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token.txt");
+        std::fs::write(&path, "file-secret-token\n").unwrap();
+        std::env::set_var("INTERNAL_SERVICE_TOKEN_FILE", &path);
+
+        let cfg = ObservabilityConfig::from_env().unwrap();
+        assert_eq!(cfg.internal_service_token, "file-secret-token");
+
+        std::env::remove_var("INTERNAL_SERVICE_TOKEN_FILE");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -133,7 +133,7 @@ async fn forgot_password(
 
     // Look up user — always return success to avoid email enumeration
     let user: Option<(String, String)> = sqlx::query_as(
-        "SELECT id, email FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1",
+        "SELECT id::text, email FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1",
     )
     .bind(&email)
     .fetch_optional(&state.db)
@@ -147,7 +147,7 @@ async fn forgot_password(
 
         // Store reset token in user metadata
         sqlx::query(
-            "UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2",
+            "UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2::uuid",
         )
         .bind(serde_json::json!({
             "password_reset_token_hash": hash_token(&token),
@@ -172,7 +172,8 @@ async fn forgot_password(
             "{}/reset-password/{}",
             state.config.base_url, encoded_token,
         );
-        let msg_id = apexmail_lib::id::generate_id("msg", 22);
+        // Production messages.id and email_queue.message_id are UUIDs.
+        let msg_id = uuid::Uuid::new_v4().to_string();
         let safe_email = html_escape(&email);
         let safe_link = html_escape(&reset_link);
         let html_body = format!(
@@ -193,7 +194,7 @@ async fn forgot_password(
         // 1. Insert into messages table (audit/log)
         sqlx::query(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at)
-             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
+             VALUES ($1::uuid, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
         )
         .bind(&msg_id)
         .bind(SYSTEM_TENANT_ID)
@@ -210,31 +211,30 @@ async fn forgot_password(
             ApiError::Internal("Failed to send reset email".into())
         })?;
 
-        // 2. Look up the domain_id for "apexmail.ee" (system domain).
-        //    Falls back to a synthetic ID if the domain is not yet registered.
-        let domain_id: String = sqlx::query_scalar(
-            "SELECT id FROM domains WHERE domain = 'apexmail.ee' LIMIT 1",
+        // 2. Look up the domain_id for "apexmail.ee" (domains.name column;
+        //    NULL when the domain is not yet registered).
+        let domain_id: Option<String> = sqlx::query_scalar(
+            "SELECT id::text FROM domains WHERE name = 'apexmail.ee' LIMIT 1",
         )
         .fetch_optional(&state.db)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to look up system domain");
             ApiError::Internal("Failed to send reset email".into())
-        })?
-        .unwrap_or_else(|| apexmail_lib::id::generate_id("dom", 22));
+        })?;
 
         // 3. Insert into email_queue for the worker processor to pick up
         let now = chrono::Utc::now();
         sqlx::query(
             "INSERT INTO email_queue (
-                id, message_id, tenant_id, domain_id, \"from\", \"to\", subject,
-                html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
+                id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
+                \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
              ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7,
-                $8, $9, $10, $11, $12, 5, 'pending', $13, $13
+                $1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7,
+                $5, $6, $8, $9, $10, $11, $12, 5, 'pending', $13, $13
              )",
         )
-        .bind(apexmail_lib::id::generate_id("emq", 22))
+        .bind(uuid::Uuid::new_v4())
         .bind(&msg_id)
         .bind(SYSTEM_TENANT_ID)
         .bind(&domain_id)
@@ -243,7 +243,7 @@ async fn forgot_password(
         .bind("Reset your ApexMail password")
         .bind(&html_body)
         .bind(&text_body)
-        .bind(serde_json::json!(["system", "password-reset"]))
+        .bind(vec!["system".to_string(), "password-reset".to_string()])
         .bind(Option::<serde_json::Value>::None) // metadata
         .bind(Option::<chrono::DateTime<chrono::Utc>>::None) // scheduled_at
         .bind(now)

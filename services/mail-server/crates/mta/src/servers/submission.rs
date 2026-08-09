@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use bytes::BytesMut;
 use dashmap::DashMap;
 use moka::sync::Cache;
 use sqlx::PgPool;
@@ -125,7 +124,6 @@ impl SubmissionServer {
     ) -> (bool, u32) {
         let mut authenticated = false;
         let mut auth_email = String::new();
-        let mut auth_account_id: Option<Uuid> = None;
         let mut mail_from: Option<String> = None;
         let mut rcpt_to: Vec<String> = Vec::new();
         let mut message_count: u32 = 0;
@@ -190,10 +188,13 @@ impl SubmissionServer {
                             .authenticate_user(&user_str, &pass_str, ip)
                             .await
                         {
-                            Ok((email, account_id)) => {
+                            Ok((email, _account_id)) => {
                                 authenticated = true;
                                 auth_email = email;
-                                auth_account_id = Some(account_id);
+                                // Reset the per-IP auth-failure counter so a user who
+                                // previously hit the lockout threshold (possibly via a
+                                // shared/NAT IP) is not locked out after a correct login.
+                                self.auth_fail_cache.remove(&ip);
                                 let _ = write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
                             }
                             Err(_) => {
@@ -230,10 +231,10 @@ impl SubmissionServer {
                         let parts: Vec<&str> = s.splitn(3, '\0').collect();
                         if parts.len() >= 3 {
                             match self.authenticate_user(parts[1], parts[2], ip).await {
-                                Ok((email, account_id)) => {
+                                Ok((email, _account_id)) => {
                                     authenticated = true;
                                     auth_email = email;
-                                    auth_account_id = Some(account_id);
+                                    self.auth_fail_cache.remove(&ip);
                                     let _ = write_line(
                                         stream,
                                         "235 2.7.0 Authentication successful\r\n",
@@ -258,15 +259,32 @@ impl SubmissionServer {
                 if !authenticated {
                     let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
                 } else {
-                    mail_from = Some(line.trim().to_string());
-                    let _ = write_line(stream, "250 OK\r\n").await;
+                    // Store only the envelope address, not the full command line.
+                    let addr = extract_address(trimmed);
+                    if !is_valid_envelope_address(&addr) {
+                        // RFC 6409: a submission server must reject messages with a
+                        // null/invalid reverse-path; email_queue.from_address also
+                        // enforces a valid-address CHECK constraint.
+                        let _ = write_line(stream, "553 5.1.7 Sender address required\r\n").await;
+                    } else {
+                        mail_from = Some(addr);
+                        let _ = write_line(stream, "250 OK\r\n").await;
+                    }
                 }
             } else if cmd.starts_with("RCPT TO:") {
                 if !authenticated {
                     let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
+                } else if rcpt_to.len() >= self.config.max_recipients {
+                    let _ = write_line(stream, "452 Too many recipients\r\n").await;
                 } else {
-                    rcpt_to.push(line.trim().to_string());
-                    let _ = write_line(stream, "250 OK\r\n").await;
+                    // Store only the recipient address, not the full command line.
+                    let addr = extract_address(trimmed);
+                    if !is_valid_envelope_address(&addr) {
+                        let _ = write_line(stream, "501 5.1.3 Bad recipient address syntax\r\n").await;
+                    } else {
+                        rcpt_to.push(addr);
+                        let _ = write_line(stream, "250 OK\r\n").await;
+                    }
                 }
             } else if cmd == "DATA" {
                 if !authenticated {
@@ -286,10 +304,15 @@ impl SubmissionServer {
                         match stream.read_line(&mut buf).await {
                             Ok(0) => break,
                             Ok(_) => {
-                                if buf == ".\r\n" {
+                                if buf.trim_end_matches(['\r', '\n']) == "." {
                                     break;
                                 }
-                                data.extend_from_slice(buf.as_bytes());
+                                // RFC 5321 §4.5.2: un-stuff transparently-doubled dots.
+                                if let Some(rest) = buf.strip_prefix("..") {
+                                    data.extend_from_slice(rest.as_bytes());
+                                } else {
+                                    data.extend_from_slice(buf.as_bytes());
+                                }
                             }
                             Err(_) => break,
                         }
@@ -304,7 +327,6 @@ impl SubmissionServer {
                     let msg_id = Uuid::new_v4().to_string();
                     match self
                         .queue_message(
-                            &auth_account_id.unwrap_or_default(),
                             &auth_email,
                             mail_from.as_deref().unwrap_or(""),
                             &rcpt_to,
@@ -359,13 +381,12 @@ impl SubmissionServer {
         password: &str,
         ip: std::net::IpAddr,
     ) -> Result<(String, Uuid), ()> {
-        let key = ip;
-        if let Some(failures) = self.auth_fail_cache.get(&key) {
-            if failures >= 5 {
-                return Err(());
-            }
-        }
-
+        // NOTE: no early-return lockout short-circuit. When an IP has >=5
+        // recent failures we STILL verify the presented credentials: a
+        // legitimate user behind a shared (NAT) IP must be able to log in
+        // with the correct password, which resets the counter below.
+        // Incorrect credentials simply keep the lockout in place (and the
+        // counter entry expires after the cache TTL anyway).
         let user = sqlx::query_as::<_, (String, Uuid, String, String)>(
             "SELECT email, id, password_hash, status FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)",
         )
@@ -387,10 +408,27 @@ impl SubmissionServer {
             return Err(());
         }
 
-        match apexmail_lib::crypto::verify_password(password, &password_hash) {
-            Ok(true) => Ok((user_email, user_id)),
+        // verify_password_for_login accepts both Argon2id and legacy bcrypt
+        // hashes (the users table contains bcrypt rows created before the
+        // Argon2id migration). On successful bcrypt login it returns an
+        // Argon2id replacement hash, which we persist so the row migrates.
+        match apexmail_lib::crypto::verify_password_for_login(password, &password_hash) {
+            Ok(verification) if verification.valid => {
+                self.auth_fail_cache.remove(&ip);
+                if let Some(new_hash) = verification.migrated_hash {
+                    let _ = sqlx::query(
+                        "UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2)",
+                    )
+                    .bind(new_hash)
+                    .bind(&user_email)
+                    .execute(&self.pool)
+                    .await;
+                }
+                Ok((user_email, user_id))
+            }
             _ => {
-                self.auth_fail_cache.insert(ip, 1 + self.auth_fail_cache.get(&ip).unwrap_or(0));
+                self.auth_fail_cache
+                    .insert(ip, 1 + self.auth_fail_cache.get(&ip).unwrap_or(0));
                 Err(())
             }
         }
@@ -398,32 +436,117 @@ impl SubmissionServer {
 
     // ── Queue helper ─────────────────────────────────────────────────────
 
+    /// Persist a submitted message into `email_queue` using the deployed
+    /// (production) schema: `id`/`message_id`/`domain_id` are UUIDs, `tenant_id`
+    /// is VARCHAR(26) referencing `tenants(id)`, and `from_address`/`to_addresses`/
+    /// `subject` are the NOT NULL columns the queue worker relies on. Both the
+    /// new column group (`from_address`, `to_addresses`, `text_body`, ...) and the
+    /// legacy worker columns (`"from"`, `"to"`, `html`, `text`, `tenant_id`,
+    /// `domain_id`, `message_id`) are populated so `EmailProcessor::fetch_jobs`
+    /// can decode the row.
     async fn queue_message(
         &self,
-        account_id: &Uuid,
-        from_email: &str,
+        auth_email: &str,
         mail_from: &str,
         rcpt_to: &[String],
         data: &str,
         msg_id: &str,
     ) -> Result<(), ()> {
-        let to_json = serde_json::to_string(rcpt_to).map_err(|_| ())?;
-        sqlx::query(
-            "INSERT INTO email_queue (id, tenant_id, from_address, to_addresses, raw_mime, status, priority, created_at)
-             VALUES ($1, $2, $3, $4::jsonb, $5, 'pending', 5, NOW())",
+        // Split the raw message into headers and body so the queue stores them
+        // separately (the queue has no raw_mime column).
+        let (headers_part, body_part) = split_headers_body(data);
+
+        // Parse the MIME content so the worker's html/text columns are
+        // populated (the worker builds the outgoing message from them).
+        let parsed = mail_parser::MessageParser::default().parse(data.as_bytes());
+        let subject = parsed
+            .as_ref()
+            .and_then(|m| m.subject())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| extract_subject(headers_part));
+        let html_body = parsed.as_ref().and_then(|m| m.body_html(0)).map(|b| b.into_owned());
+        let text_body = parsed
+            .as_ref()
+            .and_then(|m| m.body_text(0))
+            .map(|b| b.into_owned())
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| body_part.to_string());
+
+        // subject is NOT NULL in email_queue (max length 998 per CHECK).
+        let subject = if subject.is_empty() {
+            "(no subject)".to_string()
+        } else {
+            subject
+        };
+
+        // tenant_id is VARCHAR(26) referencing tenants(id) — never the user's
+        // account UUID. Look up the authenticated user's actual tenant.
+        let tenant_id: Option<String> = sqlx::query_scalar(
+            "SELECT tenant_id FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)",
         )
-        .bind(msg_id)
-        .bind(account_id.to_string())
-        .bind(from_email)
-        .bind(&to_json)
-        .bind(data)
+        .bind(auth_email)
+        .bind(auth_email)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| ())?
+        .flatten();
+
+        // domain_id is UUID referencing domains(id); resolve the sender's
+        // domain owned by the user's tenant so the worker can route/DKIM-sign.
+        let domain_id: Option<Uuid> = match tenant_id.as_deref() {
+            Some(tenant) => {
+                let domain_name = mail_from
+                    .rsplit_once('@')
+                    .map(|(_, d)| d)
+                    .unwrap_or_default();
+                if domain_name.is_empty() {
+                    None
+                } else {
+                    sqlx::query_scalar(
+                        "SELECT id FROM domains WHERE LOWER(name) = LOWER($1) AND tenant_id = $2 LIMIT 1",
+                    )
+                    .bind(domain_name)
+                    .bind(tenant)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|_| ())?
+                }
+            }
+            None => None,
+        };
+
+        let message_uuid = Uuid::parse_str(msg_id).map_err(|_| ())?;
+        let to_first = rcpt_to.first().cloned().unwrap_or_default();
+
+        sqlx::query(
+            r#"INSERT INTO email_queue (
+                id, from_address, to_addresses, subject, raw_headers, text_body,
+                "from", "to", html, text, status, priority, tenant_id, message_id,
+                domain_id, metadata, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', 5,
+                      $11, $12, $13, $14, NOW(), NOW())"#,
+        )
+        .bind(message_uuid)
+        .bind(mail_from)
+        .bind(rcpt_to)
+        .bind(&subject)
+        .bind(headers_part)
+        .bind(&text_body)
+        .bind(mail_from)
+        .bind(&to_first)
+        .bind(&html_body)
+        .bind(&text_body)
+        .bind(tenant_id)
+        .bind(message_uuid)
+        .bind(domain_id)
+        .bind(Option::<serde_json::Value>::None)
         .execute(&self.pool)
         .await
         .map_err(|_| ())?;
 
         info!(
             message_id = %msg_id,
-            from = %mail_common::pii::redact_email(from_email),
+            from = %mail_common::pii::redact_email(mail_from),
             to = ?rcpt_to,
             size = data.len(),
             "Message queued via submission"
@@ -448,6 +571,71 @@ impl SubmissionServer {
 }
 
 // ── I/O helpers ─────────────────────────────────────────────────────────
+
+/// Extract the bare address from an SMTP command line such as
+/// `RCPT TO:<user@example.com>` or `MAIL FROM: user@example.com`.
+fn extract_address(line: &str) -> String {
+    if let Some(start) = line.find('<') {
+        if let Some(end) = line.find('>') {
+            return line[start + 1..end].to_string();
+        }
+    }
+    line.split_whitespace()
+        .last()
+        .unwrap_or("")
+        .trim_matches(|c| c == '<' || c == '>')
+        .to_string()
+}
+
+/// Validate an envelope address against the same rules `email_queue` enforces
+/// (`chk_email_queue_from_address`): no whitespace, one `@`, a non-empty local
+/// part, and a non-empty domain containing at least one dot.
+fn is_valid_envelope_address(addr: &str) -> bool {
+    if addr.is_empty() || addr.chars().any(char::is_whitespace) {
+        return false;
+    }
+    match addr.rsplit_once('@') {
+        Some((local, domain)) => {
+            !local.is_empty()
+                && !domain.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        }
+        None => false,
+    }
+}
+
+/// Split a raw message into (headers, body) at the first blank line.
+fn split_headers_body(raw: &str) -> (&str, &str) {
+    if let Some(sep) = raw.find("\r\n\r\n") {
+        (&raw[..sep], &raw[sep + 4..])
+    } else if let Some(sep) = raw.find("\n\n") {
+        (&raw[..sep], &raw[sep + 2..])
+    } else {
+        (raw, "")
+    }
+}
+
+/// Extract the Subject header value; `email_queue.subject` is NOT NULL.
+fn extract_subject(headers: &str) -> String {
+    let subject = headers
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("subject:"))
+        .map(|l| {
+            l.split_once(':')
+                .map(|(_, v)| v.trim())
+                .unwrap_or("")
+                .to_string()
+        })
+        .unwrap_or_else(|| "(no subject)".to_string());
+    if subject.is_empty() {
+        "(no subject)".to_string()
+    } else {
+        // chk_email_queue_subject_length: char_length(subject) <= 998
+        subject.chars().take(998).collect()
+    }
+}
 
 async fn write_line<S: AsyncWrite + Unpin>(sink: &mut S, line: &str) -> std::io::Result<()> {
     sink.write_all(line.as_bytes()).await?;

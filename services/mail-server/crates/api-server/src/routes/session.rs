@@ -131,7 +131,7 @@ async fn get_session(
                     // Check user still exists and is active
                     let user: Option<(String, String, Option<String>, String)> =
                             sqlx::query_as(
-                                "SELECT id, email, name, role FROM users WHERE id = $1 AND status = 'active'",
+                                "SELECT id::text, email, name, role FROM users WHERE id = $1::uuid AND status = 'active'",
                             )
                             .bind(&user_id)
                             .fetch_optional(&state.db)

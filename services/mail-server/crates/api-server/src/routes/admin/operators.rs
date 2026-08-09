@@ -85,7 +85,7 @@ async fn delete_operator(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["*"])?;
-    let result = sqlx::query("DELETE FROM users WHERE id = $1 AND role IN ('admin', 'owner')")
+    let result = sqlx::query("DELETE FROM users WHERE id = $1::uuid AND role IN ('admin', 'owner')")
         .bind(&id)
         .execute(&state.db)
         .await

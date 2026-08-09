@@ -4,7 +4,7 @@ template = "page.html"
 description = "ApexMail combines email delivery with SOC 2 control evidence, HIPAA BAA lifecycle tooling, Trust Portal workflows, and automated SIG, CAIQ, and HECVAT answer packs for regulated SaaS teams."
 
 [extra]
-og_image = "/images/og-regulated.png"
+og_image = "/images/og-image.svg"
 +++
 
 # The Email Stack Built for Your Security Review

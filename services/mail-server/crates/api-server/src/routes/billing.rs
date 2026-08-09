@@ -4464,7 +4464,7 @@ mod tests {
             kiwi_min_duration_ms: None,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,
-            kiwi_auto_tune_max_bits: 24,
+            kiwi_auto_tune_max_bits: 20,
             http_client_timeout_secs: 30,
             internal_tls_enabled: false,
             internal_tls_ca_cert_path: None,

@@ -23,6 +23,19 @@ const TENANT_RATE_LIMIT_CACHE_TTL_SECS: u64 = 60;
 const TENANT_RATE_LIMIT_CACHE_TTL_JITTER: f64 = 0.10;
 const TENANT_RATE_LIMIT_CACHE_NONE: &str = "__none__";
 
+/// Atomic `INCR` + `EXPIRE`-on-first.
+///
+/// Runs as a single Lua script so a crash between `INCR` and `EXPIRE` cannot
+/// leave a counter key with no TTL (a stale key that never expires). Returns
+/// the new counter value.
+pub(crate) const INCR_EXPIRE_LUA: &str = r#"
+    local count = redis.call('INCR', KEYS[1])
+    if count == 1 then
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+    end
+    return count
+"#;
+
 // ─── Fixed-window rate limiter (middleware function) ────────────
 
 /// Axum middleware that enforces per-tenant fixed-window rate limits.

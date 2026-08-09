@@ -4,5 +4,5 @@ description = "Enterprise-E-Mail-Infrastruktur mit SOC-2-Kontrollen, dedizierter
 template = "page.html"
 
 [extra]
-og_image = "/images/og-enterprise.png"
+og_image = "/images/og-image.svg"
 +++

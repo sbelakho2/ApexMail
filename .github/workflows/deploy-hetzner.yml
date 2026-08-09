@@ -169,30 +169,54 @@ jobs:
           EOF_ENV
           ssh hetzner "chmod 600 ${DEPLOY_DIR}/.env && wc -l ${DEPLOY_DIR}/.env"
 
-      - name: Render docker secret files from .env (postgres/redis/clickhouse)
+      - name: Render docker secret files from .env (all 14 PROD_*_FILE secrets)
         run: |
           set -euo pipefail
           ssh hetzner "DEPLOY_DIR='${DEPLOY_DIR}' bash -s" <<'REMOTE_SH'
           set -euo pipefail
           cd "${DEPLOY_DIR}"
           install -d -m 700 secrets
-          # Source .env values for the three docker-compose secret files.
-          # The .env must define POSTGRES_PASSWORD, REDIS_PASSWORD, CLICKHOUSE_PASSWORD.
+          # Source .env values. The .env must define every secret value below
+          # and the matching PROD_*_FILE path (validated by docker-compose.prod.yml
+          # with ${VAR:?} on the compose's secrets.file entries).
           set -a; . ./.env; set +a
-          for name in POSTGRES_PASSWORD REDIS_PASSWORD CLICKHOUSE_PASSWORD; do
-            val="${!name:-}"
+
+          # render_secret <value-var> <file-var>
+          #   value-var  — plain secret value in .env (e.g. API_KEY_HASH_SECRET)
+          #   file-var   — PROD_*_FILE var in .env pointing at the rendered file
+          render_secret() {
+            local val="${!1:-}"
             if [[ -z "$val" ]]; then
-              echo "::error::$name missing from APEXMAIL_PROD_ENV" >&2
+              echo "::error::$1 missing from APEXMAIL_PROD_ENV (required by docker-compose.prod.yml)" >&2
               exit 1
             fi
-          done
-          umask 177
-          printf '%s' "$POSTGRES_PASSWORD"   > secrets/postgres_password.txt
-          printf '%s' "$REDIS_PASSWORD"      > secrets/redis_password.txt
-          printf '%s' "$CLICKHOUSE_PASSWORD" > secrets/clickhouse_password.txt
-          # Secrets directory stays 700 (root-only); files are 644 so container
-          # users (non-root, uid varies per image) can read them through bind mounts.
-          chmod 644 secrets/*.txt
+            local path="${!2:-}"
+            if [[ -z "$path" ]]; then
+              echo "::error::$2 missing from APEXMAIL_PROD_ENV (required by docker-compose.prod.yml)" >&2
+              exit 1
+            fi
+            install -d -m 700 "$(dirname "$path")"
+            umask 177
+            printf '%s' "$val" > "$path"
+            # Secrets directory stays 700 (root-only); files are 644 so container
+            # users (non-root, uid varies per image) can read them through bind mounts.
+            chmod 644 "$path"
+          }
+
+          render_secret POSTGRES_PASSWORD      PROD_POSTGRES_PASSWORD_FILE
+          render_secret REDIS_PASSWORD         PROD_REDIS_PASSWORD_FILE
+          render_secret CLICKHOUSE_PASSWORD    PROD_CLICKHOUSE_PASSWORD_FILE
+          render_secret API_KEY_HASH_SECRET    PROD_API_KEY_HASH_SECRET_FILE
+          render_secret WEBHOOK_SIGNING_SECRET PROD_WEBHOOK_SIGNING_SECRET_FILE
+          render_secret TRACKING_SECRET_KEY    PROD_TRACKING_SECRET_KEY_FILE
+          render_secret INTERNAL_SERVICE_TOKEN PROD_INTERNAL_SERVICE_TOKEN_FILE
+          render_secret JWT_SECRET             PROD_JWT_SECRET_FILE
+          render_secret JWT_PRIVATE_KEY_PEM    PROD_JWT_PRIVATE_KEY_FILE
+          render_secret JWT_PUBLIC_KEY_PEM     PROD_JWT_PUBLIC_KEY_FILE
+          render_secret SESSION_SECRET         PROD_SESSION_SECRET_FILE
+          render_secret IMPERSONATION_SECRET   PROD_IMPERSONATION_SECRET_FILE
+          render_secret CSRF_SECRET            PROD_CSRF_SECRET_FILE
+          render_secret KIWI_SECRET_KEY        PROD_KIWI_SECRET_KEY_FILE
           ls -l secrets/
           REMOTE_SH
 
@@ -233,21 +257,38 @@ jobs:
           ssh hetzner "echo '${{ secrets.GHCR_DEPLOY_TOKEN }}' | \
             docker login ghcr.io -u '${{ github.repository_owner }}' --password-stdin"
 
+      - name: Remove non-compose-managed legacy containers
+        run: |
+          # Bare-metal-era containers (created via `docker run`, no compose
+          # labels) hold the mail ports (993/50051) and block the compose
+          # stack from binding them. Mirrors deploy.sh Step 1: remove them
+          # ONLY when they are not managed by compose.
+          ssh hetzner "set -e
+            for name in apexmail-imap apexmail-mta apexmail-mailstore; do
+              if docker ps -a --format '{{.Names}}' | grep -q \"^\${name}\$\"; then
+                if ! docker inspect \"\$name\" --format '{{.Config.Labels}}' | grep -q 'compose'; then
+                  echo '[cleanup] removing legacy container: '\$name
+                  docker rm -f \"\$name\"
+                fi
+              fi
+            done"
+
       - name: Pull updated images
         if: ${{ github.event.inputs.skip_pull != 'true' }}
         run: |
           ssh hetzner "cd ${DEPLOY_DIR} && \
             docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
-              pull api-server mta worker enterprise tracking-service observability marketing \
-                nginx postgres redis clickhouse || true"
+              pull api-server mta imap-server mailstore worker enterprise tracking \
+                observability marketing postgres-backup nginx postgres redis clickhouse || true"
 
       - name: Apply stack (canonical service set)
         run: |
           ssh hetzner "cd ${DEPLOY_DIR} && \
             docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
               up -d --remove-orphans --no-build \
-              postgres redis clickhouse api-server mta worker enterprise tracking-service \
-                observability marketing nginx certbot"
+              postgres redis clickhouse api-server mta imap-server mailstore worker \
+                enterprise tracking observability marketing postgres-backup \
+                nginx certbot"
 
       - name: Reload nginx to re-resolve upstream container IPs
         run: |

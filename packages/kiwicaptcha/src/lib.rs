@@ -20,6 +20,7 @@ pub mod widget;
 pub use challenge::{
     hash_ip, issue_challenge, payload_from_record, sign_payload, verify_signature,
     ChallengeCache, ChallengeConfig, ChallengePayload, ChallengeRecord, Issued,
+    SOLVER_MAX_TARGET_BITS,
 };
 pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg, kiwi_shield_svg};
 pub use token::{DecodeError, IssuedChallenge, SolutionToken};

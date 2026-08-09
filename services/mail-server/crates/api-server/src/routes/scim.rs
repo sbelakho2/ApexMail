@@ -137,7 +137,7 @@ async fn list_users(
         .await?;
 
     let rows = sqlx::query_as::<_, UserScimRow>(
-        "SELECT id, email, name, status FROM users WHERE tenant_id = $1 ORDER BY email LIMIT $2 OFFSET $3",
+        "SELECT id::text, email, name, status FROM users WHERE tenant_id = $1 ORDER BY email LIMIT $2 OFFSET $3",
     )
     .bind(&auth.tenant_id)
     .bind(count)
@@ -237,7 +237,7 @@ async fn get_user(
     require_scopes(&auth, &["scim:read"])?;
 
     let row = sqlx::query_as::<_, UserScimRow>(
-        "SELECT id, email, name, status FROM users WHERE id = $1 AND tenant_id = $2",
+        "SELECT id::text, email, name, status FROM users WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(&id)
     .bind(&auth.tenant_id)
@@ -318,7 +318,7 @@ async fn delete_user(
     require_scopes(&auth, &["scim:write"])?;
 
     let result = sqlx::query(
-        "UPDATE users SET status = 'deactivated', updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
+        "UPDATE users SET status = 'deactivated', updated_at = NOW() WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(&id)
     .bind(&auth.tenant_id)

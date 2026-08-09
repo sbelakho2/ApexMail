@@ -26,13 +26,20 @@ pub struct ClickHouseEngine {
 }
 
 /// Event row for ClickHouse ingestion.
+///
+/// The `timestamp` field is serialized as `DateTime64(3)` (millisecond
+/// precision, matching the `events.timestamp` column). It must NOT be a raw
+/// integer — ClickHouse interprets integers inserted into `DateTime64`
+/// columns as *seconds*, which would corrupt the value (e.g. ms since epoch
+/// lands in the year 56 000).
 #[derive(Debug, Clone, Serialize, Deserialize, Row)]
 pub struct ClickHouseEvent {
     pub id: String,
     pub tenant_id: String,
     pub message_id: String,
     pub event_type: String,
-    pub timestamp: i64, // Unix timestamp in milliseconds
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub timestamp: time::OffsetDateTime, // DateTime64(3) — milliseconds
     pub recipient: String,
     pub recipient_domain: String,
     pub link_id: String,
@@ -92,13 +99,13 @@ impl ClickHouseEngine {
             .with_user(&config.user)
             .with_password(&config.password)
             .with_compression(clickhouse::Compression::Lz4)
-            // DB-11: async_insert=1 with wait_for_async_insert=0 gives eventual consistency.
-            // Materialized views (daily_aggregates_mv, hourly_aggregates_mv) may lag behind
-            // the main table by up to ~1s (the async insert flush interval).
-            // For critical reads-after-write (e.g., real-time dashboards), set
-            // wait_for_async_insert=1 or query the raw events table.
+            // DB-11: async_insert=1 batches concurrent inserts for write
+            // throughput. wait_for_async_insert=1 makes each insert return
+            // only after the data is durably flushed — read-after-write
+            // consistency AND surfaced write errors (with wait=0, insert
+            // errors are silently dropped and queries can lag arbitrarily).
             .with_option("async_insert", "1")
-            .with_option("wait_for_async_insert", "0")
+            .with_option("wait_for_async_insert", "1")
             // SCALE-M-03: Batch insert tuning for optimal write throughput.
             // async_insert_busy_timeout_ms: how long ClickHouse buffers before flushing
             //   (200ms default gives ~5 flushes/sec without excessive latency).
@@ -171,7 +178,8 @@ impl ClickHouseEngine {
                 ENGINE = MergeTree()
                 PARTITION BY toYYYYMM(timestamp)
                 ORDER BY (tenant_id, timestamp, event_type)
-                TTL timestamp + INTERVAL 730 DAY
+                -- TTL on DateTime64 columns must be cast to DateTime (ClickHouse <= 24.x)
+                TTL toDateTime(timestamp) + INTERVAL 730 DAY
                 SETTINGS index_granularity = 8192
                 "#,
             )
@@ -590,20 +598,28 @@ impl ClickHouseEngine {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> anyhow::Result<Vec<EngagementBucket>> {
+        // Bucketing is computed per recipient in the inner query (aggregate
+        // functions are not allowed directly in GROUP BY), then recipients
+        // are counted per bucket in the outer query.
         let query = r#"
             SELECT
-                multiIf(
-                    countIf(event_type = 'clicked') > 2, 'highly_engaged',
-                    countIf(event_type = 'opened') > 2, 'engaged',
-                    countIf(event_type = 'opened') > 0, 'somewhat_engaged',
-                    countIf(event_type = 'unsubscribed') > 0, 'unsubscribed',
-                    'not_engaged'
-                ) AS bucket,
+                bucket,
                 count() AS count
-            FROM events
-            WHERE tenant_id = ?
-              AND timestamp >= toDateTime64(?, 3)
-              AND timestamp < toDateTime64(?, 3)
+            FROM (
+                SELECT
+                    multiIf(
+                        countIf(event_type = 'clicked') > 2, 'highly_engaged',
+                        countIf(event_type = 'opened') > 2, 'engaged',
+                        countIf(event_type = 'opened') > 0, 'somewhat_engaged',
+                        countIf(event_type = 'unsubscribed') > 0, 'unsubscribed',
+                        'not_engaged'
+                    ) AS bucket
+                FROM events
+                WHERE tenant_id = ?
+                  AND timestamp >= toDateTime64(?, 3)
+                  AND timestamp < toDateTime64(?, 3)
+                GROUP BY recipient
+            )
             GROUP BY bucket
             ORDER BY bucket
         "#;
@@ -813,5 +829,121 @@ mod tests {
             let health = engine.health_check().await;
             assert_eq!(health.ok(), Some(true));
         }
+    }
+
+    /// End-to-end engine test against a live ClickHouse:
+    ///   docker run -d -e CLICKHOUSE_PASSWORD=testpass123 -p 8124:8123 clickhouse/clickhouse-server:24.8-alpine
+    ///   docker exec -i <ctr> clickhouse-client --password testpass123 --multiquery < deploy/clickhouse/initdb/001_schema.sql
+    ///   CLICKHOUSE_TEST_URL=http://127.0.0.1:8124 CLICKHOUSE_TEST_PASSWORD=testpass123 \
+    ///       cargo test -p analytics -- --ignored --nocapture engine_e2e
+    #[tokio::test]
+    #[ignore = "requires running ClickHouse"]
+    async fn engine_e2e() {
+        use chrono::{TimeZone, Utc};
+
+        let url = std::env::var("CLICKHOUSE_TEST_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8124".into());
+        let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
+        let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
+
+        let config = ClickHouseConfig {
+            url,
+            database: "apexmail".into(),
+            user,
+            password,
+            max_connections: 10,
+            query_timeout_secs: 30,
+            insert_timeout_seconds: 30,
+            tls_enabled: false,
+            ca_cert_path: String::new(),
+        };
+
+        let engine = ClickHouseEngine::new(config).await.expect("engine init");
+        assert!(engine.health_check().await.unwrap());
+
+        // Unique tenant per run — safe to execute against a shared instance
+        // (no truncation, no cross-run interference).
+        let tenant = format!("tenant_engine_e2e_{}", std::process::id());
+
+        // Insert via the crate's own insert path (validates the DateTime64(3)
+        // serialization of `ClickHouseEvent`).
+        let ts = Utc.timestamp_millis_opt(1783687496789).unwrap();
+        let event = |id: &str, msg: &str, et: &str, recipient: &str, domain: &str| {
+            ClickHouseEvent {
+                id: id.into(),
+                tenant_id: tenant.clone(),
+                message_id: msg.into(),
+                event_type: et.into(),
+                timestamp: time::OffsetDateTime::from_unix_timestamp(ts.timestamp())
+                    .unwrap()
+                    + time::Duration::nanoseconds(ts.timestamp_subsec_nanos() as i64),
+                recipient: recipient.into(),
+                recipient_domain: domain.into(),
+                link_id: "".into(),
+                user_agent: "engine-e2e".into(),
+                ip_address: "198.51.100.1".into(),
+                country: "".into(),
+                device_type: "".into(),
+                campaign_id: "".into(),
+                metadata: "{}".into(),
+            }
+        };
+        engine
+            .insert_events(&[
+                event("e1", "m1", "sent", "a@x.com", "x.com"),
+                event("e2", "m1", "delivered", "a@x.com", "x.com"),
+                event("e3", "m1", "opened", "a@x.com", "x.com"),
+                event("e4", "m1", "clicked", "a@x.com", "x.com"),
+                event("e5", "m2", "sent", "b@y.com", "y.com"),
+            ])
+            .await
+            .expect("insert_events");
+
+        let start = ts - chrono::TimeDelta::try_minutes(5).unwrap();
+        let end = ts + chrono::TimeDelta::try_minutes(5).unwrap();
+
+        let count = engine.event_count(&tenant, start, end).await.unwrap();
+        assert_eq!(count, 5, "event_count");
+
+        let series = engine
+            .time_series(&tenant, start, end, "hour", None)
+            .await
+            .unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].value, 5, "time_series total");
+
+        let dims = engine
+            .aggregate_by_dimension(&tenant, start, end, "recipient_domain")
+            .await
+            .unwrap();
+        let total: i64 = dims.iter().map(|d| d.count).sum();
+        assert_eq!(total, 5, "aggregate_by_dimension total");
+
+        let funnel = engine
+            .funnel_analysis(&tenant, start, end, &["sent", "delivered", "opened", "clicked"])
+            .await
+            .unwrap();
+        assert_eq!(funnel.len(), 4);
+        assert_eq!(funnel[0].count, 2, "funnel sent");
+        assert_eq!(funnel[2].count, 1, "funnel opened");
+
+        let metrics = engine.deliverability_metrics(&tenant, start, end).await.unwrap();
+        assert_eq!(metrics.delivery_rate, 0.5, "delivery_rate");
+        assert_eq!(metrics.open_rate, 1.0, "open_rate");
+        assert_eq!(metrics.click_rate, 1.0, "click_rate");
+
+        let hist = engine.engagement_histogram(&tenant, start, end).await.unwrap();
+        assert_eq!(hist.len(), 2, "histogram buckets");
+
+        let stats = engine.storage_stats().await.unwrap();
+        assert!(stats.total_events >= 5, "storage_stats rows");
+
+        // Best-effort cleanup (mutation is async; this run is already done).
+        engine
+            .client
+            .query(&format!("ALTER TABLE events DELETE WHERE tenant_id = '{tenant}'"))
+            .execute()
+            .await
+            .ok();
     }
 }

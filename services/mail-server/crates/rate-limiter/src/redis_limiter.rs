@@ -323,10 +323,15 @@ impl RedisLimiter {
                 return {0, retry_after, current}
             end
 
-            -- Allowed: generate a unique member using TIME for microsecond precision
+            -- Allowed: add one member per unit of cost so ZCARD always equals
+            -- the real request count.  TIME gives microsecond precision; the
+            -- per-script loop index disambiguates members added within the
+            -- same TIME snapshot (a batch of cost>1 must create cost members).
             local time_arr = redis.call('TIME')
-            local member = now .. ':' .. time_arr[1] .. '.' .. time_arr[2]
-            redis.call('ZADD', KEYS[1], now, member)
+            local member_base = now .. ':' .. time_arr[1] .. '.' .. time_arr[2]
+            for i = 1, cost do
+                redis.call('ZADD', KEYS[1], now, member_base .. ':' .. i)
+            end
             redis.call('EXPIRE', KEYS[1], window)
 
             return {1, 0, current + cost}

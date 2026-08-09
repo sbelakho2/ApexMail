@@ -1505,8 +1505,10 @@ async fn status_api(State(state): State<AppState>) -> impl IntoResponse {
     let mut services = Vec::new();
     let mut all_operational = true;
 
-    // Probe database connectivity with a lightweight query
-    let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1")
+    // Probe database connectivity with a lightweight query.
+    // `SELECT 1::bigint` (not `SELECT 1`): sqlx 0.8 type-checks scalars and
+    // i64 is incompatible with the INT4 column type of a bare `SELECT 1`.
+    let db_ok = sqlx::query_scalar::<_, i64>("SELECT 1::bigint")
         .fetch_one(&state.db).await.is_ok();
     services.push(serde_json::json!({
         "name": "Database", "status": if db_ok { "operational" } else { "degraded" }

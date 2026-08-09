@@ -10,7 +10,7 @@ competitor_name = "SendGrid"
 competitor_description = "Twilio SendGrid is a popular email delivery platform owned by Twilio."
 pricing_as_of = "2026-07-30"
 verification_date = "2026-07-30"
-og_image = "/images/og-compare-sendgrid.png"
+og_image = "/images/og-image.svg"
 # Feature comparison counts — update when capabilities change
 apexmail_wins = 0
 competitor_wins = 0
@@ -20,7 +20,7 @@ verdict_points = [
   "GDPR DSR, consent, audit, and BAA workflows built into the platform",
   "Deliverability insights without automatic black-box send decisions",
   "Custom deployment reviews for regulated enterprise programs",
-  "SSO on Scale and Enterprise with clearer plan packaging",
+  "SSO on Business and Enterprise with clearer plan packaging",
 ]
 +++
 
@@ -150,7 +150,7 @@ verdict_points = [
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">SSO Included</div>
-  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Scale & Enterprise plans</span></div>
+  <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">Business & Enterprise plans</span></div>
    <div class="text-center text-sm self-center"><span class="text-surface-600">Included on Pro</span></div>
   <div class="text-center text-sm self-center"><span class="text-brand-600 font-semibold">ApexMail</span></div>
 </div>

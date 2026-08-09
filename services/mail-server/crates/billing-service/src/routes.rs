@@ -1027,6 +1027,24 @@ fn generate_audit_log_id() -> String {
         .collect()
 }
 
+/// HMAC-SHA256 signature over the audit hash, keyed with the same
+/// `AUDIT_SIGNING_KEY` the compliance crate uses for chain verification.
+/// Falls back to a deterministic static key when unset (non-production).
+fn audit_log_signature(hash: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+    let key = std::env::var("AUDIT_SIGNING_KEY")
+        .unwrap_or_else(|_| "apexmail-billing-audit-fallback-key".to_string());
+    let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => return String::new(),
+    };
+    mac.update(hash.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
 fn compute_audit_log_hash(
     tenant_id: &str,
     action: &str,
@@ -1080,14 +1098,20 @@ async fn insert_audit_log(
         timestamp,
     );
 
+    // Canonical audit_logs schema (compliance): resource + details columns,
+    // outcome/hash/previous_hash/signature required. The signature uses the
+    // same AUDIT_SIGNING_KEY the compliance crate verifies with, so these
+    // rows stay part of the verifiable hash chain.
+    let signature = audit_log_signature(&hash);
+
     sqlx::query(
         r#"
         INSERT INTO audit_logs (
-            id, tenant_id, action, resource_type, resource_id,
-            metadata, previous_hash, hash, timestamp
+            id, tenant_id, action, resource, resource_id,
+            details, outcome, previous_hash, hash, signature, timestamp, created_at
         ) VALUES (
             $1, $2, $3, $4, $5,
-            $6, $7, $8, $9
+            $6, 'success', $7, $8, $9, $10, $10
         )
         "#,
     )
@@ -1099,6 +1123,7 @@ async fn insert_audit_log(
     .bind(metadata)
     .bind(previous_hash)
     .bind(hash)
+    .bind(signature)
     .bind(timestamp)
     .execute(&mut **tx)
     .await

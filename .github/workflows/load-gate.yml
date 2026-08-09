@@ -13,12 +13,20 @@
 #
 # Steps:
 #   1. Checkout code
-#   2. Setup k6 (install)
-#   3. Run smoke test (1 VU, 1 iteration — quick sanity check)
-#   4. Run load test (50 VUs, ramp-up → sustain → ramp-down)
-#   5. Check thresholds against defined pass/fail criteria
-#   6. Post results as a PR comment (if triggered by PR)
-#   7. Fail or pass based on threshold results
+#   2. Generate ephemeral JWT keypair + API secrets
+#   3. Build + start the real API server (postgres + redis + api-server
+#      via deploy/load-test-infra/docker-compose.ci.yml) on localhost:3000
+#   4. Bootstrap DB schema + seed the smoke-test user
+#   5. Wait for API readiness
+#   6. Setup k6 (install)
+#   7. Run smoke test (1 VU, 1 iteration — quick sanity check)
+#   8. Determine test profile
+#   9. Run load test (50 VUs, ramp-up → sustain → ramp-down)
+#   10-11. Run stress/spike tests (profile-dependent)
+#   12. Store results as artifacts
+#   13. Check thresholds against defined pass/fail criteria
+#   14. Post results as a PR comment (if triggered by PR)
+#   15. Fail or pass based on threshold results
 # =============================================================================
 
 name: Load Test Gate
@@ -51,6 +59,7 @@ env:
   K6_API_BASE: ${{ github.event.inputs.api_base_url || 'http://localhost:3000' }}
   K6_API_KEY: ${{ secrets.LOAD_TEST_API_KEY || 'ci-test-api-key' }}
   K6_INSECURE: 'true'
+  LOAD_GATE_COMPOSE: deploy/load-test-infra/docker-compose.ci.yml
 
 jobs:
   load-gate:
@@ -58,40 +67,87 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && github.event.label.name == 'load-test')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    services:
-      # ── Backing services for the API server ──────────────────────────────
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: apexmail_loadtest
-          POSTGRES_USER: apexmail
-          POSTGRES_PASSWORD: apexmail
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    timeout-minutes: 120
 
     steps:
       # ── Step 1: Checkout ──────────────────────────────────────────────────
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # ── Step 2: Setup k6 ──────────────────────────────────────────────────
+      # ── Step 2: Generate ephemeral JWT keypair + secrets for the API server ──
+      - name: Generate API server secrets (ephemeral per run)
+        run: |
+          set -euo pipefail
+          openssl genrsa -out /tmp/jwt-private.pem 2048 2>/dev/null
+          openssl rsa -in /tmp/jwt-private.pem -pubout -out /tmp/jwt-public.pem 2>/dev/null
+          {
+            printf 'JWT_PRIVATE_KEY_PEM="%s"\n' "$(cat /tmp/jwt-private.pem)"
+            printf 'JWT_PUBLIC_KEY_PEM="%s"\n'  "$(cat /tmp/jwt-public.pem)"
+            printf 'API_KEY_HASH_SECRET="%s"\n'    "$(openssl rand -hex 32)"
+            printf 'WEBHOOK_SIGNING_SECRET="%s"\n' "$(openssl rand -hex 32)"
+            printf 'SESSION_SECRET="%s"\n'         "$(openssl rand -hex 32)"
+            printf 'IMPERSONATION_SECRET="%s"\n'   "$(openssl rand -hex 32)"
+            printf 'CSRF_SECRET="%s"\n'            "$(openssl rand -hex 32)"
+            printf 'TRACKING_SECRET_KEY="%s"\n'    "$(openssl rand -hex 32)"
+            printf 'INTERNAL_SERVICE_TOKEN="%s"\n' "$(openssl rand -hex 32)"
+          } > /tmp/loadgate.env
+          echo "secrets env written: $(wc -l < /tmp/loadgate.env) vars"
+
+      # ── Step 3: Build + start the API server (postgres + redis + api-server) ─
+      # The k6 suites target http://localhost:3000 — without a running API
+      # server every request would fail. This boots the real image from the
+      # repo's Dockerfile with the backing services from the CI compose.
+      - name: Build and start API server (postgres + redis + api-server)
+        run: |
+          set -euo pipefail
+          docker compose --env-file /tmp/loadgate.env \
+            -f "${LOAD_GATE_COMPOSE}" up -d --build postgres redis api-server
+          docker compose -f "${LOAD_GATE_COMPOSE}" ps
+
+      # ── Step 4: Bootstrap schema + seed the smoke-test user ────────────────
+      # The api-server does not run migrations at startup; apply the canonical
+      # DDL (apexmail_db::migrations::SCHEMA) and insert the login used by the
+      # k6 scripts so /v1/auth/login and /v1/messages checks can pass.
+      - name: Bootstrap schema and seed smoke-test user
+        run: |
+          set -euo pipefail
+          docker compose -f "${LOAD_GATE_COMPOSE}" exec -T postgres \
+            pg_isready -U apexmail -d apexmail_loadtest
+          awk '/^pub const SCHEMA: &str = r#"$/{f=1; next} /^"#;$/{f=0} f' \
+            services/mail-server/crates/apexmail-db/src/migrations.rs > /tmp/schema.sql
+          wc -l /tmp/schema.sql
+          docker compose -f "${LOAD_GATE_COMPOSE}" exec -T postgres \
+            psql -U apexmail -d apexmail_loadtest -v ON_ERROR_STOP=1 < /tmp/schema.sql
+          sudo apt-get update -qq && sudo apt-get install -y -qq apache2-utils >/dev/null
+          HASH="$(htpasswd -bnBC 10 '' 'smoke-test-password' | tr -d ':\n')"
+          docker compose -f "${LOAD_GATE_COMPOSE}" exec -T postgres \
+            psql -U apexmail -d apexmail_loadtest -v ON_ERROR_STOP=1 <<SQL
+          INSERT INTO tenants (id, name, slug)
+          VALUES (gen_random_uuid(), 'Load Test', 'loadtest')
+          ON CONFLICT (slug) DO NOTHING;
+          INSERT INTO users (id, tenant_id, email, name, password_hash, role, status)
+          SELECT gen_random_uuid(), id, 'smoke-test@apexmail.ee', 'Smoke Test', '${HASH}', 'owner', 'active'
+          FROM tenants WHERE slug = 'loadtest'
+          ON CONFLICT (email) DO NOTHING;
+          SQL
+
+      # ── Step 5: Wait for API readiness ─────────────────────────────────────
+      - name: Wait for API server readiness
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/health/ready >/dev/null 2>&1; then
+              echo "API server ready after ${i}0s"
+              curl -s http://localhost:3000/health/live
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::API server did not become ready on localhost:3000"
+          docker compose -f "${LOAD_GATE_COMPOSE}" logs --tail 50 api-server
+          exit 1
+
+      # ── Step 6: Setup k6 ──────────────────────────────────────────────────
       - name: Setup k6
         run: |
           echo "Installing k6 — a modern load testing tool for APIs"
@@ -103,7 +159,7 @@ jobs:
           sudo apt-get install -y k6
           echo "k6 version: $(k6 version)"
 
-      # ── Step 3: Run Smoke Test ────────────────────────────────────────────
+      # ── Step 7: Run Smoke Test ────────────────────────────────────────────
       - name: Run smoke test
         id: smoke-test
         working-directory: load-tests/http
@@ -115,14 +171,14 @@ jobs:
             2>&1 | tee /tmp/k6-smoke-output.log
           echo "Smoke test exit code: $?"
 
-      # ── Step 4: Determine test profile ────────────────────────────────────
+      # ── Step 8: Determine test profile ────────────────────────────────────
       - name: Determine test profile
         id: profile
         run: |
           PROFILE="${{ github.event.inputs.test_profile || 'standard' }}"
           echo "profile=$PROFILE" >> $GITHUB_OUTPUT
 
-      # ── Step 5: Run Load Test ─────────────────────────────────────────────
+      # ── Step 9: Run Load Test ─────────────────────────────────────────────
       - name: Run load test (standard profile)
         if: steps.profile.outputs.profile == 'standard' || steps.profile.outputs.profile == 'full'
         working-directory: load-tests/http
@@ -134,7 +190,7 @@ jobs:
             2>&1 | tee /tmp/k6-load-output.log
           echo "Load test exit code: $?"
 
-      # ── Step 6: Run Stress Test (conditional) ────────────────────────────
+      # ── Step 10: Run Stress Test (conditional) ────────────────────────────
       - name: Run stress test
         if: steps.profile.outputs.profile == 'stress' || steps.profile.outputs.profile == 'full'
         working-directory: load-tests/http
@@ -147,7 +203,7 @@ jobs:
             2>&1 | tee /tmp/k6-stress-output.log
           echo "Stress test exit code: $?"
 
-      # ── Step 7: Run Spike Test (conditional) ─────────────────────────────
+      # ── Step 11: Run Spike Test (conditional) ─────────────────────────────
       - name: Run spike test
         if: steps.profile.outputs.profile == 'spike' || steps.profile.outputs.profile == 'full'
         working-directory: load-tests/http
@@ -160,7 +216,7 @@ jobs:
             2>&1 | tee /tmp/k6-spike-output.log
           echo "Spike test exit code: $?"
 
-      # ── Step 8: Store Results as Artifacts ───────────────────────────────
+      # ── Step 12: Store Results as Artifacts ───────────────────────────────
       - name: Store k6 results as artifacts
         uses: actions/upload-artifact@65c4c4a1d7e2c2c0f0c7a6c6f9b3e7a1c6b7a8e9 # v4
         with:
@@ -170,7 +226,7 @@ jobs:
             /tmp/k6-*.log
           retention-days: 7
 
-      # ── Step 9: Check Thresholds & Baseline Comparison ──────────────────────
+      # ── Step 13: Check Thresholds & Baseline Comparison ──────────────────────
       - name: Check load test thresholds and compare against baselines
         id: check-thresholds
         run: |
@@ -334,7 +390,7 @@ jobs:
             echo "threshold_passed=true" >> $GITHUB_OUTPUT
           fi
 
-      # ── Step 10: Post Results as PR Comment ──────────────────────────────
+      # ── Step 14: Post Results as PR Comment ──────────────────────────────
       - name: Post load test results as PR comment
         if: |
           github.event_name == 'pull_request' &&
@@ -420,7 +476,7 @@ jobs:
               console.log(comment);
             }
 
-      # ── Step 11: Notify on Failure ─────────────────────────────────────────
+      # ── Step 15: Notify on Failure ─────────────────────────────────────────
       - name: Notify load test failure
         if: failure() && github.event_name == 'pull_request'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7

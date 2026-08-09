@@ -96,7 +96,7 @@ async fn create_campaign(
 
     sqlx::query(
         "INSERT INTO campaigns (id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$8)",
+         VALUES ($1,$2,$3,$4,$5::uuid,$6,$7,0,$8,$8)",
     )
     .bind(id)
     .bind(&auth.tenant_id)
@@ -217,7 +217,7 @@ async fn delete_campaign(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
 
-    let result = sqlx::query("DELETE FROM campaigns WHERE id = $1 AND tenant_id = $2")
+    let result = sqlx::query("DELETE FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
         .bind(&id)
         .bind(&auth.tenant_id)
         .execute(&state.db)
@@ -273,7 +273,7 @@ async fn update_campaign_status_validated(
     }
 
     let result = sqlx::query(
-        "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
+        "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2::uuid AND tenant_id = $3",
     )
     .bind(new_status)
     .bind(&id)
@@ -327,7 +327,7 @@ async fn fetch_campaign(
 ) -> Result<CampaignRow, ApiError> {
     sqlx::query_as::<_, CampaignRow>(
         "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
-         FROM campaigns WHERE id = $1 AND tenant_id = $2",
+         FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(id)
     .bind(tenant_id)
@@ -347,7 +347,7 @@ async fn resend_campaign(
 
     // Verify campaign exists and belongs to tenant, and is in a resendable state
     let campaign_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM campaigns WHERE id = $1 AND tenant_id = $2",
+        "SELECT status FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(id)
     .bind(auth.tenant_id.to_string())
@@ -375,7 +375,7 @@ async fn resend_campaign(
     .await?;
 
     // Update campaign status
-    sqlx::query("UPDATE campaigns SET status = 'resending', updated_at = NOW() WHERE id = $1 AND tenant_id = $2")
+    sqlx::query("UPDATE campaigns SET status = 'resending', updated_at = NOW() WHERE id = $1::uuid AND tenant_id = $2")
         .bind(id)
         .bind(auth.tenant_id.to_string())
         .execute(&state.db)

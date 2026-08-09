@@ -48,6 +48,14 @@ scrape_configs:
     metrics_path: '/metrics'
     scrape_interval: 15s
 
+  # Observability service: self-monitoring gauges plus the Redis eviction
+  # monitor metrics, exposed in Prometheus text format on :4400/metrics.
+  - job_name: 'apexmail-observability'
+    static_configs:
+      - targets: ['observability:4400']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
   - job_name: 'postgres'
     static_configs:
       - targets: ['postgres-exporter:9187']
@@ -79,7 +87,7 @@ scrape_configs:
     # External reachability and TLS checks stay on the global 15s interval.
     static_configs:
       - targets:
-          - https://api.apexmail.ee/health
+          - https://api.apexmail.ee/health/live
           - https://track.apexmail.ee/
           - https://app.apexmail.ee/login
     relabel_configs:
@@ -96,8 +104,8 @@ scrape_configs:
       module: [http_api_health]
     static_configs:
       - targets:
-          - https://api.apexmail.ee/v1/health/readiness
-          - https://api.apexmail.ee/v1/health/liveness
+          - https://api.apexmail.ee/health/ready
+          - https://api.apexmail.ee/health/live
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

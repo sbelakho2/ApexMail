@@ -4,5 +4,5 @@ description = "Echtzeit-Status- und Betriebszeitüberwachung für die ApexMail-E
 template = "status.html"
 
 [extra]
-og_image = "/images/og-status.png"
+og_image = "/images/og-image.svg"
 +++

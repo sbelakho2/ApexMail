@@ -505,21 +505,29 @@ impl SubmissionSession {
             .unwrap_or_else(|| "(no subject)".to_string());
 
         // Store headers separately and body as text_body so outbound
-        // can reconstruct without duplicating headers.
+        // can reconstruct without duplicating headers. Both schema families
+        // are populated so the queue worker (fetch_jobs) can decode the row:
+        // base family (from_address/to_addresses/text_body) plus the worker
+        // columns (message_id/"from"/"to"/text).
+        let to_first = to.first().cloned().unwrap_or_default();
         sqlx::query(
             r#"
             INSERT INTO email_queue (
-                id, from_address, to_addresses, subject, 
-                raw_headers, text_body, status, priority
+                id, message_id, from_address, to_addresses, subject,
+                raw_headers, text_body, "from", "to", text, status, priority
             )
-            VALUES ($1, $2, $3, $4, $5, $6, 'pending', 50)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', 50)
         "#,
         )
+        .bind(message_id)
         .bind(message_id)
         .bind(&from)
         .bind(&to)
         .bind(&subject)
         .bind(headers_part)
+        .bind(body_part)
+        .bind(&from)
+        .bind(&to_first)
         .bind(body_part)
         .execute(&self.state.db_pool)
         .await?;

@@ -1,16 +1,19 @@
-# ApexMail — Deployment
-# ======================
+# ApexMail — Manual Deployment (emergency/hotfix path only)
+# =========================================================
 #
-# SINGLE SOURCE OF TRUTH for deployments. No GitHub Actions. No manual docker run.
+# CANONICAL production deployment is CI/CD — see deploy/DEPLOYMENT.md (the
+# single source of truth):
+#   .github/workflows/deploy.yml builds all images and pushes them to GHCR,
+#   then .github/workflows/deploy-hetzner.yml SSHes to the host, renders the
+#   secrets, pulls the images and runs `docker compose up -d`.
 #
-# Deploy procedure (operator runs from their machine):
-#   1. Code is rsync'd to /opt/apexmail on the server via SSH (with --delete so
-#      stale files are removed; only the exact current repo state exists on server)
-#   2. deploy/scripts/deploy.sh runs on the server — builds images, cleans old
-#      artifacts/containers/images, starts everything via docker compose
+# The targets below are a MANUAL FALLBACK for emergency hotfixes and local
+# testing — they are NOT the production path. They rsync code to the host and
+# run deploy/scripts/deploy.sh, which builds images LOCALLY (tagged with
+# GHCR-style names, never pushed). CI/CD remains the single supported path.
 #
 # Usage:
-#   make deploy                         — full deploy (sync all + rebuild all)
+#   make deploy                         — full manual deploy (sync all + rebuild all)
 #   make deploy-service S=api-server    — partial: sync only changed code dirs,
 #                                          rebuild only the named service(s)
 #   make deploy-service S=mta,imap-server  — rebuild multiple services
@@ -19,8 +22,10 @@
 #   make deploy-restart                 — just restart containers (no rebuild)
 #   make verify                         — check live endpoints
 #
-# Server-local files NEVER touched by rsync: .env, secrets/, certs/,
-# deploy/nginx/ssl/, target/ (Docker build cache)
+# Server-local state NEVER touched by these targets:
+#   .env, secrets/, certs/ (not in SYNC_DIRS), target/ (Docker build cache),
+#   and deploy/nginx/ssl/ (the Let's Encrypt store — excluded from the rsync
+#   of deploy/ with --exclude='ssl'; deleting it would kill live TLS certs).
 #
 
 SERVER_HOST := root@95.216.226.51
@@ -35,9 +40,9 @@ SYNC_FILES := docker-compose.yml docker-compose.prod.yml
 
 # Map service names to the code directories they depend on (for partial deploys).
 # When you do `make deploy-service S=api-server`, only these dirs are synced.
-SERVICE_DEPS_api-server    := services/mail-server/crates/api-server services/mail-server/crates/ui-foundation services/mail-server/crates/kcaptcha services/mail-server/Cargo.toml packages/kiwicaptcha
+SERVICE_DEPS_api-server    := services/mail-server/crates/api-server services/mail-server/crates/ui-foundation services/mail-server/Cargo.toml packages/kiwicaptcha
 SERVICE_DEPS_mta           := services/mail-server/crates/mta services/mail-server/crates/mail-common services/mail-server/crates/mail-proto services/mail-server/Cargo.toml
-SERVICE_DEPS_imap-server   := services/mail-server/crates/imap-server services/mail-server/crates/mailstore-core services/mail-server/Crates.toml
+SERVICE_DEPS_imap-server   := services/mail-server/crates/imap-server services/mail-server/crates/mailstore-core services/mail-server/Cargo.toml
 SERVICE_DEPS_mailstore     := services/mail-server/crates/mailstore-core services/mail-server/Cargo.toml
 SERVICE_DEPS_worker        := services/mail-server/crates/worker-processors services/mail-server/Cargo.toml
 SERVICE_DEPS_enterprise    := services/mail-server/crates/enterprise services/mail-server/Cargo.toml
@@ -54,6 +59,7 @@ deploy:
 		echo "  $$dir/"; \
 		$(RSYNC) --delete \
 			--exclude='target' --exclude='node_modules' --exclude='public' \
+			--exclude='ssl' \
 			$(RSYNC_SSH) ./$$dir/ $(SERVER_HOST):/opt/apexmail/$$dir/; \
 	done
 	@for file in $(SYNC_FILES); do \

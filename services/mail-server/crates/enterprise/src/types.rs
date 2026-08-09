@@ -578,7 +578,7 @@ impl std::fmt::Display for SubAccountStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SubAccount {
     pub id: Uuid,
-    pub parent_id: Uuid,
+    pub parent_id: String,
     pub name: String,
     pub status: String,
     pub email: Option<String>,

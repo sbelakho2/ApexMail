@@ -4,5 +4,5 @@ description = "Email API for regulated teams with GDPR workflows, HIPAA BAA life
 template = "home.html"
 
 [extra]
-og_image = "/images/og-home.png"
+og_image = "/images/og-image.svg"
 +++

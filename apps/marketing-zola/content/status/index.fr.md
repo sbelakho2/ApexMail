@@ -4,5 +4,5 @@ description = "Surveillance en temps réel du statut et de la disponibilité de 
 template = "status.html"
 
 [extra]
-og_image = "/images/og-status.png"
+og_image = "/images/og-image.svg"
 +++

@@ -24,44 +24,23 @@
 
     {# Plans Grid — max 3 columns for readability #}
     <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-      {% set plan_name = "Free" %}{% set plan_price = "€0" %}{% set plan_period = "forever" %}{% set plan_description = "Perfect for development and testing." %}{% set plan_features = ["30,000 emails/month", "RESTful API access", "1 sending domain", "7-day data retention", "Community support"] %}{% set plan_cta_label = "Start Free" %}{% set plan_cta_url = config.extra.app_url ~ "/signup" %}{% set plan_cta_aria_label = "Start Free - Free plan at €0 forever" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% set plan_name = "Free" %}{% set plan_price = "€0" %}{% set plan_period = "/month" %}{% set plan_description = "Development, testing, and learning." %}{% set plan_features = ["30,000 emails/month (no auto overage)", "1 sending domain", "1 user", "REST API + SMTP relay", "Test mode (6 test addresses)", "7-day event history", "Community support"] %}{% set plan_cta_label = "Start Free" %}{% set plan_cta_url = config.extra.app_url ~ "/signup" %}{% set plan_cta_aria_label = "Start Free - Free plan at €0/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
 
-      {% set plan_name = "Starter" %}{% set plan_price = "€25" %}{% set plan_period = "/month" %}{% set plan_description = "For growing apps with moderate needs." %}{% set plan_features = ["50,000 emails/month", "Webhooks & advanced analytics", "Custom templates", "5 sending domains", "5 team members", "Email support"] %}{% set plan_cta_label = "Start Trial" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=starter" %}{% set plan_cta_aria_label = "Start Trial - Starter plan at €25/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% set plan_name = "Developer" %}{% set plan_price = "€29" %}{% set plan_period = "/month" %}{% set plan_description = "For production applications needing dependable transactional sending." %}{% set plan_features = ["50,000 emails/month", "5 sending domains", "3 users", "Stored templates", "Signed webhooks (3 endpoints)", "30-day event history", "Basic inbound email", "Batch & scheduled sending", "2 business day support response"] %}{% set plan_cta_label = "Start Developer" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=developer" %}{% set plan_cta_aria_label = "Start Developer - Developer plan at €29/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
 
-      {% set plan_name = "Pro" %}{% set plan_price = "€65" %}{% set plan_period = "/month" %}{% set plan_description = "For teams needing advanced deliverability controls and 150K emails/month." %}{% set plan_features = ["150,000 emails/month", "Send-time optimization", "Custom tracking domain", "25 sending domains", "10 team members", "Dedicated IP add-on (€30/mo)"] %}{% set plan_cta_label = "Start Trial" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=pro" %}{% set plan_cta_aria_label = "Start Trial - Pro plan at €65/month" %}{% set plan_is_popular = true %}{% set plan_popular_label = "Most Popular" %}{% set plan_is_enterprise = false %}{% set plan_button_primary = true %}
+      {% set plan_name = "Pro" %}{% set plan_price = "€89" %}{% set plan_period = "/month" %}{% set plan_description = "For growing SaaS teams needing deeper delivery visibility." %}{% set plan_features = ["150,000 emails/month", "15 sending domains", "8 users", "Custom tracking domain", "Advanced analytics", "5 webhook endpoints", "90-day event history", "10 inbox-placement tests/mo", "Email Grader", "Dedicated IP add-on (€30/mo)", "1 business day support response"] %}{% set plan_cta_label = "Start Pro" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=pro" %}{% set plan_cta_aria_label = "Start Pro - Pro plan at €89/month" %}{% set plan_is_popular = true %}{% set plan_popular_label = "Most Popular" %}{% set plan_is_enterprise = false %}{% set plan_button_primary = true %}
       {% include "partials/pricing/card.html" %}
 
-      {% set plan_name = "Growth" %}{% set plan_price = "€150" %}{% set plan_period = "/month" %}{% set plan_description = "For teams scaling with high-volume deliverability needs." %}{% set plan_features = ["500,000 emails/month", "1 dedicated IP included", "A/B testing & audit logs", "100 sending domains", "25 team members", "90-day data retention"] %}{% set plan_cta_label = "Start Trial" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=growth" %}{% set plan_cta_aria_label = "Start Trial - Growth plan at €150/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% set plan_name = "Growth" %}{% set plan_price = "€229" %}{% set plan_period = "/month" %}{% set plan_description = "For established high-volume transactional applications." %}{% set plan_features = ["500,000 emails/month", "50 sending domains", "15 users", "1 managed dedicated IP (eligibility review)", "Managed IP warm-up", "Audit logs", "5 subaccounts", "20 inbox-placement tests/mo", "90-day event history", "Saved searches & data exports", "8 business hour priority support"] %}{% set plan_cta_label = "Start Growth" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=growth" %}{% set plan_cta_aria_label = "Start Growth - Growth plan at €229/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
 
-      {% set plan_name = "Scale" %}{% set plan_price = "€350" %}{% set plan_period = "/month" %}{% set plan_description = "For high-volume enterprise senders." %}{% set plan_features = ["2,000,000 emails/month", "3 dedicated IPs", "Unlimited domains", "SSO/SAML & 10 subaccounts", "Send-time, A/B & 99.9% uptime SLA", "Priority async support & shared Slack hub"] %}{% set plan_cta_label = "Start Trial" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=scale" %}{% set plan_cta_aria_label = "Start Trial - Scale plan at €350/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% set plan_name = "Business" %}{% set plan_price = "€699" %}{% set plan_period = "/month" %}{% set plan_description = "For platforms needing identity controls and account separation." %}{% set plan_features = ["2,000,000 emails/month", "Unlimited domains (subject to review)", "25 users", "1 managed dedicated IP (eligibility review)", "25 subaccounts", "SAML SSO + RBAC", "180-day event history", "50 inbox-placement tests/mo", "Quarterly deliverability review", "DPA support", "4 business hour high-severity response"] %}{% set plan_cta_label = "Start Business" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=business" %}{% set plan_cta_aria_label = "Start Business - Business plan at €699/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
 
-      {% set plan_name = "Enterprise" %}{% set plan_price = "€3,000" %}{% set plan_period = "/month" %}{% set plan_description = "Annual-contract platform plan for regulated senders." %}{% set plan_features = ["5,000,000 emails/month", "10 dedicated IPs included", "Private cloud & BYOIP lifecycle", "HIPAA BAA workflow", "SIG/CAIQ/HECVAT packs", "Dedicated CSM & 99.9% uptime SLA"] %}{% set plan_cta_label = "Contact Sales" %}{% set plan_cta_url = "/contact/sales/" %}{% set plan_cta_aria_label = "Contact Sales - Enterprise plan from €3,000/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = true %}{% set plan_enterprise_label = "Enterprise" %}{% set plan_button_primary = false %}
+      {% set plan_name = "Enterprise" %}{% set plan_price = "€3,000" %}{% set plan_period = "/month" %}{% set plan_description = "For regulated organizations with contractual controls. Annual commitment." %}{% set plan_features = ["5,000,000 emails/month", "10 managed dedicated IPs", "50 subaccounts", "SAML SSO + SCIM", "Custom RBAC + premium audit logs", "Named CSM", "DPA + BAA review eligibility", "SIG/CAIQ/HECVAT response", "Custom retention", "99.9% SLA (contractual)", "Monthly service review"] %}{% set plan_cta_label = "Contact Sales" %}{% set plan_cta_url = "/contact/sales/" %}{% set plan_cta_aria_label = "Contact Sales - Enterprise plan from €3,000/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = true %}{% set plan_enterprise_label = "Enterprise" %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
-    </div>
-
-    {# Pay As You Go #}
-    <div class="mt-20 border border-surface-200 bg-surface-100 p-8 rounded-sm flex flex-col md:flex-row items-center justify-between gap-8">
-      <div class="flex-1">
-        <div class="flex items-center gap-2 mb-4">
-          <div class="w-2 h-2 bg-brand-500"></div>
-          <span class="text-[10px] font-bold text-surface-950 tracking-[0.2em]">Dynamic Allocation (PAYG)</span>
-        </div>
-        <p class="text-surface-600 text-[13px] leading-[1.6] max-w-xl">
-          Zero commitment infrastructure. Automated volume discounts applied deterministically based on consumption.
-        </p>
-      </div>
-      <div class="flex flex-wrap gap-3">
-        {% for tier in ["0-10k: $0.001", "10k-100k: $0.0008", "100k-1M: $0.0005", "1M+: $0.0003"] %}
-          <span class="px-3 py-1 bg-white border border-surface-200 text-[10px] font-bold text-surface-950 tracking-tight rounded-sm">{{ tier }}</span>
-        {% endfor %}
-      </div>
-      <a href="{{ config.extra.app_url }}/signup?plan=payg" class="btn-secondary">
-        Initialize
-      </a>
     </div>
 
     {# ── Product Proof ─────────────────────────────────────────────── #}
@@ -80,7 +59,7 @@
         <div class="p-6 bg-white rounded-sm border border-surface-200 flex flex-col">
           <div class="text-[10px] font-bold text-brand-500 tracking-widest mb-3 uppercase">Enterprise</div>
           <h3 class="text-lg font-bold text-surface-950 mb-2">Priced for real ownership</h3>
-          <p class="text-sm text-surface-600 leading-relaxed">Enterprise starts at $3,000/month on annual contracts so private deployment lifecycle, BYOIP verification, dedicated onboarding, CSM coverage, and SLA commitments are resourced correctly.</p>
+          <p class="text-sm text-surface-600 leading-relaxed">Enterprise starts at €3,000/month on annual contracts so private deployment lifecycle, BYOIP verification, dedicated onboarding, CSM coverage, and SLA commitments are resourced correctly.</p>
         </div>
       </div>
 

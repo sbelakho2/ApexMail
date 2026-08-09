@@ -175,7 +175,7 @@ pip install apexmail
 
 **Go:**
 ```bash
-go get github.com/sbelakho2/ApexMail/sdks/go
+go get github.com/apexmail/apexmail-go
 ```
 
 **PHP:**

@@ -1259,8 +1259,7 @@ async fn insert_metering_events(
             .push_bind(event.normalized_id)
             .push_bind(&event.tenant_id)
             .push_bind(&event.event_type)
-            .push("::text::meter_event_type")
-            .push_bind(event.quantity)
+                        .push_bind(event.quantity)
             .push_bind(event.timestamp)
             .push_bind(&event.metadata);
     });

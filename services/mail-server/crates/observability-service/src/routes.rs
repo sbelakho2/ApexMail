@@ -9,13 +9,15 @@ use std::time::Duration;
 
 use axum::{
     extract::{DefaultBodyLimit, Query, State},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{header, header::AUTHORIZATION, HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use chrono::{DateTime, Utc};
+use deadpool_redis::Pool as RedisPool;
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
@@ -40,6 +42,8 @@ pub struct AppState {
     pub alerts: Arc<AlertManager>,
     pub slos: Arc<SloMonitor>,
     pub service_token: String,
+    pub redis_pool: Option<Arc<RedisPool>>,
+    pub metrics_handle: Option<PrometheusHandle>,
 }
 
 impl AppState {
@@ -58,7 +62,21 @@ impl AppState {
             alerts,
             slos,
             service_token,
+            redis_pool: None,
+            metrics_handle: None,
         }
+    }
+
+    /// Attach the Redis connection pool used for dependency health checks.
+    pub fn with_redis_pool(mut self, pool: Arc<RedisPool>) -> Self {
+        self.redis_pool = Some(pool);
+        self
+    }
+
+    /// Attach the Prometheus recorder handle for the `/metrics` endpoint.
+    pub fn with_metrics_handle(mut self, handle: PrometheusHandle) -> Self {
+        self.metrics_handle = Some(handle);
+        self
     }
 }
 
@@ -71,6 +89,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/health/details", get(health_details))
+        .route("/metrics", get(metrics))
         .route("/metrics/summary", get(metrics_summary))
         .route("/traces", get(traces_list))
         .route("/logs", get(logs_query))
@@ -94,7 +113,11 @@ async fn require_service_token(
     req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if req.uri().path() == "/health" {
+    // Liveness probe and Prometheus scrape endpoints are intentionally
+    // unauthenticated: the service is only reachable on the internal Docker
+    // networks, and Prometheus does not carry a service token.
+    let path = req.uri().path();
+    if path == "/health" || path == "/metrics" {
         return Ok(next.run(req).await);
     }
     if state.service_token.is_empty() {
@@ -177,11 +200,35 @@ struct DetailedHealthResponse {
     logs_count: usize,
     active_alerts: usize,
     slos_defined: usize,
+    redis_connected: bool,
 }
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+/// Prometheus text exposition endpoint.
+///
+/// Renders the global `metrics` crate registry (Redis monitor gauges) plus
+/// the in-memory [`MetricsCollector`] (self-monitoring gauges, counters,
+/// histograms). Unauthenticated — Prometheus scrapes it on the internal
+/// monitoring network.
+async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let mut body = String::new();
+    if let Some(handle) = &state.metrics_handle {
+        body.push_str(&handle.render());
+        body.push('\n');
+    }
+    body.push_str(&state.metrics.export_prometheus());
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, HeaderValue::from_static(
+            "text/plain; version=0.0.4; charset=utf-8",
+        ))],
+        body,
+    )
+}
 
 async fn metrics_summary(
     State(state): State<AppState>,
@@ -245,15 +292,52 @@ async fn health() -> Json<HealthResponse> {
 }
 
 async fn health_details(State(state): State<AppState>) -> Json<DetailedHealthResponse> {
+    let redis_connected = match &state.redis_pool {
+        Some(pool) => check_redis(pool).await,
+        None => false,
+    };
+
+    let (status, redis_connected) = match &state.redis_pool {
+        Some(_) if !redis_connected => ("degraded".to_string(), false),
+        _ => ("ok".to_string(), redis_connected),
+    };
+
     Json(DetailedHealthResponse {
-        status: "ok".to_string(),
+        status,
         uptime_secs: state.metrics.uptime_secs(),
         metrics_count: state.metrics.get_summary().len(),
         traces_count: state.traces.len(),
         logs_count: state.logs.len(),
         active_alerts: state.alerts.list_active_alerts().len(),
         slos_defined: state.slos.list_slos().len(),
+        redis_connected,
     })
+}
+
+/// Probe the Redis pool with a `PING`, bounded by a 2s timeout.
+async fn check_redis(pool: &RedisPool) -> bool {
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        match pool.get().await {
+            Ok(mut conn) => {
+                let pong: String =
+                    redis::cmd("PING").query_async(&mut conn).await.unwrap_or_default();
+                pong
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "redis health check: pool acquire failed");
+                String::new()
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(pong) => pong == "PONG",
+        Err(_) => {
+            tracing::warn!("redis health check timed out");
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +484,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_details_endpoint() {
-        let app = router(test_state());
+        let state = test_state();
+        let app = router(state);
         let req = Request::builder()
             .uri("/health/details")
             .header("x-api-key", "test-token")
@@ -416,6 +501,35 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
         assert!(json["uptime_secs"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoint_is_public_and_text_exposition() {
+        let state = test_state();
+        state.metrics.record_counter("http_total", 10.0, "HTTP total");
+        state.metrics.record_gauge("active_conns", 5.0, "Active connections");
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()["content-type"],
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("# TYPE http_total counter"));
+        assert!(text.contains("http_total 10"));
+        assert!(text.contains("# TYPE active_conns gauge"));
+        assert!(text.contains("active_conns 5"));
     }
 
     #[tokio::test]

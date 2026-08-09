@@ -58,7 +58,7 @@ export default function () {
   //    Basic health check — no authentication required.
   //    Expected: HTTP 200, body contains "ok" or similar
   const livenessResp = http.get(
-    `${BASE_URL}/v1/health/liveness`,
+    `${BASE_URL}/health/live`,
     { headers: DEFAULT_HEADERS, tags: { ...tags, endpoint: 'liveness' } }
   );
 
@@ -71,7 +71,7 @@ export default function () {
   //    Deeper health check — validates DB connectivity etc.
   //    Expected: HTTP 200
   const readinessResp = http.get(
-    `${BASE_URL}/v1/health/readiness`,
+    `${BASE_URL}/health/ready`,
     { headers: DEFAULT_HEADERS, tags: { ...tags, endpoint: 'readiness' } }
   );
 
@@ -119,7 +119,7 @@ export default function () {
   });
 
   const emailResp = http.post(
-    `${BASE_URL}/v1/email/send`,
+    `${BASE_URL}/v1/messages`,
     emailPayload,
     {
       headers: {

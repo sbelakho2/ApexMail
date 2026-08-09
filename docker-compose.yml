@@ -111,102 +111,6 @@ services:
       - redis_password
     logging: *default-logging
 
-  # ===========================================================================
-  # REDIS SENTINEL (High Availability — SCALE-H-01)
-  # ===========================================================================
-  # Three Sentinel instances provide quorum-based automatic failover for the
-  # Redis primary.  Sentinel monitors the primary and promotes a replica when
-  # the primary becomes unreachable.  Applications should connect via Sentinel
-  # (not directly to the primary) so they automatically discover the new
-  # primary after failover.
-  #
-  # Production note: In a real deployment each Sentinel should run on a
-  # separate host/VM.  This compose setup collocates them for development.
-  # ===========================================================================
-  redis-sentinel-1:
-    image: redis:7.4-alpine
-    container_name: apexmail-redis-sentinel-1
-    restart: unless-stopped
-    command: redis-sentinel /etc/redis/sentinel.conf
-    volumes:
-      - ./deploy/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    ports:
-      - "${REDIS_SENTINEL_1_PORT:-127.0.0.1:26379}:26379"
-    networks:
-      - apexmail_data
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-        reservations:
-          memory: 32M
-    security_opt:
-      - no-new-privileges:true
-      - apparmor:docker-default
-    read_only: true
-    tmpfs:
-      - /tmp
-    logging: *default-logging
-
-  redis-sentinel-2:
-    image: redis:7.4-alpine
-    container_name: apexmail-redis-sentinel-2
-    restart: unless-stopped
-    command: redis-sentinel /etc/redis/sentinel.conf
-    volumes:
-      - ./deploy/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    ports:
-      - "${REDIS_SENTINEL_2_PORT:-127.0.0.1:26380}:26379"
-    networks:
-      - apexmail_data
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-        reservations:
-          memory: 32M
-    security_opt:
-      - no-new-privileges:true
-      - apparmor:docker-default
-    read_only: true
-    tmpfs:
-      - /tmp
-    logging: *default-logging
-
-  redis-sentinel-3:
-    image: redis:7.4-alpine
-    container_name: apexmail-redis-sentinel-3
-    restart: unless-stopped
-    command: redis-sentinel /etc/redis/sentinel.conf
-    volumes:
-      - ./deploy/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    ports:
-      - "${REDIS_SENTINEL_3_PORT:-127.0.0.1:26381}:26379"
-    networks:
-      - apexmail_data
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-        reservations:
-          memory: 32M
-    security_opt:
-      - no-new-privileges:true
-      - apparmor:docker-default
-    read_only: true
-    tmpfs:
-      - /tmp
-    logging: *default-logging
-
   # =========================================================================
   # OBSERVABILITY SERVICE
   # =========================================================================
@@ -223,6 +127,12 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: observability-service
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+    secrets:
+      - redis_password
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 4400"]
       interval: 15s
@@ -232,6 +142,7 @@ services:
     networks:
       - apexmail_monitoring
       - apexmail_backend
+      - apexmail_data
     profiles:
       - monitoring
     deploy:
@@ -487,7 +398,7 @@ services:
       context: .
       dockerfile: services/mail-server/Dockerfile
       target: enterprise
-    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DB_PASSWORD", "DB_PASSWORD_FILE", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "--", "/usr/bin/tini", "--", "/usr/local/bin/enterprise-server"]
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DB_PASSWORD", "DB_PASSWORD_FILE", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "JWT_PUBLIC_KEY_PEM", "JWT_PUBLIC_KEY_PEM_FILE", "--", "/usr/bin/tini", "--", "/usr/local/bin/enterprise-server"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -509,6 +420,8 @@ services:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_DB: 0
       JWT_SECRET: ${JWT_SECRET:-dev-enterprise-jwt-secret-change-me}
+      JWT_PUBLIC_KEY_PEM: ${JWT_PUBLIC_KEY_PEM:-dev}
+      JWT_PUBLIC_KEY_PEM_FILE: ${JWT_PUBLIC_KEY_PEM_FILE:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: enterprise-server
     volumes:
@@ -669,6 +582,7 @@ services:
       - ./deploy/clickhouse/logging.xml:/etc/clickhouse-server/config.d/logging.xml:ro
       - ./deploy/clickhouse/query-log.xml:/etc/clickhouse-server/config.d/query-log.xml:ro
       - ./deploy/clickhouse/users.xml:/etc/clickhouse-server/users.d/apexmail-users.xml:ro
+      - ./deploy/clickhouse/initdb:/docker-entrypoint-initdb.d:ro
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
       - "${CLICKHOUSE_HTTP_PORT:-127.0.0.1:8123}:8123"
@@ -836,6 +750,10 @@ services:
     depends_on:
       observability:
         condition: service_healthy
+    environment:
+      # Used by deploy/alertmanager.yml webhook receivers to authenticate
+      # against the observability service's /alerts ingestion endpoint.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
     volumes:
       - ./deploy/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager_data:/alertmanager

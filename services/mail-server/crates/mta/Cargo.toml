@@ -12,12 +12,16 @@ path = "src/bin/mta.rs"
 
 [dependencies]
 mail-common = { path = "../mail-common" }
+mail-proto = { path = "../mail-proto" }
 apexmail-lib = { path = "../apexmail-lib" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 async-trait.workspace = true
 futures.workspace = true
+
+# gRPC
+tonic.workspace = true
 
 # Database
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }

@@ -124,11 +124,80 @@ pub struct UnsubscribeData {
     pub ip_address: Option<String>,
 }
 
+// ── ClickHouse row ────────────────────────────────────────────────────────────
+
+/// Row shape of `apexmail.events` — column order and types must match
+/// `deploy/clickhouse/initdb/001_schema.sql` and
+/// `analytics::clickhouse_engine::ClickHouseEngine::init_schema`.
+#[derive(Debug, Clone, Serialize, Deserialize, clickhouse::Row)]
+pub struct ClickHouseEventRow {
+    pub id: String,
+    pub tenant_id: String,
+    pub message_id: String,
+    pub event_type: String,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub timestamp: time::OffsetDateTime,
+    pub recipient: String,
+    pub recipient_domain: String,
+    pub link_id: String,
+    pub user_agent: String,
+    pub ip_address: String,
+    pub country: String,
+    pub device_type: String,
+    pub campaign_id: String,
+    pub metadata: String,
+}
+
+impl ClickHouseEventRow {
+    /// Map a WAL tracking event onto the ClickHouse row. All optional fields
+    /// are flattened to non-null strings — the `events` table has no
+    /// `Nullable` columns.
+    pub fn from_tracking_event(ev: &TrackingEvent) -> Self {
+        let ts = ev.timestamp;
+        let timestamp = time::OffsetDateTime::from_unix_timestamp(ts.timestamp())
+            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+            + time::Duration::nanoseconds(ts.timestamp_subsec_nanos() as i64);
+
+        Self {
+            id: ev.id.clone(),
+            tenant_id: ev.tenant_id.clone(),
+            message_id: ev.message_id.clone(),
+            event_type: ev.event_type.to_string(),
+            timestamp,
+            recipient: ev.recipient.clone(),
+            recipient_domain: recipient_domain(&ev.recipient),
+            link_id: ev.link_id.clone().unwrap_or_default(),
+            user_agent: ev.user_agent.clone().unwrap_or_default(),
+            ip_address: ev.ip_address.clone().unwrap_or_default(),
+            country: String::new(),
+            device_type: String::new(),
+            campaign_id: String::new(),
+            metadata: ev
+                .metadata
+                .as_ref()
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "{}".to_string()),
+        }
+    }
+}
+
+/// Lower-cased domain part of an email address (`recipient_domain` column).
+fn recipient_domain(recipient: &str) -> String {
+    recipient
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.to_lowercase())
+        .unwrap_or_default()
+}
+
 // ── EventProcessor ────────────────────────────────────────────────────────────
 
 pub struct EventProcessor {
     db: PgPool,
     redis: RedisPool,
+    /// ClickHouse OLAP client for event ingestion (best-effort secondary store).
+    clickhouse: clickhouse::Client,
+    /// Timeout for a single ClickHouse insert batch.
+    clickhouse_insert_timeout: Duration,
     flush_interval_ms: u64,
     max_buffer_size: usize,
     drain_script: Script,
@@ -137,19 +206,35 @@ pub struct EventProcessor {
 }
 
 impl EventProcessor {
-    pub fn new(db: PgPool, redis: RedisPool) -> Self {
-        Self::with_config(db, redis, 1_000, 100)
+    pub fn new(
+        db: PgPool,
+        redis: RedisPool,
+        clickhouse: clickhouse::Client,
+        clickhouse_insert_timeout: Duration,
+    ) -> Self {
+        Self::with_config(
+            db,
+            redis,
+            clickhouse,
+            clickhouse_insert_timeout,
+            1_000,
+            100,
+        )
     }
 
     pub fn with_config(
         db: PgPool,
         redis: RedisPool,
+        clickhouse: clickhouse::Client,
+        clickhouse_insert_timeout: Duration,
         flush_interval_ms: u64,
         max_buffer_size: usize,
     ) -> Self {
         Self {
             db,
             redis,
+            clickhouse,
+            clickhouse_insert_timeout,
             flush_interval_ms,
             max_buffer_size,
             drain_script: Script::new(ATOMIC_DRAIN_SCRIPT),
@@ -530,7 +615,9 @@ impl EventProcessor {
                         unnest($3::int[])  AS clicks,
                         unnest($4::int[])  AS unsubs
                 ) AS v
-                WHERE m.id = v.id
+                -- messages.id may be UUID or text depending on environment;
+                -- comparing via text avoids "operator does not exist: uuid = text".
+                WHERE m.id::text = v.id
                 "#,
             )
             .bind(&msg_ids)
@@ -543,6 +630,29 @@ impl EventProcessor {
         }
 
         tx.commit().await.context("commit transaction")?;
+
+        // ── ClickHouse OLAP ingest ──────────────────────────────────────
+        // Best-effort secondary store: Postgres is the source of truth, so a
+        // ClickHouse failure is logged (never re-enqueues the batch — that
+        // would re-run the committed Postgres writes).
+        if let Err(ch_err) = self.write_clickhouse(&events).await {
+            error!(
+                count = events.len(),
+                error = %ch_err,
+                "ClickHouse ingest failed — events are safe in Postgres"
+            );
+            metrics::counter!("apexmail_tracking_clickhouse_failures_total").increment(1);
+        } else {
+            info!(
+                count = events.len(),
+                "ClickHouse ingest successful"
+            );
+            metrics::counter!(
+                "apexmail_tracking_clickhouse_events_total",
+                "outcome" => "inserted",
+            )
+            .increment(events.len() as u64);
+        }
 
         // ── Publish events to Redis Pub/Sub for real-time SSE streaming ──
         // Fire-and-forget:SSE is best-effort; Postgres is the source of truth.
@@ -568,6 +678,49 @@ impl EventProcessor {
                 }
             }
         });
+
+        Ok(())
+    }
+
+    // ── ClickHouse ingest ────────────────────────────────────────────────
+
+    /// Insert the flushed batch into the ClickHouse `events` table.
+    ///
+    /// Column order must match `apexmail.events` (see
+    /// `deploy/clickhouse/initdb/001_schema.sql` and
+    /// `analytics::clickhouse_engine::ClickHouseEngine::init_schema`).
+    /// The batch is bounded by `clickhouse_insert_timeout` so a stalled
+    /// ClickHouse never wedges the flush loop.
+    async fn write_clickhouse(&self, events: &[TrackingEvent]) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let events = events.to_vec();
+        let timeout_dur = self.clickhouse_insert_timeout;
+
+        tokio::time::timeout(timeout_dur, async {
+            let mut insert = self
+                .clickhouse
+                .insert("events")
+                .context("ClickHouse insert handle")?;
+            for event in &events {
+                let row = ClickHouseEventRow::from_tracking_event(event);
+                insert
+                    .write(&row)
+                    .await
+                    .context("ClickHouse row write")?;
+            }
+            insert.end().await.context("ClickHouse insert commit")
+        })
+        .await
+        .map_err(|_elapsed| {
+            anyhow::anyhow!(
+                "ClickHouse insert timed out after {}s for {} events",
+                timeout_dur.as_secs(),
+                events.len()
+            )
+        })??;
 
         Ok(())
     }
@@ -829,5 +982,181 @@ mod tests {
         let payload = r#"{"id":"evt_1","type":"opened","tenantId":"t","messageId":"m","recipient":"x@y.com","timestamp":"2024-01-01T00:00:00Z"}"#;
         let envelope = format!(r#"{{"v":1,"cs":"00000000","d":{payload}}}"#);
         assert!(parse_single_wal_entry(&envelope).is_err());
+    }
+
+    #[test]
+    fn recipient_domain_extracts_and_lowercases() {
+        assert_eq!(recipient_domain("User@Example.COM"), "example.com");
+        assert_eq!(recipient_domain("no-at-sign"), "");
+        assert_eq!(recipient_domain("a@b@c.com"), "c.com");
+    }
+
+    #[test]
+    fn clickhouse_row_mapping_flattens_options() {
+        let event = TrackingEvent {
+            id: "evt_1".into(),
+            event_type: EventType::Clicked,
+            tenant_id: "t1".into(),
+            message_id: "m1".into(),
+            recipient: "User@Example.com".into(),
+            link_id: Some("lnk_1".into()),
+            link_url: Some("https://example.com/x".into()),
+            unsubscribe_reason: None,
+            user_agent: Some("TestAgent".into()),
+            ip_address: None,
+            timestamp: Utc::now(),
+            metadata: None,
+        };
+
+        let row = ClickHouseEventRow::from_tracking_event(&event);
+
+        assert_eq!(row.id, "evt_1");
+        assert_eq!(row.event_type, "clicked");
+        assert_eq!(row.recipient_domain, "example.com");
+        assert_eq!(row.link_id, "lnk_1");
+        assert_eq!(row.user_agent, "TestAgent");
+        assert_eq!(row.ip_address, "");
+        assert_eq!(row.country, "");
+        assert_eq!(row.device_type, "");
+        assert_eq!(row.campaign_id, "");
+        assert_eq!(row.metadata, "{}");
+        assert_eq!(row.timestamp.unix_timestamp(), event.timestamp.timestamp());
+        assert_eq!(
+            row.timestamp.nanosecond(),
+            event.timestamp.timestamp_subsec_nanos()
+        );
+    }
+
+    #[test]
+    fn clickhouse_row_mapping_preserves_metadata_json() {
+        let event = TrackingEvent {
+            id: "evt_2".into(),
+            event_type: EventType::Unsubscribed,
+            tenant_id: "t1".into(),
+            message_id: "m1".into(),
+            recipient: "u@example.com".into(),
+            link_id: None,
+            link_url: None,
+            unsubscribe_reason: Some("spam".into()),
+            user_agent: None,
+            ip_address: Some("1.2.3.4".into()),
+            timestamp: Utc::now(),
+            metadata: Some(serde_json::json!({ "category": "marketing" })),
+        };
+
+        let row = ClickHouseEventRow::from_tracking_event(&event);
+
+        assert_eq!(row.event_type, "unsubscribed");
+        assert_eq!(row.ip_address, "1.2.3.4");
+        assert_eq!(row.link_id, "");
+        assert!(row.metadata.contains("marketing"));
+    }
+
+    // ── Live-server integration (ignored by default) ────────────────────
+    // Requires a running ClickHouse with the ApexMail schema applied:
+    //   docker run -d -p 8124:8123 clickhouse/clickhouse-server:24.8-alpine
+    //   docker exec -i <ctr> clickhouse-client --multiquery < deploy/clickhouse/initdb/001_schema.sql
+    //   cargo test -p tracking-service -- --ignored --nocapture clickhouse_roundtrip
+
+    #[tokio::test]
+    #[ignore = "requires a running ClickHouse with the apexmail schema"]
+    async fn clickhouse_roundtrip_roundtrip_through_clickhouse() {
+        use chrono::TimeZone;
+
+        let url = std::env::var("CLICKHOUSE_TEST_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8124".into());
+        let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
+        let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
+        let ch = clickhouse::Client::default()
+            .with_url(&url)
+            .with_database("apexmail")
+            .with_user(&user)
+            .with_password(&password);
+        ch.query("SELECT 1").execute().await.expect("connect");
+
+        // Fixed recognisable timestamp: 2026-08-08T12:34:56.789Z
+        let ts_millis = 1783687496789i64;
+        // Unique tenant per run — safe to execute against a shared instance
+        // (no truncation, no cross-run interference).
+        let tenant = format!("tenant_e2e_{}", std::process::id());
+        let make = |id: &str, event_type: EventType, recipient: &str| TrackingEvent {
+            id: id.into(),
+            event_type,
+            tenant_id: tenant.clone(),
+            message_id: format!("msg_{id}"),
+            recipient: recipient.into(),
+            link_id: Some(format!("link_{id}")),
+            link_url: Some(format!("https://example.com/{id}")),
+            unsubscribe_reason: Some("spam".into()),
+            user_agent: Some("E2E-Test".into()),
+            ip_address: Some("203.0.113.7".into()),
+            timestamp: Utc.timestamp_millis_opt(ts_millis).unwrap(),
+            metadata: Some(serde_json::json!({ "integration": true })),
+        };
+
+        let events = [
+            make("e2e_open_1", EventType::Opened, "alice@example.com"),
+            make("e2e_click_1", EventType::Clicked, "bob@example.com"),
+            make("e2e_unsub_1", EventType::Unsubscribed, "carol@example.com"),
+        ];
+
+        let mut insert = ch.insert("events").expect("insert handle");
+        for ev in &events {
+            insert
+                .write(&ClickHouseEventRow::from_tracking_event(ev))
+                .await
+                .expect("write row");
+        }
+        insert.end().await.expect("commit insert");
+
+        // Verify counts per event type.
+        let rows: Vec<(String, u64)> = ch
+            .query(
+                "SELECT event_type, count() AS count FROM events
+                 WHERE tenant_id = ?
+                 GROUP BY event_type ORDER BY event_type",
+            )
+            .bind(&tenant)
+            .fetch_all()
+            .await
+            .expect("count query");
+        let by_type: std::collections::HashMap<_, _> = rows.into_iter().collect();
+        assert_eq!(by_type.get("opened"), Some(&1u64));
+        assert_eq!(by_type.get("clicked"), Some(&1u64));
+        assert_eq!(by_type.get("unsubscribed"), Some(&1u64));
+
+        // Verify the timestamp round-trips as a real 2026 date (a raw
+        // millisecond value would render as ~year 56540).
+        let row: (String, String) = ch
+            .query(
+                "SELECT id, toString(timestamp) FROM events
+                 WHERE tenant_id = ? AND id = 'e2e_open_1'",
+            )
+            .bind(&tenant)
+            .fetch_one()
+            .await
+            .expect("timestamp query");
+        assert!(row.1.starts_with("2026-"), "timestamp corrupted: {}", row.1);
+
+        // Verify derived + flattened columns.
+        let row: (String, String, String, String, String) = ch
+            .query(
+                "SELECT recipient_domain, link_id, user_agent, ip_address, metadata
+                 FROM events WHERE id = 'e2e_click_1'",
+            )
+            .fetch_one()
+            .await
+            .expect("column query");
+        assert_eq!(row.0, "example.com");
+        assert_eq!(row.1, "link_e2e_click_1");
+        assert_eq!(row.2, "E2E-Test");
+        assert_eq!(row.3, "203.0.113.7");
+        assert!(row.4.contains("integration"));
+
+        // Best-effort cleanup (mutation is async; this run is already done).
+        ch.query(&format!("ALTER TABLE events DELETE WHERE tenant_id = '{tenant}'"))
+            .execute()
+            .await
+            .ok();
     }
 }

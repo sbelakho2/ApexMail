@@ -99,13 +99,25 @@ impl ChallengeConfig {
     /// When `auto_tune` is disabled, returns the static `target_bits`.
     /// Otherwise linearly interpolates between `auto_tune_min_bits` (0 active)
     /// and `auto_tune_max_bits` (50+ active solvers).
+    ///
+    /// The result is clamped to [`SOLVER_MAX_TARGET_BITS`] so the issued
+    /// difficulty always stays within what the browser solver can finish
+    /// (~74% of solves would fail at 24 bits with the 5M-hash solver cap).
     pub fn tuned_target_bits(&self, active_solves: u64) -> u32 {
+        // Both bounds are clamped to the solver ceiling; the upper bound is
+        // re-raised to at least the lower bound so the interpolation range
+        // never inverts under misconfiguration.
+        let min_bits = self.auto_tune_min_bits.min(SOLVER_MAX_TARGET_BITS);
+        let max_bits = self
+            .auto_tune_max_bits
+            .min(SOLVER_MAX_TARGET_BITS)
+            .max(min_bits);
         if !self.auto_tune {
-            return self.target_bits;
+            return self.target_bits.clamp(min_bits, max_bits);
         }
         let load = (active_solves as f64 / 50.0).min(1.0);
-        let range = self.auto_tune_max_bits.saturating_sub(self.auto_tune_min_bits) as f64;
-        let adjusted = self.auto_tune_min_bits as f64 + load * range;
+        let range = max_bits.saturating_sub(min_bits) as f64;
+        let adjusted = min_bits as f64 + load * range;
         adjusted as u32
     }
 }
@@ -176,15 +188,38 @@ pub struct Issued {
 /// In-memory challenge cache that reduces Redis writes when the same client
 /// (identified by IP hash + scope) re-requests within a 1-second window.
 ///
-/// Entries older than 1 second are automatically pruned on `get` and `prune`.
+/// Entries older than 1 second are pruned lazily on every `get` and `put`,
+/// so the map never accumulates stale entries (bounded by the number of
+/// distinct IP+scope pairs seen within the 1-second window).
 pub struct ChallengeCache {
     entries: HashMap<String, (Issued, Instant)>,
+    /// Fresh entries survive up to this age before being pruned.
+    ttl: Duration,
 }
+
+/// Maximum difficulty the in-browser solver can reliably complete.
+///
+/// The widget solver (`packages/kiwicaptcha/src/widget.rs`) caps its search
+/// at `MAX = 5_000_000` hashes. At `n` target bits the expected work is
+/// `2^n` hashes; at 20 bits that is ~1.05M (P(solve) ≈ 99.1% within the cap),
+/// while at 24 bits it is ~16.7M (P(solve) ≈ 25.9% — ~74% of users would
+/// fail). Difficulty is therefore clamped to this ceiling so the auto-tuner
+/// can never issue a challenge the widget cannot solve.
+pub const SOLVER_MAX_TARGET_BITS: u32 = 20;
 
 impl ChallengeCache {
     pub fn new() -> Self {
         ChallengeCache {
             entries: HashMap::new(),
+            ttl: Duration::from_secs(1),
+        }
+    }
+
+    /// A `ChallengeCache` with a custom entry lifetime (for tests).
+    fn with_ttl(ttl: Duration) -> Self {
+        ChallengeCache {
+            entries: HashMap::new(),
+            ttl,
         }
     }
 
@@ -192,25 +227,48 @@ impl ChallengeCache {
         format!("{ip_hash}|{scope}")
     }
 
-    pub fn get(&self, ip_hash: &str, scope: &str) -> Option<&Issued> {
+    fn is_fresh(&self, ts: &Instant) -> bool {
+        ts.elapsed() < self.ttl
+    }
+
+    pub fn get(&mut self, ip_hash: &str, scope: &str) -> Option<&Issued> {
         let key = Self::cache_key(ip_hash, scope);
-        self.entries.get(&key).and_then(|(issued, ts)| {
-            if ts.elapsed() < Duration::from_secs(1) {
-                Some(issued)
-            } else {
-                None
+        if let Some((_, ts)) = self.entries.get(&key) {
+            if self.is_fresh(ts) {
+                return self.entries.get(&key).map(|(issued, _)| issued);
             }
-        })
+            // Stale entry: remove it now so the map stays self-pruning.
+            self.entries.remove(&key);
+        }
+        None
     }
 
     pub fn put(&mut self, ip_hash: &str, scope: &str, issued: Issued) {
+        // Opportunistic pruning keeps the map bounded when many distinct
+        // clients request challenges in quick succession.
+        if self.entries.len() >= 256 {
+            self.prune();
+        }
         let key = Self::cache_key(ip_hash, scope);
         self.entries.insert(key, (issued, Instant::now()));
     }
 
     pub fn prune(&mut self) {
+        // Capture `now` once to avoid borrowing `self` immutably inside the
+        // retain closure while `self.entries` is borrowed mutably (E0502 on
+        // newer rustc versions).
+        let ttl = self.ttl;
         self.entries
-            .retain(|_, (_, ts)| ts.elapsed() < Duration::from_secs(1));
+            .retain(|_, (_, ts)| ts.elapsed() < ttl);
+    }
+
+    /// Number of cached entries (for tests/metrics).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -418,12 +476,87 @@ mod tests {
         // Idle — should be at min.
         let idle = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
         assert_eq!(idle.challenge.target_bits, 10);
-        // Moderate load — roughly midway.
+        // Moderate load — roughly midway between min and the solver ceiling.
         let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 25).unwrap();
-        assert!(mid.challenge.target_bits >= 16 && mid.challenge.target_bits <= 18);
-        // Peak load — should be at max.
+        assert!(mid.challenge.target_bits >= 14 && mid.challenge.target_bits <= 16);
+        // Peak load — clamped to SOLVER_MAX_TARGET_BITS (not 24), because the
+        // browser solver's 5M-hash cap would fail ~74% of solves at 24 bits.
         let peak = issue_challenge(&config, "login", "1.1.1.1", 1, 50).unwrap();
-        assert_eq!(peak.challenge.target_bits, 24);
+        assert_eq!(peak.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
+    }
+
+    #[test]
+    fn auto_tune_never_exceeds_solver_cap_even_without_tuning() {
+        let config = ChallengeConfig {
+            secret_key: "test-key".into(),
+            m_kib: 65_536,
+            t: 2,
+            p: 1,
+            target_bits: 24,
+            ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
+        };
+        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        assert_eq!(issued.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
+        assert_eq!(issued.record.target_bits, SOLVER_MAX_TARGET_BITS);
+    }
+
+    #[test]
+    fn challenge_cache_prunes_stale_entries_on_get() {
+        let mut cache = ChallengeCache::with_ttl(Duration::from_millis(20));
+        let issued = issue_challenge(
+            &ChallengeConfig {
+                secret_key: "test-key".into(),
+                m_kib: 65_536,
+                t: 2,
+                p: 1,
+                target_bits: 18,
+                ttl_secs: 120,
+                auto_tune: false,
+                auto_tune_min_bits: 10,
+                auto_tune_max_bits: 24,
+            },
+            "login",
+            "1.1.1.1",
+            1,
+            0,
+        )
+        .unwrap();
+        cache.put("hash1", "login", issued);
+        assert_eq!(cache.len(), 1);
+        // Within the TTL the entry is served…
+        assert!(cache.get("hash1", "login").is_some());
+        assert_eq!(cache.len(), 1, "fresh entry must survive get");
+        // …and once stale it is removed (pruned) on access.
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(cache.get("hash1", "login").is_none());
+        assert_eq!(cache.len(), 0, "stale entry must be pruned by get");
+    }
+
+    #[test]
+    fn challenge_cache_put_prunes_expired_entries() {
+        let mut cache = ChallengeCache::with_ttl(Duration::from_millis(20));
+        let config = ChallengeConfig {
+            secret_key: "test-key".into(),
+            m_kib: 65_536,
+            t: 2,
+            p: 1,
+            target_bits: 18,
+            ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
+        };
+        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        cache.put("old", "login", issued);
+        std::thread::sleep(Duration::from_millis(40));
+        let issued2 = issue_challenge(&config, "signup", "1.1.1.1", 1, 0).unwrap();
+        cache.put("new", "signup", issued2);
+        // The expired "old" entry must not linger after put.
+        assert!(cache.get("old", "login").is_none());
+        assert!(cache.get("new", "signup").is_some());
     }
 
     #[test]

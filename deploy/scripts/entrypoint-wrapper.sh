@@ -76,6 +76,7 @@ export_from_file STRIPE_SECRET_KEY        || true
 export_from_file STRIPE_WEBHOOK_SECRET    || true
 export_from_file DB_PASSWORD              || true
 export_from_file REDIS_PASSWORD           || true
+export_from_file CLICKHOUSE_PASSWORD      || true
 
 # Direct fallback: if DB_PASSWORD wasn't exported by export_from_file (the
 # indirect export can fail in some POSIX sh implementations), read the
@@ -87,6 +88,10 @@ fi
 if [ -z "${REDIS_PASSWORD:-}" ] && [ -n "${REDIS_PASSWORD_FILE:-}" ] && [ -f "${REDIS_PASSWORD_FILE}" ]; then
   REDIS_PASSWORD="$(cat "${REDIS_PASSWORD_FILE}")"
   export REDIS_PASSWORD
+fi
+if [ -z "${CLICKHOUSE_PASSWORD:-}" ] && [ -n "${CLICKHOUSE_PASSWORD_FILE:-}" ] && [ -f "${CLICKHOUSE_PASSWORD_FILE}" ]; then
+  CLICKHOUSE_PASSWORD="$(cat "${CLICKHOUSE_PASSWORD_FILE}")"
+  export CLICKHOUSE_PASSWORD
 fi
 
 # ── Construct DATABASE_URL from DB_* parts if not already set ──────────────

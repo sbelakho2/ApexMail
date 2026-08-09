@@ -94,7 +94,9 @@ services:
       - apexmail_frontend
       - apexmail_backend
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/nginx-health || exit 1"]
+      # 127.0.0.1:8080 is the internal health server block in nginx.conf —
+      # "localhost" resolves to ::1 inside the container where nothing listens.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/nginx-health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -123,13 +125,21 @@ services:
   observability:
     image: ghcr.io/sbelakho2/apexmail/observability:latest
     environment:
+      NODE_ENV: production
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      # Redis is only reachable on the internal networks; credentials come
+      # from the shared Redis secret so eviction monitoring actually works.
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
     secrets:
       - internal_service_token
+      - redis_password
 
   postgres:
     # Production: Do NOT expose database port to host
-    ports: []
+    ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     deploy:
@@ -147,7 +157,7 @@ services:
 
   redis:
     # Production: Do NOT expose Redis port to host
-    ports: []
+    ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     # SECURITY: Password from Docker secret, not environment variable
     environment:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
@@ -188,6 +198,12 @@ services:
       TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
       JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
+      # ClickHouse OLAP event ingestion
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-apexmail}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+      CLICKHOUSE_INSERT_TIMEOUT_SECONDS: ${CLICKHOUSE_INSERT_TIMEOUT_SECONDS:-30}
     secrets:
       - postgres_password
       - clickhouse_password
@@ -195,7 +211,7 @@ services:
       - tracking_secret_key
       - internal_service_token
       - jwt_public_key_pem
-    ports: []
+    ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3001' 2>/dev/null || exit 1"]
       interval: 15s
@@ -225,11 +241,16 @@ services:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
       RUST_LOG: info
-      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       HOST: 0.0.0.0
       PORT: 3000
       BASE_URL: ${BASE_URL:?BASE_URL is required in production}
       OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:?OAUTH_REDIRECT_BASE_URL is required in production}
+      # Docker bridge subnets (frontend/backend/data). nginx is the TLS
+      # terminator and its X-Forwarded-For must be trusted so per-client
+      # rate limiting keys on the real client IP instead of the nginx
+      # container IP (which would make every user share one global bucket).
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.18.0.0/16,172.20.0.0/16,172.21.0.0/16}
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-apexmail}
@@ -248,6 +269,7 @@ services:
       SESSION_SECRET_FILE: /run/secrets/session_secret
       IMPERSONATION_SECRET_FILE: /run/secrets/impersonation_secret
       CSRF_SECRET_FILE: /run/secrets/csrf_secret
+      PLACEMENT_ENCRYPTION_SECRET: ${PLACEMENT_ENCRYPTION_SECRET:?PLACEMENT_ENCRYPTION_SECRET is required in production}
       BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:?BILLING_COMPANY_IBAN is required in production}
       BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:?BILLING_COMPANY_PHONE is required in production}
       # ── KiwiCaptcha (native Rust login CAPTCHA protection) ────────────────
@@ -262,7 +284,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    ports: []
+    ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     networks:
       - apexmail_backend
       - apexmail_data
@@ -299,6 +321,43 @@ services:
       - kiwi_secret_key
 
   # ===========================================================================
+  # STATUS SERVER (public status page + status API)
+  # ===========================================================================
+  # Runs the auth-server binary's /status, /status/api and /status/history
+  # routes (the canonical status provider per fixes.md). Exposed only on the
+  # internal networks; nginx serves it as status.apexmail.ee and maps
+  # apexmail.ee/api/status-data -> /status/api.
+  status-server:
+    image: ghcr.io/sbelakho2/apexmail/status-server:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}@postgres:5432/${POSTGRES_DB:-apexmail}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - apexmail_backend
+      - apexmail_data
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+        reservations:
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  # ===========================================================================
   # MTA (Mail Transfer Agent)
   # ===========================================================================
   mta:
@@ -313,11 +372,14 @@ services:
       - "587:587"
       - "465:465"
     volumes:
-      # Bind-mount the full /etc/letsencrypt tree (not just live/<domain>/)
+      # Bind-mount the FULL certbot tree managed by the certbot service
+      # (TLS_CERT_DIR — same tree nginx reads), not just live/<domain>/,
       # because live/*.pem are symlinks into ../archive/. Mounting only
       # live/<domain>/ would leave dangling symlinks inside the container.
       # The MTA reads fullchain/privkey via TLS_CERT_PATH / TLS_KEY_PATH below.
-      - /etc/letsencrypt:/opt/apexmail/certs:ro
+      # NOTE: certs are loaded once at startup — restart this container after
+      # a renewal to pick up the refreshed cert (see deploy/DEPLOYMENT.md).
+      - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/opt/apexmail/certs:ro
     environment:
       RUST_LOG: info
       DB_PASSWORD_FILE: /run/secrets/postgres_password
@@ -325,12 +387,14 @@ services:
       METRICS_PORT: "9090"
       HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
       LOCAL_DOMAINS: ${LOCAL_DOMAINS:-apexmail.ee}
-      # ── TLS (letsencrypt certs bind-mounted at /opt/apexmail/certs) ─────────
+      # ── TLS (certbot-managed certs bind-mounted at /opt/apexmail/certs) ─────
       TLS_ENABLED: "true"
       TLS_CERT_PATH: /opt/apexmail/certs/live/${MAIL_TLS_DOMAIN:-apexmail.ee}/fullchain.pem
       TLS_KEY_PATH: /opt/apexmail/certs/live/${MAIL_TLS_DOMAIN:-apexmail.ee}/privkey.pem
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
+      # gRPC endpoint of the mailstore service (inbound mailbox delivery)
+      MAILSTORE_GRPC_ADDR: ${MAILSTORE_GRPC_ADDR:-http://mailstore:50051}
     secrets:
       - postgres_password
       - redis_password
@@ -368,11 +432,13 @@ services:
     ports:
       - "993:993"
     volumes:
-      # Same letsencrypt bind-mount as the MTA. live/*.pem are symlinks into
-      # ../archive/, so the whole /etc/letsencrypt tree is mounted to keep the
-      # symlinks resolvable. IMAP reads the certs via INBOUND_CERT_PATH /
-      # INBOUND_KEY_PATH (its actual env var names — see crates/imap-server).
-      - /etc/letsencrypt:/opt/apexmail/certs:ro
+      # Same certbot-managed bind-mount as the MTA and nginx (TLS_CERT_DIR).
+      # live/*.pem are symlinks into ../archive/, so the whole tree is mounted
+      # to keep the symlinks resolvable. IMAP reads the certs via
+      # INBOUND_CERT_PATH / INBOUND_KEY_PATH (its actual env var names — see
+      # crates/imap-server). NOTE: certs load once at startup — restart this
+      # container after a renewal to pick up the refreshed cert.
+      - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/opt/apexmail/certs:ro
     environment:
       RUST_LOG: info
       # ── Backend datastores (same pattern as mta / api-server) ──────────────
@@ -449,12 +515,19 @@ services:
     image: ghcr.io/sbelakho2/apexmail/enterprise:latest
     environment:
       RUST_LOG: info
+      # Production bind: the dev overlay defaults PORT to 3002 — override it
+      # here so the container matches the prod healthcheck (127.0.0.1:3008)
+      # and the nginx vhost upstream (enterprise:3008).
+      HOST: 0.0.0.0
+      PORT: 3008
+      NODE_ENV: production
+      CORS_ORIGINS: ${ENTERPRISE_CORS_ORIGINS:-https://app.apexmail.ee,https://admin.apexmail.ee,https://enterprise.apexmail.ee,https://api.apexmail.ee}
       JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
     secrets:
       - postgres_password
       - redis_password
       - jwt_public_key_pem
-    ports: []
+    ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3008' 2>/dev/null || exit 1"]
       interval: 15s
@@ -513,7 +586,7 @@ services:
       - postgres_password
       - redis_password
       - internal_service_token
-    ports: []
+    ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9093' 2>/dev/null || exit 1"]
       interval: 15s
@@ -567,7 +640,7 @@ services:
           memory: 64M
 
   clickhouse:
-    ports: []
+    ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}

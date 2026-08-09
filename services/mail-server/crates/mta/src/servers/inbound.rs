@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use dashmap::DashMap;
-use governor::RateLimiter;
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -24,6 +23,9 @@ use uuid::Uuid;
 
 use crate::auth::{EmailAuthenticator, SpfStatus};
 use crate::config::{InboundConfig, RateLimitConfig};
+use mail_proto::mailstore_service_client::MailstoreServiceClient;
+use mail_proto::{GetAccountRequest, MessageFlags, StoreMessageRequest};
+use tonic::transport::Channel;
 
 // Shared resolver to avoid allocating a new DNS client per PTR verification.
 static INBOUND_RDNS_RESOLVER: LazyLock<TokioAsyncResolver> =
@@ -61,29 +63,13 @@ pub struct InboundServer {
     redis: deadpool_redis::Pool,
     authenticator: Arc<EmailAuthenticator>,
     hostname: String,
-    /// Per‑IP connection counter.
+    /// Per‑IP connection counter (admission control).
     connections: Arc<DashMap<IpAddr, u32>>,
-    /// Rate limiter per IP (token bucket).
-    #[expect(
-        dead_code,
-        reason = "rate limiters are initialized for connection admission wiring in the inbound server"
-    )]
-    #[allow(clippy::type_complexity)]
-    ip_limiters: Arc<
-        DashMap<
-            IpAddr,
-            Arc<
-                RateLimiter<
-                    governor::state::NotKeyed,
-                    governor::state::InMemoryState,
-                    governor::clock::DefaultClock,
-                >,
-            >,
-        >,
-    >,
     /// Bounded PTR/FCrDNS cache to avoid repeated DNS lookups per source IP.
     rdns_cache: Cache<IpAddr, bool>,
     shutdown: Arc<Notify>,
+    /// gRPC client for mailbox delivery to the mailstore service.
+    mailstore: MailstoreServiceClient<Channel>,
 }
 
 impl InboundServer {
@@ -94,7 +80,16 @@ impl InboundServer {
         redis: deadpool_redis::Pool,
         authenticator: Arc<EmailAuthenticator>,
         hostname: String,
+        mailstore_addr: String,
     ) -> Self {
+        let channel = Channel::from_shared(mailstore_addr)
+            .map(|c| c.connect_lazy())
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "Invalid MAILSTORE_GRPC_ADDR; mailbox delivery disabled");
+                Channel::from_shared("http://127.0.0.1:50051")
+                    .expect("static address")
+                    .connect_lazy()
+            });
         Self {
             config,
             rate_limit_config,
@@ -103,12 +98,12 @@ impl InboundServer {
             authenticator,
             hostname,
             connections: Arc::new(DashMap::new()),
-            ip_limiters: Arc::new(DashMap::new()),
             rdns_cache: Cache::builder()
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(600))
                 .build(),
             shutdown: Arc::new(Notify::new()),
+            mailstore: MailstoreServiceClient::new(channel),
         }
     }
 
@@ -435,7 +430,6 @@ impl InboundServer {
             "454 TLS not available\r\n".into()
         } else if cmd_upper.starts_with("AUTH PLAIN") && ctx.tls_active {
             // Handle AUTH PLAIN on TLS connections (port 465 submission).
-            use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
             let inline = raw_line.trim().strip_prefix("AUTH PLAIN").unwrap_or("").trim();
             let auth_b64 = if !inline.is_empty() {
                 inline.to_string()
@@ -538,7 +532,7 @@ impl InboundServer {
         let mail_from = ctx.mail_from.as_deref().unwrap_or("<>");
         let helo = &ctx.helo_hostname;
 
-        // 1. Email authentication
+        // 1. Email authentication (SPF/DKIM/DMARC policy gate)
         let auth_results = self
             .authenticator
             .authenticate(raw, ctx.client_ip, helo, mail_from)
@@ -558,31 +552,89 @@ impl InboundServer {
         // 2. Detect VERP reply
         let is_verp = ctx.rcpt_to.iter().any(|r| r.contains("bounces+"));
 
-        // 3. Store message in database
-        let rcpts_json = serde_json::to_value(&ctx.rcpt_to)?;
+        // 3. Resolve the tenant that owns the first recipient's domain
+        //    (nullable: rows with an unknown/local-only recipient stay untagged).
+        let tenant_id: Option<String> = match ctx.rcpt_to.iter().find_map(|r| recipient_domain(r)) {
+            Some(domain) => sqlx::query_scalar(
+                "SELECT tenant_id FROM domains WHERE LOWER(name) = LOWER($1) LIMIT 1",
+            )
+            .bind(domain)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten(),
+            None => None,
+        };
+
+        // 4. Parse the raw message into the canonical inbound_messages columns
+        let parsed = mail_parser::MessageParser::default().parse(raw);
+        let subject = parsed
+            .as_ref()
+            .and_then(|m| m.subject())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "(no subject)".to_string());
+        let text_body = parsed.as_ref().and_then(|m| m.body_text(0)).map(|b| b.into_owned());
+        let html_body = parsed.as_ref().and_then(|m| m.body_html(0)).map(|b| b.into_owned());
+        let headers = parsed.as_ref().map(|m| {
+            let mut map = serde_json::Map::new();
+            for (name, value) in m.headers_raw() {
+                map.entry(name.to_string())
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+                    .as_array_mut()
+                    .expect("array just inserted")
+                    .push(serde_json::Value::String(value.to_string()));
+            }
+            serde_json::Value::Object(map)
+        });
+
+        // inbound_messages.to_email is a single NOT NULL column; store the
+        // first envelope recipient (inbound mail is typically single-recipient).
+        let to_email = ctx.rcpt_to.first().cloned().unwrap_or_default();
+        let sender = if mail_from == "<>" { "" } else { mail_from };
+
+        // 5. Store the message (full raw MIME preserved in raw_message)
         sqlx::query(
             r#"INSERT INTO inbound_messages (
-                id, mail_from, rcpt_to, client_ip, helo_hostname,
-                raw_size, auth_results, disposition, is_verp_reply,
-                created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-            ON CONFLICT DO NOTHING"#,
+                id, tenant_id, mail_from, rcpt_to, client_ip, helo_hostname,
+                raw_message, raw_size, auth_results, spf_result, disposition,
+                is_verp_reply, from_email, to_email, subject, body_text,
+                body_html, headers, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                      $13, $14, $15, $16, $17, $18, NOW())
+            ON CONFLICT (id) DO NOTHING"#,
         )
         .bind(&message_id)
-        .bind(mail_from)
-        .bind(&rcpts_json)
+        .bind(tenant_id)
+        .bind(sender)
+        .bind(&ctx.rcpt_to)
         .bind(ctx.client_ip.to_string())
         .bind(helo)
+        .bind(raw)
         .bind(raw.len() as i64)
         .bind(&auth_results.auth_results_header)
-        .bind(format!("{:?}", disposition))
+        .bind(format!("{:?}", auth_results.spf.result).to_lowercase())
+        .bind(format!("{:?}", disposition).to_lowercase())
         .bind(is_verp)
+        .bind(sender)
+        .bind(&to_email)
+        .bind(subject)
+        .bind(text_body)
+        .bind(html_body)
+        .bind(headers)
         .execute(&self.pool)
         .await?;
 
-        // 4. Queue webhook notification
+        // 6. Queue webhook notification
         self.queue_inbound_webhook(&message_id, mail_from, &ctx.rcpt_to)
             .await?;
+
+        // 7. Deliver to the mailstore mailbox (best-effort). inbound_messages
+        //    is the durable record; a mailstore outage must not fail the SMTP
+        //    transaction, and unknown recipients are simply skipped.
+        if !ctx.rcpt_to.is_empty() {
+            self.deliver_to_mailstore(ctx, raw, &auth_results.auth_results_header)
+                .await;
+        }
 
         info!(
             id = %message_id,
@@ -590,6 +642,7 @@ impl InboundServer {
             rcpt_count = ctx.rcpt_to.len(),
             spf = ?auth_results.spf.result,
             dmarc = ?auth_results.dmarc.result,
+            is_verp = is_verp,
             "Message accepted"
         );
 
@@ -610,18 +663,91 @@ impl InboundServer {
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
 
-        let mut conn = self.redis.get().await?;
-        // #139:LPUSH returns list length (i64), not String
-        if let Err(e) = redis::cmd("LPUSH")
-            .arg("mta:webhook_queue")
-            .arg(payload.to_string())
-            .query_async::<i64>(&mut *conn)
-            .await
-        {
-            tracing::error!(message_id = %message_id, error = %e, "Failed to push inbound webhook to Redis queue");
+        // Best-effort: the message is already persisted; a webhook notification
+        // failure must never reject the mail or fail the session.
+        let push_result: Result<(), ()> = async {
+            let mut conn = self.redis.get().await.map_err(|e| {
+                tracing::error!(message_id = %message_id, error = %e, "Failed to get Redis connection for inbound webhook");
+            })?;
+            // #139:LPUSH returns list length (i64), not String
+            if let Err(e) = redis::cmd("LPUSH")
+                .arg("mta:webhook_queue")
+                .arg(payload.to_string())
+                .query_async::<i64>(&mut *conn)
+                .await
+            {
+                tracing::error!(message_id = %message_id, error = %e, "Failed to push inbound webhook to Redis queue");
+            }
+            Ok(())
         }
+        .await;
+        let _ = push_result;
 
         Ok(())
+    }
+
+    /// Deliver an accepted message into the recipient's mailstore mailbox.
+    ///
+    /// The raw RFC5322 message (with the Authentication-Results header) is
+    /// stored into the recipient's Inbox via the mailstore gRPC service so the
+    /// message is visible over IMAP. Best-effort: failures are logged, never
+    /// propagated to the SMTP session.
+    async fn deliver_to_mailstore(&self, ctx: &SessionContext, raw: &[u8], auth_results_header: &str) {
+        let mut client = self.mailstore.clone();
+        let mut final_message = Vec::with_capacity(auth_results_header.len() + raw.len());
+        final_message.extend_from_slice(auth_results_header.as_bytes());
+        final_message.extend_from_slice(raw);
+
+        for recipient in &ctx.rcpt_to {
+            let lookup = GetAccountRequest {
+                account_id: String::new(),
+                email: recipient.clone(),
+            };
+            let account_id = match client.get_account(lookup).await {
+                Ok(resp) => {
+                    let r = resp.into_inner();
+                    if r.account_id.is_empty() {
+                        continue;
+                    }
+                    r.account_id
+                }
+                Err(e) => {
+                    debug!(
+                        recipient = %mail_common::pii::redact_email(recipient),
+                        error = %e,
+                        "No mailstore account for recipient; skipping mailbox delivery"
+                    );
+                    continue;
+                }
+            };
+
+            let req = StoreMessageRequest {
+                account_id,
+                mailbox: "Inbox".to_string(),
+                raw_message: final_message.clone().into(),
+                flags: Some(MessageFlags {
+                    recent: true,
+                    ..Default::default()
+                }),
+                internal_date: chrono::Utc::now().timestamp(),
+            };
+            match client.store_message(req).await {
+                Ok(resp) => {
+                    info!(
+                        recipient = %mail_common::pii::redact_email(recipient),
+                        uid = resp.into_inner().uid,
+                        "Message delivered to mailstore mailbox"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        recipient = %mail_common::pii::redact_email(recipient),
+                        error = %e,
+                        "Failed to deliver message to mailstore mailbox"
+                    );
+                }
+            }
+        }
     }
 
     // ── rate limiting ──────────────────────────────────────────────────────────
@@ -759,8 +885,21 @@ impl InboundServer {
             return Err(());
         }
 
-        match apexmail_lib::crypto::verify_password(password, &password_hash) {
-            Ok(true) => Ok(user_email),
+        // Same scheme handling as the submission server: accept Argon2id and
+        // legacy bcrypt hashes, and migrate bcrypt rows to Argon2id on success.
+        match apexmail_lib::crypto::verify_password_for_login(password, &password_hash) {
+            Ok(verification) if verification.valid => {
+                if let Some(new_hash) = verification.migrated_hash {
+                    let _ = sqlx::query(
+                        "UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2)",
+                    )
+                    .bind(new_hash)
+                    .bind(&user_email)
+                    .execute(&self.pool)
+                    .await;
+                }
+                Ok(user_email)
+            }
             _ => Err(()),
         }
     }

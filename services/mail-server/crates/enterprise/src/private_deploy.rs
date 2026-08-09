@@ -13,7 +13,7 @@ pub struct PrivateDeployService {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct PrivateDeploymentDbRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     name: String,
     deployment_type: String,
     status: String,
@@ -36,7 +36,7 @@ impl From<PrivateDeploymentDbRow> for PrivateDeployment {
     fn from(row: PrivateDeploymentDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             name: row.name,
             deployment_type: row.deployment_type,
             status: row.status,
@@ -60,7 +60,7 @@ impl From<PrivateDeploymentDbRow> for PrivateDeployment {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct DedicatedIPDbRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     deployment_id: Option<Uuid>,
     ip_address: String,
     ptr_record: Option<String>,
@@ -83,7 +83,7 @@ impl From<DedicatedIPDbRow> for DedicatedIP {
     fn from(row: DedicatedIPDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             deployment_id: row.deployment_id,
             ip_address: row.ip_address,
             ptr_record: row.ptr_record,
@@ -107,7 +107,7 @@ impl From<DedicatedIPDbRow> for DedicatedIP {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct BYOIPRangeDbRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     cidr_block: String,
     status: String,
     verification_token: Option<String>,
@@ -120,7 +120,7 @@ impl From<BYOIPRangeDbRow> for BYOIPRange {
     fn from(row: BYOIPRangeDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             cidr_block: row.cidr_block,
             status: row.status,
             verification_token: row.verification_token,
@@ -129,10 +129,6 @@ impl From<BYOIPRangeDbRow> for BYOIPRange {
             created_at: row.created_at,
         }
     }
-}
-
-fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
 }
 
 impl PrivateDeployService {
@@ -149,14 +145,13 @@ impl PrivateDeployService {
         region: Option<&str>,
         config: Option<serde_json::Value>,
     ) -> Result<ApiResult<PrivateDeployment>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, PrivateDeploymentDbRow>(
             "INSERT INTO ent_private_deployments (id, tenant_id, name, deployment_type, status, region, config, created_at, updated_at)
              VALUES ($1,$2,$3,$4,'pending',$5,$6,NOW(),NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(name).bind(deployment_type)
+        .bind(id).bind(&tenant_id).bind(name).bind(deployment_type)
         .bind(region).bind(&config)
         .fetch_one(&self.db)
         .await
@@ -187,11 +182,10 @@ impl PrivateDeployService {
         &self,
         tenant_id: String,
     ) -> Result<ApiResult<Vec<PrivateDeployment>>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = sqlx::query_as::<_, PrivateDeploymentDbRow>(
             "SELECT * FROM ent_private_deployments WHERE tenant_id = $1 ORDER BY created_at DESC",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("List deployments: {e}"))?;
@@ -272,14 +266,13 @@ impl PrivateDeployService {
         deployment_id: Option<Uuid>,
         ip_address: &str,
     ) -> Result<ApiResult<DedicatedIP>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, DedicatedIPDbRow>(
             "INSERT INTO ent_dedicated_ips (id, tenant_id, deployment_id, ip_address, status, emails_sent_total, bounces_total, complaints_total, blocklisted, created_at)
              VALUES ($1,$2,$3,$4::inet,'pending',0,0,0,false,NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(deployment_id).bind(ip_address)
+        .bind(id).bind(&tenant_id).bind(deployment_id).bind(ip_address)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Allocate dedicated IP: {e}"))?;
@@ -296,10 +289,14 @@ impl PrivateDeployService {
         region: Option<&str>,
         prefer_warmed: bool,
     ) -> Result<ApiResult<DedicatedIP>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
-        // #269:Use hash-based lock ID to avoid UUID-to-i64 truncation collision
-        // XOR the upper and lower 64 bits to create a more collision-resistant lock ID
-        let uuid_bytes = tenant_uuid.as_u128();
+        // #269:Use hash-based lock ID to avoid UUID-to-i64 truncation collision.
+        // Tenant ids are 26-char identifiers, so derive a stable i64 lock id
+        // from a 128-bit hash of the string.
+        let mut hasher = sha2::Sha256::new();
+        use sha2::Digest;
+        hasher.update(tenant_id.as_bytes());
+        let digest = hasher.finalize();
+        let uuid_bytes = u128::from_be_bytes(digest[..16].try_into().expect("16 bytes"));
         let upper = (uuid_bytes >> 64) as i64;
         let lower = uuid_bytes as i64;
         let lock_id: i64 = upper ^ lower; // XOR gives better distribution than modulo
@@ -368,7 +365,7 @@ impl PrivateDeployService {
              SET status = 'allocated', allocated_to = $1, allocated_at = NOW(), updated_at = NOW()
              WHERE id = $2",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .bind(pool_id)
         .execute(&mut *tx)
         .await
@@ -386,7 +383,7 @@ impl PrivateDeployService {
              RETURNING *",
         )
         .bind(id)
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .bind(deployment_id)
         .bind(ip_address.to_string())
         .bind(reputation)
@@ -418,7 +415,6 @@ impl PrivateDeployService {
         tenant_id: String,
         ip_id: Uuid,
     ) -> Result<ApiResult<()>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let mut tx = self
             .db
             .begin()
@@ -430,7 +426,7 @@ impl PrivateDeployService {
             "SELECT ip_address::text FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2",
         )
         .bind(ip_id)
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| format!("Get dedicated IP: {e}"))?;
@@ -449,7 +445,7 @@ impl PrivateDeployService {
              WHERE ip_address = $1::inet AND allocated_to = $2",
         )
         .bind(&ip_address)
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Update pool IP: {e}"))?;
@@ -457,7 +453,7 @@ impl PrivateDeployService {
         // Remove from dedicated IPs
         sqlx::query("DELETE FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2")
             .bind(ip_id)
-            .bind(tenant_uuid)
+            .bind(&tenant_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| format!("Delete dedicated IP: {e}"))?;
@@ -514,11 +510,10 @@ impl PrivateDeployService {
         limit: i64,
         offset: i64,
     ) -> Result<ApiResult<Vec<DedicatedIP>>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = sqlx::query_as::<_, DedicatedIPDbRow>(
             "SELECT * FROM ent_dedicated_ips WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.db)
@@ -577,7 +572,6 @@ impl PrivateDeployService {
         tenant_id: String,
         cidr_block: &str,
     ) -> Result<ApiResult<BYOIPRange>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let verification_token = crate::sso::generate_random_token(32);
 
@@ -586,7 +580,7 @@ impl PrivateDeployService {
              VALUES ($1,$2,$3::cidr,'pending_verification',$4,NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(cidr_block).bind(&verification_token)
+        .bind(id).bind(&tenant_id).bind(cidr_block).bind(&verification_token)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Register BYOIP: {e}"))?;

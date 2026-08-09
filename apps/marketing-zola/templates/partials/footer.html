@@ -47,7 +47,7 @@
           <li><a href="/docs/" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["documentation"] %}{{ i18n_data[l]["footer"]["documentation"] }}{% else %}Documentation{% endif %}</a></li>
           <li><a href="/docs/api/" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_reference"] %}{{ i18n_data[l]["footer"]["api_reference"] }}{% else %}API Reference{% endif %}</a></li>
           <li><a href="/docs/sdks/" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["sdks"] %}{{ i18n_data[l]["footer"]["sdks"] }}{% else %}SDKs{% endif %}</a></li>
-          <li><a href="/api-console/" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_explorer"] %}{{ i18n_data[l]["footer"]["api_explorer"] }}{% else %}API Console{% endif %}</a></li>
+          <li><a href="/api-explorer/" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["api_explorer"] %}{{ i18n_data[l]["footer"]["api_explorer"] }}{% else %}API Console{% endif %}</a></li>
           <li><a href="/status/" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_page"] %}{{ i18n_data[l]["footer"]["status_page"] }}{% else %}Status Page{% endif %}</a></li>
         </ul>
       </div>
@@ -100,7 +100,7 @@
         var dot = document.querySelector('.footer-status-dot');
         var text = document.querySelector('.footer-status-text');
         var container = document.getElementById('footer-status-container');
-        var STATUS_API = 'https://status.apexmail.ee/api/status-data';
+        var STATUS_API = 'https://apexmail.ee/api/status-data';
 
         function setStatus(cls, label, linkHint) {
           if (dot) { dot.className = 'footer-status-dot w-1.5 h-1.5 inline-block ' + cls; }

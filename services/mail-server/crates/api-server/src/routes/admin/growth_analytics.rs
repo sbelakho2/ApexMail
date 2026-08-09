@@ -245,7 +245,7 @@ async fn get_growth_analytics(
         "SELECT COUNT(DISTINCT d.tenant_id)::bigint
          FROM domains d
          JOIN tenants t ON t.id::text = d.tenant_id::text
-         WHERE d.is_verified = true AND t.created_at >= NOW() - $1::interval",
+         WHERE d.verified = true AND t.created_at >= NOW() - $1::interval",
     )
     .bind(&interval)
     .fetch_one(db)
@@ -267,7 +267,7 @@ async fn get_growth_analytics(
         "SELECT COUNT(DISTINCT d.tenant_id)::bigint
          FROM domains d
          JOIN tenants t ON t.id::text = d.tenant_id::text
-         WHERE d.dkim_selector IS NOT NULL
+         WHERE d.dkim_enabled
            AND t.created_at >= NOW() - $1::interval",
     )
     .bind(&interval)
@@ -574,7 +574,7 @@ async fn get_activation_funnel(
         "SELECT COUNT(DISTINCT d.tenant_id)::bigint
          FROM domains d
          JOIN tenants t ON t.id::text = d.tenant_id::text
-         WHERE d.is_verified = true AND t.created_at >= NOW() - $1::interval",
+         WHERE d.verified = true AND t.created_at >= NOW() - $1::interval",
     )
     .bind(&interval)
     .fetch_one(db)

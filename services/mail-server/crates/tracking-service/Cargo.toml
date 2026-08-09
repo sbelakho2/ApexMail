@@ -48,6 +48,10 @@ metrics-exporter-prometheus.workspace = true
 # Database
 sqlx.workspace = true
 
+# ClickHouse (OLAP event ingestion)
+clickhouse = { version = "0.12", features = ["lz4", "time"] }
+time = "0.3"
+
 # Redis
 deadpool-redis.workspace = true
 redis.workspace = true

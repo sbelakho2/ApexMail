@@ -106,9 +106,9 @@ export default function () {
   // ── 1. Health Check (lightest operation) ──────────────────────────────────
   group('health check', function () {
     // During spikes, alternate endpoints to distribute load
-    const endpoint = Date.now() % 2 === 0 ? 'liveness' : 'readiness';
+    const endpoint = Date.now() % 2 === 0 ? 'live' : 'ready';
     const resp = http.get(
-      `${BASE_URL}/v1/health/${endpoint}`,
+      `${BASE_URL}/health/${endpoint}`,
       {
         headers: {
           'Content-Type': 'application/json',
@@ -176,7 +176,7 @@ export default function () {
     });
 
     const emailResp = http.post(
-      `${BASE_URL}/v1/email/send`,
+      `${BASE_URL}/v1/messages`,
       emailPayload,
       {
         headers: {

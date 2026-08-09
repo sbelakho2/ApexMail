@@ -13,6 +13,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
+    pub clickhouse: ClickHouseConfig,
     pub tracking: TrackingConfig,
     pub rate_limit: RateLimitConfig,
     pub metrics: MetricsConfig,
@@ -20,6 +21,21 @@ pub struct Config {
     /// RSA public key (PEM) for verifying RS256 JWTs (stream tokens).
     /// SECURITY (SEC-119): All JWTs use RS256 — no HS256.
     pub jwt_public_key_pem: String,
+}
+
+/// ClickHouse OLAP connection for event ingestion.
+///
+/// Reads the shared `CLICKHOUSE_*` variables used across ApexMail services.
+/// The password is bridged from the `CLICKHOUSE_PASSWORD_FILE` Docker secret
+/// by the entrypoint wrapper.
+#[derive(Debug, Clone)]
+pub struct ClickHouseConfig {
+    pub url: String,
+    pub database: String,
+    pub user: String,
+    pub password: String,
+    /// Timeout for a single ClickHouse insert batch (seconds).
+    pub insert_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +119,13 @@ fn var_or_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn var_or_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 fn var_or_bool(name: &str, default: bool) -> bool {
     match std::env::var(name).as_deref() {
         Ok("true") | Ok("1") | Ok("yes") => true,
@@ -178,6 +201,14 @@ pub fn load() -> Result<Config> {
         build_redis_url(&host, port, db, password.as_deref())
     };
 
+    let clickhouse = ClickHouseConfig {
+        url: var_or("CLICKHOUSE_URL", "http://clickhouse:8123"),
+        database: var_or("CLICKHOUSE_DATABASE", "apexmail"),
+        user: var_or("CLICKHOUSE_USER", "default"),
+        password: var_or("CLICKHOUSE_PASSWORD", ""),
+        insert_timeout_seconds: var_or_u64("CLICKHOUSE_INSERT_TIMEOUT_SECONDS", 30),
+    };
+
     let trusted_proxies =
         parse_trusted_proxies(&var_or("TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES));
 
@@ -222,6 +253,7 @@ pub fn load() -> Result<Config> {
             key_prefix: "tracking:".into(),
             pool_size,
         },
+        clickhouse,
         tracking: TrackingConfig {
             base_url: var_or("TRACKING_BASE_URL", "https://t.apexmail.ee"),
             pixel_path: var_or("TRACKING_PIXEL_PATH", "/o"),

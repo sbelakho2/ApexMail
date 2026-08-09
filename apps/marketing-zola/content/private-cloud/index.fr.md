@@ -4,5 +4,5 @@ description = "Infrastructure email en cloud privé avec tenance d'application e
 template = "private-cloud.html"
 
 [extra]
-og_image = "/images/og-private-cloud.png"
+og_image = "/images/og-image.svg"
 +++

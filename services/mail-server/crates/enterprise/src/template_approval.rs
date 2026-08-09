@@ -13,7 +13,7 @@ pub struct TemplateApprovalService {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct TemplateSubmissionDbRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     name: String,
     description: Option<String>,
     html_content: String,
@@ -33,7 +33,7 @@ impl From<TemplateSubmissionDbRow> for TemplateSubmission {
     fn from(row: TemplateSubmissionDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             name: row.name,
             description: row.description,
             html_content: row.html_content,
@@ -49,10 +49,6 @@ impl From<TemplateSubmissionDbRow> for TemplateSubmission {
             updated_at: row.updated_at,
         }
     }
-}
-
-fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
 }
 
 impl TemplateApprovalService {
@@ -73,7 +69,6 @@ impl TemplateApprovalService {
         text_content: Option<&str>,
         submitted_by: &str,
     ) -> Result<ApiResult<TemplateSubmission>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let spam_result = calculate_spam_score(html_content, subject);
 
@@ -93,7 +88,7 @@ impl TemplateApprovalService {
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(name).bind(subject)
+        .bind(id).bind(&tenant_id).bind(name).bind(subject)
         .bind(html_content).bind(text_content)
         .bind(status).bind(submitted_by)
         .bind(spam_result.score).bind(&spam_json)
@@ -129,19 +124,18 @@ impl TemplateApprovalService {
         limit: i64,
         offset: i64,
     ) -> Result<ApiResult<Vec<TemplateSubmission>>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = if let Some(s) = status {
             sqlx::query_as::<_, TemplateSubmissionDbRow>(
                 "SELECT * FROM ent_template_submissions WHERE tenant_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4"
             )
-            .bind(tenant_uuid).bind(s).bind(limit).bind(offset)
+            .bind(&tenant_id).bind(s).bind(limit).bind(offset)
             .fetch_all(&self.db)
             .await
         } else {
             sqlx::query_as::<_, TemplateSubmissionDbRow>(
                 "SELECT * FROM ent_template_submissions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
             )
-            .bind(tenant_uuid).bind(limit).bind(offset)
+            .bind(&tenant_id).bind(limit).bind(offset)
             .fetch_all(&self.db)
             .await
         }.map_err(|e| format!("List submissions: {e}"))?;
@@ -226,7 +220,6 @@ impl TemplateApprovalService {
         &self,
         tenant_id: String,
     ) -> Result<ApiResult<serde_json::Value>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let row: (i64, i64, i64, i64, i64, Option<f64>) = sqlx::query_as(
             "SELECT
              COUNT(*),
@@ -237,7 +230,7 @@ impl TemplateApprovalService {
              AVG(spam_score)::float8
              FROM ent_template_submissions WHERE tenant_id = $1",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Get template stats: {e}"))?;

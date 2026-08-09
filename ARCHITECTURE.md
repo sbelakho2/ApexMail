@@ -30,10 +30,10 @@ processes, no systemd services, no Kubernetes.
 | `apexmail-api-server-1` | `…/api-server:latest` | 3000 (internal) | REST API + SSR web UI (Axum) |
 | `apexmail-marketing-1` | `…/marketing:latest` | 8080 (internal) | Marketing site (Zola static) |
 | `apexmail-mta` | `…/mta:latest` | 25, 587, 465 | SMTP inbound + submission (STARTTLS) |
-| `apexmail-imap` | `…/imap-server:latest` | 143, 993 | IMAP/IMAPS mail access |
-| `apexmail-mailstore` | `…/api-server:latest` | 50051 (internal) | gRPC mail storage backend |
-| `apexmail-worker-1` | `…/worker:latest` | 3006 (internal) | Background job processor |
-| `apexmail-enterprise-1` | `…/enterprise:latest` | 3002 (internal) | Enterprise features |
+| `apexmail-imap` | `…/imap-server:latest` | 993 | IMAPS mail access |
+| `apexmail-mailstore` | `…/mailstore:latest` | 50051 (internal) | gRPC mail storage backend |
+| `apexmail-worker-1` | `…/worker:latest` | 9093 (metrics, internal) | Background job processor |
+| `apexmail-enterprise-1` | `…/enterprise:latest` | 3008 (internal) | Enterprise features |
 | `apexmail-tracking-1` | `…/tracking-service:latest` | 3001 (internal) | Email open/click tracking |
 | `apexmail-postgres` | `postgres:16.8-alpine` | 5432 (localhost) | Primary database |
 | `apexmail-redis` | `redis:7.4-alpine` | 6379 (localhost) | Cache, queues, KiwiCaptcha challenges |
@@ -144,9 +144,16 @@ Serves:
 
 ### HTTPS (port 443) — per-domain servers
 - `apexmail.ee`, `www.apexmail.ee` → `marketing:8080`
-- `app.apexmail.ee` → `api-server:3000`
+- `app.apexmail.ee`, `api.apexmail.ee` → `api-server:3000`
 - `admin.apexmail.ee`, `control.apexmail.ee` → `api-server:3000`
-- `status.apexmail.ee` → `api-server:3000`
+- `track.apexmail.ee` → `tracking:3001`
+- `enterprise.apexmail.ee` → `enterprise:3008`
+- `status.apexmail.ee` → `api-server:3000` (no A record in DNS — dead until added)
+- `autoconfig.apexmail.ee` → static XML served by nginx
+
+All HTTPS vhosts send security headers (HSTS, X-Content-Type-Options,
+X-Frame-Options, Referrer-Policy) and apply the declared `limit_req` zones
+(`global`, `login`, `signup`) to the relevant locations.
 
 **No legacy `apexmail.conf` or site-fragment configs.** Those are archived in
 `deploy/legacy-systemd/`.
@@ -167,6 +174,8 @@ Serves:
 | A | `smtp.apexmail.ee` | `95.216.226.51` |
 | A | `imap.apexmail.ee` | `95.216.226.51` |
 | A | `autoconfig.apexmail.ee` | `95.216.226.51` |
+| A | `track.apexmail.ee` | `95.216.226.51` |
+| A | `enterprise.apexmail.ee` | `95.216.226.51` |
 | MX | `apexmail.ee` | `10 mail.apexmail.ee` |
 | TXT | `apexmail.ee` | `v=spf1 mx a -all` |
 | TXT | `_dmarc.apexmail.ee` | `v=DMARC1; p=quarantine; rua=mailto:admin@apexmail.ee` |
@@ -210,8 +219,9 @@ push to main
 deploy.yml (GitHub Actions)
   ├── cargo check + clippy + tests (pr-gate)
   ├── image-name drift guard
-  ├── build 8 images (runtime-base, api-server, mta, worker,
-  │   enterprise, tracking-service, observability, marketing)
+  ├── build 10 images (runtime-base, api-server, mta, imap-server,
+  │   mailstore, worker, enterprise, tracking-service, observability,
+  │   marketing)
   ├── tag :<short-sha> + :latest
   ├── push to ghcr.io/sbelakho2/apexmail/
   └── Trivy security scan
@@ -221,8 +231,9 @@ deploy-hetzner.yml (GitHub Actions)
   ├── SSH to HETZNER_SSH_HOST
   ├── rsync compose files + deploy/ to /opt/apexmail/
   ├── render .env from APEXMAIL_PROD_ENV secret
-  ├── docker compose pull (all images)
-  ├── docker compose up -d --remove-orphans
+  ├── render all 14 PROD_*_FILE secret files into secrets/
+  ├── docker compose pull (all images incl. imap-server + mailstore)
+  ├── docker compose up -d --remove-orphans (all 9 app services + infra)
   ├── nginx reload
   └── verify health
 ```
@@ -260,7 +271,7 @@ deploy-hetzner.yml (GitHub Actions)
 ### Do NOT use
 | Path | Why |
 |---|---|
-| `Makefile` | References nonexistent `deploy/systemd/` and legacy nginx config. Only `verify` target is still valid. |
+| `Makefile` | Manual/emergency fallback (`deploy/scripts/deploy.sh` builds images on the host). Canonical deployment is CI: `deploy.yml` + `deploy-hetzner.yml`. |
 | `deploy/monitoring/` | Standalone status-page container not in the prod compose stack |
 
 ---

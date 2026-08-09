@@ -4,7 +4,7 @@ description = "Enterprise email infrastructure for high-volume, regulated, and p
 template = "prose.html"
 
 [extra]
-og_image = "/images/og-enterprise.png"
+og_image = "/images/og-image.svg"
 +++
 
 ## Who Enterprise Is For

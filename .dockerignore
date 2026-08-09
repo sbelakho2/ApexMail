@@ -42,6 +42,12 @@ LICENSE
 **/__tests__
 **/reports
 
+# Large model artifacts (51GB+ — poison the build context tar)
+apps/ai
+**/*.safetensors
+**/*.gguf
+**/*.bin
+
 # Development tools
 
 # Docker files (avoid recursive inclusion)

@@ -8,8 +8,10 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 
 use crate::error::ApiError;
 use crate::middleware::rate_limiter::extract_public_client_ip;
@@ -23,6 +25,18 @@ const KIWI_CHALLENGE_PREFIX: &str = "apexmail:kiwi:";
 /// thousands of challenges to DoS Redis or pre-compute solutions.
 const CHALLENGE_IP_RATE_LIMIT: i64 = 30;
 const CHALLENGE_IP_RATE_LIMIT_WINDOW_SECS: u64 = 15 * 60;
+
+/// Process-wide in-memory challenge cache (per IP hash + scope, 1s TTL).
+///
+/// A page load (or a double-fetch from the widget) often issues 2+ challenge
+/// requests for the same client within a second. The cache serves those
+/// repeats from memory instead of re-issuing a nonce and re-writing Redis.
+/// Entries are pruned lazily inside `ChallengeCache` (on `get`/`put`).
+static CHALLENGE_CACHE: OnceLock<Mutex<kiwicaptcha::ChallengeCache>> = OnceLock::new();
+
+fn challenge_cache() -> &'static Mutex<kiwicaptcha::ChallengeCache> {
+    CHALLENGE_CACHE.get_or_init(|| Mutex::new(kiwicaptcha::ChallengeCache::new()))
+}
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/challenge", post(issue_challenge_handler))
@@ -151,6 +165,14 @@ async fn issue_challenge_handler(
         auto_tune_max_bits: state.config.kiwi_auto_tune_max_bits,
     };
 
+    // Serve repeat requests from the same client (IP hash + scope) within the
+    // cache window from memory — the challenge record is already in Redis from
+    // the first issuance, so no extra Redis write happens per page load.
+    let ip_hash = kiwicaptcha::hash_ip(&client_ip, &state.config.kiwi_secret_key);
+    if let Some(issued) = challenge_cache().lock().get(&ip_hash, scope) {
+        return Ok(Json(challenge_response(issued)));
+    }
+
     let issued = kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix, 0)
         .map_err(|_| ApiError::Internal("failed to issue KiwiCaptcha challenge".into()))?;
 
@@ -168,21 +190,27 @@ async fn issue_challenge_handler(
     )
     .await?;
 
+    challenge_cache().lock().put(&ip_hash, scope, issued.clone());
+
     tracing::debug!(
         scope = scope,
         ttl_secs = state.config.kiwi_challenge_ttl_secs,
         "KiwiCaptcha challenge issued"
     );
 
-    Ok(Json(ChallengeResponse {
-        nonce: issued.challenge.nonce,
-        challenge: issued.challenge.challenge,
-        salt: issued.challenge.salt,
+    Ok(Json(challenge_response(&issued)))
+}
+
+fn challenge_response(issued: &kiwicaptcha::Issued) -> ChallengeResponse {
+    ChallengeResponse {
+        nonce: issued.challenge.nonce.clone(),
+        challenge: issued.challenge.challenge.clone(),
+        salt: issued.challenge.salt.clone(),
         m_kib: issued.challenge.m_kib,
         t: issued.challenge.t,
         p: issued.challenge.p,
         target_bits: issued.challenge.target_bits,
         ttl_secs: issued.challenge.ttl_secs,
-        prefix: issued.challenge.prefix,
-    }))
+        prefix: issued.challenge.prefix.clone(),
+    }
 }

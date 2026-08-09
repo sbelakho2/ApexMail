@@ -66,9 +66,8 @@ pub fn cursor_limit_sql(limit: i64) -> String {
 /// WHERE created_at < $1
 /// ```
 ///
-/// # Panics
-/// Panics if the column name is not in the allowlist.
-pub fn cursor_where_sql(column: &str) -> String {
+/// Returns `Err` (never panics) when the column is not in the allowlist.
+pub fn cursor_where_sql(column: &str) -> Result<String, String> {
     const ALLOWED_COLUMNS: &[&str] = &[
         "id",
         "created_at",
@@ -89,12 +88,12 @@ pub fn cursor_where_sql(column: &str) -> String {
         "date",
         "day",
     ];
-    assert!(
-        ALLOWED_COLUMNS.contains(&column),
-        "column '{}' is not in the allowlist for cursor_where_sql",
-        column
-    );
-    format!("WHERE {column} < $1")
+    if !ALLOWED_COLUMNS.contains(&column) {
+        return Err(format!(
+            "column '{column}' is not in the allowlist for cursor_where_sql"
+        ));
+    }
+    Ok(format!("WHERE {column} < $1"))
 }
 
 /// Helper to check whether a result batch has a "next page".
@@ -293,5 +292,33 @@ mod tests {
             token_blacklist_key(token),
             format!("{TOKEN_BLACKLIST_PREFIX}{}", hash_token(token))
         );
+    }
+
+    #[test]
+    fn cursor_where_sql_accepts_allowlisted_columns() {
+        for column in ["id", "created_at", "updated_at", "timestamp", "sent_at"] {
+            let where_clause = cursor_where_sql(column).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(where_clause, format!("WHERE {column} < $1"));
+        }
+    }
+
+    #[test]
+    fn cursor_where_sql_rejects_unknown_columns_without_panicking() {
+        let err = cursor_where_sql("id; DROP TABLE messages").unwrap_err();
+        assert!(err.contains("allowlist"), "unexpected error: {err}");
+        // Arbitrary/user-controlled column names must be rejected, not spliced.
+        assert!(cursor_where_sql("from_email").is_err());
+        assert!(cursor_where_sql("").is_err());
+    }
+
+    #[test]
+    fn cursor_limit_sql_fetches_one_extra_row() {
+        assert_eq!(cursor_limit_sql(50), "LIMIT 51");
+    }
+
+    #[test]
+    fn cursor_round_trip_is_lossless() {
+        let original = "2026-08-08T18:00:00.000Z";
+        assert_eq!(decode_cursor(&encode_cursor(original)).unwrap(), original);
     }
 }

@@ -11,6 +11,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -20,7 +21,7 @@ use crate::middleware::auth::{
     lookup_session_revoked_after, session_revocation_key, validate_session_csrf, AuthUser,
     JwtClaims,
 };
-use crate::middleware::rate_limiter::extract_public_client_ip;
+use crate::middleware::rate_limiter::{extract_public_client_ip, INCR_EXPIRE_LUA};
 use crate::routes::csrf::validate_form_csrf;
 use crate::state::AppState;
 
@@ -49,6 +50,20 @@ fn register_rate_limit_message() -> String {
 
 /// The Redis key prefix under which issued KiwiCaptcha challenges are stored.
 const KIWI_CHALLENGE_PREFIX: &str = "apexmail:kiwi:";
+
+/// Atomic single-use consumption of a KiwiCaptcha challenge record.
+///
+/// The record is deleted only if it still equals the exact JSON the caller
+/// verified against. A concurrent or replayed use finds the key missing (or
+/// changed) and gets `0` — the challenge is strictly single-use.
+const KIWI_CONSUME_LUA: &str = r#"
+    local stored = redis.call('GET', KEYS[1])
+    if stored == ARGV[1] then
+        redis.call('DEL', KEYS[1])
+        return 1
+    end
+    return 0
+"#;
 
 /// Verify a KiwiCaptcha proof-of-work solution against the stored challenge.
 ///
@@ -108,6 +123,7 @@ pub async fn verify_kiwi_token(
         deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key).await?;
 
     let record: kiwicaptcha::ChallengeRecord = stored
+        .as_deref()
         .ok_or_else(|| {
             tracing::warn!(nonce = %solution.nonce, key = %key, "KiwiCaptcha: challenge not found in Redis");
             ApiError::Validation(vec![
@@ -115,7 +131,7 @@ pub async fn verify_kiwi_token(
             ])
         })
         .and_then(|s| {
-            serde_json::from_str(&s).map_err(|e| {
+            serde_json::from_str(s).map_err(|e| {
                 tracing::warn!(error = %e, nonce = %solution.nonce, "KiwiCaptcha: challenge record decode failed");
                 ApiError::Internal("CAPTCHA state corrupted".into())
             })
@@ -130,15 +146,6 @@ pub async fn verify_kiwi_token(
         target_bits = record.target_bits,
         "KiwiCaptcha: challenge record found"
     );
-
-    // Set a short expiry (30s) on first successful verify so the challenge
-    // cannot be replayed, but survives long enough for a MFA retry.
-    let _: () = deadpool_redis::redis::AsyncCommands::expire(
-        &mut *conn,
-        &key,
-        30,
-    )
-    .await?;
 
     // IP binding: the challenge was issued to this IP. A mismatch means a
     // relay attack (token minted elsewhere, submitted from here).
@@ -198,8 +205,27 @@ pub async fn verify_kiwi_token(
 
     match kiwicaptcha::verify_solution(&ctx) {
         kiwicaptcha::VerifyOutcome::Valid => {
-            tracing::info!(duration_ms = solution.duration_ms, counter = solution.counter, "KiwiCaptcha: VERIFIED");
-            Ok(())
+            // Atomic single-use consumption (compare-and-delete): the record is
+            // deleted only if it still holds the exact value verified above, so
+            // a replayed token or a concurrent use can never succeed twice.
+            let consumed: i64 = deadpool_redis::redis::Script::new(KIWI_CONSUME_LUA)
+                .key(&key)
+                .arg(stored.as_deref().unwrap_or_default())
+                .invoke_async(&mut *conn)
+                .await?;
+            if consumed == 1 {
+                tracing::info!(duration_ms = solution.duration_ms, counter = solution.counter, "KiwiCaptcha: VERIFIED");
+                Ok(())
+            } else {
+                tracing::warn!(
+                    nonce = %solution.nonce,
+                    key = %key,
+                    "KiwiCaptcha: challenge already consumed or expired — replay rejected"
+                );
+                Err(ApiError::Validation(vec![
+                    "CAPTCHA challenge already used — please refresh and try again".into(),
+                ]))
+            }
         }
         kiwicaptcha::VerifyOutcome::Invalid(reason) => {
             tracing::warn!(reason = ?reason, counter = solution.counter, duration_ms = solution.duration_ms, target_bits = record.target_bits, "KiwiCaptcha: REJECTED");
@@ -587,35 +613,21 @@ async fn record_login_failure(
     let identifier_hash = hash_token(identifier);
 
     let mut conn = redis_pool.get().await?;
-    let failures: i64 = deadpool_redis::redis::cmd("INCR")
-        .arg(&failure_key)
-        .query_async(&mut *conn)
+    let failures: i64 = deadpool_redis::redis::Script::new(INCR_EXPIRE_LUA)
+        .key(&failure_key)
+        .arg(LOGIN_FAILURE_WINDOW_SECS)
+        .invoke_async(&mut *conn)
         .await?;
-
-    if failures == 1 {
-        let _: i64 = deadpool_redis::redis::cmd("EXPIRE")
-            .arg(&failure_key)
-            .arg(LOGIN_FAILURE_WINDOW_SECS)
-            .query_async(&mut *conn)
-            .await?;
-    }
 
     if failures < LOGIN_FAILURE_THRESHOLD {
         return Ok(());
     }
 
-    let lockouts: i64 = deadpool_redis::redis::cmd("INCR")
-        .arg(&lockout_counter_key)
-        .query_async(&mut *conn)
+    let lockouts: i64 = deadpool_redis::redis::Script::new(INCR_EXPIRE_LUA)
+        .key(&lockout_counter_key)
+        .arg(LOGIN_LOCKOUT_ESCALATION_WINDOW_SECS)
+        .invoke_async(&mut *conn)
         .await?;
-
-    if lockouts == 1 {
-        let _: i64 = deadpool_redis::redis::cmd("EXPIRE")
-            .arg(&lockout_counter_key)
-            .arg(LOGIN_LOCKOUT_ESCALATION_WINDOW_SECS)
-            .query_async(&mut *conn)
-            .await?;
-    }
 
     let duration = login_lockout_duration(lockouts);
     let _: () =
@@ -749,13 +761,14 @@ async fn enqueue_verification_email(
         "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours.\n\n© 2026 ApexMail — https://apexmail.ee",
     );
 
-    // Generate a message ID used in both the messages log and the email_queue
-    let message_id = apexmail_lib::id::generate_id("msg", 22);
+    // Generate a message ID used in both the messages log and the email_queue.
+    // Production messages.id and email_queue.message_id are UUIDs.
+    let message_id = uuid::Uuid::new_v4().to_string();
 
     // 1. Insert into messages table (audit/log)
     sqlx::query(
         "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at)
-         VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
+         VALUES ($1::uuid, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
     )
     .bind(&message_id)
     .bind(SYSTEM_TENANT_ID)
@@ -768,30 +781,27 @@ async fn enqueue_verification_email(
     .execute(db)
     .await?;
 
-    // 2. Look up the domain_id for "apexmail.ee" via the system domain alias.
-    //    System-internal emails use a well-known tenant-less domain; if it is
-    //    not yet registered in the domains table we generate a synthetic ID
-    //    so the email_queue worker can still pick up the row (DKIM will be
-    //    skipped gracefully for unknown domains).
-    let domain_id: String = sqlx::query_scalar(
-        "SELECT id FROM domains WHERE domain = 'apexmail.ee' LIMIT 1",
+    // 2. Look up the domain_id for "apexmail.ee" (domains.name column;
+    //    NULL when the domain is not registered — DKIM is skipped for
+    //    unknown domains).
+    let domain_id: Option<String> = sqlx::query_scalar(
+        "SELECT id::text FROM domains WHERE name = 'apexmail.ee' LIMIT 1",
     )
     .fetch_optional(db)
-    .await?
-    .unwrap_or_else(|| apexmail_lib::id::generate_id("dom", 22));
+    .await?;
 
     // 3. Insert into email_queue for the worker processor to pick up
     let now = chrono::Utc::now();
     sqlx::query(
         "INSERT INTO email_queue (
-            id, message_id, tenant_id, domain_id, \"from\", \"to\", subject,
-            html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
+            id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
+            \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7,
-            $8, $9, $10, $11, $12, 5, 'pending', $13, $13
+            $1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7,
+            $5, $6, $8, $9, $10, $11, $12, 5, 'pending', $13, $13
          )",
     )
-    .bind(apexmail_lib::id::generate_id("emq", 22))
+    .bind(uuid::Uuid::new_v4())
     .bind(&message_id)
     .bind(SYSTEM_TENANT_ID)
     .bind(&domain_id)
@@ -800,7 +810,7 @@ async fn enqueue_verification_email(
     .bind("Verify your ApexMail account")
     .bind(&html_body)
     .bind(&text_body)
-    .bind(serde_json::json!(["system", "verification"]))
+    .bind(vec!["system".to_string(), "verification".to_string()])
     .bind(Option::<serde_json::Value>::None) // metadata
     .bind(Option::<chrono::DateTime<chrono::Utc>>::None) // scheduled_at
     .bind(now)
@@ -1097,20 +1107,62 @@ async fn insert_auth_audit_log(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) -> Result<(), ApiError> {
+    // Canonical audit_logs schema (compliance hash chain): resource + details
+    // columns, with NOT NULL outcome/hash/signature populated.
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = Utc::now();
+    let mut hasher = Sha256::new();
+    hasher.update(tenant_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(user_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(action.as_bytes());
+    hasher.update(b"|");
+    hasher.update(metadata.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(timestamp.to_rfc3339().as_bytes());
+    let hash = hex::encode(hasher.finalize());
+
     sqlx::query(
-        "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource_type, ip_address, user_agent, metadata, created_at)
-         VALUES (gen_random_uuid(), $1, $2, $3, 'auth', $4, $5, $6::jsonb, NOW())",
+        "INSERT INTO audit_logs (
+            id, tenant_id, user_id, action, resource, resource_id,
+            details, ip_address, user_agent, outcome, error_message,
+            timestamp, hash, previous_hash, signature, created_at
+         ) VALUES (
+            $1, $2, $3, $4, 'auth', $5,
+            $6::jsonb, $7, $8, 'success', NULL,
+            $9, $10, NULL, $11, $9
+         )",
     )
+    .bind(&id)
     .bind(tenant_id)
     .bind(user_id)
     .bind(action)
+    .bind(metadata)
     .bind(ip_address)
     .bind(user_agent)
-    .bind(metadata)
+    .bind(timestamp)
+    .bind(&hash)
+    .bind(audit_log_signature(&hash))
     .execute(&state.db)
     .await?;
 
     Ok(())
+}
+
+/// HMAC-SHA256 signature over the audit hash, keyed with the same
+/// `AUDIT_SIGNING_KEY` the compliance crate uses for chain verification.
+fn audit_log_signature(hash: &str) -> String {
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<Sha256>;
+    let key = std::env::var("AUDIT_SIGNING_KEY")
+        .unwrap_or_else(|_| "apexmail-auth-audit-fallback-key".to_string());
+    let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => return String::new(),
+    };
+    mac.update(hash.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -1154,7 +1206,7 @@ async fn get_current_user(
     // If authenticated via API key, return the key's tenant info
     if let Some(user_id) = &auth.user_id {
         let user: Option<(String, String, Option<String>, String)> =
-            sqlx::query_as("SELECT id, email, name, role FROM users WHERE id = $1 AND status = 'active'")
+            sqlx::query_as("SELECT id::text, email, name, role FROM users WHERE id = $1::uuid AND status = 'active'")
                 .bind(user_id)
                 .fetch_optional(&state.db)
                 .await?;
@@ -1324,10 +1376,10 @@ async fn login(
                     let code_str = code.to_string();
                     let key = format!("apexmail:email_mfa:{}", user.id);
                     let _: () = deadpool_redis::redis::AsyncCommands::set_ex(&mut *redis_conn, &key, &code_str, 300).await?;
-                    tracing::info!(user_id = %user.id, email = %user.email, "Email MFA code generated: {code_str}");
+                    tracing::info!(user_id = %user.id, email = %user.email, code_length = code_str.len(), "Email MFA code generated");
 
                     // Enqueue MFA email via email_queue (same pattern as forgot_password)
-                    let msg_id = apexmail_lib::id::generate_id("msg", 22);
+                    let msg_id = uuid::Uuid::new_v4().to_string();
                     let safe_email = html_escape(&user.email);
                     let safe_code = html_escape(&code_str);
                     let html_body = format!(
@@ -1342,17 +1394,21 @@ async fn login(
 </body></html>"#,
                     );
                     let text_body = format!("Your MFA Code\n\nYour one-time verification code is: {code_str}\n\nThis code expires in 5 minutes.");
-                    let domain_id = sqlx::query_scalar::<_, String>("SELECT id FROM domains WHERE tenant_id=$1 AND status='verified' LIMIT 1")
+                    let domain_id: Option<String> = sqlx::query_scalar(
+                        "SELECT id::text FROM domains
+                         WHERE tenant_id = $1 AND name = 'apexmail.ee'
+                           AND (status = 'verified' OR verified = true)
+                         LIMIT 1",
+                    )
                         .bind(SYSTEM_TENANT_ID)
                         .fetch_optional(&state.db)
                         .await
-                        .map_err(|e| { tracing::error!(error=%e, "Failed to look up system domain"); ApiError::Internal("Failed to send MFA email".into()) })?
-                        .unwrap_or_else(|| apexmail_lib::id::generate_id("dom", 22));
+                        .map_err(|e| { tracing::error!(error=%e, "Failed to look up system domain"); ApiError::Internal("Failed to send MFA email".into()) })?;
                     let _ = sqlx::query(
-                        "INSERT INTO email_queue (id, message_id, tenant_id, domain_id, \"from\", \"to\", subject, html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 5, 'pending', $13, $13)",
+                        "INSERT INTO email_queue (id, message_id, tenant_id, domain_id, from_address, to_addresses, subject, \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at)
+                         VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7, $5, $6, $8, $9, $10, $11, $12, 5, 'pending', $13, $13)",
                     )
-                    .bind(apexmail_lib::id::generate_id("emq", 22))
+                    .bind(uuid::Uuid::new_v4())
                     .bind(&msg_id)
                     .bind(SYSTEM_TENANT_ID)
                     .bind(&domain_id)
@@ -1361,7 +1417,7 @@ async fn login(
                     .bind("Your ApexMail MFA Code")
                     .bind(&html_body)
                     .bind(&text_body)
-                    .bind(serde_json::json!(["system", "mfa"]))
+                    .bind(vec!["system".to_string(), "mfa".to_string()])
                     .bind(Option::<serde_json::Value>::None)
                     .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
                     .bind(chrono::Utc::now())
@@ -1586,8 +1642,8 @@ async fn complete_mfa_challenge(
     clear_login_failures(&state.redis, &login_identifier).await?;
 
     let mut user = sqlx::query_as::<_, UserRow>(
-        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
-         FROM users WHERE id = $1 AND tenant_id = $2",
+        "SELECT id::text, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
+         FROM users WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(&challenge.user_id)
     .bind(&challenge.tenant_id)
@@ -1761,8 +1817,8 @@ async fn init_mfa_setup(
     let user_id = authenticated_user_id(&auth)?;
 
     let user = sqlx::query_as::<_, MfaUserRow>(
-        "SELECT id, email, name, role, mfa_enabled
-         FROM users WHERE id = $1 AND tenant_id = $2",
+        "SELECT id::text, email, name, role, mfa_enabled
+         FROM users WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(user_id)
     .bind(&auth.tenant_id)
@@ -1831,8 +1887,8 @@ async fn confirm_mfa_setup(
     }
 
     let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
-         FROM users WHERE id = $1 AND tenant_id = $2",
+        "SELECT id::text, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
+         FROM users WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(user_id)
     .bind(&auth.tenant_id)
@@ -1910,7 +1966,7 @@ async fn mfa_status(
     let user_id = authenticated_user_id(&auth)?;
 
     let row = sqlx::query_as::<_, (bool, String)>(
-        "SELECT mfa_enabled, role FROM users WHERE id = $1 AND tenant_id = $2",
+        "SELECT mfa_enabled, role FROM users WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(user_id)
     .bind(&auth.tenant_id)
@@ -2046,9 +2102,12 @@ async fn register(
     let rate_key = format!("apexmail:register_rate:{client_ip}");
 
     if let Ok(mut conn) = state.redis.get().await {
-        let count: i64 = match deadpool_redis::redis::cmd("INCR")
-            .arg(&rate_key)
-            .query_async(&mut *conn)
+        // Atomic INCR + EXPIRE-on-first (single Lua script) so the key can
+        // never be left behind without a TTL.
+        let count: i64 = match deadpool_redis::redis::Script::new(INCR_EXPIRE_LUA)
+            .key(&rate_key)
+            .arg(REGISTER_RATE_LIMIT_WINDOW_SECS)
+            .invoke_async(&mut *conn)
             .await
         {
             Ok(c) => c,
@@ -2057,14 +2116,6 @@ async fn register(
                 return Err(ApiError::Internal("rate limit check unavailable".into()));
             }
         };
-
-        if count == 1 {
-            let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
-                .arg(&rate_key)
-                .arg(REGISTER_RATE_LIMIT_WINDOW_SECS)
-                .query_async(&mut *conn)
-                .await;
-        }
 
         if count > REGISTER_RATE_LIMIT_MAX_REQUESTS {
             return Err(ApiError::RateLimitedMessage(register_rate_limit_message()));
@@ -2075,7 +2126,7 @@ async fn register(
 
     // Check if email already exists
     let existing: Option<String> =
-        sqlx::query_scalar("SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1")
+        sqlx::query_scalar("SELECT id::text FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1")
             .bind(&email_lower)
             .fetch_optional(&state.db)
             .await?;
@@ -2231,7 +2282,7 @@ pub(crate) async fn verify_email_token(
 
     // Find user with matching verification token
     let user: Option<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, tenant_id, metadata FROM users
+        "SELECT id::text, tenant_id, metadata FROM users
             WHERE metadata->>'verification_token_hash' = $1
          AND email_verified = false
          LIMIT 1",
@@ -2459,9 +2510,12 @@ async fn reset_password(
     let max_requests: i64 = 5;
 
     if let Ok(mut conn) = state.redis.get().await {
-        let count: i64 = match deadpool_redis::redis::cmd("INCR")
-            .arg(&rate_key)
-            .query_async(&mut *conn)
+        // Atomic INCR + EXPIRE-on-first (single Lua script) so the key can
+        // never be left behind without a TTL.
+        let count: i64 = match deadpool_redis::redis::Script::new(INCR_EXPIRE_LUA)
+            .key(&rate_key)
+            .arg(window_secs)
+            .invoke_async(&mut *conn)
             .await
         {
             Ok(c) => c,
@@ -2470,14 +2524,6 @@ async fn reset_password(
                 return Err(ApiError::Internal("rate limit check unavailable".into()));
             }
         };
-
-        if count == 1 {
-            let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
-                .arg(&rate_key)
-                .arg(window_secs)
-                .query_async(&mut *conn)
-                .await;
-        }
 
         if count > max_requests {
             return Err(ApiError::RateLimited);
@@ -2504,7 +2550,7 @@ async fn reset_password(
     let token_hash = hash_token(&body.token);
     let email = body.email.trim().to_lowercase();
     let user: Option<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, status, metadata FROM users
+        "SELECT id::text, status, metadata FROM users
          WHERE LOWER(email) = LOWER($1)
                      AND metadata->>'password_reset_token_hash' = $2
          LIMIT 1",
@@ -2649,7 +2695,7 @@ async fn refresh_token(
     }
 
     let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id, tenant_id, email, name, password_hash, role, status FROM users WHERE id = $1",
+        "SELECT id::text, tenant_id, email, name, password_hash, role, status FROM users WHERE id = $1::uuid",
     )
     .bind(&user_id)
     .fetch_optional(&state.db)
@@ -3072,6 +3118,108 @@ mod tests {
         }
     }
 
+    /// End-to-end KiwiCaptcha single-use test (skipped when no Redis is
+    /// available). Issues a challenge, stores it like the route does, verifies
+    /// a valid solution once, then replays the same token — the replay must
+    /// be rejected even though the TTL window is still open.
+    #[tokio::test]
+    async fn test_kiwi_token_is_single_use_when_redis_available() {
+        let redis_url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let pool = match RedisConfig::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+        let mut conn = match pool.get().await {
+            Ok(conn) => conn,
+            Err(_) => return,
+        };
+        let ping: Result<String, _> = deadpool_redis::redis::cmd("PING")
+            .query_async(&mut *conn)
+            .await;
+        if ping.is_err() {
+            return;
+        }
+        drop(conn);
+
+        let mut config = crate::config::tests::valid_production_config();
+        config.kiwi_enabled = true;
+        config.kiwi_secret_key = "test-kiwi-secret-key-for-single-use-test".into();
+        config.kiwi_difficulty_bits = 8; // fast to solve in tests
+        config.kiwi_min_duration_ms = Some(0); // disable the min-duration gate
+        config.kiwi_challenge_ttl_secs = 120;
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let kc_config = kiwicaptcha::ChallengeConfig {
+            secret_key: config.kiwi_secret_key.clone(),
+            m_kib: config.kiwi_pbkdf2_iterations,
+            t: config.kiwi_argon_t,
+            p: config.kiwi_argon_p,
+            target_bits: config.kiwi_difficulty_bits,
+            ttl_secs: config.kiwi_challenge_ttl_secs,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+        };
+        let issued = kiwicaptcha::issue_challenge(&kc_config, "login", "1.2.3.4", now_unix, 0)
+            .expect("challenge issuance succeeds");
+
+        let record_json = serde_json::to_string(&issued.record).expect("record serializes");
+        let key = format!("{KIWI_CHALLENGE_PREFIX}{}", issued.record.nonce);
+
+        let mut conn = pool.get().await.expect("redis connection available");
+        let _: () = deadpool_redis::redis::AsyncCommands::set_ex(
+            &mut *conn,
+            &key,
+            record_json.clone(),
+            config.kiwi_challenge_ttl_secs,
+        )
+        .await
+        .expect("challenge stored");
+        drop(conn);
+
+        let counter = kiwicaptcha::solve_for_test(&issued.record).expect("solver finds a counter");
+        let token = kiwicaptcha::SolutionToken {
+            nonce: issued.challenge.nonce.clone(),
+            counter,
+            duration_ms: 5000,
+            telemetry: serde_json::json!({}),
+        }
+        .encode();
+
+        // First use: valid solution → succeeds and consumes the challenge.
+        verify_kiwi_token(&config, &pool, Some(&token), "1.2.3.4", Some("login"))
+            .await
+            .expect("first verification should succeed");
+
+        // Replay within the TTL window: must now fail (atomic single-use).
+        let replay_err = verify_kiwi_token(&config, &pool, Some(&token), "1.2.3.4", Some("login"))
+            .await
+            .expect_err("replay of a consumed challenge must be rejected");
+        assert!(
+            matches!(replay_err, ApiError::Validation(_)),
+            "replay must fail with a validation error, got {replay_err:?}"
+        );
+
+        // The challenge key must be gone from Redis.
+        let mut conn = pool.get().await.expect("redis connection available");
+        let exists: Option<String> =
+            deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key).await.unwrap_or(None);
+        assert!(
+            exists.is_none(),
+            "challenge key must be deleted after successful verification"
+        );
+        let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &key)
+            .await
+            .unwrap_or(0);
+    }
+
     #[test]
     fn test_login_lockout_duration_all_escalation_levels() {
         // Verify the full escalation series: 15min → 30min → 1hr → 2hr → 4hr → 8hr → 16hr → 24hr (cap)
@@ -3464,7 +3612,7 @@ async fn change_password(
 
     // Verify current password
     let user =
-        sqlx::query_as::<_, PasswordHashRow>("SELECT password_hash FROM users WHERE id = $1")
+        sqlx::query_as::<_, PasswordHashRow>("SELECT password_hash FROM users WHERE id = $1::uuid")
             .bind(user_id)
             .fetch_optional(&state.db)
             .await?
@@ -3484,7 +3632,7 @@ async fn change_password(
     let new_hash = apexmail_lib::hash_password(&body.new_password)
         .map_err(|error| ApiError::Internal(format!("Password hashing failed: {error}")))?;
 
-    sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2")
+    sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2::uuid")
         .bind(new_hash)
         .bind(user_id)
         .execute(&state.db)

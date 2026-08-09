@@ -15,7 +15,7 @@ pub struct LogStreamingService {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct LogStreamDbRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     name: String,
     description: Option<String>,
     destination_type: String,
@@ -43,7 +43,7 @@ impl From<LogStreamDbRow> for LogStream {
     fn from(row: LogStreamDbRow) -> Self {
         Self {
             id: row.id,
-            tenant_id: row.tenant_id.to_string(),
+            tenant_id: row.tenant_id,
             name: row.name,
             description: row.description,
             destination_type: row.destination_type,
@@ -69,10 +69,6 @@ impl From<LogStreamDbRow> for LogStream {
     }
 }
 
-fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
-}
-
 impl LogStreamingService {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -92,14 +88,13 @@ impl LogStreamingService {
         batch_interval_seconds: Option<i32>,
         compression_enabled: bool,
     ) -> Result<ApiResult<LogStream>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, LogStreamDbRow>(
             "INSERT INTO ent_log_streams (id, tenant_id, name, description, destination_type, status, enabled, destination_config, log_categories, batch_size, batch_interval_seconds, compression_enabled, format, total_events_delivered, total_bytes_delivered, delivery_failures_count, created_at, updated_at)
              VALUES ($1,$2,$3,$4,$5,'active',true,$6,$7,$8,$9,$10,'json',0,0,0,NOW(),NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_uuid).bind(name).bind(description)
+        .bind(id).bind(&tenant_id).bind(name).bind(description)
         .bind(destination_type).bind(&destination_config).bind(&log_categories)
         .bind(batch_size).bind(batch_interval_seconds).bind(compression_enabled)
         .fetch_one(&self.db)
@@ -127,11 +122,10 @@ impl LogStreamingService {
 
     /// List log streams for an account
     pub async fn list(&self, tenant_id: String) -> Result<ApiResult<Vec<LogStream>>, String> {
-        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = sqlx::query_as::<_, LogStreamDbRow>(
             "SELECT * FROM ent_log_streams WHERE tenant_id = $1 ORDER BY created_at DESC",
         )
-        .bind(tenant_uuid)
+        .bind(&tenant_id)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("List log streams: {e}"))?;

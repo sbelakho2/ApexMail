@@ -157,8 +157,8 @@
       {# ── Methodology note ──────────────────────────────────── #}
       <div class="mt-8 pt-6 border-t border-surface-200">
         <p class="text-[10px] text-surface-400 leading-relaxed">
-          Plan boundaries drawn from the billing engine: Free (30,000/mo), Starter (50K/mo), Pro (150K/mo), Growth (500K/mo), Scale (2M/mo), Enterprise (5M/mo).
-          Dedicated IPs are available as an add-on from &euro;30/month each (Growth+ includes one: Growth 1, Scale 3, Enterprise 10; Pro and below are add-on only).
+          Plan boundaries drawn from the billing engine: Free (30,000/mo), Developer (50K/mo), Pro (150K/mo), Growth (500K/mo), Business (2M/mo), Enterprise (5M/mo).
+          Dedicated IPs are available as an add-on from &euro;30/month each (Growth+ includes one: Growth 1, Business 1, Enterprise 10; Pro and below are add-on only).
           Shared-cloud plans have no setup fee. Private Cloud (dedicated tenant) from &euro;4,000/mo + &euro;10,000 setup. BYOC from &euro;6,500/mo + &euro;20,000 setup.
           Enterprise requires an annual contract. All totals exclude VAT.
         </p>
@@ -172,12 +172,12 @@
   'use strict';
 
   var plans = [
-    { name: 'Free',         monthlyPrice: 0,    annualPricePerMonth: 0,    includedVolume: 30000,   overagePer1K: null, includedIPs: 0,  includedDomains: 1,  includedUsers: 1,  support: 'community', setupFee: 0 },
-    { name: 'Starter',      monthlyPrice: 25,   annualPricePerMonth: 22.5, includedVolume: 50000,   overagePer1K: 0.80, includedIPs: 0,  includedDomains: 5,  includedUsers: 5,  support: 'email',    setupFee: 0 },
-    { name: 'Pro',          monthlyPrice: 65,   annualPricePerMonth: 58.5, includedVolume: 150000,  overagePer1K: 0.60, includedIPs: 0,  includedDomains: 25, includedUsers: 10, support: 'email',    setupFee: 0 },
-    { name: 'Growth',       monthlyPrice: 150,  annualPricePerMonth: 135,  includedVolume: 500000,  overagePer1K: 0.40, includedIPs: 1,  includedDomains: 100, includedUsers: 25, support: 'email',    setupFee: 0 },
-    { name: 'Scale',        monthlyPrice: 350,  annualPricePerMonth: 315,  includedVolume: 2000000, overagePer1K: 0.30, includedIPs: 3,  includedDomains: 999, includedUsers: 50, support: 'priority', setupFee: 0 },
-    { name: 'Enterprise',   monthlyPrice: 3000, annualPricePerMonth: 2700, includedVolume: 5000000, overagePer1K: 0.22, includedIPs: 10, includedDomains: 999, includedUsers: 999, support: 'dedicated', setupFee: 0 }
+    { name: 'Free',         monthlyPrice: 0,    annualPricePerMonth: 0,    includedVolume: 30000,   overagePer1K: null, includedIPs: 0,   includedDomains: 1,   includedUsers: 1,   support: 'community', setupFee: 0 },
+    { name: 'Developer',    monthlyPrice: 29,   annualPricePerMonth: 26,   includedVolume: 50000,   overagePer1K: 0.80, includedIPs: 0,   includedDomains: 5,   includedUsers: 3,   support: 'email',    setupFee: 0 },
+    { name: 'Pro',          monthlyPrice: 89,   annualPricePerMonth: 80,   includedVolume: 150000,  overagePer1K: 0.60, includedIPs: 0,   includedDomains: 15,  includedUsers: 8,   support: 'email',    setupFee: 0 },
+    { name: 'Growth',       monthlyPrice: 229,  annualPricePerMonth: 206,  includedVolume: 500000,  overagePer1K: 0.35, includedIPs: 1,   includedDomains: 50,  includedUsers: 15,  support: 'priority', setupFee: 0 },
+    { name: 'Business',     monthlyPrice: 699,  annualPricePerMonth: 629,  includedVolume: 2000000, overagePer1K: 0.35, includedIPs: 1,   includedDomains: 999, includedUsers: 25,  support: 'priority', setupFee: 0 },
+    { name: 'Enterprise',   monthlyPrice: 3000, annualPricePerMonth: 3000, includedVolume: 5000000, overagePer1K: 0.22, includedIPs: 10,  includedDomains: 999, includedUsers: 999, support: 'dedicated', setupFee: 0 }
   ];
 
   var DEPLOYMENT_SETUP = { shared: 0, private: 10000, byoc: 20000 };

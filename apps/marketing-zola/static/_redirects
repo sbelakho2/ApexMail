@@ -13,3 +13,7 @@
 
 # Inbox Placement page moved from /docs/ to top-level (2026-05-11)
 /docs/inbox-placement  /inbox-placement/  302
+
+# API Explorer renamed from /api-console/ (2026-08-09)
+/api-console           /api-explorer/  301
+/api-console/*         /api-explorer/:splat  301

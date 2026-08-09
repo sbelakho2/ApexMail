@@ -37,6 +37,7 @@ regex = { workspace = true }
 bytes = { workspace = true }
 hkdf = "0.12"
 zeroize = { workspace = true }
+urlencoding = { workspace = true }
 apexmail-lib = { path = "../apexmail-lib" }
 
 [dev-dependencies]

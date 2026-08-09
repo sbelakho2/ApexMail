@@ -62,8 +62,11 @@ receivers:
     webhook_configs:
       - url: 'https://hooks.slack.com/services/${SLACK_WEBHOOK_PATH:-}'
         send_resolved: true
-      - url: 'http://observability:4400/alerts/critical'
+      - url: 'http://observability:4400/alerts'
         send_resolved: true
+        http_config:
+          headers:
+            X-Api-Key: '${INTERNAL_SERVICE_TOKEN}'
     email_configs:
       - to: '${ALERT_EMAIL_CRITICAL:-admin@apexmail.ee}'
         send_resolved: true
@@ -76,8 +79,11 @@ receivers:
     webhook_configs:
       - url: 'https://hooks.slack.com/services/${SLACK_WEBHOOK_PATH:-}'
         send_resolved: true
-      - url: 'http://observability:4400/alerts/warning'
+      - url: 'http://observability:4400/alerts'
         send_resolved: true
+        http_config:
+          headers:
+            X-Api-Key: '${INTERNAL_SERVICE_TOKEN}'
     email_configs:
       - to: '${ALERT_EMAIL_WARNING:-admin@apexmail.ee}'
         send_resolved: true
@@ -89,11 +95,17 @@ receivers:
     webhook_configs:
       - url: 'https://hooks.slack.com/services/${SLACK_WEBHOOK_PATH_LOW:-}'
         send_resolved: true
-      - url: 'http://observability:4400/alerts/info'
+      - url: 'http://observability:4400/alerts'
         send_resolved: true
+        http_config:
+          headers:
+            X-Api-Key: '${INTERNAL_SERVICE_TOKEN}'
 
   # ── Default fallback ──
   - name: default
     webhook_configs:
-      - url: 'http://observability:4400/alerts/default'
+      - url: 'http://observability:4400/alerts'
         send_resolved: true
+        http_config:
+          headers:
+            X-Api-Key: '${INTERNAL_SERVICE_TOKEN}'

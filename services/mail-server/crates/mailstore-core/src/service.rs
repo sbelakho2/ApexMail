@@ -442,6 +442,7 @@ impl MailstoreService for MailstoreServiceImpl {
             date: internal_date,
             text_body: metadata.text_body,
             html_body: metadata.html_body,
+            raw_message: Some(req.raw_message.to_vec()),
             raw_size: req.raw_message.len() as i64,
             is_read: flags.seen,
             is_starred: flags.flagged,
@@ -499,7 +500,12 @@ impl MailstoreService for MailstoreServiceImpl {
 
         let meta = Self::message_to_meta(&message, &mailbox.name);
         let body = if req.include_body {
-            message.text_body.unwrap_or_default().into_bytes()
+            match &message.raw_message {
+                Some(raw) => raw.clone(),
+                // Legacy rows predate the raw_message column: fall back to the
+                // parsed text body so clients still receive something useful.
+                None => message.text_body.clone().unwrap_or_default().into_bytes(),
+            }
         } else {
             vec![]
         };
@@ -528,7 +534,7 @@ impl MailstoreService for MailstoreServiceImpl {
             "Listing messages"
         );
 
-        let limit = Self::clamp_limit(if req.limit > 0 { req.limit as i64 } else { 100 }, 1000);
+        let limit = Self::clamp_limit(if req.limit > 0 { req.limit as i64 } else { 100 }, 100_000);
         let messages = self
             .storage
             .list_messages(&MessageQuery {
@@ -576,7 +582,7 @@ impl MailstoreService for MailstoreServiceImpl {
             "Searching messages"
         );
 
-        let limit = Self::clamp_limit(if req.limit > 0 { req.limit as i64 } else { 100 }, 1000);
+        let limit = Self::clamp_limit(if req.limit > 0 { req.limit as i64 } else { 100 }, 100_000);
         let offset = if req.offset > 0 { req.offset as i64 } else { 0 };
 
         let (messages, total) = self

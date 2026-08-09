@@ -4,5 +4,5 @@ description = "Kontaktieren Sie ApexMail — Vertrieb, Support und allgemeine An
 template = "section.html"
 
 [extra]
-og_image = "/images/og-contact.png"
+og_image = "/images/og-image.svg"
 +++

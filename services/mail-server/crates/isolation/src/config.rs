@@ -88,7 +88,15 @@ pub struct RedisConfig {
 impl RedisConfig {
     pub fn url(&self) -> String {
         if let Some(pw) = &self.password {
-            format!("redis://:{}@{}:{}/{}", pw, self.host, self.port, self.db)
+            // Percent-encode the password (RFC 3986) so special characters
+            // like `@`, `:`, `/`, `+` cannot corrupt the URL.
+            format!(
+                "redis://:{}@{}:{}/{}",
+                urlencoding::encode(pw),
+                self.host,
+                self.port,
+                self.db
+            )
         } else {
             format!("redis://{}:{}/{}", self.host, self.port, self.db)
         }
@@ -316,5 +324,19 @@ mod tests {
             db: 2,
         };
         assert_eq!(r.url(), "redis://:secret@redis.example.com:6380/2");
+    }
+
+    #[test]
+    fn test_redis_url_percent_encodes_special_characters() {
+        let r = RedisConfig {
+            host: "redis.example.com".into(),
+            port: 6380,
+            password: Some("p@ss:word/with space+plus".into()),
+            db: 2,
+        };
+        assert_eq!(
+            r.url(),
+            "redis://:p%40ss%3Aword%2Fwith%20space%2Bplus@redis.example.com:6380/2"
+        );
     }
 }

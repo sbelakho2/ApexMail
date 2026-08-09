@@ -5,5 +5,5 @@ template = "prose.html"
 
 [extra]
 last_updated = "2026-07-29"
-og_image = "/images/og-quickstart.png"
+og_image = "/images/og-image.svg"
 +++

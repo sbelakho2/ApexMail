@@ -15,30 +15,25 @@
     <div class="max-w-2xl">
       <p class="mb-4 text-sm font-semibold tracking-[0.3em] text-brand-300">404</p>
       <h1 class="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-        This page is gone, but the platform is still here.
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["heading"] %}{{ i18n_data[l]["not_found"]["heading"] }}{% else %}This page is gone, but the platform is still here.{% endif %}
       </h1>
       <p class="mt-6 max-w-xl text-lg text-surface-300">
-        The URL may be outdated or mistyped. Use one of the primary entry points below to get back to pricing, docs, or the application.
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["copy"] %}{{ i18n_data[l]["not_found"]["copy"] }}{% else %}The URL may be outdated or mistyped. Use one of the primary entry points below to get back to pricing, docs, or the application.{% endif %}
       </p>
       <div class="mt-10 flex flex-col gap-3 sm:flex-row">
         <a href="/pricing/" class="inline-flex items-center justify-center rounded-sm bg-brand-500 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-brand-400">
-          View Pricing
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["pricing"] %}{{ i18n_data[l]["not_found"]["pricing"] }}{% else %}View Pricing{% endif %}
         </a>
         <a href="/docs/" class="inline-flex items-center justify-center rounded-sm border border-surface-700 px-6 py-3 text-sm font-medium text-surface-100 transition-colors hover:border-surface-500 hover:bg-surface-900">
-          Read Docs
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["docs"] %}{{ i18n_data[l]["not_found"]["docs"] }}{% else %}Read Docs{% endif %}
         </a>
         <a href="{{ config.extra.app_url }}/login" class="inline-flex items-center justify-center rounded-sm border border-surface-700 px-6 py-3 text-sm font-medium text-surface-100 transition-colors hover:border-surface-500 hover:bg-surface-900">
-          Open Console
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["console"] %}{{ i18n_data[l]["not_found"]["console"] }}{% else %}Open Console{% endif %}
         </a>
       </div>
-      <div class="mt-10 max-w-md">
-        <label for="search-404" class="sr-only">Search the docs</label>
-        <div class="relative">
-          <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-surface-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input id="search-404" type="search" placeholder="Search the documentation..." class="w-full pl-10 pr-4 py-3 bg-surface-900 border border-surface-700 rounded-sm text-sm text-white placeholder-surface-400 focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition-colors" />
-        </div>
-        <p class="text-xs text-surface-500 mt-2">Or visit <a href="/docs/" class="text-brand-300 underline hover:text-brand-200">the full documentation index</a>.</p>
-      </div>
+      <p class="mt-10 text-xs text-surface-500">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["docs_index"] %}{{ i18n_data[l]["not_found"]["docs_index"] | safe }}{% else %}Or visit the <a href="/docs/" class="text-brand-300 underline hover:text-brand-200">full documentation index</a>.{% endif %}
+      </p>
     </div>
   </div>
 </section>

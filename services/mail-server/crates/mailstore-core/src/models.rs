@@ -24,6 +24,9 @@ pub struct StoredMessage {
     pub date: DateTime<Utc>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
+    /// The exact raw RFC5322 message bytes as received (IMAP FETCH BODY[]).
+    /// `None` for legacy rows stored before the `raw_message` column existed.
+    pub raw_message: Option<Vec<u8>>,
     pub raw_size: i64,
     pub is_read: bool,
     pub is_starred: bool,

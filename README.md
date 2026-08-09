@@ -237,10 +237,18 @@ See `.env.example` for all available configuration options.
 ## Deployment
 
 ApexMail ships to production via **Docker Compose + GHCR images**, deployed by
-GitHub Actions over SSH to the Hetzner host. The full, authoritative procedure —
-including the service→image map, tag strategy, required secrets, and drift guard —
-lives in **[`deploy/DEPLOYMENT.md`](deploy/DEPLOYMENT.md)**, which is the single
+GitHub Actions over SSH to the Hetzner host. `deploy.yml` builds **all nine
+service images** (`api-server`, `mta`, `imap-server`, `mailstore`, `worker`,
+`enterprise`, `tracking-service`, `observability`, `marketing`) and pushes
+them to GHCR; `deploy-hetzner.yml` then pulls them on the host and runs
+`docker compose up -d`. The full, authoritative procedure — including the
+service→image map, tag strategy, required secrets, and drift guard — lives in
+**[`deploy/DEPLOYMENT.md`](deploy/DEPLOYMENT.md)**, which is the single
 source of truth for deployment.
+
+The `Makefile` + `deploy/scripts/deploy.sh` path is a **manual/emergency
+fallback only** (it builds images locally on the host and never pushes them);
+do not use it for routine production deploys.
 
 The legacy bare-metal (systemd) and Kubernetes deployment paths are **superseded**
 but preserved for reference under [`deploy/legacy-systemd/`](deploy/legacy-systemd/)

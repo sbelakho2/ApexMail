@@ -4,5 +4,5 @@ description = "Debug email delivery issues with delivery event tracking. Inspect
 template = "forensic.html"
 
 [extra]
-og_image = "/images/og-forensic.png"
+og_image = "/images/og-image.svg"
 +++

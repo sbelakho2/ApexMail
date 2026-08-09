@@ -4,5 +4,5 @@ description = "See implementation-backed ApexMail use cases for regulated SaaS, 
 template = "case-studies.html"
 
 [extra]
-og_image = "/images/og-case-studies.png"
+og_image = "/images/og-image.svg"
 +++

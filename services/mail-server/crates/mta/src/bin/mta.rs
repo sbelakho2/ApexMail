@@ -115,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
             redis_pool.clone(),
             authenticator.clone(),
             config.inbound.hostname.clone(),
+            config.mailstore_addr.clone(),
         ));
         let s = srv.clone();
         let tls = tls_acceptor.clone();

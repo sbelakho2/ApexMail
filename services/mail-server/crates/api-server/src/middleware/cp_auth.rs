@@ -205,7 +205,7 @@ pub async fn require_cp_auth(
 
     // ── Verify user still exists and is active ──────────────
     let user_status: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM users WHERE id = $1 AND tenant_id = $2"
+        "SELECT status FROM users WHERE id = $1::uuid AND tenant_id = $2"
     )
     .bind(&claims.sub)
     .bind(&claims.tenant_id)

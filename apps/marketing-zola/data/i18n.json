@@ -150,7 +150,7 @@
       "f_batch_title": "Batch-API",
       "f_batch_desc": "Bis zu 100 Nachrichtenanfragen pro Batch mit Einzelnachrichten-Validierung",
       "f_inbound_title": "Eingehende Verarbeitung",
-      "f_inbound_desc": "Eingehende E-Mails empfangen und über Webhooks parsen (Scale+-Tarife)",
+      "f_inbound_desc": "Eingehende E-Mails empfangen und über Webhooks parsen (verfügbar ab Developer-Tarif)",
       "f_dkim_title": "DKIM/SPF/DMARC",
       "f_dkim_desc": "Automatische Authentifizierung mit konfigurierbarer Schlüsselrotation",
       "f_arc_title": "ARC & BIMI-Unterstützung",
@@ -204,7 +204,7 @@
       "f_export_title": "Export & Berichterstattung",
       "f_export_desc": "CSV, JSON und geplante Berichtszustellung",
       "f_sso_title": "SSO/SAML/OIDC",
-      "f_sso_desc": "Enterprise-Identitätsanbieter-Integration (Scale+-Tarife)",
+      "f_sso_desc": "Enterprise-Identitätsanbieter-Integration (Business+-Tarife)",
       "f_whitelabel_title": "White-Label",
       "f_whitelabel_desc": "Benutzerdefiniertes Branding, Domains und Anmeldeseiten",
       "f_subaccounts_title": "Sub-Accounts",
@@ -212,11 +212,10 @@
       "f_custom_deploy_title": "Benutzerdefinierte Bereitstellung",
       "f_custom_deploy_desc": "Single-Tenant- und dedizierte Bereitstellungsoptionen im Rahmen des Enterprise-Reviews",
       "f_sla_title": "SLA-Garantien",
-      "f_sla_desc": "99,9 % Uptime (Scale+-Tarife) mit Error-Budget-Tracking",
+      "f_sla_desc": "99,9 % Uptime (Enterprise-Tarife) mit Error-Budget-Tracking",
       "f_support_title": "Prioritäts-Support",
       "f_support_desc": "Dedizierter Success Manager mit priorisiertem asynchronem Support und Eskalationswegen",
       "badge_developer_plus": "Developer+",
-      "badge_scale_plus": "Scale+",
       "hero_badge": "Komplette E-Mail-Infrastruktur",
       "hero_heading_1": "Jede Funktion, die Sie brauchen,",
       "hero_heading_2": "Keine, die Sie nicht brauchen",
@@ -335,7 +334,6 @@
       "support_response": "Support-Reaktionszeit",
       "named_csm": "Benannter CSM",
       "dedicated_ip_section": "Dedizierte IPs — Verwaltete Reputations-Assets",
-      "dedicated_ip_text": "Erste verwaltete dedizierte IP: <strong>30 €/Monat</strong>. Jede weitere: <strong>69 €/Monat</strong>. Verfügbar ab Pro-Tarif nach Eignungsprüfung (Volumen, Verkehrskonsistenz, Domain-Historie, Beschwerde-/Bounce-Raten). Beinhaltet Reverse-DNS, Warm-up-Plan, Volumenplan, Anbieter-Drosselung, Reputationsüberwachung, Blocklist-Überwachung und Ersatzrichtlinie. Abrechnung beginnt erst bei IP-Zuweisung. Empfohlenes Minimum: ~100.000 stabile monatliche Nachrichten.",
       "card_most_popular": "Beliebt",
       "card_enterprise": "Enterprise",
       "card_annual_contract": "Jahresvertrag",
@@ -362,8 +360,7 @@
       "billing_overage_desc": "<strong>Self-Service-Tarife (Developer, Pro, Growth, Business):</strong> Überschreitungen werden zum Tarif-pro-1.000-Satz berechnet, wenn Sie das enthaltene Volumen überschreiten. Die Überschreitungsabrechnung erfolgt automatisch und erfordert eine gültige Zahlungsmethode.",
       "billing_overage_free": "<strong>Free-Tarif:</strong> Keine automatische Überschreitung. Der Versand wird pausiert, wenn das enthaltene Volumen von 30.000/Monat erreicht ist. Führen Sie ein Upgrade durch, um weiter zu senden.",
       "billing_unused_title": "Ungenutztes Volumen & Bandpreise",
-      "billing_unused_desc": "<strong>Ungenutztes Volumen:</strong> Enthaltenes monatliches E-Mail-Volumen wird nicht übertragen — ungenutzte Anteile verfallen am Ende des Abrechnungsmonats.",
-      "billing_unused_payg": "<strong>Dynamische Zuweisung (PAYG):</strong> Volumenbasierte Preisstufen sind innerhalb jedes Abrechnungsmonats kumulativ. Ihr Preis pro E-Mail sinkt, wenn das monatliche Volumen durch jede Stufe steigt. Nur mit einem kostenpflichtigen Abonnement verfügbar — nicht im Free-Tarif."
+      "billing_unused_desc": "<strong>Ungenutztes Volumen:</strong> Enthaltenes monatliches E-Mail-Volumen wird nicht übertragen — ungenutzte Anteile verfallen am Ende des Abrechnungsmonats."
     },
     "home": {
       "hero_badge": "Jetzt mit Private-Cloud-Bereitstellungen",
@@ -403,7 +400,7 @@
       "card_5_title": "Intelligentes Routing",
       "card_5_desc": "Überwachung und Aufwärmen dedizierter IP-Reputation. Leiten Sie Ihre E-Mails über den optimalen Zustellpfad.",
       "card_6_title": "Entwickler zuerst",
-      "card_6_desc": "REST-API und Webhooks, mit SDKs für gängige Sprachen in Kürze. Implementieren Sie E-Mail-Funktionen in Minuten, nicht Tagen.",
+      "card_6_desc": "REST-API und Webhooks sowie First-Party-SDKs für Python, Go, PHP, Ruby und Java (in Entwicklung; Quellcode im Monorepo).",
       "card_7_title": "E-Mail-Grader",
       "card_7_desc": "Bewerten Sie Ihre E-Mail-Zustellbarkeit mit deterministischen DNS-, Authentifizierungs-, Inhalts- und Reputationsprüfungen.",
       "card_8_title": "Inbox-Platzierung",
@@ -611,6 +608,14 @@
       "pricing_island_heading_1": "Preise, die",
       "pricing_island_heading_2": "mit Ihnen skalieren",
       "pricing_island_subtitle": "Transparente Preisberechnung mit 30.000 kostenlosen E-Mails pro Monat, veröffentlichten Überziehungsraten und Enterprise-Preisen für betreute Infrastruktur."
+    },
+    "not_found": {
+      "heading": "Diese Seite ist weg, aber die Plattform ist noch da.",
+      "copy": "Die URL ist möglicherweise veraltet oder falsch geschrieben. Nutzen Sie einen der Haupteinstiegspunkte, um zu Preisen, Doku oder zur Anwendung zurückzukehren.",
+      "pricing": "Preise ansehen",
+      "docs": "Dokumentation lesen",
+      "console": "Konsole öffnen",
+      "docs_index": "oder besuchen Sie das <a href=\"/docs/\" class=\"text-brand-300 underline hover:text-brand-200\">vollständige Dokumentationsverzeichnis</a>."
     }
   },
   "fr": {
@@ -741,12 +746,12 @@
       "compliance_3": "Résidence des données (UE)",
       "compliance_4": "Chiffrement au repos",
       "compliance_5": "TLS 1.2+ en transit",
-      "compliance_check_1": "DSGVO-konforme Verarbeitung (EWR-gehostet)",
-      "compliance_check_2": "HIPAA BAA verfügbar (Enterprise)",
-      "compliance_check_3": "Datenresidenz (EU)",
-      "compliance_check_4": "Verschlüsselung im Ruhezustand",
-      "compliance_check_5": "TLS 1.2+ bei Übertragung",
-      "system_integrity_label": "Systemintegritätskontrollen"
+      "compliance_check_1": "Traitement aligné RGPD (hébergé EEE)",
+      "compliance_check_2": "BAA HIPAA disponible (Enterprise)",
+      "compliance_check_3": "Résidence des données (UE)",
+      "compliance_check_4": "Chiffrement au repos",
+      "compliance_check_5": "TLS 1.2+ en transit",
+      "system_integrity_label": "Contrôles d'intégrité système"
     },
     "features": {
       "heading": "Ensemble complet de fonctionnalités",
@@ -768,7 +773,7 @@
       "f_batch_title": "API par lots",
       "f_batch_desc": "Soumettez jusqu'à 100 requêtes par lot avec validation par message",
       "f_inbound_title": "Traitement entrant",
-      "f_inbound_desc": "Recevez et analysez les emails entrants via des webhooks (forfaits Scale+)",
+      "f_inbound_desc": "Recevez et analysez les emails entrants via des webhooks (dès le forfait Developer)",
       "f_dkim_title": "DKIM & SPF",
       "f_dkim_desc": "Authentification de domaine complète",
       "f_arc_title": "Support ARC et BIMI",
@@ -830,11 +835,10 @@
       "f_custom_deploy_title": "Examen de déploiement personnalisé",
       "f_custom_deploy_desc": "Options de déploiement en locataire unique et dédié définies lors de l'examen Enterprise",
       "f_sla_title": "Garanties SLA",
-      "f_sla_desc": "Disponibilité 99,9 % (forfaits Scale+) avec suivi du budget d'erreur",
+      "f_sla_desc": "Disponibilité 99,9 % (forfaits Enterprise) avec suivi du budget d'erreur",
       "f_support_title": "Support prioritaire",
       "f_support_desc": "Gestionnaire de succès dédié avec support asynchrone prioritaire et chemins d'escalade",
       "badge_developer_plus": "Developer+",
-      "badge_scale_plus": "Scale+",
       "detail_api_title": "API axée développeur",
       "detail_compliance_title": "Conformité intégrée",
       "detail_compliance_benefit_3": "Flux BAA HIPAA (Entreprise)",
@@ -977,7 +981,6 @@
       "support_response": "Délai de réponse support",
       "named_csm": "CSM dédié",
       "dedicated_ip_section": "IPs dédiées — Actifs de réputation gérés",
-      "dedicated_ip_text": "Première IP dédiée gérée : <strong>30 €/mois</strong>. Chaque supplémentaire : <strong>69 €/mois</strong>. Disponible à partir du forfait Pro après examen d'éligibilité (volume, cohérence du trafic, historique de domaine, taux de plaintes/rebonds). Comprend le DNS inversé, le plan de démarrage progressif, le planning de volume, la limitation au niveau du fournisseur, la surveillance de la réputation, la surveillance des listes de blocage et la politique de remplacement. La facturation commence uniquement lorsqu'une IP est attribuée. Minimum recommandé : ~100 000 messages mensuels stables.",
       "card_most_popular": "Populaire",
       "card_enterprise": "Entreprise",
       "card_annual_contract": "Contrat annuel",
@@ -1004,8 +1007,7 @@
       "billing_overage_desc": "<strong>Forfaits en libre-service (Developer, Pro, Growth, Business) :</strong> Les dépassements sont facturés au tarif par 1 000 du forfait lorsque vous dépassez le volume inclus. La facturation des dépassements est automatique et nécessite un moyen de paiement valide.",
       "billing_overage_free": "<strong>Forfait Free :</strong> Pas de dépassement automatique. L'envoi est suspendu lorsque le volume inclus de 30 000/mois est atteint. Effectuez une mise à niveau pour continuer à envoyer.",
       "billing_unused_title": "Volume inutilisé et tarification par paliers",
-      "billing_unused_desc": "<strong>Volume inutilisé :</strong> Le volume mensuel d'emails inclus n'est pas reporté — toute portion inutilisée expire à la fin du mois de facturation.",
-      "billing_unused_payg": "<strong>Allocation dynamique (PAYG) :</strong> Les paliers de tarification basés sur le volume sont cumulatifs au cours de chaque mois de facturation. Votre tarif par email diminue à mesure que le volume mensuel augmente à travers chaque palier. Disponible uniquement avec un abonnement payant — non disponible sur le forfait Free."
+      "billing_unused_desc": "<strong>Volume inutilisé :</strong> Le volume mensuel d'emails inclus n'est pas reporté — toute portion inutilisée expire à la fin du mois de facturation."
     },
     "home": {
       "hero_badge": "Maintenant avec déploiements Cloud Privé",
@@ -1067,7 +1069,7 @@
       "card_4_title": "Analyse de Livraison",
       "card_5_desc": "Sélection adaptative des fournisseurs avec basculement automatique.",
       "card_5_title": "Routage Intelligent",
-      "card_6_desc": "API REST et webhooks, avec des SDK pour des langages courants à venir. Expédiez des fonctionnalités e-mail en minutes, pas en jours.",
+      "card_6_desc": "API REST et webhooks, ainsi que des SDK propriétaires pour Python, Go, PHP, Ruby et Java (en cours de développement ; code source dans le monorepo).",
       "card_6_title": "API Prioritaire Développeur",
       "card_7_desc": "Évaluation DNS complète : SPF, DKIM, DMARC, BIMI et MTA-STS.",
       "card_8_desc": "Tests de placement chez 6 fournisseurs avec diagnostics exploitables.",
@@ -1294,6 +1296,14 @@
       "pricing_island_heading_1": "Des prix qui",
       "pricing_island_heading_2": "évoluent avec vous",
       "pricing_island_subtitle": "Tarification transparente avec 30 000 e-mails gratuits par mois, dépassements publiés et tarifs Enterprise réservés à une infrastructure gérée."
+    },
+    "not_found": {
+      "heading": "Cette page a disparu, mais la plateforme est toujours là.",
+      "copy": "L'URL est peut-être obsolète ou mal saisie. Utilisez l'un des points d'entrée principaux pour revenir aux tarifs, à la documentation ou à l'application.",
+      "pricing": "Voir les tarifs",
+      "docs": "Lire la documentation",
+      "console": "Ouvrir la console",
+      "docs_index": "ou visitez l'<a href=\"/docs/\" class=\"text-brand-300 underline hover:text-brand-200\">index complet de la documentation</a>."
     }
   },
   "es": {
@@ -1424,12 +1434,12 @@
       "compliance_3": "Residencia de datos (UE)",
       "compliance_4": "Cifrado en reposo",
       "compliance_5": "TLS 1.2+ en tránsito",
-      "compliance_check_1": "DSGVO-konforme Verarbeitung (EWR-gehostet)",
-      "compliance_check_2": "HIPAA BAA verfügbar (Enterprise)",
-      "compliance_check_3": "Datenresidenz (EU)",
-      "compliance_check_4": "Verschlüsselung im Ruhezustand",
-      "compliance_check_5": "TLS 1.2+ bei Übertragung",
-      "system_integrity_label": "Systemintegritätskontrollen"
+      "compliance_check_1": "Procesamiento alineado RGPD (alojado en EEE)",
+      "compliance_check_2": "BAA HIPAA disponible (Enterprise)",
+      "compliance_check_3": "Residencia de datos (UE)",
+      "compliance_check_4": "Cifrado en reposo",
+      "compliance_check_5": "TLS 1.2+ en tránsito",
+      "system_integrity_label": "Controles de integridad del sistema"
     },
     "features": {
       "heading": "Conjunto completo de funcionalidades",
@@ -1451,7 +1461,7 @@
       "f_batch_title": "API por lotes",
       "f_batch_desc": "Envíe hasta 100 solicitudes de mensajes por lote con validación por mensaje",
       "f_inbound_title": "Procesamiento entrante",
-      "f_inbound_desc": "Reciba y analice emails entrantes mediante webhooks (planes Scale+)",
+      "f_inbound_desc": "Reciba y analice emails entrantes mediante webhooks (desde el plan Developer)",
       "f_dkim_title": "DKIM y SPF",
       "f_dkim_desc": "Autenticación de dominio completa",
       "f_arc_title": "Soporte ARC y BIMI",
@@ -1513,11 +1523,10 @@
       "f_custom_deploy_title": "Revisión de implementación personalizada",
       "f_custom_deploy_desc": "Opciones de implementación de inquilino único y dedicado definidas mediante revisión Enterprise",
       "f_sla_title": "Garantías SLA",
-      "f_sla_desc": "Disponibilidad del 99,9 % (planes Scale+) con seguimiento de presupuesto de error",
+      "f_sla_desc": "Disponibilidad del 99,9 % (planes Enterprise) con seguimiento del presupuesto de error",
       "f_support_title": "Soporte prioritario",
       "f_support_desc": "Gerente de éxito dedicado con soporte asíncrono prioritario y rutas de escalado",
       "badge_developer_plus": "Developer+",
-      "badge_scale_plus": "Scale+",
       "detail_api_title": "API para desarrolladores",
       "detail_compliance_title": "Cumplimiento integrado",
       "detail_compliance_benefit_3": "Flujo BAA HIPAA (Empresa)",
@@ -1660,7 +1669,6 @@
       "support_response": "Tiempo de respuesta de soporte",
       "named_csm": "CSM asignado",
       "dedicated_ip_section": "IPs dedicadas — Activos de reputación gestionados",
-      "dedicated_ip_text": "Primera IP dedicada gestionada: <strong>30 €/mes</strong>. Cada adicional: <strong>69 €/mes</strong>. Disponible desde el plan Pro tras revisión de elegibilidad (volumen, consistencia de tráfico, historial de dominio, tasas de quejas/rebotes). Incluye DNS inverso, plan de calentamiento, programa de volumen, limitación a nivel de proveedor, monitoreo de reputación, monitoreo de listas de bloqueo y política de reemplazo. La facturación comienza solo cuando se asigna una IP. Mínimo recomendado: ~100.000 mensajes mensuales estables.",
       "card_most_popular": "Más popular",
       "card_enterprise": "Empresa",
       "card_annual_contract": "Contrato anual",
@@ -1687,8 +1695,7 @@
       "billing_overage_desc": "<strong>Planes de autoservicio (Developer, Pro, Growth, Business):</strong> Los excesos se facturan a la tarifa por 1.000 del plan cuando supera el volumen incluido. La facturación de excesos es automática y requiere un método de pago válido.",
       "billing_overage_free": "<strong>Plan Free:</strong> Sin exceso automático. El envío se pausa cuando se alcanza el volumen incluido de 30.000/mes. Actualice para continuar enviando.",
       "billing_unused_title": "Volumen no utilizado y precios por banda",
-      "billing_unused_desc": "<strong>Volumen no utilizado:</strong> El volumen mensual de emails incluido no se transfiere — cualquier porción no utilizada expira al final del mes de facturación.",
-      "billing_unused_payg": "<strong>Asignación dinámica (PAYG):</strong> Las bandas de precios basadas en volumen son acumulativas dentro de cada mes de facturación. Su tarifa por email disminuye a medida que el volumen mensual aumenta a través de cada nivel. Disponible solo con un plan de suscripción de pago — no disponible en el plan Free."
+      "billing_unused_desc": "<strong>Volumen no utilizado:</strong> El volumen mensual de emails incluido no se transfiere — cualquier porción no utilizada expira al final del mes de facturación."
     },
     "home": {
       "hero_badge": "Ahora con implementaciones de Nube Privada",
@@ -1750,7 +1757,7 @@
       "card_4_title": "Analítica de Entrega",
       "card_5_desc": "Selección adaptativa de proveedores con conmutación por error automática.",
       "card_5_title": "Enrutamiento Inteligente",
-      "card_6_desc": "API REST y webhooks, con SDK para lenguajes populares próximamente. Implemente funciones de correo electrónico en minutos, no en días.",
+      "card_6_desc": "API REST y webhooks, además de SDK propios para Python, Go, PHP, Ruby y Java (en desarrollo; código fuente en el monorepo).",
       "card_6_title": "API para Desarrolladores",
       "card_7_desc": "Evaluación DNS completa: SPF, DKIM, DMARC, BIMI y MTA-STS.",
       "card_8_desc": "Pruebas de ubicación en 6 proveedores con diagnósticos procesables.",
@@ -1964,6 +1971,14 @@
       "pricing_island_heading_1": "Precios que",
       "pricing_island_heading_2": "escalan contigo",
       "pricing_island_subtitle": "Precios transparentes con 30 000 correos gratuitos al mes, excedentes publicados y precios Enterprise reservados para infraestructura gestionada."
+    },
+    "not_found": {
+      "heading": "Esta página ya no existe, pero la plataforma sigue aquí.",
+      "copy": "La URL puede estar desactualizada o mal escrita. Use uno de los puntos de entrada principales para volver a los precios, la documentación o la aplicación.",
+      "pricing": "Ver precios",
+      "docs": "Leer documentación",
+      "console": "Abrir consola",
+      "docs_index": "o visite el <a href=\"/docs/\" class=\"text-brand-300 underline hover:text-brand-200\">índice completo de documentación</a>."
     }
   }
 }

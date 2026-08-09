@@ -5,7 +5,7 @@ template = "status.html"
 
 [extra]
 status_api_url = "https://status.apexmail.ee"
-og_image = "/images/og-status.png"
+og_image = "/images/og-image.svg"
 +++
 
 Live status data is available at [status.apexmail.ee](https://status.apexmail.ee). This page lists monitored components.

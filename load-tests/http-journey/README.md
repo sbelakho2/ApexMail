@@ -11,8 +11,8 @@ the full request path that in-process Rust unit tests cannot measure.
 | Script | Endpoint | Type |
 |--------|----------|------|
 | [`auth-load-test.js`](auth-load-test.js) | `POST /v1/auth/login` | Authentication |
-| [`email-send-load-test.js`](email-send-load-test.js) | `POST /v1/email/send` | Email sending |
-| [`health-load-test.js`](health-load-test.js) | `GET /v1/health/liveness`, `GET /v1/health/readiness` | Health checks |
+| [`email-send-load-test.js`](email-send-load-test.js) | `POST /v1/messages` | Email sending |
+| [`health-load-test.js`](health-load-test.js) | `GET /health/live`, `GET /health/ready` | Health checks |
 | [`tracking-pixel-test.js`](tracking-pixel-test.js) | `GET /v1/tracking/pixel.gif`, `GET /v1/tracking/click.gif` | Tracking pixel throughput |
 | [`combined-journey-test.js`](combined-journey-test.js) | All of the above (weighted distribution) | Full journey |
 
@@ -63,7 +63,7 @@ K6_API_KEY=your-api-key k6 run email-send-load-test.js
 K6_API_BASE=http://staging.apexmail.ee K6_API_KEY=xxx k6 run email-send-load-test.js
 ```
 
-Tests `POST /v1/email/send` with dynamically generated email payloads.  
+Tests `POST /v1/messages` with dynamically generated email payloads.  
 Requires an API key (`K6_API_KEY`) for the `Authorization: Bearer` header.  
 Concurrency levels: 10 → 50 → 100 concurrent users.
 
@@ -73,7 +73,7 @@ Concurrency levels: 10 → 50 → 100 concurrent users.
 k6 run health-load-test.js
 ```
 
-Tests `GET /v1/health/liveness` and `GET /v1/health/readiness`.  
+Tests `GET /health/live` and `GET /health/ready`.  
 No authentication required — health endpoints are meant for unauthenticated
 orchestrator probes.  
 Concurrency levels: 10 → 50 → 100 concurrent users (shorter duration — health
@@ -88,10 +88,10 @@ K6_API_KEY=your-api-key k6 run combined-journey-test.js
 Runs all four API paths with a realistic traffic mix:
 | Endpoint | Weight | Rationale |
 |----------|--------|-----------|
-| `GET /v1/health/liveness` | 10% | Orchestrator polling frequency |
-| `GET /v1/health/readiness` | 10% | Orchestrator polling frequency |
+| `GET /health/live` | 10% | Orchestrator polling frequency |
+| `GET /health/ready` | 10% | Orchestrator polling frequency |
 | `POST /v1/auth/login` | 30% | Session initiation |
-| `POST /v1/email/send` | 50% | Primary business operation |
+| `POST /v1/messages` | 50% | Primary business operation |
 
 Concurrency levels: 10 → 50 → 100 concurrent users.
 

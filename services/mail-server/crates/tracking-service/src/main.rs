@@ -104,8 +104,38 @@ async fn main() -> Result<()> {
     // ── Bot detector ──────────────────────────────────────────────────
     let bot_detector = BotDetector::new();
 
+    // ── ClickHouse (OLAP event ingest) ────────────────────────────────
+    let clickhouse = clickhouse::Client::default()
+        .with_url(&cfg.clickhouse.url)
+        .with_database(&cfg.clickhouse.database)
+        .with_user(&cfg.clickhouse.user)
+        .with_password(&cfg.clickhouse.password)
+        .with_compression(clickhouse::Compression::Lz4);
+    if !cfg.clickhouse.password.is_empty() || cfg.clickhouse.user != "default" {
+        // Verify connectivity eagerly so a misconfigured ClickHouse is
+        // visible at startup (log-only — tracking must not fail to boot).
+        match clickhouse.query("SELECT 1").execute().await {
+            Ok(()) => info!(
+                url = %cfg.clickhouse.url,
+                database = %cfg.clickhouse.database,
+                user = %cfg.clickhouse.user,
+                "ClickHouse connection verified"
+            ),
+            Err(error) => tracing::warn!(
+                url = %cfg.clickhouse.url,
+                error = %error,
+                "ClickHouse unreachable — events will be written to Postgres only"
+            ),
+        }
+    }
+
     // ── Event processor ───────────────────────────────────────────────
-    let processor_arc = Arc::new(EventProcessor::new(db.clone(), redis_pool.clone()));
+    let processor_arc = Arc::new(EventProcessor::new(
+        db.clone(),
+        redis_pool.clone(),
+        clickhouse,
+        std::time::Duration::from_secs(cfg.clickhouse.insert_timeout_seconds),
+    ));
     {
         let p = processor_arc.clone();
         p.start();
