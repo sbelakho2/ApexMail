@@ -129,12 +129,21 @@ impl SubmissionServer {
                 let _ = write_line(&mut stream, "220 Go ahead\r\n").await;
                 let _ = stream.flush().await;
                 let inner = stream.into_inner();
-                match acceptor.accept(inner).await {
+                match super::inbound::tls_handshake_with_timeout(
+                    acceptor.accept(inner),
+                    Duration::from_secs(30),
+                )
+                .await
+                {
                     Ok(tls_stream) => {
                         let mut tls_buf = BufStream::new(TlsStream::from(tls_stream));
                         self.run_session_loop(&mut tls_buf, peer, false, true).await;
                     }
-                    Err(e) => debug!(error = %e, "STARTTLS handshake failed"),
+                    Err(()) => {
+                        // M26: timed-out/failed handshake — socket is dropped
+                        // and the connection slot released below.
+                        debug!("STARTTLS handshake failed or timed out");
+                    }
                 }
             }
         }

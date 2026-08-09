@@ -3,6 +3,7 @@
 //! Implements rate limiting, SPF/DKIM/DMARC authentication, VERP reply detection,
 //! and message storage.
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -32,6 +33,15 @@ use tonic::transport::Channel;
 // Shared resolver to avoid allocating a new DNS client per PTR verification.
 static INBOUND_RDNS_RESOLVER: LazyLock<TokioAsyncResolver> =
     LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
+
+/// M26: maximum time a TLS handshake may take before the connection is
+/// dropped and the per-IP connection slot released.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// M28: bounded deadlines for mailstore gRPC calls — a hung mailstore must
+/// never stall the SMTP session task indefinitely.
+const MAILSTORE_CHANNEL_TIMEOUT: Duration = Duration::from_secs(10);
+const MAILSTORE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -88,11 +98,12 @@ impl InboundServer {
         mailstore_addr: String,
     ) -> Self {
         let channel = Channel::from_shared(mailstore_addr)
-            .map(|c| c.connect_lazy())
+            .map(|c| c.timeout(MAILSTORE_CHANNEL_TIMEOUT).connect_lazy())
             .unwrap_or_else(|e| {
                 warn!(error = %e, "Invalid MAILSTORE_GRPC_ADDR; mailbox delivery disabled");
                 Channel::from_shared("http://127.0.0.1:50051")
                     .expect("static address")
+                    .timeout(MAILSTORE_CHANNEL_TIMEOUT)
                     .connect_lazy()
             });
         Self {
@@ -134,11 +145,18 @@ impl InboundServer {
                                     let srv = server.clone();
                                     let a = acc.clone();
                                     tokio::spawn(async move {
-                                        match a.accept(socket).await {
+                                        match tls_handshake_with_timeout(
+                                            a.accept(socket),
+                                            TLS_HANDSHAKE_TIMEOUT,
+                                        )
+                                        .await
+                                        {
                                             Ok(tls_stream) => {
                                                 srv.handle_session_tls(tls_stream, peer).await;
                                             }
-                                            Err(e) => debug!(error = %e, "TLS handshake failed"),
+                                            Err(()) => {
+                                                debug!("TLS handshake failed or timed out");
+                                            }
                                         }
                                     });
                                 }
@@ -224,7 +242,9 @@ impl InboundServer {
         if starttls_requested {
             if let Some(acceptor) = tls {
                 let inner = stream.into_inner();
-                match acceptor.accept(inner).await {
+                match tls_handshake_with_timeout(acceptor.accept(inner), TLS_HANDSHAKE_TIMEOUT)
+                    .await
+                {
                     Ok(tls_stream) => {
                         ctx.tls_active = true;
                         ctx.helo_hostname.clear();
@@ -233,8 +253,10 @@ impl InboundServer {
                         let mut tls_buf = BufStream::new(tls_stream);
                         self.run_session_loop(&mut tls_buf, &mut ctx, false).await;
                     }
-                    Err(e) => {
-                        debug!(error = %e, "STARTTLS handshake failed");
+                    Err(()) => {
+                        // M26: on timeout/failure the socket is dropped and the
+                        // per-IP connection slot released below.
+                        debug!("STARTTLS handshake failed or timed out");
                     }
                 }
             }
@@ -356,10 +378,7 @@ impl InboundServer {
                     ctx.rcpt_to.clear();
                 } else if message.len() <= self.config.max_message_size {
                     let result = self.process_message(ctx, &message).await;
-                    let resp = match result {
-                        Ok(id) => format!("250 OK id={id}\r\n"),
-                        Err(e) => format!("451 Temporary failure: {e}\r\n"),
-                    };
+                    let resp = format_data_response(&result);
                     let _ = write_line_buf(stream, &resp).await;
                     ctx.message_count += 1;
                     ctx.mail_from = None;
@@ -727,19 +746,29 @@ impl InboundServer {
                 account_id: String::new(),
                 email: recipient.clone(),
             };
-            let account_id = match client.get_account(lookup).await {
-                Ok(resp) => {
+            // M28: bounded RPC — a hung mailstore must not stall the session.
+            let account_id = match rpc_with_deadline(client.get_account(lookup), MAILSTORE_RPC_TIMEOUT)
+                .await
+            {
+                Some(Ok(resp)) => {
                     let r = resp.into_inner();
                     if r.account_id.is_empty() {
                         continue;
                     }
                     r.account_id
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     debug!(
                         recipient = %mail_common::pii::redact_email(recipient),
                         error = %e,
                         "No mailstore account for recipient; skipping mailbox delivery"
+                    );
+                    continue;
+                }
+                None => {
+                    debug!(
+                        recipient = %mail_common::pii::redact_email(recipient),
+                        "Mailstore account lookup timed out; skipping mailbox delivery"
                     );
                     continue;
                 }
@@ -755,19 +784,25 @@ impl InboundServer {
                 }),
                 internal_date: chrono::Utc::now().timestamp(),
             };
-            match client.store_message(req).await {
-                Ok(resp) => {
+            match rpc_with_deadline(client.store_message(req), MAILSTORE_RPC_TIMEOUT).await {
+                Some(Ok(resp)) => {
                     info!(
                         recipient = %mail_common::pii::redact_email(recipient),
                         uid = resp.into_inner().uid,
                         "Message delivered to mailstore mailbox"
                     );
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     warn!(
                         recipient = %mail_common::pii::redact_email(recipient),
                         error = %e,
                         "Failed to deliver message to mailstore mailbox"
+                    );
+                }
+                None => {
+                    warn!(
+                        recipient = %mail_common::pii::redact_email(recipient),
+                        "Mailstore store_message timed out; mailbox delivery skipped"
                     );
                 }
             }
@@ -1079,6 +1114,54 @@ async fn write_line_buf<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>
 ) -> std::io::Result<()> {
     stream.write_all(data.as_bytes()).await?;
     stream.flush().await
+}
+
+/// M23: format the SMTP response for a DATA result. The client only ever sees
+/// a generic temporary-failure message; internal error details are logged
+/// server-side and never echoed to the remote peer.
+fn format_data_response(result: &anyhow::Result<String>) -> String {
+    match result {
+        Ok(id) => format!("250 OK id={id}\r\n"),
+        Err(e) => {
+            warn!(error = %e, "Message processing failed; sending generic 451");
+            "451 4.3.0 Temporary failure\r\n".into()
+        }
+    }
+}
+
+/// M26: run a TLS handshake under a bounded timeout. On timeout or error the
+/// connection is dead; callers must drop the socket and release the
+/// per-IP connection slot.
+pub(crate) async fn tls_handshake_with_timeout<F>(
+    handshake: F,
+    timeout_dur: Duration,
+) -> Result<tokio_rustls::server::TlsStream<TcpStream>, ()>
+where
+    F: Future<Output = std::io::Result<tokio_rustls::server::TlsStream<TcpStream>>>,
+{
+    match tokio::time::timeout(timeout_dur, handshake).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(e)) => {
+            debug!(error = %e, "TLS handshake failed");
+            Err(())
+        }
+        Err(_) => {
+            warn!("TLS handshake timed out; closing connection");
+            Err(())
+        }
+    }
+}
+
+/// M28: run a mailstore RPC under a bounded deadline. Returns None on timeout
+/// so the caller can degrade gracefully (best-effort delivery semantics).
+async fn rpc_with_deadline<T>(fut: impl Future<Output = T>, dur: Duration) -> Option<T> {
+    match tokio::time::timeout(dur, fut).await {
+        Ok(value) => Some(value),
+        Err(_) => {
+            warn!(timeout = %dur.as_secs(), "mailstore RPC timed out");
+            None
+        }
+    }
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────
@@ -1431,5 +1514,185 @@ mod tests {
             .authenticate_user("alice@example.com", "secret", ctx.client_ip)
             .await;
         assert_eq!(result, Err(crate::auth::AuthError::Failed));
+    }
+
+    // ── FIX-F (M23): never echo internal error details to the client ──────
+
+    #[test]
+    fn test_format_data_response_error_is_generic() {
+        let resp = format_data_response(&Err(anyhow::anyhow!(
+            "postgres: connection refused at 10.0.0.5:5432"
+        )));
+        assert_eq!(
+            resp, "451 4.3.0 Temporary failure\r\n",
+            "internal error details must never be echoed to the remote client"
+        );
+    }
+
+    #[test]
+    fn test_format_data_response_ok_includes_id() {
+        let resp = format_data_response(&Ok("abc-123".into()));
+        assert_eq!(resp, "250 OK id=abc-123\r\n");
+    }
+
+    // ── FIX-H (M28): bounded mailstore RPCs ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_rpc_with_deadline_never_resolving_future_returns_none() {
+        // A hung mailstore RPC must never stall the session: the deadline
+        // helper must return None long before the outer test deadline.
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            rpc_with_deadline(std::future::pending::<()>(), Duration::from_millis(50)),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "rpc_with_deadline must return before the outer deadline"
+        );
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_with_deadline_returns_value_when_resolves() {
+        let result = rpc_with_deadline(async { 42 }, Duration::from_millis(50)).await;
+        assert_eq!(result, Some(42));
+    }
+
+    // ── FIX-G (M26): bounded TLS handshakes ───────────────────────────────
+
+    fn test_tls_acceptor() -> tokio_rustls::TlsAcceptor {
+        use rustls_pemfile::{certs, private_key};
+        let fixture_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let certs: Vec<_> = certs(&mut std::io::BufReader::new(
+            std::fs::File::open(fixture_dir.join("cert.pem")).unwrap(),
+        ))
+        .collect::<Result<_, _>>()
+        .unwrap();
+        let key = private_key(&mut std::io::BufReader::new(
+            std::fs::File::open(fixture_dir.join("key.pem")).unwrap(),
+        ))
+        .unwrap()
+        .unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+        tokio_rustls::TlsAcceptor::from(Arc::new(config))
+    }
+
+    #[tokio::test]
+    async fn test_tls_handshake_timeout_fires_on_never_completing_handshake() {
+        // A client that connects but never sends a ClientHello must be cut off
+        // by the handshake timeout — never held forever.
+        let never: std::future::Pending<
+            std::io::Result<tokio_rustls::server::TlsStream<TcpStream>>,
+        > = std::future::pending();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            tls_handshake_with_timeout(never, Duration::from_millis(50)),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "tls_handshake_with_timeout must return before the outer deadline"
+        );
+        assert!(result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_starttls_handshake_timeout_releases_connection_slot() {
+        tokio::time::pause();
+        let (server, _ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let server = Arc::new(server);
+        let acceptor = test_tls_acceptor();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ip = addr.ip();
+
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session_plain(socket, peer, Some(acceptor)).await;
+        });
+
+        use tokio::io::AsyncReadExt;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 2048];
+
+        // Greeting
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("220"));
+        // EHLO
+        client.write_all(b"EHLO test.local\r\n").await.unwrap();
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("250"));
+        // STARTTLS — server replies 220 and then waits for the handshake.
+        client.write_all(b"STARTTLS\r\n").await.unwrap();
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("220"));
+
+        // The client sends no ClientHello: the 30s handshake timeout must
+        // fire and the session must end, releasing the per-IP slot.
+        tokio::time::advance(TLS_HANDSHAKE_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::resume();
+
+        let completed = tokio::time::timeout(Duration::from_secs(5), task).await;
+        assert!(
+            completed.is_ok(),
+            "session must terminate after the TLS handshake timeout"
+        );
+
+        let slot = server.connections.get(&ip).map(|v| *v).unwrap_or(0);
+        assert_eq!(
+            slot, 0,
+            "the per-IP connection slot must be released after a timed-out handshake"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_implicit_tls_handshake_timeout_does_not_hang_task() {
+        tokio::time::pause();
+        let (server, _ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let server = Arc::new(server);
+        let acceptor = test_tls_acceptor();
+
+        // Simulate the implicit-TLS accept loop: a client that connects to the
+        // 465 listener but never completes the handshake must be dropped by
+        // the bounded wrapper instead of hanging the spawned task.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            match tls_handshake_with_timeout(acceptor.accept(socket), TLS_HANDSHAKE_TIMEOUT).await
+            {
+                Ok(_tls_stream) => unreachable!("handshake cannot succeed without a client"),
+                Err(()) => {}
+            }
+            let _ = peer;
+            let _ = server;
+        });
+
+        let _client = TcpStream::connect(addr).await.unwrap();
+        // Let the accepting task reach the handshake wrapper before advancing.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(TLS_HANDSHAKE_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        tokio::time::resume();
+
+        let completed = tokio::time::timeout(Duration::from_secs(5), task).await;
+        assert!(
+            completed.is_ok(),
+            "implicit-TLS handshake task must end after the timeout"
+        );
     }
 }

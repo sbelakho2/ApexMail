@@ -5,7 +5,7 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
 use rsa::pkcs1v15::SigningKey;
-use rsa::RsaPrivateKey;
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -44,12 +44,17 @@ pub enum ArcChainStatus {
 }
 
 /// Generate a new ARC header set for a message.
+///
+/// `chain_key_lookup` resolves the public keys of the previous ARC sets'
+/// domains so the Chain Validation Status (`cv=`) reflects real RFC 8617
+/// cryptographic verification instead of failing closed.
 pub fn generate_arc_headers(
     message_headers: &str, // #123:Raw message headers for AMS signing
     message_body: &[u8],
     auth_result: &ArcAuthResult,
     config: &ArcSigningConfig,
     existing_chain: &[ArcSet],
+    chain_key_lookup: &dyn Fn(&str, &str) -> Option<RsaPublicKey>,
 ) -> anyhow::Result<ArcSet> {
     let instance = existing_chain.len() as u32 + 1;
     if instance > 50 {
@@ -90,13 +95,16 @@ pub fn generate_arc_headers(
     let signing_key = SigningKey::<Sha256>::new(config.private_key.clone());
 
     // #123:Build proper AMS signing input – canonicalized headers listed in h= tag,
-    // then the AMS header itself (with empty b=) per RFC 8617 §5.1
+    // then the AMS header itself (with empty b=) per RFC 8617 §4.1.2 / RFC 6376 §3.7
     let h_list = ["from", "to", "subject", "date", "message-id"];
     let canonicalized_headers = extract_signing_headers(message_headers, &h_list);
+    // The AMS header is signed in its relaxed-canonicalized form so that any
+    // header folding/whitespace variant verifies identically.
+    let canonicalized_ams = canonicalize_header_relaxed(&ams_template);
     let ams_signing_input = if canonicalized_headers.is_empty() {
-        ams_template.clone()
+        canonicalized_ams.clone()
     } else {
-        format!("{}\r\n{}", canonicalized_headers, ams_template)
+        format!("{}\r\n{}", canonicalized_headers, canonicalized_ams)
     };
 
     let ams_sig = {
@@ -106,14 +114,17 @@ pub fn generate_arc_headers(
     };
     let ams = format!("{ams_template}{ams_sig}");
 
-    // #125:Actually validate existing chain instead of hardcoding "pass"
-    let chain_validation = if existing_chain.is_empty() {
-        "none"
-    } else {
-        match validate_arc_chain(existing_chain) {
-            ArcChainStatus::Pass => "pass",
-            _ => "fail",
-        }
+    // #125:Validate the existing chain with real cryptographic verification
+    // (RFC 8617 §5.2). Without resolvable keys the chain fails closed.
+    let chain_validation = match verify_arc_chain(
+        existing_chain,
+        message_headers,
+        message_body,
+        &|d, s| chain_key_lookup(d, s),
+    ) {
+        ArcChainStatus::Pass => "pass",
+        ArcChainStatus::None => "none",
+        ArcChainStatus::Fail => "fail",
     };
 
     let seal_template = format!(
@@ -126,13 +137,16 @@ pub fn generate_arc_headers(
         selector = config.selector,
     );
 
-    // #124:Build proper seal signing input – all previous ARC headers + current AAR/AMS
-    // + seal template (with empty b=) per RFC 8617 §5.1.2
+    // #124:Build proper seal signing input per RFC 8617 §5.1.1/§5.1.2.
+    // On a valid prior chain the AS covers all previous ARC sets plus the
+    // current AAR/AMS; on a broken chain (§5.1.2) it covers only the current set.
     let mut seal_signing_parts = Vec::new();
-    for prev in existing_chain {
-        seal_signing_parts.push(canonicalize_header_relaxed(&prev.authentication_results));
-        seal_signing_parts.push(canonicalize_header_relaxed(&prev.message_signature));
-        seal_signing_parts.push(canonicalize_header_relaxed(&prev.seal));
+    if chain_validation == "pass" {
+        for prev in existing_chain {
+            seal_signing_parts.push(canonicalize_header_relaxed(&prev.authentication_results));
+            seal_signing_parts.push(canonicalize_header_relaxed(&prev.message_signature));
+            seal_signing_parts.push(canonicalize_header_relaxed(&prev.seal));
+        }
     }
     seal_signing_parts.push(canonicalize_header_relaxed(&aar));
     seal_signing_parts.push(canonicalize_header_relaxed(&ams));
@@ -154,13 +168,28 @@ pub fn generate_arc_headers(
     })
 }
 
-/// Validate an ARC chain (RFC 8617 §5).
-pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
+/// Validate an ARC chain (RFC 8617 §5) with full cryptographic verification.
+///
+/// `key_lookup(domain, selector)` returns the DKIM public key for the AMS/AS
+/// `d=`/`s=` pair. Any unresolvable key, malformed header, or failed
+/// signature makes the whole chain `Fail` (RFC 8617 §5.2.1 – all failures
+/// are permanent; the validator fails closed on any error).
+pub fn verify_arc_chain(
+    arc_sets: &[ArcSet],
+    message_headers: &str,
+    message_body: &[u8],
+    key_lookup: &dyn Fn(&str, &str) -> Option<RsaPublicKey>,
+) -> ArcChainStatus {
     if arc_sets.is_empty() {
         return ArcChainStatus::None;
     }
 
-    // Check instances are sequential 1..=N
+    // RFC 8617 §5.2 steps 1–3: bound the chain, check structure.
+    if arc_sets.len() > 50 {
+        warn!(count = arc_sets.len(), "ARC chain too long (max 50)");
+        return ArcChainStatus::Fail;
+    }
+
     for (i, set) in arc_sets.iter().enumerate() {
         let expected = i as u32 + 1;
         if set.instance != expected {
@@ -171,10 +200,7 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
             );
             return ArcChainStatus::Fail;
         }
-    }
 
-    // Check all sets have non-empty fields and valid structure
-    for set in arc_sets {
         if set.authentication_results.is_empty()
             || set.message_signature.is_empty()
             || set.seal.is_empty()
@@ -212,7 +238,7 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
             }
         }
 
-        // #126:Verify cv= values throughout the chain
+        // #126:Verify cv= values throughout the chain (RFC 8617 §5.2 step 3c)
         let cv = extract_tag_value(&set.seal, "cv");
         if set.instance == 1 {
             if cv != Some("none") {
@@ -228,11 +254,173 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
         }
     }
 
-    // #E-005:Do not return pass without cryptographic verification.
-    // Full ARC validation requires AMS/AS signature verification against
-    // selector keys. Until implemented, fail closed instead of reporting pass.
-    warn!("ARC structural checks passed but cryptographic verification is not implemented; failing closed");
-    ArcChainStatus::Fail
+    // RFC 8617 §5.2 step 4: cryptographically verify every AMS (we verify all
+    // instances, not just the most recent, so any tampered link fails the chain).
+    for set in arc_sets {
+        if !verify_ams(set, message_headers, message_body, key_lookup) {
+            warn!(instance = set.instance, "ARC AMS signature verification failed");
+            return ArcChainStatus::Fail;
+        }
+    }
+
+    // RFC 8617 §5.2 step 6: cryptographically verify every AS, which covers
+    // the prior ARC sets + the current AAR/AMS (RFC 8617 §5.1.1).
+    for (idx, _set) in arc_sets.iter().enumerate() {
+        if !verify_seal(arc_sets, idx, key_lookup) {
+            warn!(instance = idx as u32 + 1, "ARC seal signature verification failed");
+            return ArcChainStatus::Fail;
+        }
+    }
+
+    ArcChainStatus::Pass
+}
+
+/// Validate an ARC chain without a key source (fails closed: no keys → no Pass).
+pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
+    verify_arc_chain(arc_sets, "", b"", &|_, _| None)
+}
+
+/// Verify one AMS signature (RFC 8617 §4.1.2, DKIM-formatted).
+fn verify_ams(
+    set: &ArcSet,
+    message_headers: &str,
+    message_body: &[u8],
+    key_lookup: &dyn Fn(&str, &str) -> Option<RsaPublicKey>,
+) -> bool {
+    let header = &set.message_signature;
+    let Some(domain) = extract_tag_value(header, "d") else {
+        return false;
+    };
+    let Some(selector) = extract_tag_value(header, "s") else {
+        return false;
+    };
+    if extract_tag_value(header, "a") != Some("rsa-sha256") {
+        return false;
+    }
+    let Some(bh) = extract_tag_value(header, "bh") else {
+        return false;
+    };
+    let Some(h_tag) = extract_tag_value(header, "h") else {
+        return false;
+    };
+    let Some(sig_b64) = extract_tag_value(header, "b") else {
+        return false;
+    };
+
+    let Some(public_key) = key_lookup(domain.trim(), selector.trim()) else {
+        warn!(domain, selector, "No ARC public key for AMS");
+        return false;
+    };
+
+    // Body hash check (RFC 6376 §3.7): bh= must match the relaxed-canonicalized body.
+    let expected_bh = {
+        let mut hasher = Sha256::new();
+        hasher.update(canonicalize_body_relaxed(message_body));
+        B64.encode(hasher.finalize())
+    };
+    let clean_bh: String = bh.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if clean_bh != expected_bh {
+        warn!(instance = set.instance, "ARC AMS body hash mismatch");
+        return false;
+    }
+
+    // Rebuild the signing input exactly as the sealer built it (RFC 8617 §4.1.2):
+    // canonicalized h= message headers + relaxed-canonicalized AMS with empty b=.
+    let h_names: Vec<&str> = h_tag
+        .split(':')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .collect();
+    let canonicalized_headers = extract_signing_headers(message_headers, &h_names);
+    let canonicalized_ams = canonicalize_header_relaxed(&strip_b_signature(header));
+    let signing_input = if canonicalized_headers.is_empty() {
+        canonicalized_ams
+    } else {
+        format!("{}\r\n{}", canonicalized_headers, canonicalized_ams)
+    };
+
+    verify_rsa_sha256(public_key, signing_input.as_bytes(), sig_b64)
+}
+
+/// Verify one ARC-Seal signature (RFC 8617 §5.1.1).
+fn verify_seal(
+    arc_sets: &[ArcSet],
+    idx: usize,
+    key_lookup: &dyn Fn(&str, &str) -> Option<RsaPublicKey>,
+) -> bool {
+    let set = &arc_sets[idx];
+    let header = &set.seal;
+    let Some(domain) = extract_tag_value(header, "d") else {
+        return false;
+    };
+    let Some(selector) = extract_tag_value(header, "s") else {
+        return false;
+    };
+    if extract_tag_value(header, "a") != Some("rsa-sha256") {
+        return false;
+    }
+    let Some(sig_b64) = extract_tag_value(header, "b") else {
+        return false;
+    };
+
+    let Some(public_key) = key_lookup(domain.trim(), selector.trim()) else {
+        warn!(domain, selector, "No ARC public key for seal");
+        return false;
+    };
+
+    // RFC 8617 §5.1.1: prior sets (AAR, AMS, AS per instance, increasing order)
+    // + current AAR + current AMS + AS with empty b=.
+    let mut parts = Vec::new();
+    for prev in &arc_sets[..idx] {
+        parts.push(canonicalize_header_relaxed(&prev.authentication_results));
+        parts.push(canonicalize_header_relaxed(&prev.message_signature));
+        parts.push(canonicalize_header_relaxed(&prev.seal));
+    }
+    parts.push(canonicalize_header_relaxed(&set.authentication_results));
+    parts.push(canonicalize_header_relaxed(&set.message_signature));
+    parts.push(canonicalize_header_relaxed(&strip_b_signature(header)));
+    let signing_input = parts.join("\r\n");
+
+    verify_rsa_sha256(public_key, signing_input.as_bytes(), sig_b64)
+}
+
+/// Verify an RSA-SHA256 PKCS#1 v1.5 signature.
+fn verify_rsa_sha256(public_key: RsaPublicKey, message: &[u8], sig_b64: &str) -> bool {
+    use rsa::pkcs1v15::Signature;
+    use rsa::pkcs1v15::VerifyingKey;
+    use rsa::signature::Verifier;
+
+    let clean: String = sig_b64.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let Ok(sig_bytes) = B64.decode(&clean) else {
+        return false;
+    };
+    let Ok(signature) = Signature::try_from(sig_bytes.as_slice()) else {
+        return false;
+    };
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key);
+    verifying_key.verify(message, &signature).is_ok()
+}
+
+/// Return the header line with the `b=` signature value removed (kept through "b=").
+/// The `b=` tag MUST be the last tag (RFC 6376 §3.5); any other layout fails closed.
+fn strip_b_signature(header_line: &str) -> String {
+    let value_start = header_line.find(':').map(|p| p + 1).unwrap_or(0);
+    let mut last_semi = None;
+    for (idx, ch) in header_line.char_indices() {
+        if ch == ';' {
+            last_semi = Some(idx);
+        }
+    }
+    let tag_start = match last_semi {
+        Some(idx) if idx + 1 > value_start => idx + 1,
+        _ => value_start,
+    };
+    let tag = header_line[tag_start..].trim_start();
+    if tag.starts_with("b=") {
+        format!("{} b=", header_line[..tag_start].trim_end())
+    } else {
+        header_line.to_string()
+    }
 }
 
 /// Parse ARC headers from raw header block.
@@ -498,5 +686,243 @@ mod tests {
         assert!(text.contains("Test tabs"));
         // Trailing empty lines removed
         assert!(!text.ends_with("\r\n\r\n"));
+    }
+
+    // ── FIX-C (H12): real RFC 8617 cryptographic verification ─────────────
+
+    fn test_config(private_key: RsaPrivateKey) -> ArcSigningConfig {
+        ArcSigningConfig {
+            domain: "example.com".into(),
+            selector: "sel1".into(),
+            private_key,
+        }
+    }
+
+    fn test_auth_result() -> ArcAuthResult {
+        ArcAuthResult {
+            spf: "pass".into(),
+            dkim: "pass".into(),
+            dmarc: "pass".into(),
+        }
+    }
+
+    const TEST_HEADERS: &str = "From: alice@example.com\r\nTo: bob@example.org\r\nSubject: hello\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\nMessage-ID: <abc@example.com>";
+
+    fn test_keys() -> (RsaPrivateKey, RsaPublicKey) {
+        let mut rng = rsa::rand_core::OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("generate RSA key");
+        let public_key = private_key.to_public_key();
+        (private_key, public_key)
+    }
+
+    fn test_lookup(public_key: RsaPublicKey) -> impl Fn(&str, &str) -> Option<RsaPublicKey> {
+        move |d, s| {
+            if d == "example.com" && s == "sel1" {
+                Some(public_key.clone())
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_arc_chain_signed_chain_passes() {
+        let (private_key, public_key) = test_keys();
+        let config = test_config(private_key);
+        let lookup = test_lookup(public_key);
+
+        let set = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[],
+            &lookup,
+        )
+        .expect("generate ARC set");
+        assert_eq!(set.instance, 1);
+
+        let status = verify_arc_chain(&[set], TEST_HEADERS, b"Hello world\r\n", &lookup);
+        assert_eq!(status, ArcChainStatus::Pass);
+    }
+
+    #[test]
+    fn test_verify_arc_chain_two_sets_seal_covers_prior_set() {
+        let (private_key, public_key) = test_keys();
+        let config = test_config(private_key);
+        let lookup = test_lookup(public_key);
+
+        let set1 = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[],
+            &lookup,
+        )
+        .expect("generate set 1");
+        let set2 = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[set1.clone()],
+            &lookup,
+        )
+        .expect("generate set 2");
+        assert_eq!(set2.instance, 2);
+        // The generated seal must have validated the prior chain → cv=pass
+        assert!(
+            set2.seal.contains("cv=pass"),
+            "seal cv should be pass for a valid prior chain: {}",
+            set2.seal
+        );
+
+        let status = verify_arc_chain(&[set1, set2], TEST_HEADERS, b"Hello world\r\n", &lookup);
+        assert_eq!(status, ArcChainStatus::Pass);
+    }
+
+    #[test]
+    fn test_verify_arc_chain_tampered_byte_fails() {
+        let (private_key, public_key) = test_keys();
+        let config = test_config(private_key);
+        let lookup = test_lookup(public_key);
+
+        let set1 = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[],
+            &lookup,
+        )
+        .expect("generate set 1");
+        let set2 = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[set1.clone()],
+            &lookup,
+        )
+        .expect("generate set 2");
+
+        // Tamper one byte of the i=1 AMS signature: set 2's seal covers it,
+        // so the whole chain must fail.
+        let mut tampered = set1.clone();
+        let b_value = extract_tag_value(&tampered.message_signature, "b").unwrap().to_string();
+        let mut chars: Vec<char> = b_value.chars().collect();
+        let last = chars.last_mut().unwrap();
+        *last = if *last == 'A' { 'B' } else { 'A' };
+        let new_b: String = chars.into_iter().collect();
+        tampered.message_signature = tampered
+            .message_signature
+            .replace(b_value.as_str(), new_b.as_str());
+
+        assert_ne!(tampered.message_signature, set1.message_signature);
+
+        let status = verify_arc_chain(
+            &[tampered, set2],
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &lookup,
+        );
+        assert_eq!(status, ArcChainStatus::Fail);
+    }
+
+    #[test]
+    fn test_verify_arc_chain_wrong_domain_fails() {
+        let (private_key, public_key) = test_keys();
+        let config = test_config(private_key);
+
+        let set = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[],
+            &|_, _| None,
+        )
+        .expect("generate ARC set");
+
+        // Only an unrelated domain has a key → d=example.com lookup returns None.
+        let wrong_domain_lookup = move |d: &str, s: &str| {
+            if d == "attacker.com" && s == "sel1" {
+                Some(public_key.clone())
+            } else {
+                None
+            }
+        };
+        let status = verify_arc_chain(&[set], TEST_HEADERS, b"Hello world\r\n", &wrong_domain_lookup);
+        assert_eq!(status, ArcChainStatus::Fail);
+    }
+
+    #[test]
+    fn test_verify_arc_chain_instance_order_violation_fails() {
+        let (private_key, public_key) = test_keys();
+        let config = test_config(private_key);
+        let lookup = test_lookup(public_key);
+
+        let set1 = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[],
+            &lookup,
+        )
+        .expect("generate set 1");
+        let set2 = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[set1.clone()],
+            &lookup,
+        )
+        .expect("generate set 2");
+
+        // Reversed order: instance 2 appears first → sequence violation.
+        let status = verify_arc_chain(&[set2, set1], TEST_HEADERS, b"Hello world\r\n", &lookup);
+        assert_eq!(status, ArcChainStatus::Fail);
+    }
+
+    #[test]
+    fn test_verify_arc_chain_tampered_body_fails() {
+        let (private_key, public_key) = test_keys();
+        let config = test_config(private_key);
+        let lookup = test_lookup(public_key);
+
+        let set = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[],
+            &lookup,
+        )
+        .expect("generate ARC set");
+
+        // bh= covers the body: a changed body must break the chain.
+        let status = verify_arc_chain(&[set], TEST_HEADERS, b"Goodbye world\r\n", &lookup);
+        assert_eq!(status, ArcChainStatus::Fail);
+    }
+
+    #[test]
+    fn test_validate_arc_chain_fails_closed_without_keys() {
+        // Without a key source a real (structurally valid) chain must still
+        // fail closed — Pass requires cryptographic proof.
+        let (private_key, _public_key) = test_keys();
+        let config = test_config(private_key);
+        let set = generate_arc_headers(
+            TEST_HEADERS,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[],
+            &|_, _| None,
+        )
+        .expect("generate ARC set");
+        assert_eq!(validate_arc_chain(&[set]), ArcChainStatus::Fail);
     }
 }

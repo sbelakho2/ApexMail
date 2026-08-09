@@ -496,7 +496,29 @@ async fn validate_vmc_certificate(url: &str) -> bool {
         None => return false,
     };
 
-    verify_x509_chain(&cert_chain)
+    verify_x509_chain(&cert_chain, &pinned_vmc_ca_certs())
+}
+
+/// Parse the `VMC_CA_PEMS` environment variable: a comma-separated list of
+/// PEM-encoded CA certificates that are allowed as self-signed trust anchors
+/// for VMC chain validation. Empty (unset) ⇒ no self-signed roots accepted.
+fn pinned_vmc_ca_certs() -> Vec<Vec<u8>> {
+    let Ok(pems) = std::env::var("VMC_CA_PEMS") else {
+        return Vec::new();
+    };
+    parse_pinned_ca_pems(&pems)
+}
+
+/// Split a raw `VMC_CA_PEMS` value into DER certificates.
+fn parse_pinned_ca_pems(raw: &str) -> Vec<Vec<u8>> {
+    let mut certs = Vec::new();
+    for pem in raw.split(',').filter(|p| !p.trim().is_empty()) {
+        let mut cursor = Cursor::new(pem.trim().as_bytes());
+        for cert in rustls_pemfile::certs(&mut cursor).filter_map(Result::ok) {
+            certs.push(cert.to_vec());
+        }
+    }
+    certs
 }
 
 fn parse_vmc_cert_chain(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
@@ -513,7 +535,20 @@ fn parse_vmc_cert_chain(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some(certs)
 }
 
-fn verify_x509_chain(chain_der: &[Vec<u8>]) -> bool {
+/// Cryptographically verify a VMC certificate chain (RFC 5280-style path
+/// validation for the BIMI VMC use case):
+///
+/// * every certificate is parsed and its validity dates checked;
+/// * the leaf carries the VMC Brand Indicator EKU;
+/// * every issuer has BasicConstraints CA:TRUE and KeyUsage keyCertSign;
+/// * each certificate's signature is verified with its issuer's public key;
+/// * the root must be self-signed, cryptographically self-consistent, and
+///   pinned in the configured trust set (`VMC_CA_PEMS`); an unpinned
+///   self-signed root is rejected.
+///
+/// Any error (parse failure, unsupported algorithm, missing CA constraints,
+/// failed signature) yields `false` — verification fails closed.
+fn verify_x509_chain(chain_der: &[Vec<u8>], pinned_ca_der: &[Vec<u8>]) -> bool {
     if chain_der.is_empty() {
         return false;
     }
@@ -540,10 +575,18 @@ fn verify_x509_chain(chain_der: &[Vec<u8>]) -> bool {
         return false;
     }
 
+    // Verify every non-root certificate: issuer name equality, issuer CA
+    // constraints, and the cryptographic signature of this cert by the issuer.
     for idx in 0..(chain.len().saturating_sub(1)) {
         let cert = &chain[idx];
         let issuer = &chain[idx + 1];
         if cert.issuer() != issuer.subject() {
+            return false;
+        }
+        if !certificate_is_ca(issuer) {
+            return false;
+        }
+        if cert.verify_signature(Some(issuer.public_key())).is_err() {
             return false;
         }
     }
@@ -552,7 +595,36 @@ fn verify_x509_chain(chain_der: &[Vec<u8>]) -> bool {
         Some(c) => c,
         None => return false,
     };
-    root.issuer() == root.subject()
+
+    // The trust anchor must be a self-signed certificate pinned in the
+    // configurable trust set. Any other root (unpinned self-signed, or a
+    // certificate whose issuer is not part of the presented chain) is
+    // rejected — fail closed.
+    if root.issuer() != root.subject() {
+        return false;
+    }
+    // Self-signature consistency (RFC 5280 §3.6.2.1): the root must verify
+    // against its own public key when it claims to be self-signed.
+    if root.verify_signature(Some(root.public_key())).is_err() {
+        return false;
+    }
+    pinned_ca_der
+        .iter()
+        .any(|pinned| pinned.as_slice() == chain_der.last().map(Vec::as_slice).unwrap_or(&[]))
+}
+
+/// BasicConstraints CA:TRUE AND KeyUsage keyCertSign (RFC 5280 §4.2.1.3/4.2.1.9).
+fn certificate_is_ca(cert: &X509Certificate<'_>) -> bool {
+    let mut basic_ca = false;
+    let mut key_cert_sign = false;
+    for extension in cert.extensions() {
+        match extension.parsed_extension() {
+            ParsedExtension::BasicConstraints(bc) => basic_ca = bc.ca,
+            ParsedExtension::KeyUsage(ku) => key_cert_sign = ku.key_cert_sign(),
+            _ => {}
+        }
+    }
+    basic_ca && key_cert_sign
 }
 
 fn certificate_has_vmc_purpose(cert: &X509Certificate<'_>) -> bool {
@@ -643,5 +715,155 @@ mod tests {
         assert!(steps.len() >= 5);
         assert!(steps[0].contains("DMARC"));
         assert!(steps[3].contains("default._bimi.example.com"));
+    }
+
+    // ── FIX-E (C5): VMC chain cryptographic verification ───────────────────
+
+    const VMC_EKU_OID: [u64; 9] = [1, 3, 6, 1, 5, 5, 7, 3, 31];
+
+    fn vmc_leaf_params(san: &str) -> rcgen::CertificateParams {
+        let mut params = rcgen::CertificateParams::new(vec![san.to_string()]).unwrap();
+        params.extended_key_usages =
+            vec![rcgen::ExtendedKeyUsagePurpose::Other(VMC_EKU_OID.to_vec())];
+        params
+    }
+
+    fn test_ca(san: &str) -> (rcgen::Certificate, rcgen::KeyPair) {
+        let mut params = rcgen::CertificateParams::new(vec![san.to_string()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        (cert, key)
+    }
+
+    #[test]
+    fn test_vmc_self_signed_chain_rejected_without_pin() {
+        // (a) A self-signed chain with the VMC EKU must NOT validate unless the
+        // root is pinned in the trust set.
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = vmc_leaf_params("vmc.example.com").self_signed(&key).unwrap();
+        let chain = vec![cert.der().to_vec()];
+
+        assert!(
+            !verify_x509_chain(&chain, &[]),
+            "self-signed VMC chain must be rejected when the root is not pinned"
+        );
+    }
+
+    #[test]
+    fn test_vmc_self_signed_chain_passes_when_pinned() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = vmc_leaf_params("vmc.example.com").self_signed(&key).unwrap();
+        let der = cert.der().to_vec();
+
+        assert!(
+            verify_x509_chain(&[der.clone()], &[der]),
+            "pinned self-signed root must validate"
+        );
+    }
+
+    #[test]
+    fn test_vmc_ca_signed_chain_passes() {
+        // (b) A leaf signed by a proper CA (CA:TRUE + keyCertSign) validates.
+        let (ca_cert, ca_key) = test_ca("VMC CA");
+        let ca_der = ca_cert.der().to_vec();
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf = vmc_leaf_params("vmc.example.com")
+            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        let chain = vec![leaf.der().to_vec(), ca_der.clone()];
+        assert!(
+            verify_x509_chain(&chain, &[ca_der]),
+            "CA-signed VMC chain must validate"
+        );
+    }
+
+    #[test]
+    fn test_vmc_non_ca_issuer_fails() {
+        // (c) An issuer without CA:TRUE / keyCertSign must be rejected.
+        let issuer_key = rcgen::KeyPair::generate().unwrap();
+        let mut issuer_params = rcgen::CertificateParams::new(vec!["issuer.example.com".to_string()]).unwrap();
+        issuer_params.is_ca = rcgen::IsCa::ExplicitNoCa;
+        issuer_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        let issuer = issuer_params.self_signed(&issuer_key).unwrap();
+
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf = vmc_leaf_params("vmc.example.com")
+            .signed_by(&leaf_key, &issuer, &issuer_key)
+            .unwrap();
+
+        let chain = vec![leaf.der().to_vec(), issuer.der().to_vec()];
+        assert!(
+            !verify_x509_chain(&chain, &[]),
+            "a non-CA issuer must fail chain validation"
+        );
+    }
+
+    #[test]
+    fn test_vmc_tampered_leaf_fails() {
+        // (d) Tampering with the leaf's signature must fail verification.
+        let (ca_cert, ca_key) = test_ca("VMC CA");
+        let ca_der = ca_cert.der().to_vec();
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf = vmc_leaf_params("vmc.example.com")
+            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .unwrap();
+        let leaf_der = leaf.der().to_vec();
+
+        let (_, parsed) = X509Certificate::from_der(&leaf_der).unwrap();
+        let sig_offset = parsed.signature_value.data.as_ptr() as usize - leaf_der.as_ptr() as usize;
+        let mut tampered = leaf_der.clone();
+        tampered[sig_offset + 3] ^= 0x01;
+
+        let chain = vec![tampered, ca_der.clone()];
+        assert!(
+            !verify_x509_chain(&chain, &[ca_der]),
+            "a tampered leaf must fail signature verification"
+        );
+    }
+
+    #[test]
+    fn test_vmc_incomplete_chain_fails() {
+        // A chain whose root is not self-signed (missing trust anchor) fails closed.
+        let (_ca_cert, ca_key) = test_ca("VMC CA");
+        let (super_ca, super_key) = test_ca("Super CA");
+        let ca_cert = {
+            let mut params = rcgen::CertificateParams::new(vec!["VMC CA".to_string()]).unwrap();
+            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            params.key_usages = vec![
+                rcgen::KeyUsagePurpose::KeyCertSign,
+                rcgen::KeyUsagePurpose::DigitalSignature,
+            ];
+            params.signed_by(&ca_key, &super_ca, &super_key).unwrap()
+        };
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf = vmc_leaf_params("vmc.example.com")
+            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        // The chain stops at an intermediate — no trust anchor present.
+        let chain = vec![leaf.der().to_vec(), ca_cert.der().to_vec()];
+        let _ = &ca_cert;
+        assert!(!verify_x509_chain(&chain, &[]));
+    }
+
+    #[test]
+    fn test_parse_pinned_ca_pems() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = vmc_leaf_params("pin.example.com").self_signed(&key).unwrap();
+        let pem = cert.pem();
+        let parsed = parse_pinned_ca_pems(&pem);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], cert.der().to_vec());
+
+        // Empty / unset-like values produce an empty trust set.
+        assert!(parse_pinned_ca_pems("").is_empty());
+        assert!(parse_pinned_ca_pems("  ,  ").is_empty());
     }
 }
