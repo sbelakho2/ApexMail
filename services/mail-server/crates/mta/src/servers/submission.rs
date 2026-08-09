@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dashmap::DashMap;
@@ -18,10 +18,40 @@ use tokio_rustls::{TlsAcceptor, TlsStream};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::config::SubmissionConfig;
+use crate::config::{RateLimitConfig, SubmissionConfig};
+
+/// Maximum length of a single SMTP command line (RFC 5321 §4.5.3.1.4 limits
+/// commands to 512 octets and lines to 1000; 4096 gives headroom for the
+/// inline `AUTH PLAIN <base64>` payload while still bounding memory).
+const MAX_COMMAND_LINE: usize = 4096;
+
+/// After an over-long line, keep draining this many bytes looking for the
+/// terminator so the session can resynchronise instead of closing.
+const MAX_LINE_DRAIN: usize = 64 * 1024;
+
+/// Per-read timeout for AUTH challenge/response lines (a silent client must
+/// not hold the session forever).
+const AUTH_LINE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Total deadline for receiving message DATA.
+const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Per-line timeout while receiving message DATA.
+const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Result of a capped line read.
+enum LineRead {
+    /// A full line (including trailing `\r\n`).
+    Line(String),
+    /// The line exceeded the cap; the terminator was still drained.
+    TooLong,
+    /// End of stream.
+    Eof,
+}
 
 pub struct SubmissionServer {
     config: SubmissionConfig,
+    rate_limit: RateLimitConfig,
     pool: PgPool,
     shutdown: Arc<Notify>,
     connections: Arc<DashMap<std::net::IpAddr, u32>>,
@@ -32,11 +62,13 @@ pub struct SubmissionServer {
 impl SubmissionServer {
     pub fn new(
         config: SubmissionConfig,
+        rate_limit: RateLimitConfig,
         pool: PgPool,
         tls_acceptor: Option<TlsAcceptor>,
     ) -> Self {
         Self {
             config,
+            rate_limit,
             pool,
             shutdown: Arc::new(Notify::new()),
             connections: Arc::new(DashMap::new()),
@@ -124,6 +156,7 @@ impl SubmissionServer {
     ) -> (bool, u32) {
         let mut authenticated = false;
         let mut auth_email = String::new();
+        let mut helo_seen = false;
         let mut mail_from: Option<String> = None;
         let mut rcpt_to: Vec<String> = Vec::new();
         let mut message_count: u32 = 0;
@@ -132,9 +165,15 @@ impl SubmissionServer {
 
         loop {
             line.clear();
-            match tokio::time::timeout(Duration::from_secs(300), stream.read_line(&mut line)).await {
-                Ok(Ok(0)) | Err(_) => break,
-                Ok(Ok(_)) => {}
+            let read = async { read_line_capped(stream, MAX_COMMAND_LINE).await };
+            match tokio::time::timeout(Duration::from_secs(300), read).await {
+                Err(_) => break,
+                Ok(Ok(LineRead::Eof)) => break,
+                Ok(Ok(LineRead::TooLong)) => {
+                    let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
+                    continue;
+                }
+                Ok(Ok(LineRead::Line(l))) => line = l,
                 Ok(Err(e)) => {
                     debug!(error = %e, peer = %peer, "Read error");
                     break;
@@ -149,6 +188,7 @@ impl SubmissionServer {
             let cmd = cmd_upper.as_str();
 
             if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
+                helo_seen = true;
                 let host = line.split_whitespace().nth(1).unwrap_or("unknown");
                 let mut caps = format!("250-{} Hello {}\r\n", self.config.hostname, host);
                 caps.push_str(&format!("250-SIZE {}\r\n", self.config.max_message_size));
@@ -164,99 +204,27 @@ impl SubmissionServer {
                 let _ = write_line(stream, &caps).await;
             } else if cmd == "STARTTLS" && allow_starttls && !already_tls {
                 return (true, message_count);
-            } else if cmd.starts_with("AUTH LOGIN") {
-                let _ = write_line(stream, "334 VXNlcm5hbWU6\r\n").await;
-                let mut user_b64 = String::new();
-                match stream.read_line(&mut user_b64).await {
-                    Ok(_) => {}
-                    _ => break,
+            } else if cmd == "STARTTLS" {
+                let _ = write_line(stream, "454 TLS not available\r\n").await;
+            } else if cmd.starts_with("AUTH LOGIN") || cmd.starts_with("AUTH PLAIN") {
+                if !helo_seen {
+                    // RFC 4954 §4: AUTH must not be used before EHLO.
+                    let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
+                } else if authenticated {
+                    let _ = write_line(stream, "503 5.5.1 Already authenticated\r\n").await;
+                } else if cmd.starts_with("AUTH LOGIN") {
+                    if let Some((email, _account_id)) = self.handle_auth_login(stream, trimmed, ip).await {
+                        authenticated = true;
+                        auth_email = email;
+                    }
+                } else if let Some((email, _account_id)) = self.handle_auth_plain(stream, trimmed, ip).await {
+                    authenticated = true;
+                    auth_email = email;
                 }
-                let _ = write_line(stream, "334 UGFzc3dvcmQ6\r\n").await;
-                let mut pass_b64 = String::new();
-                match stream.read_line(&mut pass_b64).await {
-                    Ok(_) => {}
-                    _ => break,
-                }
-                match (
-                    BASE64.decode(user_b64.trim()),
-                    BASE64.decode(pass_b64.trim()),
-                ) {
-                    (Ok(user), Ok(pass)) => {
-                        let user_str = String::from_utf8_lossy(&user);
-                        let pass_str = String::from_utf8_lossy(&pass);
-                        match self
-                            .authenticate_user(&user_str, &pass_str, ip)
-                            .await
-                        {
-                            Ok((email, _account_id)) => {
-                                authenticated = true;
-                                auth_email = email;
-                                // Reset the per-IP auth-failure counter so a user who
-                                // previously hit the lockout threshold (possibly via a
-                                // shared/NAT IP) is not locked out after a correct login.
-                                self.auth_fail_cache.remove(&ip);
-                                let _ = write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
-                            }
-                            Err(_) => {
-                                let _ =
-                                    write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
-                            }
-                        }
-                    }
-                    _ => {
-                        let _ = write_line(stream, "501 Invalid base64\r\n").await;
-                    }
-                }
-            } else if cmd.starts_with("AUTH PLAIN") {
-                // RFC 4954: AUTH PLAIN can include the initial response inline:
-                //   "AUTH PLAIN <base64>"  — one-line form (what most clients use)
-                //   "AUTH PLAIN"           — two-step form (server sends 334, client responds)
-                // IMPORTANT: use the ORIGINAL line (not uppercased cmd) to preserve base64 case.
-                let inline_b64 = trimmed.strip_prefix("AUTH PLAIN").or_else(|| trimmed.strip_prefix("auth plain")).unwrap_or("").trim();
-                let auth_b64 = if !inline_b64.is_empty() {
-                    // One-line form: use the inline base64 directly
-                    inline_b64.to_string()
-                } else {
-                    // Two-step form: send challenge, wait for response
-                    let _ = write_line(stream, "334 \r\n").await;
-                    let mut b64 = String::new();
-                    match stream.read_line(&mut b64).await {
-                        Ok(_) => b64,
-                        _ => break,
-                    }
-                };
-                match BASE64.decode(auth_b64.trim()) {
-                    Ok(creds) => {
-                        let s = String::from_utf8_lossy(&creds);
-                        let parts: Vec<&str> = s.splitn(3, '\0').collect();
-                        if parts.len() >= 3 {
-                            match self.authenticate_user(parts[1], parts[2], ip).await {
-                                Ok((email, _account_id)) => {
-                                    authenticated = true;
-                                    auth_email = email;
-                                    self.auth_fail_cache.remove(&ip);
-                                    let _ = write_line(
-                                        stream,
-                                        "235 2.7.0 Authentication successful\r\n",
-                                    )
-                                    .await;
-                                }
-                                Err(_) => {
-                                    let _ = write_line(
-                                        stream,
-                                        "535 5.7.8 Authentication failed\r\n",
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        let _ = write_line(stream, "501 Invalid base64\r\n").await;
-                    }
-                }
-            } else if cmd.starts_with("MAIL FROM:") {
-                if !authenticated {
+            } else if cmd.starts_with("MAIL FROM") {
+                if !helo_seen {
+                    let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
+                } else if !authenticated {
                     let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
                 } else {
                     // Store only the envelope address, not the full command line.
@@ -271,11 +239,13 @@ impl SubmissionServer {
                         let _ = write_line(stream, "250 OK\r\n").await;
                     }
                 }
-            } else if cmd.starts_with("RCPT TO:") {
-                if !authenticated {
+            } else if cmd.starts_with("RCPT TO") {
+                if !helo_seen {
+                    let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
+                } else if !authenticated {
                     let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
                 } else if rcpt_to.len() >= self.config.max_recipients {
-                    let _ = write_line(stream, "452 Too many recipients\r\n").await;
+                    let _ = write_line(stream, "452 4.5.3 Too many recipients\r\n").await;
                 } else {
                     // Store only the recipient address, not the full command line.
                     let addr = extract_address(trimmed);
@@ -286,69 +256,129 @@ impl SubmissionServer {
                         let _ = write_line(stream, "250 OK\r\n").await;
                     }
                 }
-            } else if cmd == "DATA" {
-                if !authenticated {
+            } else if cmd.starts_with("DATA") {
+                if !helo_seen {
+                    let _ = write_line(stream, "503 5.5.1 Send EHLO first\r\n").await;
+                } else if !authenticated {
                     let _ = write_line(stream, "530 5.7.0 Authentication required\r\n").await;
                 } else if mail_from.is_none() || rcpt_to.is_empty() {
-                    let _ = write_line(stream, "503 Need MAIL and RCPT first\r\n").await;
+                    let _ = write_line(stream, "503 5.5.1 Need MAIL and RCPT first\r\n").await;
                 } else {
                     let _ = write_line(
                         stream,
                         "354 Start mail input; end with <CRLF>.<CRLF>\r\n",
                     )
                     .await;
+
+                    // Receive the message body with:
+                    //  - a total deadline (slow-loris protection),
+                    //  - a per-line timeout,
+                    //  - an overall size cap enforced BEFORE buffering (552),
+                    //  - dot-unstuffing, and no queueing of partial DATA on
+                    //    client disconnect.
                     let mut data = Vec::new();
                     let mut buf = String::new();
+                    let mut too_large = false;
+                    let mut timed_out = false;
+                    let mut terminated = false;
+                    let deadline = Instant::now() + DATA_TOTAL_TIMEOUT;
                     loop {
                         buf.clear();
-                        match stream.read_line(&mut buf).await {
-                            Ok(0) => break,
-                            Ok(_) => {
+                        let remaining = deadline
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or(Duration::ZERO);
+                        if remaining.is_zero() {
+                            timed_out = true;
+                            break;
+                        }
+                        let per_line = remaining.min(DATA_LINE_TIMEOUT);
+                        match tokio::time::timeout(per_line, stream.read_line(&mut buf)).await {
+                            Err(_) => {
+                                timed_out = true;
+                                break;
+                            }
+                            Ok(Ok(0)) => break, // client disconnected mid-DATA
+                            Ok(Ok(_)) => {
                                 if buf.trim_end_matches(['\r', '\n']) == "." {
+                                    terminated = true;
                                     break;
                                 }
+                                if too_large {
+                                    // Drain the rest without buffering.
+                                    continue;
+                                }
                                 // RFC 5321 §4.5.2: un-stuff transparently-doubled dots.
-                                if let Some(rest) = buf.strip_prefix("..") {
-                                    data.extend_from_slice(rest.as_bytes());
+                                let data_slice = if let Some(rest) = buf.strip_prefix("..") {
+                                    rest
                                 } else {
-                                    data.extend_from_slice(buf.as_bytes());
+                                    &buf[..]
+                                };
+                                if data.len() + data_slice.len() > self.config.max_message_size {
+                                    too_large = true;
+                                    data.clear();
+                                } else {
+                                    data.extend_from_slice(data_slice.as_bytes());
                                 }
                             }
-                            Err(_) => break,
+                            Ok(Err(_)) => break,
                         }
                     }
-                    if data.last() == Some(&b'\n') {
-                        data.pop();
-                        if data.last() == Some(&b'\r') {
+
+                    if timed_out {
+                        let _ = write_line(stream, "421 4.4.2 Data timeout exceeded\r\n").await;
+                        break;
+                    }
+
+                    if too_large {
+                        // RFC 5321 §4.5.3.2: message exceeds the SIZE limit.
+                        let _ = write_line(stream, "552 5.3.4 Message too large\r\n").await;
+                        mail_from = None;
+                        rcpt_to.clear();
+                        continue;
+                    }
+
+                    if terminated {
+                        if data.last() == Some(&b'\n') {
                             data.pop();
+                            if data.last() == Some(&b'\r') {
+                                data.pop();
+                            }
                         }
-                    }
-                    let data_str = String::from_utf8_lossy(&data);
-                    let msg_id = Uuid::new_v4().to_string();
-                    match self
-                        .queue_message(
-                            &auth_email,
-                            mail_from.as_deref().unwrap_or(""),
-                            &rcpt_to,
-                            &data_str,
-                            &msg_id,
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            message_count += 1;
-                            let _ = write_line(
-                                stream,
-                                &format!("250 OK id={}\r\n", msg_id),
+                        let data_str = String::from_utf8_lossy(&data);
+                        let msg_id = Uuid::new_v4().to_string();
+                        match self
+                            .queue_message(
+                                &auth_email,
+                                mail_from.as_deref().unwrap_or(""),
+                                &rcpt_to,
+                                &data_str,
+                                &msg_id,
                             )
-                            .await;
+                            .await
+                        {
+                            Ok(_) => {
+                                message_count += 1;
+                                let _ = write_line(
+                                    stream,
+                                    &format!("250 OK id={}\r\n", msg_id),
+                                )
+                                .await;
+                                if message_count >= self.rate_limit.max_messages_per_connection {
+                                    let _ = write_line(
+                                        stream,
+                                        "421 4.7.0 Too many messages, closing connection\r\n",
+                                    )
+                                    .await;
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                let _ = write_line(stream, "451 4.3.0 Requested action aborted\r\n").await;
+                            }
                         }
-                        Err(_) => {
-                            let _ = write_line(stream, "451 Requested action aborted\r\n").await;
-                        }
+                        mail_from = None;
+                        rcpt_to.clear();
                     }
-                    mail_from = None;
-                    rcpt_to.clear();
                 }
             } else if cmd.starts_with("RSET") {
                 mail_from = None;
@@ -359,8 +389,14 @@ impl SubmissionServer {
             } else if cmd.starts_with("QUIT") {
                 let _ = write_line(stream, "221 Bye\r\n").await;
                 break;
+            } else if cmd.starts_with("HELP") {
+                let _ = write_line(
+                    stream,
+                    "214 Supported: EHLO HELO AUTH MAIL RCPT DATA RSET NOOP QUIT\r\n",
+                )
+                .await;
             } else {
-                let _ = write_line(stream, "502 Command not recognised\r\n").await;
+                let _ = write_line(stream, "502 5.5.1 Command not recognised\r\n").await;
             }
         }
 
@@ -371,6 +407,138 @@ impl SubmissionServer {
             "Submission session ended"
         );
         (false, message_count)
+    }
+
+    /// `AUTH LOGIN` two-step (plus optional inline username): prompt for
+    /// base64 username then password, verify, and always send a terminating
+    /// reply (never leave the client hanging). Returns the authenticated
+    /// email on success.
+    async fn handle_auth_login<S: AsyncRead + AsyncWrite + Unpin>(
+        self: &Arc<Self>,
+        stream: &mut BufStream<S>,
+        trimmed: &str,
+        ip: std::net::IpAddr,
+    ) -> Option<(String, Uuid)> {
+        // Optional inline initial response: "AUTH LOGIN <base64-username>".
+        let inline_user = trimmed
+            .strip_prefix("AUTH LOGIN")
+            .or_else(|| trimmed.strip_prefix("auth login"))
+            .unwrap_or(trimmed)
+            .trim();
+        let user_b64: String = if !inline_user.is_empty() {
+            inline_user.to_string()
+        } else {
+            let _ = write_line(stream, "334 VXNlcm5hbWU6\r\n").await;
+            self.read_auth_line(stream).await?
+        };
+
+        let _ = write_line(stream, "334 UGFzc3dvcmQ6\r\n").await;
+        let pass_b64 = self.read_auth_line(stream).await?;
+
+        match (BASE64.decode(user_b64.trim()), BASE64.decode(pass_b64.trim())) {
+            (Ok(user), Ok(pass)) => {
+                let user_str = String::from_utf8_lossy(&user);
+                let pass_str = String::from_utf8_lossy(&pass);
+                match self.authenticate_user(&user_str, &pass_str, ip).await {
+                    Ok((email, account_id)) => {
+                        self.auth_fail_cache.remove(&ip);
+                        let _ = write_line(
+                            stream,
+                            "235 2.7.0 Authentication successful\r\n",
+                        )
+                        .await;
+                        Some((email, account_id))
+                    }
+                    Err(_) => {
+                        let _ =
+                            write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
+                        None
+                    }
+                }
+            }
+            _ => {
+                let _ = write_line(stream, "501 5.5.2 Invalid base64\r\n").await;
+                None
+            }
+        }
+    }
+
+    /// `AUTH PLAIN` inline or two-step. Always sends a terminating reply,
+    /// including for payloads that decode to fewer than three NUL-separated
+    /// fields (previously the client hung forever in that case). Returns the
+    /// authenticated email on success.
+    async fn handle_auth_plain<S: AsyncRead + AsyncWrite + Unpin>(
+        self: &Arc<Self>,
+        stream: &mut BufStream<S>,
+        trimmed: &str,
+        ip: std::net::IpAddr,
+    ) -> Option<(String, Uuid)> {
+        // Use the ORIGINAL line (not uppercased) to preserve base64 case.
+        let inline_b64 = trimmed
+            .strip_prefix("AUTH PLAIN")
+            .or_else(|| trimmed.strip_prefix("auth plain"))
+            .unwrap_or(trimmed)
+            .trim();
+        let auth_b64: String = if !inline_b64.is_empty() {
+            inline_b64.to_string()
+        } else {
+            let _ = write_line(stream, "334 \r\n").await;
+            self.read_auth_line(stream).await?
+        };
+        match BASE64.decode(auth_b64.trim()) {
+            Ok(creds) => {
+                let s = String::from_utf8_lossy(&creds);
+                let parts: Vec<&str> = s.splitn(3, '\0').collect();
+                if parts.len() >= 3 {
+                    match self.authenticate_user(parts[1], parts[2], ip).await {
+                        Ok((email, account_id)) => {
+                            self.auth_fail_cache.remove(&ip);
+                            let _ = write_line(
+                                stream,
+                                "235 2.7.0 Authentication successful\r\n",
+                            )
+                            .await;
+                            Some((email, account_id))
+                        }
+                        Err(_) => {
+                            let _ = write_line(
+                                stream,
+                                "535 5.7.8 Authentication failed\r\n",
+                            )
+                            .await;
+                            None
+                        }
+                    }
+                } else {
+                    // Malformed authcid (fewer than three NUL fields).
+                    let _ = write_line(
+                        stream,
+                        "535 5.7.8 Authentication failed\r\n",
+                    )
+                    .await;
+                    None
+                }
+            }
+            _ => {
+                let _ = write_line(stream, "501 5.5.2 Invalid base64\r\n").await;
+                None
+            }
+        }
+    }
+
+    /// Read one AUTH response line with a timeout and a line-length cap.
+    async fn read_auth_line<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: &mut BufStream<S>,
+    ) -> Option<String> {
+        match tokio::time::timeout(AUTH_LINE_TIMEOUT, read_line_capped(stream, MAX_COMMAND_LINE)).await {
+            Ok(Ok(LineRead::Line(l))) => Some(l),
+            Ok(Ok(LineRead::TooLong)) => {
+                let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
+                None
+            }
+            _ => None,
+        }
     }
 
     // ── Auth helper ──────────────────────────────────────────────────────
@@ -572,16 +740,104 @@ impl SubmissionServer {
 
 // ── I/O helpers ─────────────────────────────────────────────────────────
 
-/// Extract the bare address from an SMTP command line such as
-/// `RCPT TO:<user@example.com>` or `MAIL FROM: user@example.com`.
-fn extract_address(line: &str) -> String {
-    if let Some(start) = line.find('<') {
-        if let Some(end) = line.find('>') {
-            return line[start + 1..end].to_string();
+/// Read one line with a hard cap on its length. When the cap is exceeded,
+/// the remainder of the line is drained (up to `MAX_LINE_DRAIN` bytes) so
+/// the session can stay synchronised, then `LineRead::TooLong` is returned.
+async fn read_line_capped<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut BufStream<S>,
+    cap: usize,
+) -> std::io::Result<LineRead> {
+    use tokio::io::AsyncBufReadExt;
+    let mut line = Vec::with_capacity(128);
+    let mut too_long = false;
+    let mut drained = 0usize;
+    loop {
+        // Scope the borrow so `buf` is dropped before `stream.consume`.
+        let action = {
+            let buf = stream.fill_buf().await?;
+            if buf.is_empty() {
+                if line.is_empty() && !too_long {
+                    return Ok(LineRead::Eof);
+                }
+                // EOF mid-line: return what we have.
+                Action::Done
+            } else if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                let take = pos + 1;
+                if line.len() + take > cap {
+                    too_long = true;
+                    line.clear();
+                } else if !too_long {
+                    line.extend_from_slice(&buf[..take]);
+                }
+                // A newline-terminated line is complete — return now.
+                // (Action::Return breaks after consuming; looping back to
+                // fill_buf() would block until MORE data arrives, hanging
+                // the session while the client waits for a reply.)
+                Action::Return(take)
+            } else if too_long {
+                drained += buf.len();
+                if drained > MAX_LINE_DRAIN {
+                    Action::GiveUp
+                } else {
+                    Action::Consume(buf.len())
+                }
+            } else if line.len() + buf.len() > cap {
+                too_long = true;
+                line.clear();
+                Action::Consume(buf.len())
+            } else {
+                line.extend_from_slice(buf);
+                Action::Consume(buf.len())
+            }
+        };
+        match action {
+            Action::Done => break,
+            Action::Return(n) => {
+                stream.consume(n);
+                break;
+            }
+            Action::GiveUp => return Ok(LineRead::TooLong),
+            Action::Consume(n) => stream.consume(n),
         }
     }
-    line.split_whitespace()
-        .last()
+    if too_long {
+        Ok(LineRead::TooLong)
+    } else {
+        Ok(LineRead::Line(String::from_utf8_lossy(&line).into_owned()))
+    }
+}
+
+enum Action {
+    Done,
+    Return(usize),
+    Consume(usize),
+    GiveUp,
+}
+
+/// Extract the bare address from an SMTP command line such as
+/// `RCPT TO:<user@example.com>` or `MAIL FROM: user@example.com`.
+/// Only the address path is returned — trailing parameters such as
+/// `SIZE=1000` are never part of the address.
+fn extract_address(line: &str) -> String {
+    // Prefer the explicit angle-bracketed path.
+    if let Some(start) = line.find('<') {
+        if let Some(end) = line[start + 1..].find('>') {
+            return line[start + 1..start + 1 + end].to_string();
+        }
+    }
+    // Fall back to the token directly after the MAIL FROM:/RCPT TO: verb
+    // (never the last token — that could be a command parameter).
+    let rest = line
+        .split_once("MAIL FROM")
+        .or_else(|| line.split_once("RCPT TO"))
+        .or_else(|| line.split_once("mail from"))
+        .or_else(|| line.split_once("rcpt to"))
+        .map(|(_, r)| r)
+        .unwrap_or(line)
+        .trim_start_matches(':')
+        .trim();
+    rest.split_whitespace()
+        .next()
         .unwrap_or("")
         .trim_matches(|c| c == '<' || c == '>')
         .to_string()
