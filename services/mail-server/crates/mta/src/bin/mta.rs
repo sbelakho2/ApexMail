@@ -187,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
         } else { None };
         let srv = Arc::new(SubmissionServer::new(
             config.submission.clone(),
+            config.rate_limit.clone(),
             pool.clone(),
             tls_acceptor,
         ));

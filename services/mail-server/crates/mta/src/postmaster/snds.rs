@@ -149,7 +149,10 @@ fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
 }
 
 /// SNDS reports complaint rate as either an empty string, "<1", or a percent
-/// like "0.5" or "0.05".  We normalise to a 0..=1 fraction; "<1" becomes 0.005.
+/// like "0.5" or "0.05" (i.e. 0.5% and 0.05%).  We normalise to a 0..=1
+/// fraction; "<1" becomes 0.005.  Every numeric value is a percentage and is
+/// divided by 100 — treating "0.05" as a bare fraction (0.05 = 5%) inflated
+/// ordinary complaint rates a hundred-fold and drove IPs to the Red band.
 fn parse_complaint(s: &str) -> Option<f64> {
     let t = s.trim().trim_end_matches('%');
     if t.is_empty() {
@@ -160,8 +163,7 @@ fn parse_complaint(s: &str) -> Option<f64> {
         return rest.parse::<f64>().ok().map(|v| (v / 2.0) / 100.0);
     }
     let v: f64 = t.parse().ok()?;
-    // Heuristic: values <=1 are already fractions; >1 are percentages.
-    Some(if v <= 1.0 { v } else { v / 100.0 })
+    Some(v / 100.0)
 }
 
 pub async fn upsert_records(db: &PgPool, rows: &[SndsRecord]) -> Result<usize, String> {
@@ -236,7 +238,10 @@ mod tests {
 
     #[test]
     fn complaint_rate_fraction() {
-        assert_eq!(parse_complaint("0.05"), Some(0.05));
+        // SNDS reports complaint_rate as a *percentage* ("0.05" == 0.05%),
+        // so every numeric value is divided by 100 into a 0..=1 fraction.
+        assert_eq!(parse_complaint("0.05"), Some(0.0005));
+        assert_eq!(parse_complaint("0.5"), Some(0.005));
         assert_eq!(parse_complaint("5"), Some(0.05));
         assert_eq!(parse_complaint("5%"), Some(0.05));
         assert_eq!(parse_complaint("<1"), Some(0.005));

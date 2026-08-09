@@ -751,7 +751,56 @@ impl EmailProcessor {
         .execute(&self.db)
         .await?;
 
+        // FIX-9/M56: feed the FBL server's complaint-rate alerting. The
+        // `mta:reputation:{domain}:{date}` "sent" counter was never written
+        // anywhere, so the `sent > 100` gate in feedback_loop.rs could never
+        // fire. Best-effort: a counter failure must not fail the send.
+        if let Some(domain) = envelope_domain(&job.from).filter(|d| !d.is_empty()) {
+            self.record_sent_reputation(domain).await;
+        }
+
         Ok(())
+    }
+
+    /// Increment the daily per-domain sent counters (Redis, matching the FBL
+    /// reader's key format, plus the DB mirror). Best-effort by design.
+    async fn record_sent_reputation(&self, domain: &str) {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let key = reputation_sent_key(domain, &today);
+        match self.redis.get().await {
+            Ok(mut conn) => {
+                let incr = redis::cmd("HINCRBY")
+                    .arg(&key)
+                    .arg("sent")
+                    .arg(1i64)
+                    .query_async::<i64>(&mut *conn)
+                    .await;
+                match incr {
+                    Ok(_) => {
+                        let _: bool = redis::cmd("EXPIRE")
+                            .arg(&key)
+                            .arg(7 * 86400i64)
+                            .query_async(&mut *conn)
+                            .await
+                            .unwrap_or(false);
+                    }
+                    Err(e) => warn!(error = %e, "Failed to record Redis sent reputation counter"),
+                }
+            }
+            Err(e) => warn!(error = %e, "Redis unavailable for sent reputation counter"),
+        }
+        if let Err(e) = sqlx::query(
+            r#"INSERT INTO sender_reputation (domain, date, sent, updated_at)
+               VALUES ($1, CURRENT_DATE, 1, NOW())
+               ON CONFLICT (domain, date)
+               DO UPDATE SET sent = sender_reputation.sent + 1, updated_at = NOW()"#,
+        )
+        .bind(domain)
+        .execute(&self.db)
+        .await
+        {
+            warn!(error = %e, "Failed to record DB sent reputation");
+        }
     }
 
     /// Handle suppressed recipient.
@@ -987,6 +1036,17 @@ impl EmailProcessor {
 }
 
 use base64::Engine;
+
+/// Redis hash key used by the FBL server's complaint-rate alerting
+/// (feedback_loop.rs: `mta:reputation:{domain}:{YYYY-MM-DD}`, field "sent").
+fn reputation_sent_key(domain: &str, date: &str) -> String {
+    format!("mta:reputation:{domain}:{date}")
+}
+
+/// Envelope-sender domain used for per-domain reputation counters.
+fn envelope_domain(from: &str) -> Option<&str> {
+    from.rsplit_once('@').map(|(_, d)| d)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1682,5 +1742,29 @@ mod tests {
             "concurrent is_allowed + record_failure must produce valid state: got {:?}",
             state
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // 3. Sender-reputation sent counter (FIX-9 / M56)
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn test_reputation_sent_key_format() {
+        // Key format must match the FBL server's reader:
+        //   mta:reputation:{domain}:{YYYY-MM-DD}  with field "sent"
+        assert_eq!(
+            reputation_sent_key("example.com", "2026-08-09"),
+            "mta:reputation:example.com:2026-08-09"
+        );
+    }
+
+    #[test]
+    fn test_envelope_domain() {
+        assert_eq!(envelope_domain("sender@example.com"), Some("example.com"));
+        assert_eq!(
+            envelope_domain("sender@sub.example.co.uk"),
+            Some("sub.example.co.uk")
+        );
+        assert_eq!(envelope_domain("no-at-sign"), None);
+        assert_eq!(envelope_domain("@"), Some(""));
     }
 }
