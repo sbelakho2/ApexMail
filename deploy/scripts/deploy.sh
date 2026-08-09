@@ -89,7 +89,6 @@ for s in "${ALL_SERVICES[@]}"; do ALL_IMAGES+=" ${GHCR_NS}/${s}:latest"; done
 declare -A SEPARATE_DOCKERFILES=(
     [marketing]="${DEPLOY_DIR}/apps/marketing-zola/Dockerfile"
     [tracking-service]="${DEPLOY_DIR}/deploy/Dockerfile.tracking"
-    [pdf-renderer]="${MAIL_SERVER_DIR}/crates/pdf-renderer/Dockerfile"
 )
 
 # Determine which services to build
@@ -170,8 +169,11 @@ if ! $NO_BUILD; then
             "$BUILD_CONTEXT" 2>&1 | tail -2
     done
 
-    # Build services with separate Dockerfiles (marketing, tracking, pdf-renderer)
-    for separate_svc in marketing tracking-service pdf-renderer; do
+    # Build services with separate Dockerfiles (marketing, tracking).
+    # NOTE: pdf-renderer is dev-profile-only (docker-compose.yml profiles:
+    # ["dev","full-stack"]), is NOT part of the production stack, and its
+    # Dockerfile is not buildable from this context — skip it here.
+    for separate_svc in marketing tracking-service; do
         should_build=false
         if [[ -z "$SERVICES_TO_BUILD" ]] || echo "$SERVICES_TO_BUILD" | grep -q "$separate_svc"; then
             should_build=true
@@ -190,13 +192,6 @@ if ! $NO_BUILD; then
                         docker build --tag "${GHCR_NS}/tracking-service:latest" \
                             -f "${DEPLOY_DIR}/deploy/Dockerfile.tracking" \
                             "${DEPLOY_DIR}" 2>&1 | tail -2
-                    fi
-                    ;;
-                pdf-renderer)
-                    if [[ -f "${MAIL_SERVER_DIR}/crates/pdf-renderer/Dockerfile" ]]; then
-                        log "Building: apexmail-pdf-renderer:latest"
-                        docker build --tag "apexmail-pdf-renderer:latest" \
-                            "${MAIL_SERVER_DIR}" 2>&1 | tail -2
                     fi
                     ;;
             esac

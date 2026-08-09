@@ -67,4 +67,10 @@ CREATE TABLE IF NOT EXISTS sender_reputation (
     PRIMARY KEY (domain, date)
 );
 
+-- Drift repair: production had an ad-hoc sender_reputation (uuid PK,
+-- no sent column) created before this migration. Align it with the code
+-- contract without touching existing rows.
+ALTER TABLE sender_reputation ADD COLUMN IF NOT EXISTS sent BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE sender_reputation ADD COLUMN IF NOT EXISTS complaints BIGINT NOT NULL DEFAULT 0;
+
 COMMIT;
