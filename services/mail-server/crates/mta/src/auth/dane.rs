@@ -6,7 +6,9 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use std::future::Future;
 use moka::sync::Cache;
+use x509_parser::prelude::FromDer;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
@@ -97,6 +99,29 @@ pub async fn verify_dane(
     protocol: &str,
     dns_config: &DnsConfig,
 ) -> DaneVerificationResult {
+    verify_dane_with_fetcher(
+        domain,
+        port,
+        protocol,
+        dns_config,
+        |d, p| fetch_remote_cert_chain(d, p),
+    )
+    .await
+}
+
+/// Same as [`verify_dane`] but with an injectable certificate-chain fetcher
+/// (hermetic testing).
+async fn verify_dane_with_fetcher<F, Fut>(
+    domain: &str,
+    port: u16,
+    protocol: &str,
+    dns_config: &DnsConfig,
+    fetch_chain: F,
+) -> DaneVerificationResult
+where
+    F: Fn(String, u16) -> Fut,
+    Fut: Future<Output = anyhow::Result<Vec<Vec<u8>>>>,
+{
     let mut result = DaneVerificationResult {
         supported: false,
         mode: DaneMode::None,
@@ -109,33 +134,37 @@ pub async fn verify_dane(
     let name = format!("_{port}._{protocol}.{domain}");
 
     // O-1.4:Check TLSA cache with configurable TTL enforcement
-    if let Some(cached) = TLSA_CACHE.get(&name) {
+    let cached_records: Option<Vec<TlsaRecord>> = if let Some(cached) = TLSA_CACHE.get(&name) {
         let ttl = Duration::from_secs(dns_config.tlsa_cache_ttl_secs);
         if cached.fetched_at.elapsed() < ttl {
-            if !cached.records.is_empty() {
-                result.supported = true;
-                for record in &cached.records {
-                    match record.usage {
-                        3 => {
-                            if result.mode != DaneMode::DaneTa {
-                                result.mode = DaneMode::DaneEe;
-                            }
-                        }
-                        2 => result.mode = DaneMode::DaneTa,
-                        0 | 1 => {
-                            if result.mode == DaneMode::None {
-                                result.mode = DaneMode::Pkix;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                result.tlsa_records = cached.records.clone();
-            }
-            return result;
+            Some(cached.records.clone())
+        } else {
+            // Stale entry — evict and re-fetch
+            TLSA_CACHE.invalidate(name.as_str());
+            None
         }
-        // Stale entry — evict and re-fetch
-        TLSA_CACHE.invalidate(&name);
+    } else {
+        None
+    };
+
+    if let Some(records) = cached_records {
+        // #E-006: A cache hit is NOT a validation result. The live certificate
+        // must be fetched and matched against the cached TLSA records again —
+        // a stale record set must never flip `supported` to true on its own.
+        return match fetch_chain(domain.to_string(), port).await {
+            Ok(chain) => evaluate_tlsa_records(&chain, &records, domain),
+            Err(e) => {
+                result.warnings.push(format!(
+                    "Could not fetch target TLS certificate for DANE validation: {e}"
+                ));
+                result.tlsa_records = records;
+                result.recommendations.push(
+                    "TLSA cache entry could not be re-validated against the live certificate"
+                        .into(),
+                );
+                result
+            }
+        };
     }
 
     let Some(client) = DOH_CLIENT.as_ref() else {
@@ -212,7 +241,9 @@ pub async fn verify_dane(
         }
     }
 
-    // Parse TLSA answers
+    // Parse TLSA answers, keeping only records with known usage/selector/matching-type.
+    // Unknown values are ignored (RFC 7671 §3): they must never set supported=true.
+    let mut records = Vec::new();
     if let Some(answers) = body.get("Answer").and_then(|v| v.as_array()) {
         for answer in answers {
             let rtype = answer.get("type").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -222,65 +253,106 @@ pub async fn verify_dane(
             }
             if let Some(data) = answer.get("data").and_then(|v| v.as_str()) {
                 if let Some(record) = parse_tlsa_data(data) {
-                    result.supported = true;
-                    // Determine mode from usage
-                    match record.usage {
-                        3 => {
-                            if result.mode != DaneMode::DaneTa {
-                                result.mode = DaneMode::DaneEe;
-                            }
-                        }
-                        2 => result.mode = DaneMode::DaneTa,
-                        0 | 1 => {
-                            if result.mode == DaneMode::None {
-                                result.mode = DaneMode::Pkix;
-                            }
-                        }
-                        _ => {}
+                    if record.usage <= 3 && record.selector <= 1 && record.matching_type <= 2 {
+                        records.push(record);
                     }
-                    result.tlsa_records.push(record);
                 }
             }
         }
     }
 
-    if !result.supported {
+    if records.is_empty() {
         result
             .recommendations
             .push(format!("Add TLSA record at {name} for DANE support"));
-    } else {
-        match fetch_remote_leaf_certificate(domain, port).await {
-            Ok(cert_der) => {
-                let matches_tlsa = result
-                    .tlsa_records
-                    .iter()
-                    .any(|record| validate_certificate_against_tlsa(&cert_der, record));
+        TLSA_CACHE.insert(
+            name,
+            CachedTlsaRecords {
+                records: Vec::new(),
+                fetched_at: Instant::now(),
+            },
+        );
+        return result;
+    }
 
-                if !matches_tlsa {
-                    result
-                        .errors
-                        .push("TLSA records do not match the target server certificate".into());
-                    result.supported = false;
-                }
-            }
-            Err(e) => {
-                result.warnings.push(format!(
-                    "Could not fetch target TLS certificate for DANE validation: {e}"
-                ));
-                result.supported = false;
-            }
+    // #E-006: Fetch the live certificate chain and evaluate the records
+    // against it — supported=true only when a record actually matches.
+    match fetch_chain(domain.to_string(), port).await {
+        Ok(chain) => {
+            result = evaluate_tlsa_records(&chain, &records, domain);
+        }
+        Err(e) => {
+            result.warnings.push(format!(
+                "Could not fetch target TLS certificate for DANE validation: {e}"
+            ));
+            result.tlsa_records = records.clone();
         }
     }
 
-    // O-1.4:Cache the result with a timestamp for configurable TTL enforcement
+    // O-1.4:Cache the records with a timestamp for configurable TTL enforcement
     TLSA_CACHE.insert(
         name,
         CachedTlsaRecords {
-            records: result.tlsa_records.clone(),
+            records,
             fetched_at: Instant::now(),
         },
     );
 
+    result
+}
+
+/// Evaluate a set of TLSA records against a live certificate chain.
+/// Records with unknown usage/selector/matching-type are ignored and never
+/// set `supported`; `supported` requires at least one record to match.
+fn evaluate_tlsa_records(chain: &[Vec<u8>], records: &[TlsaRecord], domain: &str) -> DaneVerificationResult {
+    let mut result = DaneVerificationResult {
+        supported: false,
+        mode: DaneMode::None,
+        tlsa_records: Vec::new(),
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        recommendations: Vec::new(),
+    };
+
+    for record in records {
+        if record.usage > 3 || record.selector > 1 || record.matching_type > 2 {
+            continue;
+        }
+        result.tlsa_records.push(record.clone());
+        match record.usage {
+            3 => {
+                if result.mode != DaneMode::DaneTa {
+                    result.mode = DaneMode::DaneEe;
+                }
+            }
+            2 => result.mode = DaneMode::DaneTa,
+            0 | 1 => {
+                if result.mode == DaneMode::None {
+                    result.mode = DaneMode::Pkix;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if result.tlsa_records.is_empty() {
+        result
+            .recommendations
+            .push("No usable TLSA records (unknown usage/selector/matching-type)".into());
+        return result;
+    }
+
+    let matches_tlsa = result
+        .tlsa_records
+        .iter()
+        .any(|record| validate_chain_against_tlsa(chain, record, domain));
+    if !matches_tlsa {
+        result
+            .errors
+            .push("TLSA records do not match the target server certificate".into());
+    } else {
+        result.supported = true;
+    }
     result
 }
 
@@ -316,15 +388,43 @@ pub fn generate_tlsa_record(
         }
     };
 
+    // Compute association data honouring the selector (RFC 6698 §2.1):
+    // selector 0 = full certificate DER, selector 1 = SubjectPublicKeyInfo.
+    let data = match (selector, matching_type) {
+        (0, _) => Ok(der),
+        (1, _) => x509_parser::prelude::X509Certificate::from_der(&der)
+            .map(|(_, cert)| cert.public_key().raw.to_vec())
+            .map_err(|e| format!("Failed to parse certificate for SPKI extraction: {e}")),
+        _ => Err(format!("Unsupported selector: {selector}")),
+    };
+
+    let data = match data {
+        Ok(d) => d,
+        Err(e) => {
+            errors.push(e);
+            return DaneRecordGenerationResult {
+                record: TlsaRecord {
+                    usage,
+                    selector,
+                    matching_type,
+                    certificate_association_data: String::new(),
+                },
+                dns_record: String::new(),
+                errors,
+                recommendations,
+            };
+        }
+    };
+
     // Compute association data
     let data = match matching_type {
-        0 => hex::encode(&der),
+        0 => hex::encode(&data),
         1 => {
-            let hash = Sha256::digest(&der);
+            let hash = Sha256::digest(&data);
             hex::encode(hash)
         }
         2 => {
-            let hash = Sha512::digest(&der);
+            let hash = Sha512::digest(&data);
             hex::encode(hash)
         }
         _ => {
@@ -336,7 +436,9 @@ pub fn generate_tlsa_record(
     let name = format!("_{port}._{protocol}.{domain}");
     let dns_record = format!("{name} IN TLSA {usage} {selector} {matching_type} {data}");
 
-    if usage == 3 {
+    if usage > 3 {
+        errors.push(format!("Unsupported usage: {usage}"));
+    } else if usage == 3 {
         recommendations
             .push("DANE-EE (usage=3) requires DNSSEC to be enabled on the domain".into());
     }
@@ -355,14 +457,114 @@ pub fn generate_tlsa_record(
 }
 
 /// Validate a certificate (DER) against a TLSA record.
+///
+/// `record.usage` is honoured (RFC 7671): DANE-EE (3) only requires the digest
+/// match; DANE-TA (2) additionally requires the certificate to anchor a valid
+/// signature chain; PKIX-TA/PKIX-EE (0/1) additionally require full PKIX
+/// validation, which cannot be performed without a chain and server name, so
+/// single-certificate validation always fails closed for usages 0/1.
 pub fn validate_certificate_against_tlsa(cert_der: &[u8], record: &TlsaRecord) -> bool {
-    let computed = match record.matching_type {
-        0 => hex::encode(cert_der),
-        1 => hex::encode(Sha256::digest(cert_der)),
-        2 => hex::encode(Sha512::digest(cert_der)),
+    validate_chain_against_tlsa(&[cert_der.to_vec()], record, "")
+}
+
+/// Validate a certificate chain (leaf first) against a TLSA record
+/// (RFC 6698 selectors/usage, RFC 7671 §3).
+pub fn validate_chain_against_tlsa(chain: &[Vec<u8>], record: &TlsaRecord, domain: &str) -> bool {
+    if chain.is_empty() {
+        return false;
+    }
+    // Unknown usage/selector/matching-type values must not match anything.
+    if record.usage > 3 || record.selector > 1 || record.matching_type > 2 {
+        return false;
+    }
+    match record.usage {
+        // DANE-EE: association data matches the leaf certificate.
+        3 => cert_matches(&chain[0], record),
+        // DANE-TA: a chain certificate matches AND the leaf chains to it.
+        2 => match chain.iter().position(|der| cert_matches(der, record)) {
+            Some(anchor_idx) => chain_signatures_valid(chain, anchor_idx),
+            None => false,
+        },
+        // PKIX-EE: leaf matches AND the chain validates against public roots.
+        1 => pkix_chain_valid(chain, domain) && cert_matches(&chain[0], record),
+        // PKIX-TA: a chain certificate matches AND the chain validates.
+        0 => pkix_chain_valid(chain, domain) && chain.iter().any(|der| cert_matches(der, record)),
+        _ => false,
+    }
+}
+
+/// Compute the association data for a certificate according to the TLSA
+/// selector/matching-type and compare it (case-insensitively) with the record.
+fn cert_matches(cert_der: &[u8], record: &TlsaRecord) -> bool {
+    let data: Vec<u8> = match record.selector {
+        // Selector 0: the full certificate DER.
+        0 => cert_der.to_vec(),
+        // Selector 1: the SubjectPublicKeyInfo DER (RFC 6698 §2.1.2).
+        1 => {
+            let Ok((_, cert)) = x509_parser::prelude::X509Certificate::from_der(cert_der) else {
+                return false;
+            };
+            cert.public_key().raw.to_vec()
+        }
         _ => return false,
     };
-    computed.to_lowercase() == record.certificate_association_data.to_lowercase()
+    let computed = match record.matching_type {
+        0 => hex::encode(data),
+        1 => hex::encode(Sha256::digest(&data)),
+        2 => hex::encode(Sha512::digest(&data)),
+        _ => return false,
+    };
+    computed.eq_ignore_ascii_case(&record.certificate_association_data)
+}
+
+/// Verify the cryptographic signature of each certificate up to the anchor.
+fn chain_signatures_valid(chain_der: &[Vec<u8>], anchor_idx: usize) -> bool {
+    let mut chain = Vec::with_capacity(chain_der.len());
+    for der in chain_der {
+        let Ok((_, cert)) = x509_parser::prelude::X509Certificate::from_der(der) else {
+            return false;
+        };
+        chain.push(cert);
+    }
+    for i in 0..anchor_idx {
+        let issuer_key = chain[i + 1].public_key();
+        if chain[i].verify_signature(Some(issuer_key)).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Full PKIX chain validation against the bundled public roots (webpki-roots).
+fn pkix_chain_valid(chain_der: &[Vec<u8>], domain: &str) -> bool {
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+    let Some(leaf) = chain_der.first() else {
+        return false;
+    };
+    let Ok(server_name) = ServerName::try_from(domain.to_string()) else {
+        return false;
+    };
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let Ok(verifier) = rustls::client::WebPkiServerVerifier::builder(std::sync::Arc::new(root_store))
+        .build()
+    else {
+        return false;
+    };
+
+    let end_entity = CertificateDer::from(leaf.clone());
+    let intermediates: Vec<CertificateDer> = chain_der[1..]
+        .iter()
+        .map(|der| CertificateDer::from(der.clone()))
+        .collect();
+
+    verifier
+        .verify_server_cert(&end_entity, &intermediates, &server_name, &[], UnixTime::now())
+        .is_ok()
 }
 
 /// Describe a TLSA record in human‑readable form.
@@ -446,7 +648,8 @@ fn extract_der_from_pem(pem: &str) -> Option<Vec<u8>> {
     B64.decode(&b64).ok()
 }
 
-async fn fetch_remote_leaf_certificate(domain: &str, port: u16) -> anyhow::Result<Vec<u8>> {
+/// Fetch the full peer certificate chain (leaf first) over TLS.
+async fn fetch_remote_cert_chain(domain: String, port: u16) -> anyhow::Result<Vec<Vec<u8>>> {
     let addr = format!("{domain}:{port}");
     let tcp = timeout(Duration::from_secs(10), TcpStream::connect(&addr))
         .await
@@ -472,11 +675,7 @@ async fn fetch_remote_leaf_certificate(domain: &str, port: u16) -> anyhow::Resul
         .peer_certificates()
         .ok_or_else(|| anyhow::anyhow!("No peer certificates from {addr}"))?;
 
-    let leaf = certs
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("Missing leaf certificate from {addr}"))?;
-
-    Ok(leaf.to_vec())
+    Ok(certs.iter().map(|c| c.to_vec()).collect())
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────
@@ -484,6 +683,14 @@ async fn fetch_remote_leaf_certificate(domain: &str, port: u16) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use x509_parser::prelude::FromDer;
+
+    fn test_cert_pem(san: &str) -> String {
+        let params = rcgen::CertificateParams::new(vec![san.to_string()]).unwrap();
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        cert.pem()
+    }
 
     #[test]
     fn test_parse_tlsa_data() {
@@ -497,9 +704,9 @@ mod tests {
 
     #[test]
     fn test_generate_tlsa_record_sha256() {
-        let pem =
-            " -----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJALRiMLAh4EEAMA0G\n-----END CERTIFICATE-----";
-        let result = generate_tlsa_record(pem, "example.com", 25, "tcp", 3, 1, 1);
+        let pem = test_cert_pem("example.com");
+        let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 1, 1);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert!(!result.record.certificate_association_data.is_empty());
         assert!(result.dns_record.contains("_25._tcp.example.com"));
         assert!(result.dns_record.contains("IN TLSA 3 1 1"));
@@ -553,5 +760,244 @@ mod tests {
         assert!(doh_response_should_try_next(
             &serde_json::json!({ "Status": 5 })
         ));
+    }
+
+    // ── FIX-D (H13): selector/usage/matching-type handling ─────────────────
+
+    #[test]
+    fn test_generate_tlsa_selector1_hashes_spki_not_full_der() {
+        let pem = test_cert_pem("example.com");
+        let der = extract_der_from_pem(&pem).unwrap();
+        let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&der).unwrap();
+        let expected = hex::encode(Sha256::digest(cert.public_key().raw));
+
+        let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 1, 1);
+        assert!(
+            result.errors.is_empty(),
+            "errors: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            result.record.certificate_association_data, expected,
+            "selector=1 must hash the SubjectPublicKeyInfo, not the full certificate"
+        );
+        assert_ne!(
+            result.record.certificate_association_data,
+            hex::encode(Sha256::digest(&der)),
+            "selector=1 must NOT be the full-certificate hash"
+        );
+    }
+
+    #[test]
+    fn test_tlsa_selector1_record_matches_cert() {
+        let pem = test_cert_pem("example.com");
+        let der = extract_der_from_pem(&pem).unwrap();
+        let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 1, 1);
+        assert!(validate_certificate_against_tlsa(&der, &result.record));
+        // The SPKI-derived record must not match when hashing the full DER.
+        assert_ne!(
+            result.record.certificate_association_data,
+            hex::encode(Sha256::digest(&der))
+        );
+    }
+
+    #[test]
+    fn test_tlsa_tampered_cert_fails() {
+        let pem = test_cert_pem("example.com");
+        let der = extract_der_from_pem(&pem).unwrap();
+        let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 1, 1);
+        // Flip one byte INSIDE the SubjectPublicKeyInfo key material.
+        let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&der).unwrap();
+        let spki_offset = cert.public_key().raw.as_ptr() as usize - der.as_ptr() as usize;
+        let mut tampered = der.clone();
+        tampered[spki_offset + 8] ^= 0x01;
+        assert_ne!(tampered, der);
+        assert!(!validate_certificate_against_tlsa(&tampered, &result.record));
+    }
+
+    #[test]
+    fn test_tlsa_usage1_cert_not_chainable_fails() {
+        // usage=1 (PKIX-EE): a self-signed cert not chainable to a public
+        // trust store must fail even though the digest matches.
+        let pem = test_cert_pem("example.com");
+        let der = extract_der_from_pem(&pem).unwrap();
+        let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 1, 0, 1);
+        assert!(
+            !validate_certificate_against_tlsa(&der, &result.record),
+            "usage=1 must require PKIX chain validation"
+        );
+    }
+
+    #[test]
+    fn test_tlsa_unknown_usage_255_not_supported() {
+        let pem = test_cert_pem("example.com");
+        let der = extract_der_from_pem(&pem).unwrap();
+        let record = TlsaRecord {
+            usage: 255,
+            selector: 0,
+            matching_type: 1,
+            certificate_association_data: hex::encode(Sha256::digest(&der)),
+        };
+        assert!(
+            !validate_certificate_against_tlsa(&der, &record),
+            "unknown usage must not be treated as supported"
+        );
+    }
+
+    #[test]
+    fn test_tlsa_dane_ta_matches_ca_signed_chain() {
+        // DANE-TA (usage=2): leaf chained to a matching anchor certificate.
+        let ca_params = rcgen::CertificateParams::new(vec!["ca.example.com".to_string()]).unwrap();
+        let mut ca_params = ca_params;
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let ca_pem = ca_cert.pem();
+
+        let leaf_params =
+            rcgen::CertificateParams::new(vec!["mail.example.com".to_string()]).unwrap();
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+
+        let chain = vec![leaf_cert.der().to_vec(), ca_cert.der().to_vec()];
+
+        // Anchor = CA cert, usage 2, selector 0, matching SHA-256.
+        let ca_der = ca_cert.der().to_vec();
+        let record = TlsaRecord {
+            usage: 2,
+            selector: 0,
+            matching_type: 1,
+            certificate_association_data: hex::encode(Sha256::digest(&ca_der)),
+        };
+        assert!(validate_chain_against_tlsa(&chain, &record, "mail.example.com"));
+
+        // A record matching an unrelated cert must fail.
+        let other_pem = test_cert_pem("other.example.com");
+        let other_der = extract_der_from_pem(&other_pem).unwrap();
+        let unrelated = TlsaRecord {
+            usage: 2,
+            selector: 0,
+            matching_type: 1,
+            certificate_association_data: hex::encode(Sha256::digest(&other_der)),
+        };
+        assert!(!validate_chain_against_tlsa(&chain, &unrelated, "mail.example.com"));
+
+        // generation from the CA PEM must produce a matching record
+        let generated = generate_tlsa_record(&ca_pem, "example.com", 25, "tcp", 2, 0, 1);
+        assert!(
+            generated.errors.is_empty(),
+            "errors: {:?}",
+            generated.errors
+        );
+        assert!(validate_chain_against_tlsa(
+            &chain,
+            &generated.record,
+            "mail.example.com"
+        ));
+    }
+
+    #[test]
+    fn test_tlsa_unknown_selector_and_matching_type_not_supported() {
+        let pem = test_cert_pem("example.com");
+        let der = extract_der_from_pem(&pem).unwrap();
+        let record = TlsaRecord {
+            usage: 3,
+            selector: 9,
+            matching_type: 1,
+            certificate_association_data: hex::encode(Sha256::digest(&der)),
+        };
+        assert!(!validate_certificate_against_tlsa(&der, &record));
+        let record = TlsaRecord {
+            usage: 3,
+            selector: 0,
+            matching_type: 9,
+            certificate_association_data: hex::encode(Sha256::digest(&der)),
+        };
+        assert!(!validate_certificate_against_tlsa(&der, &record));
+    }
+
+    // ── FIX-D (H13c): cache hit must re-validate the live certificate ──────
+
+    #[tokio::test]
+    async fn test_dane_cache_hit_does_not_report_supported_without_match() {
+        let cert_a = test_cert_pem("example.com");
+        let _der_a = extract_der_from_pem(&cert_a).unwrap();
+        let der_b = extract_der_from_pem(&test_cert_pem("other.example")).unwrap();
+
+        let record = generate_tlsa_record(&cert_a, "example.com", 25, "tcp", 3, 1, 1).record;
+        let name = "_25._tcp.example.com";
+        TLSA_CACHE.insert(
+            name.to_string(),
+            CachedTlsaRecords {
+                records: vec![record],
+                fetched_at: Instant::now(),
+            },
+        );
+
+        let config = DnsConfig {
+            dnssec_enabled: false,
+            tlsa_cache_ttl_secs: 300,
+        };
+
+        // A fresh cache entry exists, but the live certificate (returned by
+        // the fetcher) does NOT match the cached TLSA records. The cache hit
+        // must NOT report supported.
+        let result = verify_dane_with_fetcher(
+            "example.com",
+            25,
+            "tcp",
+            &config,
+            move |_d: String, _p: u16| {
+                let der = der_b.clone();
+                async move { Ok(vec![der]) }
+            },
+        )
+        .await;
+        assert!(
+            !result.supported,
+            "cache hit must re-validate the live certificate; got supported={}",
+            result.supported
+        );
+
+        // Clean up the static cache for other tests.
+        TLSA_CACHE.invalidate(name);
+    }
+
+    #[tokio::test]
+    async fn test_dane_cache_hit_still_passes_when_cert_matches() {
+        let cert_a = test_cert_pem("example.com");
+        let der_a = extract_der_from_pem(&cert_a).unwrap();
+        let _ = &der_a;
+        let record = generate_tlsa_record(&cert_a, "example.com", 25, "tcp", 3, 1, 1).record;
+        let name = "_25._tcp.matching.example.com";
+        TLSA_CACHE.insert(
+            name.to_string(),
+            CachedTlsaRecords {
+                records: vec![record],
+                fetched_at: Instant::now(),
+            },
+        );
+
+        let config = DnsConfig {
+            dnssec_enabled: false,
+            tlsa_cache_ttl_secs: 300,
+        };
+        let result = verify_dane_with_fetcher(
+            "matching.example.com",
+            25,
+            "tcp",
+            &config,
+            move |_d: String, _p: u16| {
+                let der = der_a.clone();
+                async move { Ok(vec![der]) }
+            },
+        )
+        .await;
+        assert!(result.supported, "matching live cert must still pass on cache hits");
+        TLSA_CACHE.invalidate(name);
     }
 }
