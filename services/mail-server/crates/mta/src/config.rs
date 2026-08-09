@@ -105,6 +105,14 @@ pub struct BounceConfig {
     pub verp_domain: String,
     #[serde(default = "default_true")]
     pub verp_sanitize: bool,
+    #[serde(default = "default_bounce_max_message_size")]
+    pub max_message_size: usize,
+    #[serde(default = "default_max_conn_per_ip")]
+    pub max_connections_per_ip: u32,
+    #[serde(default = "default_max_msg_per_conn")]
+    pub max_messages_per_connection: u32,
+    #[serde(default = "default_max_msgs_per_ip_per_hour")]
+    pub max_messages_per_ip_per_hour: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -119,6 +127,10 @@ pub struct FeedbackConfig {
     pub hostname: String,
     #[serde(default = "default_max_arf_size")]
     pub max_arf_size: usize,
+    #[serde(default = "default_max_conn_per_ip")]
+    pub max_connections_per_ip: u32,
+    #[serde(default = "default_max_msg_per_conn")]
+    pub max_messages_per_connection: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -280,6 +292,10 @@ impl_default!(
         hostname: default_hostname(),
         verp_domain: default_verp_domain(),
         verp_sanitize: true,
+        max_message_size: default_bounce_max_message_size(),
+        max_connections_per_ip: default_max_conn_per_ip(),
+        max_messages_per_connection: default_max_msg_per_conn(),
+        max_messages_per_ip_per_hour: default_max_msgs_per_ip_per_hour(),
     }
 );
 impl_default!(
@@ -290,6 +306,8 @@ impl_default!(
         port: default_fbl_port(),
         hostname: default_hostname(),
         max_arf_size: default_max_arf_size(),
+        max_connections_per_ip: default_max_conn_per_ip(),
+        max_messages_per_connection: default_max_msg_per_conn(),
     }
 );
 impl_default!(
@@ -450,6 +468,12 @@ fn default_bimi_svg_max_size() -> usize {
 fn default_max_arf_size() -> usize {
     1024 * 1024
 }
+fn default_bounce_max_message_size() -> usize {
+    1024 * 1024
+}
+fn default_max_msgs_per_ip_per_hour() -> u32 {
+    2000
+}
 
 impl MtaConfig {
     /// Load configuration from environment variables.
@@ -494,6 +518,22 @@ impl MtaConfig {
                 hostname: std::env::var("BOUNCE_HOSTNAME").unwrap_or_else(|_| default_hostname()),
                 verp_domain: std::env::var("VERP_DOMAIN").unwrap_or_else(|_| default_verp_domain()),
                 verp_sanitize: parse_bool_env("VERP_SANITIZE", true),
+                max_message_size: parse_usize_env(
+                    "BOUNCE_MAX_MESSAGE_SIZE",
+                    default_bounce_max_message_size(),
+                ),
+                max_connections_per_ip: parse_u32_env(
+                    "BOUNCE_MAX_CONNS_PER_IP",
+                    default_max_conn_per_ip(),
+                ),
+                max_messages_per_connection: parse_u32_env(
+                    "BOUNCE_MAX_MSGS_PER_CONN",
+                    default_max_msg_per_conn(),
+                ),
+                max_messages_per_ip_per_hour: parse_u32_env(
+                    "BOUNCE_MAX_MSGS_PER_IP_PER_HOUR",
+                    default_max_msgs_per_ip_per_hour(),
+                ),
             },
             feedback: FeedbackConfig {
                 enabled: parse_bool_env("FBL_ENABLED", true),
@@ -501,6 +541,14 @@ impl MtaConfig {
                 port: parse_u16_env("FBL_PORT", default_fbl_port()),
                 hostname: std::env::var("FBL_HOSTNAME").unwrap_or_else(|_| default_hostname()),
                 max_arf_size: parse_usize_env("MAX_ARF_SIZE", default_max_arf_size()),
+                max_connections_per_ip: parse_u32_env(
+                    "FBL_MAX_CONNS_PER_IP",
+                    default_max_conn_per_ip(),
+                ),
+                max_messages_per_connection: parse_u32_env(
+                    "FBL_MAX_MSGS_PER_CONN",
+                    default_max_msg_per_conn(),
+                ),
             },
             submission: SubmissionConfig {
                 enabled: parse_bool_env("SUBMISSION_ENABLED", true),
@@ -729,6 +777,13 @@ fn parse_u16_env(name: &str, default: u16) -> u16 {
 }
 
 fn parse_usize_env(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn parse_u32_env(name: &str, default: u32) -> u32 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())

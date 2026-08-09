@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use bytes::BytesMut;
+use dashmap::DashMap;
 use hmac::{Hmac, Mac};
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
+use super::bounce::{append_data_line, connection_allowed, ConnGuard};
 use crate::config::FeedbackConfig;
 
 // #148:Shared DNS resolver – avoids creating a new one per rDNS verification call
@@ -84,6 +86,8 @@ pub struct FeedbackLoopServer {
     trusted_domains: HashSet<String>,
     /// #149:Bounded rDNS cache with 10-minute TTL (replaces unbounded DashMap).
     rdns_cache: Cache<IpAddr, bool>,
+    /// Active connections per IP — enforces `max_connections_per_ip`.
+    connections: Arc<DashMap<IpAddr, u32>>,
     shutdown: Arc<Notify>,
 }
 
@@ -111,6 +115,7 @@ impl FeedbackLoopServer {
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(600))
                 .build(),
+            connections: Arc::new(DashMap::new()),
             shutdown: Arc::new(Notify::new()),
         }
     }
@@ -152,6 +157,19 @@ impl FeedbackLoopServer {
             return;
         }
 
+        // Enforce the per-IP connection cap.
+        let active = self.connections.get(&ip).map(|e| *e).unwrap_or(0);
+        if !connection_allowed(active, self.config.max_connections_per_ip) {
+            let mut s = BufStream::new(socket);
+            let _ = write_line(&mut s, "421 Too many connections from your IP\r\n").await;
+            return;
+        }
+        *self.connections.entry(ip).or_insert(0) += 1;
+        let _conn_guard = ConnGuard {
+            conns: self.connections.clone(),
+            ip,
+        };
+
         let mut stream = BufStream::new(socket);
         let greeting = format!("220 {} FBL Processor\r\n", self.hostname);
         if write_line(&mut stream, &greeting).await.is_err() {
@@ -159,6 +177,8 @@ impl FeedbackLoopServer {
         }
 
         let mut rcpt_to = Vec::<String>::new();
+        let mut mail_from_seen = false;
+        let mut msgs_this_conn: u32 = 0;
         let mut line = String::new();
 
         loop {
@@ -179,9 +199,19 @@ impl FeedbackLoopServer {
             if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
                 let _ = write_line(&mut stream, &format!("250 {}\r\n", self.hostname)).await;
             } else if cmd.starts_with("MAIL FROM") {
+                // ARF reports from ISP FBL sources are regular mail with a
+                // real envelope sender — the rDNS/FCrDNS verification is the
+                // source of trust here, not a null sender. We only enforce
+                // the MAIL → RCPT ordering.
+                mail_from_seen = true;
+                rcpt_to.clear();
                 let _ = write_line(&mut stream, "250 OK\r\n").await;
             } else if cmd.starts_with("RCPT TO") {
                 let addr = extract_addr(&line);
+                if !mail_from_seen {
+                    let _ = write_line(&mut stream, "503 Bad sequence (send MAIL FROM first)\r\n").await;
+                    continue;
+                }
                 // Accept abuse@, complaints@, fbl@, feedback@, postmaster@
                 let local = addr.split('@').next().unwrap_or("").to_lowercase();
                 let accepted = local == "abuse"
@@ -196,12 +226,17 @@ impl FeedbackLoopServer {
                     let _ = write_line(&mut stream, "550 Invalid FBL recipient\r\n").await;
                 }
             } else if cmd.starts_with("DATA") {
-                if rcpt_to.is_empty() {
+                if !mail_from_seen || rcpt_to.is_empty() {
                     let _ = write_line(&mut stream, "503 Bad sequence\r\n").await;
+                    continue;
+                }
+                if msgs_this_conn >= self.config.max_messages_per_connection {
+                    let _ = write_line(&mut stream, "452 Too many messages from this connection\r\n").await;
                     continue;
                 }
                 let _ = write_line(&mut stream, "354 Go ahead\r\n").await;
                 let mut message = BytesMut::new();
+                let mut too_large = false;
                 loop {
                     line.clear();
                     match stream.read_line(&mut line).await {
@@ -210,30 +245,51 @@ impl FeedbackLoopServer {
                             if line.trim() == "." {
                                 break;
                             }
-                            if line.starts_with("..") {
-                                message.extend_from_slice(&line.as_bytes()[1..]);
-                            } else {
-                                message.extend_from_slice(line.as_bytes());
+                            // M57: enforce max_arf_size *while* reading so the
+                            // payload is never fully buffered before rejection.
+                            if !append_data_line(&mut message, &line, self.config.max_arf_size) {
+                                too_large = true;
+                                loop {
+                                    line.clear();
+                                    match stream.read_line(&mut line).await {
+                                        Ok(0) | Err(_) => break,
+                                        Ok(_) => {
+                                            if line.trim() == "." {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                break;
                             }
                         }
                         Err(_) => break,
                     }
                 }
 
-                match self.process_complaint(ip, &message).await {
-                    Ok(id) => {
-                        let _ = write_line(&mut stream, &format!("250 OK id={id}\r\n")).await;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Complaint processing failed");
-                        let _ = write_line(&mut stream, "451 Temporary failure\r\n").await;
+                if too_large {
+                    let _ = write_line(&mut stream, "552 5.3.4 Message size exceeds fixed limit\r\n").await;
+                } else {
+                    match self.process_complaint(ip, &message).await {
+                        Ok(id) => {
+                            let _ = write_line(&mut stream, &format!("250 OK id={id}\r\n")).await;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Complaint processing failed");
+                            let _ = write_line(&mut stream, "451 Temporary failure\r\n").await;
+                        }
                     }
                 }
+                msgs_this_conn += 1;
                 rcpt_to.clear();
             } else if cmd.starts_with("QUIT") {
                 let _ = write_line(&mut stream, "221 Bye\r\n").await;
                 break;
             } else if cmd.starts_with("RSET") || cmd.starts_with("NOOP") {
+                if cmd.starts_with("RSET") {
+                    rcpt_to.clear();
+                    mail_from_seen = false;
+                }
                 let _ = write_line(&mut stream, "250 OK\r\n").await;
             } else if cmd.starts_with("VRFY") || cmd.starts_with("EXPN") {
                 // Avoid leaking recipient validity.
@@ -277,7 +333,7 @@ impl FeedbackLoopServer {
                     if self
                         .trusted_domains
                         .iter()
-                        .any(|domain| hostname.ends_with(domain.as_str()))
+                        .any(|domain| hostname_matches_trusted(&hostname, domain))
                     {
                         matched_hostname = Some(hostname);
                         break;
@@ -320,7 +376,7 @@ impl FeedbackLoopServer {
     async fn process_complaint(&self, source_ip: IpAddr, raw: &[u8]) -> anyhow::Result<String> {
         let complaint_id = Uuid::new_v4().to_string();
 
-        // O-1.5:Reject oversized ARF payloads before parsing
+        // O-1.5:Reject oversized ARF payloads (also enforced while reading).
         if raw.len() > self.config.max_arf_size {
             warn!(
                 size = raw.len(),
@@ -342,13 +398,19 @@ impl FeedbackLoopServer {
         // Match to original message
         let original_id = complaint.original_message_id.clone();
 
-        // Record complaint event
-        sqlx::query(
+        // Record complaint event. The unique index on
+        // (source_ip, original_message_id, original_recipient) makes retries
+        // and replays idempotent: only a freshly inserted row may run side
+        // effects (M55).
+        let inserted = sqlx::query(
             r#"INSERT INTO complaint_events (
                 id, original_message_id, original_recipient,
                 feedback_type, source_ip, reporting_mta,
                 user_agent, arrival_date, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())"#,
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            ON CONFLICT (source_ip, original_message_id, original_recipient)
+            WHERE original_message_id IS NOT NULL AND original_recipient IS NOT NULL
+            DO NOTHING"#,
         )
         .bind(&complaint_id)
         .bind(&original_id)
@@ -359,19 +421,62 @@ impl FeedbackLoopServer {
         .bind(&complaint.user_agent)
         .bind(&complaint.arrival_date)
         .execute(&self.pool)
-        .await?;
+        .await?
+        .rows_affected()
+            > 0;
 
-        // Add recipient to suppression list (complaints → always suppress)
-        if let Some(ref recipient) = complaint.original_recipient {
-            sqlx::query(
-                "INSERT INTO suppression_list (email, reason, source, created_at) VALUES ($1, 'complaint', 'fbl', NOW()) ON CONFLICT DO NOTHING"
-            )
-            .bind(recipient)
-            .execute(&self.pool)
-            .await?;
+        if !inserted {
+            debug!(
+                msg_id = ?original_id,
+                dedup_key = ?complaint_dedup_key(&complaint, source_ip),
+                "Duplicate complaint event, skipping side effects"
+            );
+            return Ok(complaint_id);
         }
 
-        // Update sender reputation
+        // Only act on complaints referencing a message this system sent:
+        // resolve the tenant before touching suppression. The FBL source is
+        // rDNS-verified, so reputation counting and webhooks still run for
+        // unknown messages (e.g. pruned from email_queue) — only the
+        // suppression is gated on verification.
+        let suppression_target: Option<(String, String)> = match original_id.as_deref() {
+            Some(mid) => match self.lookup_sent_message(mid).await? {
+                None => {
+                    warn!(msg_id = %mid, "Complaint references unknown message — skipping suppression");
+                    None
+                }
+                Some((tenant_id, queued_recipient)) => match &complaint.original_recipient {
+                    Some(reported) if *reported == queued_recipient => {
+                        Some((tenant_id, reported.clone()))
+                    }
+                    Some(reported) => {
+                        warn!(
+                            reported_recipient = %reported,
+                            queued_recipient = %queued_recipient,
+                            msg_id = %mid,
+                            "Complaint recipient does not match queued recipient — dropping forged complaint"
+                        );
+                        None
+                    }
+                    None => Some((tenant_id, queued_recipient)),
+                },
+            },
+            None => {
+                warn!("Complaint carries no original message id — skipping suppression");
+                None
+            }
+        };
+
+        if let Some((tenant_id, recipient)) = suppression_target {
+            if let Err(e) = self
+                .insert_suppression(&tenant_id, &recipient, "complaint")
+                .await
+            {
+                warn!(error = %e, "Suppression write failed; continuing complaint processing");
+            }
+        }
+
+        // Update sender reputation (only for freshly inserted complaints)
         self.update_sender_reputation(&complaint).await?;
 
         // Queue webhook
@@ -401,6 +506,51 @@ impl FeedbackLoopServer {
         );
 
         Ok(complaint_id)
+    }
+
+    /// Resolve the tenant and recipient of a message this system sent.
+    ///
+    /// Looks up `email_queue` by its id or message_id. Returns `None` when the
+    /// message is unknown to this system (attacker-forged reference).
+    async fn lookup_sent_message(
+        &self,
+        message_id: &str,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        let row: Option<(String, String)> = sqlx::query_as(
+            r#"SELECT COALESCE(tenant_id, '') AS tenant_id,
+                      COALESCE(to_addresses[1], "to", '') AS recipient
+               FROM email_queue
+               WHERE id::text = $1 OR message_id::text = $1
+               LIMIT 1"#,
+        )
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.filter(|(tenant, recipient)| !tenant.is_empty() && !recipient.is_empty()))
+    }
+
+    /// Insert into the canonical `suppressions` table (C4). FBL-triggered
+    /// rows are always complaints and never removable by the API.
+    async fn insert_suppression(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO suppressions
+               (id, tenant_id, email, reason, subtype, source, created_at)
+               VALUES ($1, $2, $3, $4, 'fbl', 'fbl', NOW())
+               ON CONFLICT (tenant_id, email) DO NOTHING"#,
+        )
+        .bind(super::bounce::suppression_row_id())
+        .bind(tenant_id)
+        .bind(email)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn update_sender_reputation(&self, complaint: &ComplaintInfo) -> anyhow::Result<()> {
@@ -576,6 +726,27 @@ impl FeedbackLoopServer {
 
 // ── ARF parsing ────────────────────────────────────────────────────────────────
 
+/// Strict trusted-domain match for FBL sources (H16).
+///
+/// A PTR hostname is only trusted when it equals the domain or lives in a
+/// real subdomain of it. A bare suffix match (`evil-google.com` ending in
+/// `google.com`) is rejected — an attacker can register such names and
+/// control their own PTR + A records.
+fn hostname_matches_trusted(hostname: &str, domain: &str) -> bool {
+    hostname == domain || hostname.ends_with(&format!(".{domain}"))
+}
+
+/// Natural key used to deduplicate complaint reports (M55).
+///
+/// Only reports carrying both an original message id and an original
+/// recipient can be deduplicated; everything else is recorded but never
+/// counted toward reputation or suppression.
+fn complaint_dedup_key(info: &ComplaintInfo, source_ip: IpAddr) -> Option<String> {
+    let mid = info.original_message_id.as_deref()?;
+    let recipient = info.original_recipient.as_deref()?;
+    Some(format!("{}|{}|{}", source_ip, mid, recipient))
+}
+
 /// Parse an ARF (Abuse Reporting Format) feedback report.
 pub fn parse_arf_report(message: &str) -> ComplaintInfo {
     let mut info = ComplaintInfo {
@@ -728,5 +899,70 @@ Original-Message-ID: <original@example.com>\r\n";
         assert!(TRUSTED_FBL_SENDERS.contains(&"google.com"));
         assert!(TRUSTED_FBL_SENDERS.contains(&"microsoft.com"));
         assert!(TRUSTED_FBL_SENDERS.contains(&"yahoo.com"));
+    }
+
+    #[test]
+    fn test_hostname_matches_trusted_domain_exact() {
+        assert!(hostname_matches_trusted("google.com", "google.com"));
+    }
+
+    #[test]
+    fn test_hostname_matches_trusted_subdomain() {
+        assert!(hostname_matches_trusted("mx.google.com", "google.com"));
+        assert!(hostname_matches_trusted(
+            "outbound.mail.microsoft.com",
+            "microsoft.com"
+        ));
+    }
+
+    #[test]
+    fn test_hostname_matches_trusted_rejects_suffix_spoof() {
+        assert!(!hostname_matches_trusted("evil-google.com", "google.com"));
+        assert!(!hostname_matches_trusted("notgoogle.com", "google.com"));
+        assert!(!hostname_matches_trusted("google.com.evil.com", "google.com"));
+        assert!(!hostname_matches_trusted("google.com.", "google.com"));
+        assert!(!hostname_matches_trusted("", "google.com"));
+    }
+
+    #[test]
+    fn test_complaint_dedup_key() {
+        let info = ComplaintInfo {
+            feedback_type: "abuse".into(),
+            user_agent: None,
+            version: None,
+            original_message_id: Some("msg123@example.com".into()),
+            original_recipient: Some("victim@example.com".into()),
+            reporting_mta: None,
+            source_ip: Some("192.168.1.1".into()),
+            arrival_date: None,
+            reported_domain: None,
+            reported_uris: vec![],
+            authentication_results: None,
+        };
+        let key = complaint_dedup_key(&info, std::net::IpAddr::from([192, 168, 1, 1]));
+        assert_eq!(
+            key.as_deref(),
+            Some("192.168.1.1|msg123@example.com|victim@example.com")
+        );
+    }
+
+    #[test]
+    fn test_complaint_dedup_key_requires_identity() {
+        let info = ComplaintInfo {
+            feedback_type: "abuse".into(),
+            user_agent: None,
+            version: None,
+            original_message_id: None,
+            original_recipient: Some("victim@example.com".into()),
+            reporting_mta: None,
+            source_ip: None,
+            arrival_date: None,
+            reported_domain: None,
+            reported_uris: vec![],
+            authentication_results: None,
+        };
+        // Without a verifiable original message id we cannot dedupe —
+        // the event is recorded but never counted toward reputation.
+        assert!(complaint_dedup_key(&info, std::net::IpAddr::from([192, 168, 1, 1])).is_none());
     }
 }
