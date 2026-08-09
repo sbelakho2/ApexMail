@@ -49,6 +49,7 @@ SERVICE_DEPS_enterprise    := services/mail-server/crates/enterprise services/ma
 SERVICE_DEPS_observability := services/mail-server/crates/observability-service services/mail-server/Cargo.toml
 SERVICE_DEPS_marketing     := apps/marketing-zola
 SERVICE_DEPS_tracking      := deploy/Dockerfile.tracking services/mail-server/crates/tracking-service
+SERVICE_DEPS_status-server := services/mail-server/crates/auth-server services/mail-server/Cargo.toml
 
 .PHONY: deploy deploy-service deploy-quick deploy-restart verify
 

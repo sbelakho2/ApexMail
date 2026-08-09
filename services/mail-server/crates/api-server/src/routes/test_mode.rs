@@ -189,13 +189,13 @@ async fn test_send(
 
     // Persist message record
     let _ = sqlx::query(
-        "INSERT INTO messages (id, tenant_id, from_address, to_address, subject, status, created_at)
-         VALUES ($1::uuid, $2, $3, $4, $5, 'test', $6)"
+        "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, created_at)
+         VALUES ($1::uuid, $2, $3, $4::jsonb, $5, 'test', $6)"
     )
     .bind(&message_id)
     .bind(&auth.tenant_id)
     .bind(body.from.as_deref().unwrap_or("sender@test.apexmail.ee"))
-    .bind(&ta.address)
+    .bind(serde_json::json!([ta.address]))
     .bind(body.subject.as_deref().unwrap_or("ApexMail test message"))
     .bind(now)
     .execute(&state.db)

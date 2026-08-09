@@ -328,7 +328,7 @@ async fn list_ticket_messages(
     }
 
     let rows: Vec<TicketMessageRow> = sqlx::query_as(
-        r#"SELECT id, ticket_id, sender_id, sender_type, body, created_at
+        r#"SELECT id::text, ticket_id, author_id AS sender_id, '' AS sender_type, body, created_at
            FROM ticket_messages
            WHERE ticket_id = $1
            ORDER BY created_at ASC
@@ -392,10 +392,9 @@ async fn create_ticket_message(
     let user_id_str = auth.user_id.as_ref().map(|id| id.to_string());
 
     sqlx::query(
-        "INSERT INTO ticket_messages (id, ticket_id, sender_id, sender_type, body, created_at)
-         VALUES ($1, $2, $3, 'user', $4, $5)",
+        "INSERT INTO ticket_messages (id, ticket_id, author_id, body, is_internal, created_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, false, $4)",
     )
-    .bind(id.to_string())
     .bind(&ticket_id)
     .bind(&user_id_str)
     .bind(&body.body)

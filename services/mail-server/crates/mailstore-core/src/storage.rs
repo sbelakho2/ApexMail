@@ -409,13 +409,14 @@ impl MessageStorage {
 
         // ON CONFLICT DO UPDATE with FALSE WHERE ensures we don't actually update,
         // but returns no rows if a concurrent insert beat us. We then fall back to
-        // fetching within the same transaction.
+        // fetching within the same transaction. The conflict target must match the
+        // unique index (migration 001) on the COALESCE'd parent_id expression.
         // SAFETY: MAILBOX_COLUMNS is a compile-time constant string, not user input.
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO mail_mailboxes (account_id, name, mailbox_type)
             VALUES ($1, $2, $3)
-            ON CONFLICT (account_id, name, parent_id) DO UPDATE
+            ON CONFLICT (account_id, name, (COALESCE(parent_id, '00000000-0000-0000-0000-000000000000'::uuid))) DO UPDATE
                 SET name = EXCLUDED.name
             WHERE FALSE
             RETURNING {}

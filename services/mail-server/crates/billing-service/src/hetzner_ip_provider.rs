@@ -170,8 +170,8 @@ impl HetznerIpProvider {
         let request_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             r#"
-            INSERT INTO ip_provisioning_queue (id, tenant_id, requested_at, status)
-            VALUES ($1, $2, NOW(), 'pending')
+            INSERT INTO ip_provisioning_queue (id, tenant_id, request_type, region, quantity, status, created_at)
+            VALUES ($1, $2, 'dedicated_ip', 'us-east-1', 1, 'pending', NOW())
             "#,
         )
         .bind(&request_id)
@@ -265,7 +265,7 @@ impl HetznerIpProvider {
             r#"
             INSERT INTO dedicated_ips (
                 id, tenant_id, ip_address, hetzner_floating_ip_id, status,
-                rdns_hostname, assigned_server_id, warmup_day, created_at, activated_at
+                rdns_hostname, hetzner_server_id, warmup_day, created_at, allocated_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
@@ -397,7 +397,7 @@ impl HetznerIpProvider {
         sqlx::query(
             r#"
             UPDATE dedicated_ips
-            SET status = 'released', released_at = NOW()
+            SET status = 'released'
             WHERE id = $1
             "#,
         )
@@ -433,7 +433,7 @@ impl HetznerIpProvider {
         >(
             r#"
             SELECT id, tenant_id, ip_address, hetzner_floating_ip_id, status,
-                   rdns_hostname, assigned_server_id, warmup_day, created_at, activated_at
+                   rdns_hostname, hetzner_server_id, warmup_day, created_at, allocated_at
             FROM dedicated_ips
             WHERE tenant_id = $1 AND status != 'released'
             ORDER BY created_at
@@ -490,8 +490,8 @@ impl HetznerIpProvider {
         let result = sqlx::query(
             r#"
             UPDATE dedicated_ips
-            SET warmup_day = EXTRACT(DAY FROM NOW() - activated_at)::int
-            WHERE status = 'warming' AND activated_at IS NOT NULL
+            SET warmup_day = EXTRACT(DAY FROM NOW() - allocated_at)::int
+            WHERE status = 'warming' AND allocated_at IS NOT NULL
             "#,
         )
         .execute(&self.db)
@@ -525,7 +525,7 @@ impl HetznerIpProvider {
             r#"
             UPDATE ip_provisioning_queue
             SET status = $2, error_message = $3, completed_at = NOW()
-            WHERE id = $1
+            WHERE id = $1::uuid
             "#,
         )
         .bind(request_id)
@@ -545,7 +545,7 @@ impl HetznerIpProvider {
             SELECT id, tenant_id
             FROM ip_provisioning_queue
             WHERE status = 'pending'
-            ORDER BY requested_at
+            ORDER BY created_at
             LIMIT 10
             "#,
         )
@@ -560,7 +560,7 @@ impl HetznerIpProvider {
                 r#"
                 UPDATE ip_provisioning_queue
                 SET status = 'processing'
-                WHERE id = $1
+                WHERE id = $1::uuid
                 "#,
             )
             .bind(&request_id)
@@ -571,7 +571,7 @@ impl HetznerIpProvider {
             // Get tenant's primary domain for rDNS
             let domain: Option<String> = sqlx::query_scalar(
                 r#"
-                SELECT domain
+                SELECT name
                 FROM domains
                 WHERE tenant_id = $1 AND verified = true
                 ORDER BY created_at

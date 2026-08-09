@@ -25,8 +25,8 @@ ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DE
 -- DOMAINS — Add missing columns, keep both old and new for compatibility
 -- =============================================================================
 
--- Rename 'name' to 'domain' (repo uses 'domain')
-ALTER TABLE domains RENAME COLUMN name TO domain;
+-- NOTE: prod converged on `name` (services/mail-server migrations tree); the
+-- old 'domain' convention was dropped. Keep `name` as the canonical column.
 
 -- Add 'status' column (repo uses status enum instead of is_verified boolean)
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending';
@@ -37,14 +37,13 @@ UPDATE domains SET status = CASE WHEN is_verified THEN 'verified' ELSE 'pending'
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS dns_records JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}';
 
--- Recreate the unique index with the new column name
+-- Recreate the unique index with the canonical column name
 ALTER TABLE domains DROP CONSTRAINT IF EXISTS domains_tenant_id_name_key;
 DROP INDEX IF EXISTS domains_tenant_id_name_key;
-CREATE UNIQUE INDEX IF NOT EXISTS domains_tenant_id_domain_key ON domains(tenant_id, domain);
+CREATE UNIQUE INDEX IF NOT EXISTS domains_tenant_id_name_key ON domains(tenant_id, name);
 
--- Rename the existing name index
-DROP INDEX IF EXISTS idx_domains_name;
-CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
+-- Ensure the name index exists
+CREATE INDEX IF NOT EXISTS idx_domains_name ON domains(name);
 
 -- =============================================================================
 -- MESSAGES — Add missing columns
@@ -92,8 +91,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_campaign ON messages(campaign_id) WHERE 
 -- SUPPRESSIONS — Add missing columns
 -- =============================================================================
 
--- Rename 'reason' to 'type' (repo uses 'type')
-ALTER TABLE suppressions RENAME COLUMN reason TO type;
+-- NOTE: prod converged on `reason` (088_unify_email_queue_inbound_schema);
+-- the old 'type' convention was dropped. Keep the superset columns below.
 
 -- Add missing columns
 ALTER TABLE suppressions ADD COLUMN IF NOT EXISTS scope VARCHAR(50) NOT NULL DEFAULT 'global';

@@ -168,15 +168,22 @@ pub async fn create_credit_note(
             // transaction so that wallet + credit_note are consistent.
             sqlx::query(
                 r#"
+                WITH ensure_wallet AS (
+                    INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+                    VALUES ($1, 0, 0, 'eur', NOW(), NOW())
+                    ON CONFLICT (tenant_id) DO UPDATE SET updated_at = wallets.updated_at
+                    RETURNING id, balance
+                )
                 INSERT INTO wallet_transactions
-                    (tenant_id, amount, transaction_type, reference_type, reference_id, description, created_at)
-                VALUES ($1, $2, 'credit', 'credit_note', $3, $4, $5)
+                    (wallet_id, tenant_id, type, amount, balance_after, description, reference, created_at)
+                SELECT id, $1, 'credit', $2::int4, balance, $3, $4, $5
+                FROM ensure_wallet
                 "#,
             )
             .bind(&input.tenant_id)
             .bind(input.amount) // positive amount = credit
-            .bind(row.id)
             .bind(&input.reason)
+            .bind(row.id.to_string())
             .bind(now)
             .execute(&mut *tx)
             .await

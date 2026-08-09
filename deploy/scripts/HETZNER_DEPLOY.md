@@ -162,8 +162,8 @@ The workflow:
    into `secrets/` on the host
 6. Logs in to GHCR on the host, `docker compose pull`, `up -d --remove-orphans`
    over the canonical service set (`api-server mta imap-server mailstore worker
-   enterprise tracking-service observability marketing postgres-backup nginx
-   postgres redis clickhouse certbot`)
+   enterprise tracking observability marketing status-server postgres-backup
+   nginx postgres redis clickhouse certbot`)
 7. Reloads nginx to re-resolve upstream container IPs
 8. Verifies the rollout and the TLS certificate (warns if self-signed)
 9. Shreds the SSH key from the runner

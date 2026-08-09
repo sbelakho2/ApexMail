@@ -35,6 +35,7 @@ build step. The namespace (`ghcr.io/<owner>/<repo>`) is derived from
 | `tracking-service`    | `ghcr.io/<ns>/tracking-service`              | (deploy/Dockerfile.tracking) | `tracking-service`|
 | `observability`       | `ghcr.io/<ns>/observability`                 | `observability`              | `observability`   |
 | `marketing`           | `ghcr.io/<ns>/marketing`                     | (apps/marketing-zola)        | nginx static      |
+| `status-server`       | `ghcr.io/<ns>/status-server`                 | `auth-server`                | `auth-server`     |
 
 Notes:
 
@@ -46,6 +47,12 @@ Notes:
   built by `deploy.yml` from the `imap-server` / `mailstore` Dockerfile
   targets, and are pulled + started by `deploy-hetzner.yml` alongside the
   other services. Do not remove them from any of the three places.
+- `status-server` (the public status page + status API behind
+  `status.apexmail.ee` and `apexmail.ee/api/status-data`) is built from the
+  Dockerfile's **`auth-server`** stage — the image is published as
+  `status-server`, matching its compose service key and the nginx upstream
+  name. The stage is not renamed to avoid touching the `auth-server` crate
+  references; only the image name is canonical.
 - `ops-service` is intentionally **not** built or deployed — it had no compose
   consumer and existed only as drift.
 - The dev `docker-compose.yml` builds the `mta` service from the `smtp-edge`
@@ -58,10 +65,6 @@ Notes:
 These crates exist in the workspace but are **not** part of the production
 stack. Do not add them to compose, do not deploy them:
 
-- **`auth-server`** (`services/mail-server/crates/auth-server`) — legacy
-  duplicate of the auth flows now served by `api-server` (`/v1/auth/*`,
-  `/api/auth/*`). Not referenced in any compose file, not built by
-  `deploy.yml`, not running on production. Do not use.
 - **`submission`** (`services/mail-server/crates/submission`, binary
   `submission-server`) — dev/duplicate SMTP-submission implementation.
   Production SMTP submission (ports 25/465/587) is served exclusively by
@@ -69,6 +72,10 @@ stack. Do not add them to compose, do not deploy them:
 - **`smtp-edge`** — dev-only. The dev `docker-compose.yml` `mta` service
   builds the `smtp-edge` Dockerfile stage for local use; production uses the
   full `mta` image. Never referenced in `docker-compose.prod.yml`.
+
+> `auth-server` (`services/mail-server/crates/auth-server`) is **deployed**
+> — as the `status-server` service/image (see the canonical map above). It is
+> not a standalone image name; the crate's binary serves the status page/API.
 
 ## TLS certificate management (production)
 
@@ -85,13 +92,15 @@ stack. Do not add them to compose, do not deploy them:
 - The host `/etc/letsencrypt` tree is **legacy** — it is no longer mounted
   by any compose service and nothing renews it. Do not use it for new
   TLS wiring.
-- **`status.apexmail.ee`** — the nginx vhost exists (proxies to
-  `api-server:3000`) but the hostname has **no DNS A record**, so it is not
-  included in the Let's Encrypt certificate and is unreachable. Once an A
-  record (`status.apexmail.ee → <server IP>`) is added at the registrar,
-  issue the cert with:
-  `certbot certonly --webroot -w /var/www/certbot -d <all 12 current domains> -d status.apexmail.ee --expand`
-  and reload nginx.
+- **`status.apexmail.ee`** — first-class service (`status-server` in
+  `docker-compose.prod.yml`, proxied by nginx). Its A record resolves to the
+  production host and the Let's Encrypt certificate covers it — the cert
+  currently contains all 13 domains (apexmail.ee, www, api, app, admin,
+  control, enterprise, track, mail, smtp, imap, autoconfig, status).
+  After a renewal, the certbot deploy-hook copies `live/apexmail.ee/*` to the
+  tree root (`fullchain.pem`/`privkey.pem`/`ca-chain.pem`); if you ever issue
+  an expanded cert manually, run `deploy/scripts/issue-letsencrypt.sh` again
+  (it re-copies and reloads nginx) or re-run the deploy-hook.
 
 ## Tag strategy
 
@@ -121,9 +130,9 @@ The deploy workflows fail fast if any of these are absent:
 
 The CI job `deploy-image-name-guard` (in `deploy.yml`) asserts that every
 `image:` reference in `docker-compose*.yml` matches the canonical service map
-above — including `imap-server` and `mailstore`. If you add a service or
-rename an image, update this map **and** the guard together — the build will
-fail otherwise.
+above — including `imap-server`, `mailstore` and `status-server`. If you add
+a service or rename an image, update this map **and** the guard together —
+the build will fail otherwise.
 
 ## Manual fallback (NOT the production path)
 

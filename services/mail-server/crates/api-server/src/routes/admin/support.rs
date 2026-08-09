@@ -70,18 +70,18 @@ async fn log_support_audit(
     ticket_id: &str,
     metadata: serde_json::Value,
 ) {
-    if let Err(error) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
-         VALUES (NOW(), $1, 'support_ticket', $2, $3::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        db,
+        None,
+        None,
+        action,
+        "support_ticket",
+        Some(ticket_id),
+        metadata,
+        None,
+        None,
     )
-    .bind(action)
-    .bind(ticket_id)
-    .bind(metadata)
-    .execute(db)
-    .await
-    {
-        tracing::warn!(ticket_id = %ticket_id, action = %action, error = %error, "Failed to write support audit log");
-    }
+    .await;
 }
 
 // ─── Types ─────────────────────────────────────────────────────

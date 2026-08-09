@@ -20,17 +20,18 @@ fn build_gdpr_audit_metadata(body: &UpdateGdprRequest) -> serde_json::Value {
 }
 
 async fn log_gdpr_audit(db: &sqlx::PgPool, request_id: &str, metadata: serde_json::Value) {
-    if let Err(error) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
-         VALUES (NOW(), 'control_plane.gdpr.request_updated', 'gdpr_request', $1, $2::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        db,
+        None,
+        None,
+        "control_plane.gdpr.request_updated",
+        "gdpr_request",
+        Some(request_id),
+        metadata,
+        None,
+        None,
     )
-    .bind(request_id)
-    .bind(metadata)
-    .execute(db)
-    .await
-    {
-        tracing::warn!(request_id = %request_id, error = %error, "Failed to write GDPR audit log");
-    }
+    .await;
 }
 
 #[derive(Debug, Deserialize)]

@@ -212,22 +212,22 @@ fn build_plan_change_sql(audit_time_col: &str) -> Result<String, ApiError> {
     let audit_time_col = validated_column(audit_time_col)?;
     Ok(format!(
         "SELECT a.{audit_time_col} as logged_at,
-                a.metadata->>'changeType' as change_type,
-                a.metadata->>'billingInterval' as billing_interval,
+                a.details->>'changeType' as change_type,
+                a.details->>'billingInterval' as billing_interval,
                 COALESCE(previous_plan.price_monthly, 0) as previous_price_monthly,
                 COALESCE(previous_plan.price_yearly, 0) as previous_price_yearly,
                 COALESCE(new_plan.price_monthly, 0) as new_price_monthly,
                 COALESCE(new_plan.price_yearly, 0) as new_price_yearly,
                 CASE
-                    WHEN jsonb_typeof(a.metadata->'proration'->'netAmount') = 'number'
-                    THEN (a.metadata->'proration'->>'netAmount')::bigint
+                    WHEN jsonb_typeof(a.details->'proration'->'netAmount') = 'number'
+                    THEN (a.details->'proration'->>'netAmount')::bigint
                     ELSE NULL
                 END as net_amount
          FROM audit_logs a
-         LEFT JOIN plans previous_plan ON previous_plan.name = a.metadata->>'previousPlan'
-         LEFT JOIN plans new_plan ON new_plan.name = a.metadata->>'newPlan'
+         LEFT JOIN plans previous_plan ON previous_plan.name = a.details->>'previousPlan'
+         LEFT JOIN plans new_plan ON new_plan.name = a.details->>'newPlan'
          WHERE a.action = 'plan.changed'
-           AND a.metadata IS NOT NULL
+           AND a.details IS NOT NULL
            AND a.{audit_time_col} >= $1"
     ))
 }
@@ -237,12 +237,12 @@ fn audit_log_spend_sql(audit_time_col: &str) -> Result<String, ApiError> {
     Ok(format!(
         "SELECT COALESCE(SUM(
             CASE
-                WHEN jsonb_typeof(metadata->'spendCents') = 'number'
-                THEN (metadata->>'spendCents')::bigint
-                WHEN jsonb_typeof(metadata->'acquisitionCostCents') = 'number'
-                THEN (metadata->>'acquisitionCostCents')::bigint
-                WHEN jsonb_typeof(metadata->'marketingSpendCents') = 'number'
-                THEN (metadata->>'marketingSpendCents')::bigint
+                WHEN jsonb_typeof(details->'spendCents') = 'number'
+                THEN (details->>'spendCents')::bigint
+                WHEN jsonb_typeof(details->'acquisitionCostCents') = 'number'
+                THEN (details->>'acquisitionCostCents')::bigint
+                WHEN jsonb_typeof(details->'marketingSpendCents') = 'number'
+                THEN (details->>'marketingSpendCents')::bigint
                 ELSE 0
             END
         ), 0)::bigint
@@ -252,7 +252,7 @@ fn audit_log_spend_sql(audit_time_col: &str) -> Result<String, ApiError> {
             'marketing.acquisition_spend.recorded',
             'growth.spend.recorded'
          )
-           AND metadata IS NOT NULL
+           AND details IS NOT NULL
            AND {audit_time_col} >= $1"
     ))
 }

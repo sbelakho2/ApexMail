@@ -17,8 +17,8 @@ use tracing_subscriber::EnvFilter;
 
 use worker_processors::{
     common::{
-        AnalyticsConfig, EmailConfig, ProcessorConfig, ReplyHandlerConfig, SmtpConfig,
-        TransportType, WebhookConfig,
+        AnalyticsConfig, DkimConfig, EmailConfig, ProcessorConfig, ReplyHandlerConfig,
+        SmtpConfig, TransportType, WebhookConfig,
     },
     AnalyticsProcessor, EmailProcessor, ReplyHandler, WebhookProcessor,
 };
@@ -195,6 +195,14 @@ async fn main() -> Result<()> {
             },
             transport_type,
             smtp: smtp_config,
+            dkim: DkimConfig {
+                enabled: env::var("DKIM_ENABLED")
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false),
+                selector: env::var("DKIM_SELECTOR").unwrap_or_else(|_| "apexmail2026".into()),
+                key_path: env::var("DKIM_KEY_PATH").ok().filter(|s| !s.is_empty()),
+                domain: env::var("DKIM_DOMAIN").ok().filter(|s| !s.is_empty()),
+            },
             ..Default::default()
         };
 

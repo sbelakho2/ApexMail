@@ -411,17 +411,15 @@ impl SelfHostedBounceHandler {
         // Record complaint
         sqlx::query(
             r#"
-            INSERT INTO complaints (id, tenant_id, message_id, recipient, feedback_type, user_agent, occurred_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO complaints (id, tenant_id, recipient, feedback_type, user_agent, created_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
             "#,
         )
         .bind(&event.id)
         .bind(&event.tenant_id)
-        .bind(&event.message_id)
         .bind(&event.recipient)
         .bind(&event.feedback_type)
         .bind(&event.user_agent)
-        .bind(event.occurred_at)
         .execute(&self.db)
         .await
         .map_err(|e| BounceError::Database(e.to_string()))?;
@@ -433,10 +431,10 @@ impl SelfHostedBounceHandler {
         // Update tenant metrics
         sqlx::query(
             r#"
-            INSERT INTO tenant_deliverability_metrics (tenant_id, period_start, complaints)
+            INSERT INTO tenant_deliverability_metrics (tenant_id, period_start, emails_complained)
             VALUES ($1, DATE_TRUNC('day', NOW()), 1)
             ON CONFLICT (tenant_id, period_start)
-            DO UPDATE SET complaints = tenant_deliverability_metrics.complaints + 1
+            DO UPDATE SET emails_complained = tenant_deliverability_metrics.emails_complained + 1
             "#,
         )
         .bind(tenant_id)
@@ -458,33 +456,21 @@ impl SelfHostedBounceHandler {
     async fn record_bounce(&self, event: &BounceEvent) -> Result<(), BounceError> {
         sqlx::query(
             r#"
-            INSERT INTO bounces (
-                id, tenant_id, message_id, recipient, bounce_type, category,
-                diagnostic_code, smtp_response, source_ip, occurred_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            INSERT INTO bounces (id, tenant_id, recipient, bounce_type, diagnostic_code, created_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
             "#,
         )
         .bind(&event.id)
         .bind(&event.tenant_id)
-        .bind(&event.message_id)
         .bind(&event.recipient)
         .bind(format!("{:?}", event.bounce_type).to_lowercase())
-        .bind(format!("{:?}", event.category).to_lowercase())
         .bind(&event.diagnostic_code)
-        .bind(&event.smtp_response)
-        .bind(&event.source_ip)
-        .bind(event.occurred_at)
         .execute(&self.db)
         .await
         .map_err(|e| BounceError::Database(e.to_string()))?;
 
         // Update tenant metrics
-        let metric_column = match event.bounce_type {
-            BounceType::Hard => "hard_bounces",
-            BounceType::Soft => "soft_bounces",
-            BounceType::Unknown => "soft_bounces",
-        };
+        let metric_column = "emails_bounced";
 
         sqlx::query(&format!(
             r#"

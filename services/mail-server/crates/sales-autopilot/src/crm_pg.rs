@@ -160,19 +160,17 @@ impl SqlxCrmService {
         sqlx::query(
             r#"
             INSERT INTO sales_leads (
-                id, tenant_id, email, contact_email, contact_name, company_name,
-                domain, title, score, source, status, created_at, updated_at
+                id, tenant_id, contact_email, company_name,
+                domain, score, source, status, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $3, $4, $5, $6, $7, 0, $8, 'new', $9, $9)
+            VALUES ($1, $2, $3, $4, $5, 0, $6, 'new', $7, $7)
         "#,
         )
         .bind(&id_string)
         .bind(tenant_id)
         .bind(&email)
-        .bind(&name)
         .bind(&company)
         .bind(&domain)
-        .bind(&title)
         .bind(&source)
         .bind(now)
         .execute(&self.pool)

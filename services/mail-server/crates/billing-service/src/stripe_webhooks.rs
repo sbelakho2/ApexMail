@@ -1197,15 +1197,15 @@ async fn record_failed_payment(
         ),
         log_event AS (
             INSERT INTO dunning_events (
-                id, tenant_id, event_type, invoice_id, amount, metadata, created_at
+                id, tenant_id, event_type, invoice_id, created_at
             )
-            VALUES (gen_random_uuid(), $1, 'payment_failed', $9, $10, $11, NOW())
+            VALUES (gen_random_uuid(), $1, 'payment_failed', $9, NOW())
             RETURNING tenant_id
         ),
         suspend_tenant AS (
             UPDATE tenants
             SET status = 'suspended', updated_at = NOW()
-            WHERE id = $1 AND $12 = true
+            WHERE id = $1 AND $10 = true
             RETURNING id
         )
         SELECT 1
@@ -1220,11 +1220,6 @@ async fn record_failed_payment(
     .bind(suspended_at)
     .bind(grace_period_ends_at)
     .bind(invoice_id)
-    .bind(amount)
-    .bind(serde_json::json!({
-        "attempt": failed_payment_count,
-        "daysSinceFirstFailure": days_since_first_failure,
-    }))
     .bind(new_status == "hard_suspended")
     .execute(&mut *tx)
     .await

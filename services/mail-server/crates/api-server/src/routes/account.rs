@@ -145,18 +145,21 @@ async fn delete_account(
     invalidate_tenant_user_status_cache(&auth.tenant_id, &state).await;
 
     // Audit log
-    sqlx::query(
-        "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource_type, metadata, created_at)
-         VALUES (gen_random_uuid(), $1, $2, 'account.deletion_scheduled', 'account', $3::jsonb, NOW())",
+    crate::audit_log::insert_audit_log(
+        &state.db,
+        Some(&auth.tenant_id),
+        auth.user_id.as_deref(),
+        "account.deletion_scheduled",
+        "account",
+        None,
+        serde_json::json!({
+            "reason": body.reason,
+            "deletion_scheduled_at": deletion_at.to_rfc3339(),
+            "initiated_by": auth.user_id,
+        }),
+        None,
+        None,
     )
-    .bind(&auth.tenant_id)
-    .bind(&auth.user_id)
-    .bind(serde_json::json!({
-        "reason": body.reason,
-        "deletion_scheduled_at": deletion_at.to_rfc3339(),
-        "initiated_by": auth.user_id,
-    }))
-    .execute(&state.db)
     .await?;
 
     tracing::info!(

@@ -192,7 +192,7 @@ CREATE TABLE IF NOT EXISTS fbl_registrations (
 CREATE TABLE IF NOT EXISTS fbl_complaints (
     id VARCHAR(26) PRIMARY KEY,
     tenant_id VARCHAR(26) REFERENCES tenants(id) ON DELETE SET NULL,
-    message_id VARCHAR(26) REFERENCES messages(id) ON DELETE SET NULL,
+    message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
     isp_name VARCHAR(100),
     recipient VARCHAR(255) NOT NULL,
     complaint_type VARCHAR(50),
@@ -239,7 +239,7 @@ CREATE INDEX idx_dns_providers_tenant ON dns_providers(tenant_id);
 CREATE TABLE IF NOT EXISTS dns_records (
     id VARCHAR(26) PRIMARY KEY,
     tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    domain_id VARCHAR(26) REFERENCES domains(id) ON DELETE CASCADE,
+    domain_id VARCHAR(64) REFERENCES domains(id) ON DELETE CASCADE,
     provider_id VARCHAR(26) REFERENCES dns_providers(id) ON DELETE SET NULL,
     record_type VARCHAR(20) NOT NULL, -- 'TXT', 'CNAME', 'MX'
     name VARCHAR(255) NOT NULL,

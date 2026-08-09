@@ -28,18 +28,18 @@ async fn log_feature_audit(
     feature_id: Uuid,
     metadata: serde_json::Value,
 ) {
-    if let Err(error) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
-         VALUES (NOW(), $1, 'feature_flag', $2, $3::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        db,
+        None,
+        None,
+        action,
+        "feature_flag",
+        Some(&feature_id.to_string()),
+        metadata,
+        None,
+        None,
     )
-    .bind(action)
-    .bind(feature_id.to_string())
-    .bind(metadata)
-    .execute(db)
-    .await
-    {
-        tracing::warn!(feature_id = %feature_id, action = %action, error = %error, "Failed to write feature flag audit log");
-    }
+    .await;
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]

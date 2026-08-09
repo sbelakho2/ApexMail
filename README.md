@@ -13,7 +13,7 @@ server config, deployment pipeline, and file locations — is documented in
 |---------|---------|---------|
 | `api-server` | REST API + SSR web UI (Axum) | 3000 (internal) |
 | `mta` | SMTP inbound + submission (STARTTLS) | 25, 587, 465 |
-| `imap-server` | IMAP/IMAPS mail access | 143, 993 |
+| `imap-server` | IMAP/IMAPS mail access | 993 |
 | `marketing` | Marketing site (Zola static) | 8080 (internal) |
 | `nginx` | Reverse proxy, TLS termination | 80, 443 |
 | `postgres` | Primary database | 5432 |
@@ -237,9 +237,10 @@ See `.env.example` for all available configuration options.
 ## Deployment
 
 ApexMail ships to production via **Docker Compose + GHCR images**, deployed by
-GitHub Actions over SSH to the Hetzner host. `deploy.yml` builds **all nine
+GitHub Actions over SSH to the Hetzner host. `deploy.yml` builds **all ten
 service images** (`api-server`, `mta`, `imap-server`, `mailstore`, `worker`,
-`enterprise`, `tracking-service`, `observability`, `marketing`) and pushes
+`enterprise`, `tracking-service`, `observability`, `marketing`,
+`status-server`) and pushes
 them to GHCR; `deploy-hetzner.yml` then pulls them on the host and runs
 `docker compose up -d`. The full, authoritative procedure — including the
 service→image map, tag strategy, required secrets, and drift guard — lives in

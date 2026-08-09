@@ -48,9 +48,9 @@ COMPOSE_FILES="-f docker-compose.yml -f docker-compose.prod.yml"
 BUILD_CONTEXT="${DEPLOY_DIR}"
 DOCKERFILE="${MAIL_SERVER_DIR}/Dockerfile"
 ENV_FILE="${DEPLOY_DIR}/.env"
-CERT_SRC="/etc/letsencrypt/live/apexmail.ee"
-CERT_DIR="${DEPLOY_DIR}/certs"
 NGINX_SSL_DIR="${DEPLOY_DIR}/deploy/nginx/ssl"
+CERT_SRC="${NGINX_SSL_DIR}/live/apexmail.ee"
+CERT_DIR="${DEPLOY_DIR}/certs"
 GHCR_NS="ghcr.io/sbelakho2/apexmail"
 
 # Colors
@@ -75,7 +75,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 # All services that can be built from the mail-server Dockerfile
-ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observability)
+ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observability status-server)
+# Dockerfile targets that differ from the canonical image/service name.
+# status-server is built from the `auth-server` stage (the binary inside the
+# image is auth-server); the IMAGE name follows the compose service key.
+declare -A BUILD_TARGETS=(
+    [status-server]=auth-server
+)
 ALL_IMAGES="${GHCR_NS}/marketing:latest ${GHCR_NS}/tracking-service:latest"
 for s in "${ALL_SERVICES[@]}"; do ALL_IMAGES+=" ${GHCR_NS}/${s}:latest"; done
 
@@ -155,9 +161,10 @@ if ! $NO_BUILD; then
 
     for svc in "${BUILD_LIST[@]}"; do
         image="${GHCR_NS}/${svc}:latest"
-        log "Building: $image"
+        target="${BUILD_TARGETS[${svc}]:-$svc}"
+        log "Building: $image (Dockerfile target: $target)"
         docker build \
-            --target "$svc" \
+            --target "$target" \
             --tag "$image" \
             -f "$DOCKERFILE" \
             "$BUILD_CONTEXT" 2>&1 | tail -2
@@ -207,10 +214,15 @@ fi
 # ── Step 4: Deploy TLS certs ─────────────────────────────────────────────────
 step "Step 4: Deploy TLS certificates"
 
+# The certbot service maintains the cert tree under deploy/nginx/ssl
+# (NGINX_SSL_DIR); live/<domain>/ holds the current LE cert. Copy it to the
+# tree root where nginx reads it (same layout as the certbot deploy-hook).
+# The legacy host /etc/letsencrypt tree is NOT used (see deploy/DEPLOYMENT.md).
 if [[ -f "${CERT_SRC}/fullchain.pem" && -f "${CERT_SRC}/privkey.pem" ]]; then
     mkdir -p "$NGINX_SSL_DIR" "$CERT_DIR"
-    cp "${CERT_SRC}/fullchain.pem" "${NGINX_SSL_DIR}/fullchain.pem"
-    cp "${CERT_SRC}/privkey.pem"   "${NGINX_SSL_DIR}/privkey.pem"
+    install -m 644 "${CERT_SRC}/fullchain.pem" "${NGINX_SSL_DIR}/fullchain.pem"
+    install -m 600 "${CERT_SRC}/privkey.pem"   "${NGINX_SSL_DIR}/privkey.pem"
+    install -m 644 "${CERT_SRC}/chain.pem"     "${NGINX_SSL_DIR}/ca-chain.pem"
     for name in apexmail.crt apexmail.key mta.crt mta.key fullchain.pem privkey.pem; do
         case "$name" in
             *.crt|fullchain.pem) cp "${CERT_SRC}/fullchain.pem" "${CERT_DIR}/${name}" ;;
@@ -268,7 +280,9 @@ docker compose $COMPOSE_FILES --env-file "$ENV_FILE" ps --format "table {{.Name}
 
 echo ""
 log "Port checks:"
-for port in 80 443 25 587 143 993; do
+# 143 is intentionally CLOSED — IMAP is SSL-only on 993 (see commit
+# "fix(mail): close port 143, SSL-only autoconfig").
+for port in 80 443 25 587 993; do
     nc -z -w2 127.0.0.1 "$port" 2>/dev/null && echo "  :${port} ${GREEN}OPEN${NC}" || echo "  :${port} ${RED}CLOSED${NC}"
 done
 

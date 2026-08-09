@@ -208,20 +208,18 @@ async fn warmup_action(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
-    if let Err(e) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, ip_address, user_agent, metadata)
-         VALUES (NOW(), $1, 'ip_pool', $2, $3, $4, $5::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        &state.db,
+        Some(&auth.tenant_id),
+        None,
+        &format!("warmup.{}", body.action),
+        "ip_pool",
+        Some(&body.pool_id),
+        serde_json::json!({ "action": body.action, "newStatus": new_status }),
+        Some(ip),
+        Some(ua),
     )
-    .bind(format!("warmup.{}", body.action))
-    .bind(&body.pool_id)
-    .bind(ip)
-    .bind(ua)
-    .bind(serde_json::json!({ "action": body.action, "newStatus": new_status }))
-    .execute(&state.db)
-    .await
-    {
-        tracing::warn!(pool_id = %body.pool_id, error = %e, "Failed to write warmup audit log");
-    }
+    .await;
 
     Ok(Json(serde_json::json!({
         "success": true,

@@ -343,7 +343,7 @@ async fn verify_domain(
 
     sqlx::query(
         "UPDATE domains SET spf_verified=$1, dkim_verified=$2, dmarc_verified=$3,
-         return_path_verified=$4, status=$5, ses_verified=$6, updated_at=NOW() WHERE id=$7",
+         return_path_verified=$4, status=$5, ses_verified=$6, updated_at=NOW() WHERE id=$7::uuid",
     )
     .bind(spf)
     .bind(dkim)

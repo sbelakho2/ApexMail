@@ -371,6 +371,12 @@ services:
       - "25:25"
       - "587:587"
       - "465:465"
+      # Bounce (VERP/DSN) and FBL (abuse/complaint) SMTP endpoints. These are
+      # intentionally open to the internet: the bounce server only accepts
+      # VERP/mailer-daemon recipients with a null sender, and the FBL server
+      # requires forward-confirmed rDNS matching a known ISP FBL hostname.
+      - "2525:2525"
+      - "2526:2526"
     volumes:
       # Bind-mount the FULL certbot tree managed by the certbot service
       # (TLS_CERT_DIR — same tree nginx reads), not just live/<domain>/,
@@ -556,6 +562,8 @@ services:
     entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "worker"]
     volumes:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+      # DKIM signing key(s) for outbound mail (mounted read-only).
+      - ${DKIM_KEY_DIR:-./deploy/dkim}:/opt/apexmail/dkim:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -582,6 +590,13 @@ services:
       SMTP_TLS: ${SMTP_TLS:-false}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # Outbound DKIM signing — signs every message the worker relays with the
+      # <DKIM_SELECTOR>._domainkey.<DKIM_DOMAIN> key loaded from DKIM_KEY_PATH
+      # (or from domains.dkim_private_key when a per-domain key is installed).
+      DKIM_ENABLED: ${DKIM_ENABLED:-true}
+      DKIM_SELECTOR: ${DKIM_SELECTOR:-apexmail2026}
+      DKIM_DOMAIN: ${DKIM_DOMAIN:-apexmail.ee}
+      DKIM_KEY_PATH: ${DKIM_KEY_PATH:-/opt/apexmail/dkim/apexmail2026.private.pem}
     secrets:
       - postgres_password
       - redis_password

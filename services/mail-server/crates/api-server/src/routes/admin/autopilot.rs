@@ -30,17 +30,18 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn log_autopilot_audit(db: &sqlx::PgPool, action: &str, metadata: serde_json::Value) {
-    if let Err(error) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
-         VALUES (NOW(), $1, 'sales_autopilot', 'default', $2::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        db,
+        None,
+        None,
+        action,
+        "sales_autopilot",
+        Some("default"),
+        metadata,
+        None,
+        None,
     )
-    .bind(action)
-    .bind(metadata)
-    .execute(db)
-    .await
-    {
-        tracing::warn!(action = %action, error = %error, "Failed to write autopilot audit log");
-    }
+    .await;
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,23 +79,9 @@ async fn ensure_autopilot_state_table(db: &sqlx::PgPool) -> Result<(), ApiError>
         return Ok(());
     }
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS sales_autopilot_state (
-            id INTEGER PRIMARY KEY,
-            status TEXT NOT NULL DEFAULT 'stopped',
-            safe_mode BOOLEAN NOT NULL DEFAULT false,
-            last_action TEXT,
-            last_action_at TIMESTAMPTZ,
-            rules JSONB NOT NULL DEFAULT '[]'::jsonb,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(db)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO sales_autopilot_state (id, status, safe_mode, rules, updated_at)
-         VALUES (1, 'stopped', false, '[]'::jsonb, NOW())
-         ON CONFLICT (id) DO NOTHING",
+        "INSERT INTO sales_autopilot_state (tenant_id, status, safe_mode, rules, updated_at)
+         VALUES ('system', 'stopped', false, '[]'::jsonb, NOW())
+         ON CONFLICT (tenant_id) DO NOTHING",
     )
     .execute(db)
     .await?;
@@ -116,7 +103,7 @@ async fn load_autopilot_state(db: &sqlx::PgPool) -> Result<AutopilotStateRow, Ap
     ) = sqlx::query_as(
         "SELECT status, safe_mode, last_action, last_action_at, rules
          FROM sales_autopilot_state
-         WHERE id = 1",
+         WHERE tenant_id = 'system'",
     )
     .fetch_one(db)
     .await?;
@@ -154,7 +141,7 @@ async fn persist_autopilot_state(
              last_action_at = NOW(),
              rules = $4,
              updated_at = NOW()
-         WHERE id = 1
+         WHERE tenant_id = 'system'
          RETURNING status, safe_mode, last_action, last_action_at, rules",
     )
     .bind(next_status.unwrap_or(&current.status))

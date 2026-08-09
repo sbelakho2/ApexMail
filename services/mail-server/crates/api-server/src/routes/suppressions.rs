@@ -159,7 +159,7 @@ async fn create_suppression(
     let now = Utc::now();
 
     sqlx::query(
-        "INSERT INTO suppressions (id, tenant_id, email, type, source, created_at)
+        "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
          VALUES ($1,$2,$3,$4,$5,$6)",
     )
     .bind(&id)
@@ -232,7 +232,7 @@ async fn check_suppression(
     let email = canonical_email(&email);
 
     let row = sqlx::query_as::<_, SuppressionReasonRow>(
-        "SELECT type AS reason FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = $2",
+        "SELECT reason FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = $2",
     )
     .bind(&auth.tenant_id)
     .bind(&email)
@@ -287,7 +287,7 @@ async fn bulk_suppress(
             }
 
             match sqlx::query(
-                "INSERT INTO suppressions (id, tenant_id, email, type, source, created_at)
+                "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
                  VALUES ($1,$2,$3,$4,'bulk',$5)
                  ON CONFLICT (tenant_id, email) DO NOTHING",
             )

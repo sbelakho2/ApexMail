@@ -79,17 +79,15 @@ async fn report_client_error(
 
     // Persist to database for analysis
     sqlx::query(
-        "INSERT INTO client_errors (tenant_id, message, stack, url, source, user_agent, severity, context, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())",
+        "INSERT INTO client_errors (id, tenant_id, user_id, error_message, stack_trace, url, user_agent, created_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())",
     )
     .bind(auth.tenant_id.to_string())
+    .bind(auth.user_id.as_deref())
     .bind(message)
     .bind(stack)
     .bind(url)
-    .bind(source)
     .bind(body.user_agent.as_deref().map(|s| truncate(s, 512)))
-    .bind(body.severity)
-    .bind(body.context)
     .execute(&state.db)
     .await?;
 

@@ -14,6 +14,7 @@ use billing_service::{
 };
 use chrono::{Datelike, Months, NaiveTime, Utc};
 use deadpool_redis::redis::AsyncCommands;
+use hmac::{Hmac, Mac};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -2173,6 +2174,20 @@ fn generate_audit_log_id() -> String {
         .collect()
 }
 
+/// HMAC-SHA256 signature over the audit hash, keyed with the same
+/// `AUDIT_SIGNING_KEY` the compliance crate uses for chain verification.
+fn audit_log_signature(hash: &str) -> String {
+    type HmacSha256 = Hmac<Sha256>;
+    let key = std::env::var("AUDIT_SIGNING_KEY")
+        .unwrap_or_else(|_| "apexmail-audit-fallback-key".to_string());
+    let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => return String::new(),
+    };
+    mac.update(hash.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
 fn compute_audit_log_hash(
     tenant_id: &str,
     action: &str,
@@ -2225,14 +2240,18 @@ async fn insert_audit_log(
         timestamp,
     );
 
+    let signature = audit_log_signature(&hash);
+
     sqlx::query(
         r#"
         INSERT INTO audit_logs (
-            id, tenant_id, action, resource_type, resource_id,
-            metadata, previous_hash, hash, timestamp
+            id, tenant_id, user_id, session_id, action, resource, resource_id,
+            details, ip_address, user_agent, outcome, error_message,
+            timestamp, hash, previous_hash, signature, created_at
         ) VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9
+            $1, $2, NULL, NULL, $3, $4, $5,
+            $6::jsonb, NULL, NULL, 'success', NULL,
+            $7, $8, $9, $10, $7
         )
         "#,
     )
@@ -2242,9 +2261,10 @@ async fn insert_audit_log(
     .bind(resource_type)
     .bind(resource_id)
     .bind(metadata)
-    .bind(previous_hash)
-    .bind(hash)
     .bind(timestamp)
+    .bind(hash)
+    .bind(previous_hash)
+    .bind(signature)
     .execute(&mut **tx)
     .await?;
 
@@ -3500,41 +3520,28 @@ async fn admin_apply_credit(
         ),
         updated_wallet AS (
             UPDATE wallets
-            SET balance = balance + $1, updated_at = NOW()
+            SET balance = balance + $1::int4, updated_at = NOW()
             WHERE tenant_id = $2
             RETURNING id AS wallet_id, tenant_id, balance
         ),
         new_transaction AS (
             INSERT INTO wallet_transactions (
-                id, tenant_id, wallet_id, type, amount, balance_after, description, reference, metadata, created_at
+                id, tenant_id, wallet_id, type, amount, balance_after, description, reference, created_at
             )
             SELECT
                 gen_random_uuid(),
                 tenant_id,
                 wallet_id,
                 'credit',
-                $1,
+                $1::int4,
                 balance,
                 $3,
                 $4,
-                $5::jsonb,
                 NOW()
             FROM updated_wallet
-            RETURNING id::text AS id, tenant_id, type::text AS transaction_type, amount,
-                      balance_after AS balance, description, reference, metadata, created_at
-        ),
-        audit_log AS (
-            INSERT INTO audit_logs (id, tenant_id, action, resource_type, resource_id, metadata, created_at)
-            SELECT
-                gen_random_uuid(),
-                nt.tenant_id,
-                'wallet.credit',
-                'wallet',
-                nt.id,
-                jsonb_build_object('amount', $1, 'description', $3, 'reference', $4, 'balanceAfter', nt.balance),
-                NOW()
-            FROM new_transaction nt
-            RETURNING id
+            RETURNING id::text AS id, tenant_id, type::text AS transaction_type, amount::bigint,
+                      balance_after::bigint AS balance, description, reference,
+                      '{}'::jsonb AS metadata, created_at
         )
         SELECT id, tenant_id, transaction_type, amount, balance, description, reference, metadata, created_at
         FROM new_transaction
@@ -3544,11 +3551,25 @@ async fn admin_apply_credit(
     .bind(&tenant_id)
     .bind(format!("Admin credit: {}", body.reason))
     .bind(&idempotency_key)
-    .bind(serde_json::json!({
-        "reason": body.reason,
-        "expiresAt": body.expires_at,
-    }))
     .fetch_one(&state.db)
+    .await?;
+
+    crate::audit_log::insert_audit_log(
+        &state.db,
+        Some(&tenant_id),
+        None,
+        "wallet.credit",
+        "wallet",
+        Some(&transaction.id),
+        serde_json::json!({
+            "amount": transaction.amount,
+            "description": transaction.description,
+            "reference": transaction.reference,
+            "balanceAfter": transaction.balance,
+        }),
+        None,
+        None,
+    )
     .await?;
 
     invalidate_cache_key(&state, &format!("wallet:balance:{tenant_id}")).await;
@@ -3577,9 +3598,10 @@ async fn admin_apply_plan_override(
     sqlx::query(
         r#"
         INSERT INTO plan_overrides (
-            tenant_id, plan_id, reason, admin_id, expires_at, created_at
-        ) VALUES ($1, $2, $3, $4, $5, NOW())
+            tenant_id, plan, plan_id, reason, admin_id, expires_at, created_at
+        ) VALUES ($1, $2, $2, $3, $4, $5, NOW())
         ON CONFLICT (tenant_id) DO UPDATE SET
+            plan = $2,
             plan_id = $2,
             reason = $3,
             admin_id = $4,
@@ -3595,6 +3617,7 @@ async fn admin_apply_plan_override(
     .execute(&state.db)
     .await?;
 
+    let actor_id: Option<uuid::Uuid> = uuid::Uuid::parse_str(&admin_id).ok();
     sqlx::query(
         r#"
         INSERT INTO billing_audit_log (
@@ -3604,7 +3627,7 @@ async fn admin_apply_plan_override(
     )
     .bind(&tenant_id)
     .bind("plan_override")
-    .bind(&admin_id)
+    .bind(actor_id)
     .bind("admin")
     .bind(serde_json::json!({
         "planId": body.plan_id,
@@ -3667,6 +3690,7 @@ async fn admin_force_subscription_status(
             .into_response());
     }
 
+    let actor_id: Option<uuid::Uuid> = uuid::Uuid::parse_str(&admin_id).ok();
     sqlx::query(
         r#"
         INSERT INTO billing_audit_log (
@@ -3676,7 +3700,7 @@ async fn admin_force_subscription_status(
     )
     .bind(&tenant_id)
     .bind("subscription_status_override")
-    .bind(&admin_id)
+    .bind(actor_id)
     .bind("admin")
     .bind(serde_json::json!({ "newStatus": body.status, "reason": body.reason }))
     .execute(&mut *tx)
@@ -3755,6 +3779,7 @@ async fn admin_reset_dunning(
     .fetch_one(&mut *tx)
     .await?;
 
+    let actor_id: Option<uuid::Uuid> = uuid::Uuid::parse_str(&admin_id).ok();
     sqlx::query(
         r#"
         INSERT INTO billing_audit_log (
@@ -3764,7 +3789,7 @@ async fn admin_reset_dunning(
     )
     .bind(&tenant_id)
     .bind("dunning_reset")
-    .bind(&admin_id)
+    .bind(actor_id)
     .bind("admin")
     .bind(serde_json::json!({ "reason": body.reason }))
     .execute(&mut *tx)
@@ -3948,12 +3973,12 @@ async fn admin_create_invoice(
         r#"
         INSERT INTO invoices (
             id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
-            subtotal, vat_total, total, line_items, billing_address,
+            amount, subtotal, vat_total, total, line_items, billing_address,
             issued_at, due_at, period_start, period_end,
             purchase_order_number, notes, created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, NULL, $2, 'draft', $3,
-            $4, $5, $6, $7, $8,
+            $6, $4, $5, $6, $7, $8,
             $9, $10, $11, $12,
             NULL, $13, NOW(), NOW()
         )

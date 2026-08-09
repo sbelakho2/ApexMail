@@ -1,5 +1,11 @@
 //! Secrets management endpoints.
 //!
+//! Aligned with the canonical secrets schema (migration 038):
+//! secrets(id, tenant_id, name, type, encrypted_value, version,
+//! rotation_schedule, last_rotated_at, next_rotation_at, created_by,
+//! created_at, updated_at, expires_at) + secrets_archive + secret_versions.
+//! The previous implementation targeted columns (description, rotation_policy,
+//! status, access_count, last_accessed) that never existed on production.
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -32,7 +38,7 @@ struct SecretRow {
     status: String,
     access_count: i64,
     last_accessed: Option<chrono::DateTime<chrono::Utc>>,
-    last_rotated: chrono::DateTime<chrono::Utc>,
+    last_rotated: Option<chrono::DateTime<chrono::Utc>>,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
@@ -50,7 +56,7 @@ pub struct SecretResponse {
     pub status: String,
     pub access_count: i64,
     pub last_accessed: Option<String>,
-    pub last_rotated: String,
+    pub last_rotated: Option<String>,
     pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -67,7 +73,7 @@ impl From<SecretRow> for SecretResponse {
             status: r.status,
             access_count: r.access_count,
             last_accessed: r.last_accessed.map(|t| t.to_rfc3339()),
-            last_rotated: r.last_rotated.to_rfc3339(),
+            last_rotated: r.last_rotated.map(|t| t.to_rfc3339()),
             expires_at: r.expires_at.map(|t| t.to_rfc3339()),
             created_at: r.created_at.to_rfc3339(),
             updated_at: r.updated_at.to_rfc3339(),
@@ -88,10 +94,18 @@ fn default_limit() -> i64 {
     50
 }
 
+/// Canonical list query: `description`/`status`/`access_count`/`last_accessed`
+/// are presentation aliases — the canonical table stores rotation_schedule and
+/// rotation timestamps instead.
 fn build_list_secrets_sql() -> &'static str {
     // RS-050: Scoped by tenant_id to prevent cross-tenant secret exposure.
-    "SELECT id, name, type, description, rotation_policy, status,
-            access_count, last_accessed, last_rotated, expires_at,
+    "SELECT id, name, type,
+            '' AS description,
+            COALESCE(rotation_schedule->>'policy', 'manual') AS rotation_policy,
+            'active' AS status,
+            0::bigint AS access_count,
+            NULL::timestamptz AS last_accessed,
+            last_rotated_at AS last_rotated, expires_at,
             created_at, updated_at
      FROM secrets WHERE tenant_id = $3
      ORDER BY created_at DESC
@@ -104,18 +118,18 @@ async fn log_secret_audit(
     secret_id: &str,
     metadata: serde_json::Value,
 ) {
-    if let Err(e) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
-         VALUES (NOW(), $1, 'secret', $2, $3::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        db,
+        None,
+        None,
+        action,
+        "secret",
+        Some(secret_id),
+        metadata,
+        None,
+        None,
     )
-    .bind(action)
-    .bind(secret_id)
-    .bind(metadata)
-    .execute(db)
-    .await
-    {
-        tracing::warn!(secret_id = %secret_id, action = %action, error = %e, "Failed to write secret audit log");
-    }
+    .await;
 }
 
 async fn list_secrets(
@@ -154,6 +168,23 @@ pub struct CreateSecretRequest {
 
 fn default_rotation() -> String {
     "manual".into()
+}
+
+/// Rotation interval per policy, used to compute `next_rotation_at`.
+fn next_rotation_offset(policy: &str) -> Option<chrono::Duration> {
+    match policy {
+        "daily" => Some(chrono::Duration::days(1)),
+        "weekly" => Some(chrono::Duration::weeks(1)),
+        "monthly" => Some(chrono::Duration::days(30)),
+        _ => None,
+    }
+}
+
+fn generate_secret_value() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex::encode(buf)
 }
 
 async fn create_secret(
@@ -195,19 +226,44 @@ async fn create_secret(
         return Err(ApiError::Validation(vec!["Invalid rotation policy".into()]));
     }
 
+    let id = apexmail_lib::id::generate_id("sec", 22);
+    let created_by = auth.user_id.clone().unwrap_or_else(|| "system".to_string());
+    let encrypted_value = apexmail_lib::secret_at_rest::encrypt_at_rest(
+        &generate_secret_value(),
+        b"apexmail.secrets",
+    )
+    .unwrap_or_else(|_| {
+        // Encryption key unset (dev mode): store the plaintext marker.
+        format!("plain:{}", generate_secret_value())
+    });
+    let next_rotation_at =
+        next_rotation_offset(&body.rotation_policy).map(|d| chrono::Utc::now() + d);
+    let rotation_schedule =
+        serde_json::json!({ "policy": body.rotation_policy, "description": body.description });
+
     // RS-050: Include tenant_id from authenticated session in INSERT.
     let row = sqlx::query_as::<_, SecretRow>(
-        "INSERT INTO secrets (name, type, description, rotation_policy, status, tenant_id)
-         VALUES ($1, $2, $3, $4, 'active', $5)
-         RETURNING id, name, type, description, rotation_policy, status,
-                   access_count, last_accessed, last_rotated, expires_at,
+        "INSERT INTO secrets (
+            id, tenant_id, name, type, encrypted_value, version, rotation_schedule,
+            last_rotated_at, next_rotation_at, created_by, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, 1, $6, NOW(), $7, $8, NOW(), NOW())
+         RETURNING id, name, type,
+                   '' AS description,
+                   COALESCE(rotation_schedule->>'policy', 'manual') AS rotation_policy,
+                   'active' AS status,
+                   0::bigint AS access_count,
+                   NULL::timestamptz AS last_accessed,
+                   last_rotated_at AS last_rotated, expires_at,
                    created_at, updated_at",
     )
+    .bind(&id)
+    .bind(&auth.tenant_id)
     .bind(&body.name)
     .bind(&body.secret_type)
-    .bind(&body.description)
-    .bind(&body.rotation_policy)
-    .bind(&auth.tenant_id)
+    .bind(&encrypted_value)
+    .bind(&rotation_schedule)
+    .bind(next_rotation_at)
+    .bind(&created_by)
     .fetch_one(&state.db)
     .await?;
 
@@ -239,17 +295,36 @@ async fn update_secret(
     match body.action.as_str() {
         "rotate" => {
             // RS-050: Scope rotate by tenant_id to prevent cross-tenant modification.
-            let result = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
-                "UPDATE secrets SET last_rotated = NOW(), status = 'active', updated_at = NOW()
-                 WHERE id = $1 AND tenant_id = $2 RETURNING last_rotated",
-            )
-            .bind(&body.id)
-            .bind(&auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+            let row: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+                    r#"
+                    WITH rotated AS (
+                        UPDATE secrets
+                        SET version = version + 1,
+                            last_rotated_at = NOW(),
+                            next_rotation_at = CASE COALESCE(rotation_schedule->>'policy', 'manual')
+                                WHEN 'daily' THEN NOW() + INTERVAL '1 day'
+                                WHEN 'weekly' THEN NOW() + INTERVAL '7 days'
+                                WHEN 'monthly' THEN NOW() + INTERVAL '30 days'
+                                ELSE NULL END,
+                            updated_at = NOW()
+                        WHERE id = $1 AND tenant_id = $2
+                        RETURNING id, version, encrypted_value, last_rotated_at
+                    ),
+                    snapshot AS (
+                        INSERT INTO secret_versions (secret_id, version, encrypted_value, created_at)
+                        SELECT id, version, encrypted_value, NOW() FROM rotated
+                        ON CONFLICT (secret_id, version) DO NOTHING
+                    )
+                    SELECT id, last_rotated_at FROM rotated
+                    "#,
+                )
+                .bind(&body.id)
+                .bind(&auth.tenant_id)
+                .fetch_optional(&state.db)
+                .await?;
 
-            match result {
-                Some(last_rotated) => {
+            match row {
+                Some((id, last_rotated)) => {
                     log_secret_audit(
                         &state.db,
                         "control_plane.secret.rotated",
@@ -259,7 +334,7 @@ async fn update_secret(
                     .await;
                     Ok(Json(serde_json::json!({
                         "success": true,
-                        "message": format!("Secret {} rotated", body.id),
+                        "message": format!("Secret {id} rotated"),
                         "lastRotated": last_rotated.to_rfc3339(),
                         "status": "active"
                     })))
@@ -267,37 +342,62 @@ async fn update_secret(
                 None => Err(ApiError::NotFound("Secret not found".into())),
             }
         }
-        "revoke" => {
-            // RS-050: Scope revoke by tenant_id to prevent cross-tenant modification.
-            let result = sqlx::query(
-                "UPDATE secrets SET status = 'revoked', updated_at = NOW()
-                 WHERE id = $1 AND tenant_id = $2 RETURNING id",
-            )
-            .bind(&body.id)
-            .bind(&auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-            if result.is_none() {
-                return Err(ApiError::NotFound("Secret not found".into()));
-            }
-
-            log_secret_audit(
-                &state.db,
-                "control_plane.secret.revoked",
-                &body.id,
-                serde_json::json!({}),
-            )
-            .await;
-
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "message": format!("Secret {} revoked", body.id),
-                "status": "revoked"
-            })))
-        }
+        "revoke" => archive_and_delete(&state, &auth, &body.id, "revoked").await,
         _ => Err(ApiError::Validation(vec!["Invalid action".into()])),
     }
+}
+
+/// Canonical lifecycle: archived copies move to `secrets_archive`, the live
+/// row is removed (the canonical schema has no `status` column).
+async fn archive_and_delete(
+    state: &AppState,
+    auth: &AuthUser,
+    id: &str,
+    reason: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut tx = state.db.begin().await?;
+
+    let row: Option<String> = sqlx::query_scalar(
+        r#"
+        WITH archived AS (
+            INSERT INTO secrets_archive
+            SELECT * FROM secrets WHERE id = $1 AND tenant_id = $2
+            RETURNING id
+        )
+        SELECT id FROM archived
+        "#,
+    )
+    .bind(id)
+    .bind(&auth.tenant_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if row.is_none() {
+        tx.rollback().await?;
+        return Err(ApiError::NotFound("Secret not found".into()));
+    }
+
+    sqlx::query("DELETE FROM secrets WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(&auth.tenant_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    log_secret_audit(
+        &state.db,
+        &format!("control_plane.secret.{reason}"),
+        id,
+        serde_json::json!({}),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("Secret {id} {reason}"),
+        "status": reason
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,29 +425,7 @@ async fn delete_secret(
         .or(query.id)
         .ok_or_else(|| ApiError::Validation(vec!["Secret ID is required".into()]))?;
 
-    // RS-050: Scope delete by tenant_id to prevent cross-tenant deletion.
-    let result = sqlx::query("DELETE FROM secrets WHERE id = $1 AND tenant_id = $2 RETURNING id")
-        .bind(&id)
-        .bind(&auth.tenant_id)
-        .fetch_optional(&state.db)
-        .await?;
-
-    if result.is_none() {
-        return Err(ApiError::NotFound("Secret not found".into()));
-    }
-
-    log_secret_audit(
-        &state.db,
-        "control_plane.secret.deleted",
-        &id,
-        serde_json::json!({}),
-    )
-    .await;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": format!("Secret {} deleted", id)
-    })))
+    archive_and_delete(&state, &auth, &id, "deleted").await
 }
 
 #[cfg(test)]
@@ -360,5 +438,13 @@ mod tests {
 
         assert!(sql.contains("LIMIT $1 OFFSET $2"));
         assert!(sql.contains("WHERE tenant_id = $3"), "list_secrets must scope by tenant_id");
+    }
+
+    #[test]
+    fn rotation_offset_matches_policies() {
+        assert_eq!(next_rotation_offset("daily"), Some(chrono::Duration::days(1)));
+        assert_eq!(next_rotation_offset("weekly"), Some(chrono::Duration::weeks(1)));
+        assert_eq!(next_rotation_offset("monthly"), Some(chrono::Duration::days(30)));
+        assert_eq!(next_rotation_offset("manual"), None);
     }
 }

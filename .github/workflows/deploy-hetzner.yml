@@ -279,7 +279,8 @@ jobs:
           ssh hetzner "cd ${DEPLOY_DIR} && \
             docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
               pull api-server mta imap-server mailstore worker enterprise tracking \
-                observability marketing postgres-backup nginx postgres redis clickhouse || true"
+                observability marketing status-server postgres-backup nginx postgres redis \
+                clickhouse certbot || true"
 
       - name: Apply stack (canonical service set)
         run: |
@@ -287,7 +288,7 @@ jobs:
             docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
               up -d --remove-orphans --no-build \
               postgres redis clickhouse api-server mta imap-server mailstore worker \
-                enterprise tracking observability marketing postgres-backup \
+                enterprise tracking observability marketing status-server postgres-backup \
                 nginx certbot"
 
       - name: Reload nginx to re-resolve upstream container IPs

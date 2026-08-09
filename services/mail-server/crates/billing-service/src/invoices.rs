@@ -190,12 +190,12 @@ pub async fn create_invoice(
         r#"
         INSERT INTO invoices (
             id, tenant_id, stripe_invoice_id, invoice_number, status,
-            currency, subtotal, vat_total, total, line_items,
+            currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, period_start, period_end,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, 'draft',
-            $5, $6, $7, $8, $9,
+            $5, $8, $6, $7, $8, $9,
             $10, $11, $12, $13,
             $10, $10
         )

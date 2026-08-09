@@ -215,15 +215,17 @@ async fn write_impersonation_audit_log(
     tenant_id: &str,
     metadata: serde_json::Value,
 ) -> Result<(), ApiError> {
-    sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
-         VALUES (NOW(), $1, 'session', $2, $3, $4::jsonb)",
+    crate::audit_log::insert_audit_log(
+        &state.db,
+        Some(tenant_id),
+        None,
+        action,
+        "session",
+        Some(resource_id),
+        metadata,
+        None,
+        None,
     )
-    .bind(action)
-    .bind(resource_id)
-    .bind(tenant_id)
-    .bind(metadata)
-    .execute(&state.db)
     .await
     .map_err(|error| {
         tracing::error!(error = %error, action = %action, resource_id = %resource_id, tenant_id = %tenant_id, "failed to write impersonation audit log");

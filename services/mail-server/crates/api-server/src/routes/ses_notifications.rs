@@ -534,10 +534,11 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                 // Auto-suppress hard bounces
                 if is_permanent {
                     if let Err(e) = sqlx::query(
-                        "INSERT INTO suppression_list (id, email, reason, source, created_at)
-                         VALUES (gen_random_uuid(), $1, $2, 'ses_bounce', NOW())
-                         ON CONFLICT (email) DO NOTHING",
+                        "INSERT INTO suppression_list (id, tenant_id, email, reason, created_at)
+                         VALUES (gen_random_uuid(), $1, $2, $3, NOW())
+                         ON CONFLICT DO NOTHING",
                     )
+                    .bind(tenant_id.as_deref())
                     .bind(email)
                     .bind(&reason)
                     .execute(&state.db)
@@ -555,11 +556,10 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     // Strip any "msg_" prefix from the message ID before matching
                     let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
                     if let Err(e) = sqlx::query(
-                        "UPDATE messages SET status = $1, bounce_type = $2, updated_at = NOW()
-                         WHERE id = $3",
+                        "UPDATE messages SET status = $1, updated_at = NOW()
+                         WHERE id = $2::uuid",
                     )
                     .bind(status)
-                    .bind(&reason)
                     .bind(db_id)
                     .execute(&state.db)
                     .await
@@ -621,10 +621,11 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
 
                 // Always suppress — complaints are serious
                 if let Err(e) = sqlx::query(
-                    "INSERT INTO suppression_list (id, email, reason, source, created_at)
-                     VALUES (gen_random_uuid(), $1, $2, 'ses_complaint', NOW())
-                     ON CONFLICT (email) DO NOTHING",
+                    "INSERT INTO suppression_list (id, tenant_id, email, reason, created_at)
+                     VALUES (gen_random_uuid(), $1, $2, $3, NOW())
+                     ON CONFLICT DO NOTHING",
                 )
+                .bind(tenant_id.as_deref())
                 .bind(email)
                 .bind(&reason)
                 .execute(&state.db)
@@ -641,7 +642,7 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                     let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
                     if let Err(e) = sqlx::query(
                         "UPDATE messages SET status = 'complained', updated_at = NOW()
-                         WHERE id = $1",
+                         WHERE id = $1::uuid",
                     )
                     .bind(db_id)
                     .execute(&state.db)
@@ -694,7 +695,7 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
         let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
         if let Err(e) = sqlx::query(
             "UPDATE messages SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
-             WHERE id = $1 AND status != 'delivered'",
+             WHERE id = $1::uuid AND status != 'delivered'",
         )
         .bind(db_id)
         .execute(&state.db)

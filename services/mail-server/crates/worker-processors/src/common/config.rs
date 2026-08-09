@@ -154,6 +154,9 @@ pub struct DkimConfig {
     pub enabled: bool,
     pub selector: String,
     pub key_path: Option<String>,
+    /// Domain the `key_path` key belongs to; the fallback key is only used
+    /// for jobs whose envelope domain matches (see `EmailProcessor`).
+    pub domain: Option<String>,
 }
 
 impl Default for DkimConfig {
@@ -162,6 +165,7 @@ impl Default for DkimConfig {
             enabled: false,
             selector: "default".to_string(),
             key_path: None,
+            domain: None,
         }
     }
 }

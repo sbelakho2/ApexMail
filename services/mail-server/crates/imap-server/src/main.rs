@@ -25,7 +25,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio_rustls::TlsAcceptor;
 use tonic::transport::Channel;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "imap-server", about = "ApexMail IMAP4rev1 Server")]
@@ -299,8 +299,12 @@ fn flags_response(flags: &[String]) -> String {
 }
 
 fn permanent_flags_response(flags: &[String]) -> String {
-    let f = flags.to_vec().join(" ");
-    format!("* OK [PERMANENTFLAGS ({})] Permanent flags\r\n", f)
+    let mut all = flags.to_vec();
+    all.push("\\*".to_string());
+    format!(
+        "* OK [PERMANENTFLAGS ({})] Permanent flags\r\n",
+        all.join(" ")
+    )
 }
 
 fn uid_validity_response(uidvalidity: u64) -> String {
@@ -420,17 +424,34 @@ fn encode_nstring(s: &str) -> String {
 
 /// Tokenize a command argument string into whitespace-separated tokens,
 /// keeping `"quoted strings"` and `(parenthesized lists)` intact as one token.
+/// Backslash escapes inside quoted strings (`\"`, `\\`) are preserved in the
+/// token and handled by `unquote` later.
 fn tokenize_command_args(args: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
     let mut in_quote = false;
     let mut paren_depth = 0usize;
     let mut has_token = false;
-    for c in args.chars() {
+    let mut chars = args.chars().peekable();
+    while let Some(c) = chars.next() {
         match c {
-            '"' => {
-                in_quote = !in_quote;
+            '"' if !in_quote => {
+                in_quote = true;
                 cur.push(c);
+                has_token = true;
+            }
+            '"' => {
+                in_quote = false;
+                cur.push(c);
+            }
+            '\\' if in_quote => {
+                // Escaped character inside a quoted string: keep both chars
+                // so unquote() can unescape them.
+                cur.push(c);
+                if let Some(&next) = chars.peek() {
+                    cur.push(next);
+                    chars.next();
+                }
                 has_token = true;
             }
             '(' if !in_quote => {
@@ -461,17 +482,70 @@ fn tokenize_command_args(args: &str) -> Vec<String> {
     tokens
 }
 
+/// Unquote an IMAP quoted string and process backslash escapes.
+/// RFC 3501 §4.3: within a quoted string, `\"` and `\\` are the only escapes.
 fn unquote(s: &str) -> String {
     let s = s.trim();
     if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-        s[1..s.len() - 1].to_string()
+        let inner = &s[1..s.len() - 1];
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(next) = chars.next() {
+                    if next == '"' || next == '\\' {
+                        out.push(next);
+                    } else {
+                        out.push('\\');
+                        out.push(next);
+                    }
+                } else {
+                    out.push('\\');
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     } else {
         s.to_string()
     }
 }
 
+// ── Literal handling ────────────────────────────────────────────────────────
+//
+// A literal is spliced into the command stream as the marker token
+// `\x01LIT<k>\x01`, where `<k>` indexes into the literal byte buffers that
+// were read with the command. Handlers resolve markers with `resolve_token`
+// (text) or `token_literal_bytes` (raw APPEND payload).
+
+fn literal_index(token: &str) -> Option<usize> {
+    token
+        .strip_prefix('\x01')
+        .and_then(|t| t.strip_suffix('\x01'))
+        .and_then(|t| t.strip_prefix("LIT"))
+        .and_then(|k| k.parse().ok())
+}
+
+/// Resolve a token to text: literal markers become their UTF-8 content,
+/// quoted strings are unquoted/unescaped, atoms pass through.
+fn resolve_token(token: &str, literals: &[Vec<u8>]) -> String {
+    if let Some(k) = literal_index(token) {
+        if let Some(lit) = literals.get(k) {
+            return String::from_utf8_lossy(lit).into_owned();
+        }
+    }
+    unquote(token)
+}
+
+/// If the token is a literal marker, return the raw literal bytes.
+fn token_literal_bytes<'a>(token: &str, literals: &'a [Vec<u8>]) -> Option<&'a [u8]> {
+    literal_index(token).and_then(|k| literals.get(k)).map(|v| v.as_slice())
+}
+
 /// Parse a literal spec: `{size}`, `{size+}` (LITERAL+ non-sync), or `~{size}`.
 /// Returns (size, non_sync).
+#[allow(dead_code)]
 fn parse_literal_spec(s: &str) -> Result<(usize, bool)> {
     let s = s.trim().trim_start_matches('~');
     let inner = s
@@ -486,14 +560,137 @@ fn parse_literal_spec(s: &str) -> Result<(usize, bool)> {
     Ok((num, non_sync))
 }
 
+// ── Modified UTF-7 (RFC 3501 §5.1.3) ───────────────────────────────────────
+//
+// Mailbox names are exchanged with clients in modified UTF-7: ASCII passes
+// through unchanged, `&` is encoded as `&-`, and runs of non-ASCII characters
+// are encoded as modified base64 (`,` instead of `/`, no padding) of their
+// UTF-16BE representation, wrapped in `&...-`. Internally (and in the
+// mailstore) mailbox names are plain UTF-8.
+
+fn modified_b64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut bits: u32 = 0;
+    let mut nbits: u32 = 0;
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b',' => 63,
+            b'=' => break, // padding (not used by modified UTF-7, tolerate)
+            _ => return None,
+        };
+        bits = (bits << 6) | v as u32;
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((bits >> nbits) as u8);
+        }
+    }
+    Some(out)
+}
+
+fn modified_b64_encode(bytes: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
+    let mut out = String::with_capacity(bytes.len() / 3 * 4);
+    let mut bits: u32 = 0;
+    let mut nbits: u32 = 0;
+    for &b in bytes {
+        bits = (bits << 8) | b as u32;
+        nbits += 8;
+        while nbits >= 6 {
+            nbits -= 6;
+            out.push(CHARS[((bits >> nbits) & 0x3F) as usize] as char);
+        }
+    }
+    if nbits > 0 {
+        out.push(CHARS[((bits << (6 - nbits)) & 0x3F) as usize] as char);
+    }
+    out
+}
+
+/// Decode a modified UTF-7 mailbox name to UTF-8. Sequences that are not
+/// valid modified UTF-7 (e.g. a plain UTF-8 name containing `&`) pass through
+/// unchanged.
+fn imap_utf7_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            if let Some(rel_end) = s[i + 1..].find('-') {
+                let b64 = &s[i + 1..i + 1 + rel_end];
+                if b64.is_empty() {
+                    // "&-" encodes a literal '&'
+                    out.push(b'&');
+                    i += 2;
+                    continue;
+                }
+                if let Some(decoded) = modified_b64_decode(b64) {
+                    let mut utf16 = Vec::with_capacity(decoded.len() / 2);
+                    for pair in decoded.chunks_exact(2) {
+                        utf16.push(u16::from_be_bytes([pair[0], pair[1]]));
+                    }
+                    out.extend_from_slice(&String::from_utf16_lossy(&utf16).into_bytes());
+                    i += 2 + rel_end;
+                    continue;
+                }
+            }
+            // Not valid modified UTF-7: keep the '&' literally.
+            out.push(b'&');
+            i += 1;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Encode a UTF-8 mailbox name as modified UTF-7.
+fn imap_utf7_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut acc: Vec<u16> = Vec::new();
+    let flush = |acc: &mut Vec<u16>, out: &mut String| {
+        if acc.is_empty() {
+            return;
+        }
+        let mut bytes = Vec::with_capacity(acc.len() * 2);
+        for u in acc.drain(..) {
+            bytes.extend_from_slice(&u.to_be_bytes());
+        }
+        out.push('&');
+        out.push_str(&modified_b64_encode(&bytes));
+        out.push('-');
+    };
+    for ch in s.chars() {
+        if ch == '&' {
+            flush(&mut acc, &mut out);
+            out.push_str("&-");
+        } else if ch.is_ascii() {
+            flush(&mut acc, &mut out);
+            out.push(ch);
+        } else {
+            let mut buf = [0u16; 2];
+            for &u in ch.encode_utf16(&mut buf).iter() {
+                acc.push(u);
+            }
+        }    }
+    flush(&mut acc, &mut out);
+    out
+}
+
 /// IMAP LIST/LSUB pattern matching. `*` matches any sequence of characters,
 /// `%` matches any sequence except the hierarchy delimiter `/`.
+/// Mailbox names are case-insensitive per RFC 3501, so ASCII case is folded.
 fn imap_pattern_match(name: &str, pattern: &str) -> bool {
     if pattern.is_empty() {
         return name.is_empty();
     }
-    let n: Vec<char> = name.chars().collect();
-    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let p: Vec<char> = pattern.chars().map(|c| c.to_ascii_lowercase()).collect();
     let (mut i, mut j) = (0usize, 0usize);
     let mut star: Option<(usize, usize)> = None;
     while i < n.len() {
@@ -549,7 +746,11 @@ fn tonic_code(e: &anyhow::Error) -> Option<tonic::Code> {
 
 // ── Capability advertisement ─────────────────────────────────────────────────
 
-fn capability_list(tls_active: bool, allow_insecure_auth: bool) -> Vec<&'static str> {
+fn capability_list(
+    tls_active: bool,
+    allow_insecure_auth: bool,
+    starttls_available: bool,
+) -> Vec<&'static str> {
     let mut caps = vec![
         "IMAP4rev1",
         "NAMESPACE",
@@ -561,7 +762,9 @@ fn capability_list(tls_active: bool, allow_insecure_auth: bool) -> Vec<&'static 
     if tls_active {
         caps.push("AUTH=PLAIN");
     } else {
-        caps.insert(0, "STARTTLS");
+        if starttls_available {
+            caps.insert(0, "STARTTLS");
+        }
         if allow_insecure_auth {
             caps.push("AUTH=PLAIN");
         } else {
@@ -572,11 +775,174 @@ fn capability_list(tls_active: bool, allow_insecure_auth: bool) -> Vec<&'static 
     caps
 }
 
-fn greeting_line(tls_active: bool, allow_insecure_auth: bool) -> String {
+fn greeting_line(tls_active: bool, allow_insecure_auth: bool, starttls_available: bool) -> String {
     format!(
         "* OK [CAPABILITY {}] ApexMail IMAP4rev1 server ready\r\n",
-        capability_list(tls_active, allow_insecure_auth).join(" ")
+        capability_list(tls_active, allow_insecure_auth, starttls_available).join(" ")
     )
+}
+
+// ── Command reader ──────────────────────────────────────────────────────────
+//
+// Commands are read line-by-line with full literal support: a literal spec
+// (`{n}`, `{n+}`, `~{n}`) found at a token boundary, outside quoted strings,
+// is consumed per RFC 3501 §4.3. Synchronizing literals get a continuation
+// request; LITERAL+ literals are read immediately. The literal bytes are
+// returned in order and the command text is spliced with `\x01LIT<k>\x01`
+// marker tokens so the existing tokenizers see the literal as one token.
+
+const MAX_COMMAND_LINE: usize = 1024 * 1024;
+const MAX_LITERAL_SIZE: usize = 32 * 1024 * 1024;
+
+/// Read one physical line (bounded) as lossy UTF-8. Returns None on EOF.
+async fn read_line_limited<R: AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<String>> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let consumed = {
+            let available = reader.fill_buf().await?;
+
+            if available.is_empty() {
+                return Ok(None);
+            }
+            if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                buf.extend_from_slice(&available[..=pos]);
+                pos + 1
+            } else {
+                if buf.len() + available.len() > MAX_COMMAND_LINE {
+                    bail!("Command line too long");
+                }
+                buf.extend_from_slice(available);
+                available.len()
+            }
+        };
+        reader.consume(consumed);
+        if buf.last() == Some(&b'\n') {
+            break;
+        }
+    }
+    if buf.len() > MAX_COMMAND_LINE {
+        bail!("Command line too long");
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
+/// Find the first literal spec at a token boundary in `line`.
+/// Returns (spec_start, spec_end, size, non_sync).
+fn find_literal_spec(line: &str) -> Option<(usize, usize, usize, bool)> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut in_quote = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                in_quote = !in_quote;
+                i += 1;
+            }
+            b'\\' if in_quote => i += 2,
+            b'{' if !in_quote => {
+                let prev_ok = i == 0 || matches!(bytes[i - 1], b' ' | b'(' | b'\t');
+                if prev_ok {
+                    let mut j = i + 1;
+                    let mut size: usize = 0;
+                    let mut digits = false;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        size = size
+                            .saturating_mul(10)
+                            .saturating_add((bytes[j] - b'0') as usize);
+                        j += 1;
+                        digits = true;
+                    }
+                    if digits {
+                        let non_sync = j < bytes.len() && bytes[j] == b'+';
+                        if non_sync {
+                            j += 1;
+                        }
+                        if j < bytes.len() && bytes[j] == b'}' {
+                            return Some((i, j + 1, size, non_sync));
+                        }
+                    }
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Read a complete command (tag, command name, args) including any literals.
+/// Returns None when the client closes the connection cleanly at a command
+/// boundary. Errors indicate the stream is no longer synchronized (e.g. a
+/// literal was truncated) and the connection must be closed.
+async fn read_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut BufReader<R>,
+    writer: &mut W,
+) -> Result<Option<(String, String, String, Vec<Vec<u8>>)>> {
+    let mut assembled = String::new();
+    let mut literals: Vec<Vec<u8>> = Vec::new();
+    let mut pending = String::new();
+
+    loop {
+        if pending.is_empty() {
+            let line = match read_line_limited(reader).await? {
+                None => return Ok(None),
+                Some(l) => l,
+            };
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                continue; // ignore blank lines between commands
+            }
+            pending = line.to_string();
+        }
+
+        match find_literal_spec(&pending) {
+            Some((start, end, size, non_sync)) => {
+
+                assembled.push_str(&pending[..start]);
+                assembled.push_str(&format!("\x01LIT{}\x01", literals.len()));
+                if size > MAX_LITERAL_SIZE {
+                    bail!("Literal too large");
+                }
+                if !non_sync {
+                    write_line(writer, "+ Ready for literal data\r\n").await?;
+                }
+                let mut buf = vec![0u8; size];
+
+                reader
+                    .read_exact(&mut buf)
+                    .await
+                    .with_context(|| "Literal data truncated")?;
+
+                literals.push(buf);
+                // The text after the literal spec is sent after the literal
+                // data, followed by CRLF; the next physical line continues it.
+                let rest = pending[end..].to_string();
+                let line = match read_line_limited(reader).await? {
+                    None => return Ok(None),
+                    Some(l) => l,
+                };
+                pending = rest + line.trim_end_matches(['\r', '\n']);
+                if pending.is_empty() {
+                    break; // literal ended the command
+                }
+                // Otherwise keep scanning for further literals in `pending`.
+            }
+            None => {
+                assembled.push_str(&pending);
+                break;
+            }
+        }
+    }
+
+    let assembled = assembled.trim_end_matches(['\r', '\n']).to_string();
+    let (tag, cmd, args) = parse_imap_line(&assembled).unwrap_or_else(|_| {
+        // Commands starting with a literal (e.g. `{5}\r\nLOGIN ...`) have no
+        // tag; treat the whole thing as the command with a generic tag.
+        ("*".to_string(), assembled.clone(), String::new())
+    });
+    Ok(Some((tag, cmd, args, literals)))
 }
 // ── Command dispatcher ──────────────────────────────────────────────────────
 //
@@ -596,32 +962,33 @@ async fn handle_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     args: &str,
     reader: &mut BufReader<R>,
     writer: &mut W,
+    literals: &[Vec<u8>],
 ) -> Result<()> {
     session.tag = tag.to_string();
 
     match cmd.to_uppercase().as_str() {
         "CAPABILITY" => handle_capability(session, tag, writer).await,
-        "LOGIN" => handle_login(session, tag, args, writer).await,
+        "LOGIN" => handle_login(session, tag, args, literals, writer).await,
         "LOGOUT" => handle_logout(session, tag, writer).await,
         "AUTHENTICATE" => handle_authenticate(session, tag, args, reader, writer).await,
-        "NAMESPACE" => handle_namespace(tag, writer).await,
-        "SELECT" => handle_select(session, tag, args, false, writer).await,
-        "EXAMINE" => handle_select(session, tag, args, true, writer).await,
+        "NAMESPACE" => handle_namespace(session, tag, writer).await,
+        "SELECT" => handle_select(session, tag, args, false, literals, writer).await,
+        "EXAMINE" => handle_select(session, tag, args, true, literals, writer).await,
         "FETCH" => handle_fetch(session, tag, args, false, writer).await,
-        "UID" => handle_uid_command(session, tag, args, reader, writer).await,
-        "STORE" => handle_store(session, tag, args, false, writer).await,
-        "SEARCH" => handle_search(session, tag, args, false, writer).await,
-        "COPY" => handle_copy(session, tag, args, false, writer).await,
-        "MOVE" => handle_move(session, tag, args, false, writer).await,
-        "CREATE" => handle_create(session, tag, args, writer).await,
-        "DELETE" => handle_delete(session, tag, args, writer).await,
-        "RENAME" => handle_rename(session, tag, args, writer).await,
-        "LIST" => handle_list(session, tag, args, writer).await,
-        "LSUB" => handle_lsub(session, tag, args, writer).await,
-        "SUBSCRIBE" => handle_subscribe(session, tag, args, writer).await,
-        "UNSUBSCRIBE" => handle_unsubscribe(session, tag, args, writer).await,
-        "STATUS" => handle_status(session, tag, args, writer).await,
-        "APPEND" => handle_append(session, tag, args, reader, writer).await,
+        "UID" => handle_uid_command(session, tag, args, literals, writer).await,
+        "STORE" => handle_store(session, tag, args, false, literals, writer).await,
+        "SEARCH" => handle_search(session, tag, args, false, literals, writer).await,
+        "COPY" => handle_copy(session, tag, args, false, literals, writer).await,
+        "MOVE" => handle_move(session, tag, args, false, literals, writer).await,
+        "CREATE" => handle_create(session, tag, args, literals, writer).await,
+        "DELETE" => handle_delete(session, tag, args, literals, writer).await,
+        "RENAME" => handle_rename(session, tag, args, literals, writer).await,
+        "LIST" => handle_list(session, tag, args, literals, writer).await,
+        "LSUB" => handle_lsub(session, tag, args, literals, writer).await,
+        "SUBSCRIBE" => handle_subscribe(session, tag, args, literals, writer).await,
+        "UNSUBSCRIBE" => handle_unsubscribe(session, tag, args, literals, writer).await,
+        "STATUS" => handle_status(session, tag, args, literals, writer).await,
+        "APPEND" => handle_append(session, tag, args, literals, writer).await,
         "EXPUNGE" => handle_expunge(session, tag, args, writer).await,
         "IDLE" => handle_idle(session, tag, writer).await,
         "NOOP" => handle_noop(session, tag, writer).await,
@@ -637,25 +1004,26 @@ async fn handle_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
-async fn handle_uid_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+async fn handle_uid_command<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
-    _reader: &mut BufReader<R>,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     let args = args.trim();
     let space_pos = args.find(' ').unwrap_or(args.len());
     let sub_cmd = &args[..space_pos];
     let sub_args = args[space_pos..].trim();
+    let sub_args = resolve_token(sub_args, literals);
 
     match sub_cmd.to_uppercase().as_str() {
-        "FETCH" => handle_fetch(session, tag, sub_args, true, writer).await,
-        "STORE" => handle_store(session, tag, sub_args, true, writer).await,
-        "SEARCH" => handle_search(session, tag, sub_args, true, writer).await,
-        "COPY" => handle_copy(session, tag, sub_args, true, writer).await,
-        "MOVE" => handle_move(session, tag, sub_args, true, writer).await,
-        "EXPUNGE" => handle_expunge(session, tag, "", writer).await,
+        "FETCH" => handle_fetch(session, tag, &sub_args, true, writer).await,
+        "STORE" => handle_store(session, tag, &sub_args, true, literals, writer).await,
+        "SEARCH" => handle_search(session, tag, &sub_args, true, literals, writer).await,
+        "COPY" => handle_copy(session, tag, &sub_args, true, literals, writer).await,
+        "MOVE" => handle_move(session, tag, &sub_args, true, literals, writer).await,
+        "EXPUNGE" => handle_expunge(session, tag, &sub_args, writer).await,
         _ => {
             write_line(
                 writer,
@@ -668,6 +1036,31 @@ async fn handle_uid_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
 fn auth_required(session: &ImapSession) -> bool {
     session.state != SessionState::NotAuthenticated
+}
+
+/// Re-list the selected mailbox so the session's UID map (and thus sequence
+/// numbers) stays correct even when other sessions modify the mailbox.
+async fn refresh_session_view(session: &mut ImapSession) {
+    if !mailbox_selected(session) {
+        return;
+    }
+    let mut client = session.client.clone();
+    let req = ListMessagesRequest {
+        account_id: session.account_id.clone(),
+        mailbox: session.mailbox.clone(),
+        uid_min: 1,
+        uid_max: u64::MAX,
+        limit: 100_000,
+    };
+    if let Ok(resp) = client.list_messages(req).await {
+        let mut msgs = resp.into_inner().messages;
+        msgs.sort_by_key(|m| m.uid);
+        session.uid_map = msgs.iter().map(|m| m.uid).collect();
+        session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
+        if let Some(&last) = session.uid_map.last() {
+            session.uid_next = session.uid_next.max(last.saturating_add(1));
+        }
+    }
 }
 
 fn mailbox_selected(session: &ImapSession) -> bool {
@@ -685,7 +1078,7 @@ async fn handle_capability<W: AsyncWrite + Unpin>(
     tag: &str,
     writer: &mut W,
 ) -> Result<()> {
-    let caps = capability_list(session.tls_active, session.allow_insecure_auth);
+    let caps = capability_list(session.tls_active, session.allow_insecure_auth, true);
     write_line(
         writer,
         &format!(
@@ -699,7 +1092,14 @@ async fn handle_capability<W: AsyncWrite + Unpin>(
 
 // ── NAMESPACE (RFC 2342) ────────────────────────────────────────────────────
 
-async fn handle_namespace<W: AsyncWrite + Unpin>(tag: &str, writer: &mut W) -> Result<()> {
+async fn handle_namespace<W: AsyncWrite + Unpin>(
+    session: &ImapSession,
+    tag: &str,
+    writer: &mut W,
+) -> Result<()> {
+    if !auth_required(session) {
+        return write_line(writer, &tagged_no(tag, "Not authenticated")).await;
+    }
     write_line(
         writer,
         &format!(
@@ -716,6 +1116,7 @@ async fn handle_login<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if session.state != SessionState::NotAuthenticated {
@@ -736,7 +1137,7 @@ async fn handle_login<W: AsyncWrite + Unpin>(
         .await;
     }
 
-    let (user, password) = match parse_login_args(args) {
+    let (user, password) = match parse_login_args(args, literals) {
         Ok(v) => v,
         Err(e) => {
             return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
@@ -767,47 +1168,24 @@ async fn handle_login<W: AsyncWrite + Unpin>(
     }
 }
 
-fn parse_login_args(args: &str) -> Result<(String, String)> {
-    let mut user = String::new();
-    let mut pass = String::new();
-    let mut in_quote = false;
-    let mut current = String::new();
-    let chars: Vec<char> = args.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '"' {
-            if in_quote {
-                if user.is_empty() {
-                    user = current.clone();
-                } else if pass.is_empty() {
-                    pass = current.clone();
-                }
-                current.clear();
-                in_quote = false;
-            } else {
-                in_quote = true;
-            }
-        } else if c == ' ' && !in_quote {
-            if !current.is_empty() && user.is_empty() {
-                user = current.clone();
-                current.clear();
-            } else if !current.is_empty() && pass.is_empty() && !user.is_empty() {
-                pass = current.clone();
-                current.clear();
-            }
-        } else {
-            current.push(c);
-        }
-        i += 1;
-    }
-    if !current.is_empty() && pass.is_empty() {
-        pass = current;
-    }
-    if user.is_empty() || pass.is_empty() {
+fn parse_login_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, String)> {
+    let tokens = tokenize_command_args(args.trim());
+    if tokens.is_empty() {
         bail!("LOGIN requires username and password");
     }
-    Ok((user, pass))
+    let user = resolve_token(&tokens[0], literals);
+    let password = if tokens.len() > 1 {
+        resolve_token(&tokens[1], literals)
+    } else {
+        String::new()
+    };
+    if tokens.len() > 2 {
+        bail!("LOGIN takes exactly username and password");
+    }
+    if user.is_empty() || password.is_empty() {
+        bail!("LOGIN requires username and password");
+    }
+    Ok((user, password))
 }
 
 // ── AUTHENTICATE PLAIN (RFC 4616) ───────────────────────────────────────────
@@ -933,12 +1311,17 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     tag: &str,
     args: &str,
     read_only: bool,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
         return write_line(writer, &tagged_no(tag, "Not authenticated")).await;
     }
-    let mailbox = args.trim().trim_matches('"').to_string();
+    let tokens = tokenize_command_args(args.trim());
+    let mailbox = tokens
+        .first()
+        .map(|t| imap_utf7_decode(&resolve_token(t, literals)))
+        .unwrap_or_default();
     if mailbox.is_empty() {
         return write_line(writer, &tagged_bad(tag, "Mailbox name required")).await;
     }
@@ -990,10 +1373,20 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     msgs.sort_by_key(|m| m.uid);
     session.uid_map = msgs.iter().map(|m| m.uid).collect();
 
+    // RFC 3501 §6.3.1: [UNSEEN n] is the sequence number of the FIRST unseen
+    // message, sent only when the mailbox contains unseen messages.
+    let first_unseen = msgs
+        .iter()
+        .position(|m| !m.flags.clone().unwrap_or_default().seen)
+        .map(|i| i as u32 + 1);
+
     let mut responses = String::new();
     responses.push_str(&format!("* {} EXISTS\r\n", session.exists));
     responses.push_str(&format!("* {} RECENT\r\n", session.recent));
     responses.push_str(&flags_response(&session.permanent_flags));
+    if let Some(seq) = first_unseen {
+        responses.push_str(&format!("* OK [UNSEEN {}] First unseen message\r\n", seq));
+    }
     responses.push_str(&permanent_flags_response(&session.permanent_flags));
     responses.push_str(&uid_validity_response(session.uid_validity));
     responses.push_str(&uid_next_response(session.uid_next));
@@ -1109,7 +1502,6 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     let (seq_part, items_str) = parse_fetch_args(args)?;
     let items = parse_fetch_items(&items_str)?;
     let intervals = parse_sequence_set(&seq_part)?;
-
     // Fetch the full mailbox listing so sequence numbers are correct and
     // wildcards resolve against actual contents.
     let mut client = session.client.clone();
@@ -1263,6 +1655,12 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                             BodySection::Text => text,
                         };
                         let mut payload = section_bytes.to_vec();
+                        // RFC 3501 §7.4.2: a partial fetch response names the
+                        // section with its origin, e.g. BODY[HEADER]<0>.
+                        let resp_name = match partial {
+                            Some((offset, _)) => format!("{}<{}>", name, offset),
+                            None => name.clone(),
+                        };
                         if let Some((offset, octets)) = partial {
                             let end = if octets == 0 {
                                 payload.len()
@@ -1275,7 +1673,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                                 payload.clear();
                             }
                         }
-                        body_payloads.push((name.clone(), payload));
+                        body_payloads.push((resp_name, payload));
                     }
                     FetchItem::Fast | FetchItem::All | FetchItem::Full => {}
                 }
@@ -1306,10 +1704,14 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         }
         writer.write_all(out.as_bytes()).await?;
         if !body_payloads.is_empty() {
+            // RFC 3501 §7.4.2: after the last literal the closing paren
+            // follows immediately (no trailing space).
             writer.write_all(b"\r\n").await?;
-            for (_, payload) in &body_payloads {
+            for (i, (_, payload)) in body_payloads.iter().enumerate() {
+                if i > 0 {
+                    writer.write_all(b" ").await?;
+                }
                 writer.write_all(payload).await?;
-                writer.write_all(b" ").await?;
             }
         }
         writer.write_all(b")\r\n").await?;
@@ -1328,7 +1730,7 @@ fn parse_fetch_args(args: &str) -> Result<(String, String)> {
     if tokens.is_empty() {
         bail!("FETCH requires a sequence set");
     }
-    let seq_part = tokens[0].clone();
+    let seq_part = resolve_token(&tokens[0], &[]);
     let items_str = tokens[1..].join(" ");
     Ok((seq_part, items_str))
 }
@@ -1525,6 +1927,7 @@ async fn handle_store<W: AsyncWrite + Unpin>(
     tag: &str,
     args: &str,
     is_uid: bool,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !mailbox_selected(session) {
@@ -1534,13 +1937,14 @@ async fn handle_store<W: AsyncWrite + Unpin>(
         return write_line(writer, &tagged_no(tag, "[READ-ONLY] STORE not permitted")).await;
     }
 
-    let (seq_part, store_op) = match parse_store_args(args) {
+    let (seq_part, store_op) = match parse_store_args(args, literals) {
         Ok(v) => v,
         Err(e) => {
             return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
         }
     };
-    let uids = resolve_sequence_set(session, seq_part, is_uid)?;
+    refresh_session_view(session).await;
+    let uids = resolve_sequence_set(session, &seq_part, is_uid)?;
     if uids.is_empty() {
         return write_line(writer, &tagged_ok(tag, "STORE completed")).await;
     }
@@ -1608,13 +2012,13 @@ async fn handle_store<W: AsyncWrite + Unpin>(
     write_line(writer, &responses).await
 }
 
-fn parse_store_args(args: &str) -> Result<(&str, StoreOp)> {
+fn parse_store_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, StoreOp)> {
     let args = args.trim();
     let tokens: Vec<&str> = args.splitn(3, ' ').collect();
     if tokens.len() < 3 {
         bail!("STORE requires sequence set, operation, and flags");
     }
-    let seq_part = tokens[0];
+    let seq_part = resolve_token(tokens[0], literals);
     let op_prefix = tokens[1];
     let flags_str = tokens[2];
 
@@ -1648,11 +2052,14 @@ async fn handle_search<W: AsyncWrite + Unpin>(
     tag: &str,
     args: &str,
     is_uid: bool,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !mailbox_selected(session) {
         return write_line(writer, &tagged_bad(tag, "No mailbox selected")).await;
     }
+
+    refresh_session_view(session).await;
 
     let mut client = session.client.clone();
     let list_req = ListMessagesRequest {
@@ -1681,7 +2088,7 @@ async fn handle_search<W: AsyncWrite + Unpin>(
 
     let tokens: Vec<String> = tokenize_command_args(args.trim())
         .iter()
-        .map(|t| unquote(t))
+        .map(|t| resolve_token(t, literals))
         .collect();
     let mut i = 0;
     while i < tokens.len() {
@@ -1774,8 +2181,19 @@ async fn handle_search<W: AsyncWrite + Unpin>(
                     }
                 }
             }
-            "BODY" | "TEXT" | "HEADER" => {
+            "BODY" | "TEXT" => {
                 i += 1;
+                if i < tokens.len() {
+                    fulltext_terms.push(tokens[i].clone());
+                }
+            }
+            // HEADER <field> <value>: consume the field name and search on
+            // the value only (the mailstore fulltext query covers headers).
+            "HEADER" => {
+                i += 1; // skip HEADER
+                if i < tokens.len() {
+                    i += 1; // skip the field name
+                }
                 if i < tokens.len() {
                     fulltext_terms.push(tokens[i].clone());
                 }
@@ -1849,18 +2267,20 @@ async fn handle_copy<W: AsyncWrite + Unpin>(
     tag: &str,
     args: &str,
     is_uid: bool,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !mailbox_selected(session) {
         return write_line(writer, &tagged_bad(tag, "No mailbox selected")).await;
     }
 
-    let (seq_part, dest) = match parse_copy_args(args) {
+    let (seq_part, dest) = match parse_copy_args(args, literals) {
         Ok(v) => v,
         Err(e) => {
             return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
         }
     };
+    refresh_session_view(session).await;
     let uids = resolve_sequence_set(session, &seq_part, is_uid)?;
     if uids.is_empty() {
         return write_line(writer, &tagged_ok(tag, "COPY completed")).await;
@@ -1881,20 +2301,25 @@ async fn handle_copy<W: AsyncWrite + Unpin>(
         }
     };
 
-    let mappings: Vec<String> = resp
+    // RFC 4315: [COPYUID <uidvalidity> <src uid-set> <dst uid-set>]
+    let mut pairs: Vec<(u64, u64)> = resp
         .uid_mapping
         .iter()
-        .map(|(from, to)| format!("{} {}", from, to))
+        .map(|(from, to)| (*from, *to))
         .collect();
+    pairs.sort_unstable();
+    let srcs: Vec<String> = pairs.iter().map(|(s, _)| s.to_string()).collect();
+    let dsts: Vec<String> = pairs.iter().map(|(_, d)| d.to_string()).collect();
 
     write_line(
         writer,
         &tagged_ok(
             tag,
             &format!(
-                "[COPYUID {} {}] COPY completed",
-                resp.uid_mapping.len(),
-                mappings.join(",")
+                "[COPYUID {} {} {}] COPY completed",
+                session.uid_validity,
+                srcs.join(","),
+                dsts.join(",")
             ),
         ),
     )
@@ -1906,18 +2331,20 @@ async fn handle_move<W: AsyncWrite + Unpin>(
     tag: &str,
     args: &str,
     is_uid: bool,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !mailbox_selected(session) {
         return write_line(writer, &tagged_bad(tag, "No mailbox selected")).await;
     }
 
-    let (seq_part, dest) = match parse_copy_args(args) {
+    let (seq_part, dest) = match parse_copy_args(args, literals) {
         Ok(v) => v,
         Err(e) => {
             return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
         }
     };
+    refresh_session_view(session).await;
     let uids = resolve_sequence_set(session, &seq_part, is_uid)?;
     if uids.is_empty() {
         return write_line(writer, &tagged_ok(tag, "MOVE completed")).await;
@@ -1938,11 +2365,15 @@ async fn handle_move<W: AsyncWrite + Unpin>(
         }
     };
 
-    let mappings: Vec<String> = resp
+    // RFC 4315: [COPYUID <uidvalidity> <src uid-set> <dst uid-set>]
+    let mut pairs: Vec<(u64, u64)> = resp
         .uid_mapping
         .iter()
-        .map(|(from, to)| format!("{} {}", from, to))
+        .map(|(from, to)| (*from, *to))
         .collect();
+    pairs.sort_unstable();
+    let srcs: Vec<String> = pairs.iter().map(|(s, _)| s.to_string()).collect();
+    let dsts: Vec<String> = pairs.iter().map(|(_, d)| d.to_string()).collect();
 
     // Update the session's view: moved messages are gone from this mailbox.
     session.uid_map.retain(|u| !uids.contains(u));
@@ -1953,22 +2384,23 @@ async fn handle_move<W: AsyncWrite + Unpin>(
         &tagged_ok(
             tag,
             &format!(
-                "[COPYUID {} {}] MOVE completed",
-                resp.uid_mapping.len(),
-                mappings.join(",")
+                "[COPYUID {} {} {}] MOVE completed",
+                session.uid_validity,
+                srcs.join(","),
+                dsts.join(",")
             ),
         ),
     )
     .await
 }
 
-fn parse_copy_args(args: &str) -> Result<(String, String)> {
+fn parse_copy_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, String)> {
     let tokens = tokenize_command_args(args.trim());
     if tokens.len() < 2 {
         bail!("COPY/MOVE requires sequence set and destination");
     }
-    let seq_part = tokens[0].clone();
-    let dest = unquote(&tokens[tokens.len() - 1]);
+    let seq_part = resolve_token(&tokens[0], literals);
+    let dest = imap_utf7_decode(&resolve_token(&tokens[tokens.len() - 1], literals));
     Ok((seq_part, dest))
 }
 
@@ -1978,12 +2410,17 @@ async fn handle_create<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
         return write_line(writer, &tagged_no(tag, "Not authenticated")).await;
     }
-    let name = args.trim().trim_matches('"').to_string();
+    let tokens = tokenize_command_args(args.trim());
+    let name = tokens
+        .first()
+        .map(|t| imap_utf7_decode(&resolve_token(t, literals)))
+        .unwrap_or_default();
     if name.is_empty() {
         return write_line(writer, &tagged_bad(tag, "Mailbox name required")).await;
     }
@@ -2013,12 +2450,17 @@ async fn handle_delete<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
         return write_line(writer, &tagged_no(tag, "Not authenticated")).await;
     }
-    let name = args.trim().trim_matches('"').to_string();
+    let tokens = tokenize_command_args(args.trim());
+    let name = tokens
+        .first()
+        .map(|t| imap_utf7_decode(&resolve_token(t, literals)))
+        .unwrap_or_default();
     if name.is_empty() {
         return write_line(writer, &tagged_bad(tag, "Mailbox name required")).await;
     }
@@ -2048,6 +2490,7 @@ async fn handle_rename<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
@@ -2057,8 +2500,8 @@ async fn handle_rename<W: AsyncWrite + Unpin>(
     if tokens.len() < 2 {
         return write_line(writer, &tagged_bad(tag, "RENAME requires old and new name")).await;
     }
-    let old_name = unquote(&tokens[0]);
-    let new_name = unquote(&tokens[1]);
+    let old_name = imap_utf7_decode(&resolve_token(&tokens[0], literals));
+    let new_name = imap_utf7_decode(&resolve_token(&tokens[1], literals));
     if old_name.is_empty() || new_name.is_empty() {
         return write_line(writer, &tagged_bad(tag, "RENAME requires old and new name")).await;
     }
@@ -2130,13 +2573,14 @@ async fn handle_list<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
         return write_line(writer, &tagged_no(tag, "Not authenticated")).await;
     }
-    let (reference, pattern) = parse_list_args(args);
-    let pattern = combine_list_pattern(&reference, &pattern);
+    let (reference, pattern) = parse_list_args(args, literals);
+    let pattern = imap_utf7_decode(&combine_list_pattern(&reference, &pattern));
 
     let mut client = session.client.clone();
     let req = ListMailboxesRequest {
@@ -2169,7 +2613,7 @@ async fn handle_list<W: AsyncWrite + Unpin>(
             "* LIST ({}) {} \"{}\"\r\n",
             attrs.join(" "),
             delim,
-            mb.name
+            imap_utf7_encode(&mb.name)
         ));
     }
     responses.push_str(&tagged_ok(tag, "LIST completed"));
@@ -2180,13 +2624,14 @@ async fn handle_lsub<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
         return write_line(writer, &tagged_no(tag, "Not authenticated")).await;
     }
-    let (reference, pattern) = parse_list_args(args);
-    let pattern = combine_list_pattern(&reference, &pattern);
+    let (reference, pattern) = parse_list_args(args, literals);
+    let pattern = imap_utf7_decode(&combine_list_pattern(&reference, &pattern));
 
     let subscribed = subscribed_mailboxes(&session.account_id).await;
 
@@ -2220,7 +2665,7 @@ async fn handle_lsub<W: AsyncWrite + Unpin>(
             "* LSUB ({}) {} \"{}\"\r\n",
             mb.attributes.join(" "),
             delim,
-            mb.name
+            imap_utf7_encode(&mb.name)
         ));
     }
     responses.push_str(&tagged_ok(tag, "LSUB completed"));
@@ -2234,12 +2679,15 @@ async fn is_subscribed(account_id: &str, mailbox: &str) -> bool {
         .any(|s| s.eq_ignore_ascii_case(mailbox))
 }
 
-fn parse_list_args(args: &str) -> (String, String) {
+fn parse_list_args(args: &str, literals: &[Vec<u8>]) -> (String, String) {
     let tokens = tokenize_command_args(args.trim());
-    let reference = tokens.first().map(|t| unquote(t)).unwrap_or_default();
+    let reference = tokens
+        .first()
+        .map(|t| resolve_token(t, literals))
+        .unwrap_or_default();
     let pattern = tokens
         .get(1)
-        .map(|t| unquote(t))
+        .map(|t| resolve_token(t, literals))
         .unwrap_or_else(|| "*".to_string());
     (reference, pattern)
 }
@@ -2250,12 +2698,13 @@ async fn handle_subscribe<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
         return write_line(writer, &tagged_no(tag, "Not authenticated")).await;
     }
-    let name = unquote(args.trim());
+    let name = imap_utf7_decode(&resolve_token(args.trim(), literals));
     if name.is_empty() {
         return write_line(writer, &tagged_bad(tag, "Mailbox name required")).await;
     }
@@ -2271,12 +2720,13 @@ async fn handle_unsubscribe<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
         return write_line(writer, &tagged_no(tag, "Not authenticated")).await;
     }
-    let name = unquote(args.trim());
+    let name = imap_utf7_decode(&resolve_token(args.trim(), literals));
     if name.is_empty() {
         return write_line(writer, &tagged_bad(tag, "Mailbox name required")).await;
     }
@@ -2294,15 +2744,17 @@ async fn handle_status<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
         return write_line(writer, &tagged_no(tag, "Not authenticated")).await;
     }
-    let args = args.trim();
-    let first_space = args.find(' ').unwrap_or(args.len());
-    let mailbox = args[..first_space].trim().trim_matches('"').to_string();
-
+    let tokens = tokenize_command_args(args.trim());
+    if tokens.is_empty() {
+        return write_line(writer, &tagged_bad(tag, "Mailbox name required")).await;
+    }
+    let mailbox = imap_utf7_decode(&resolve_token(&tokens[0], literals));
     if mailbox.is_empty() {
         return write_line(writer, &tagged_bad(tag, "Mailbox name required")).await;
     }
@@ -2323,7 +2775,7 @@ async fn handle_status<W: AsyncWrite + Unpin>(
     };
     let mb = status.mailbox.unwrap_or_default();
 
-    let items_str = args[first_space..].trim();
+    let items_str = tokens[1..].join(" ");
     let mut parts = Vec::new();
     let items_lower = items_str.to_lowercase();
 
@@ -2346,7 +2798,7 @@ async fn handle_status<W: AsyncWrite + Unpin>(
     let mut responses = String::new();
     responses.push_str(&format!(
         "* STATUS \"{}\" ({})\r\n",
-        mailbox,
+        imap_utf7_encode(&mailbox),
         parts.join(" ")
     ));
     responses.push_str(&tagged_ok(tag, "STATUS completed"));
@@ -2355,11 +2807,11 @@ async fn handle_status<W: AsyncWrite + Unpin>(
 
 // ── APPEND ──────────────────────────────────────────────────────────────────
 
-async fn handle_append<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+async fn handle_append<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
-    reader: &mut BufReader<R>,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !auth_required(session) {
@@ -2370,7 +2822,7 @@ async fn handle_append<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     if tokens.is_empty() {
         return write_line(writer, &tagged_bad(tag, "APPEND requires a mailbox")).await;
     }
-    let mailbox = unquote(&tokens[0]);
+    let mailbox = imap_utf7_decode(&resolve_token(&tokens[0], literals));
     if mailbox.is_empty() {
         return write_line(writer, &tagged_bad(tag, "APPEND requires a mailbox")).await;
     }
@@ -2405,7 +2857,7 @@ async fn handle_append<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
     let mut internal_date: i64 = 0;
     if idx < tokens.len() && tokens[idx].starts_with('"') {
-        let date_str = unquote(&tokens[idx]);
+        let date_str = resolve_token(&tokens[idx], literals);
         let parsed = chrono::DateTime::parse_from_str(&date_str, "%d-%b-%Y %H:%M:%S %z");
         match parsed {
             Ok(dt) => internal_date = dt.timestamp(),
@@ -2427,12 +2879,25 @@ async fn handle_append<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         )
         .await;
     }
-    let (size, non_sync) = match parse_literal_spec(&tokens[idx]) {
-        Ok(v) => v,
-        Err(e) => {
-            return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
+    // The message literal was consumed by the command reader (sync literals
+    // got a continuation request there). The literal token is the message.
+    let raw_message = match token_literal_bytes(&tokens[idx], literals) {
+        Some(b) => b.to_vec(),
+        None => {
+            return write_line(
+                writer,
+                &tagged_bad(tag, "APPEND requires a literal message"),
+            )
+            .await;
         }
     };
+    if idx + 1 < tokens.len() {
+        return write_line(
+            writer,
+            &tagged_bad(tag, "Unexpected extra argument after message literal"),
+        )
+        .await;
+    }
 
     // Verify the target mailbox exists and get its UIDVALIDITY.
     let uidvalidity = match get_mailbox_status(&mut session.client, &session.account_id, &mailbox)
@@ -2451,38 +2916,12 @@ async fn handle_append<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
     };
 
-    // Synchronizing literal: prompt the client to send the data.
-    if !non_sync {
-        write_line(writer, "+ Ready for literal data\r\n").await?;
-    }
-
-    let mut buf = vec![0u8; size];
-    match reader.read_exact(&mut buf).await {
-        Ok(_) => {}
-        Err(e) => bail!("Failed to read APPEND literal: {}", e),
-    }
-
-    if !non_sync {
-        // Synchronizing literals are terminated by a CRLF after the data.
-        let mut crlf = [0u8; 2];
-        match reader.read_exact(&mut crlf).await {
-            Ok(_) => {
-                if crlf != *b"\r\n" {
-                    warn!("APPEND literal not followed by CRLF");
-                }
-            }
-            Err(_) => {
-                warn!("APPEND literal truncated before trailing CRLF");
-            }
-        }
-    }
-
     // Store the message via mailstore gRPC.
     let mut client = session.client.clone();
     let req = StoreMessageRequest {
         account_id: session.account_id.clone(),
         mailbox: mailbox.clone(),
-        raw_message: buf.into(),
+        raw_message: raw_message.into(),
         flags: Some(flags),
         internal_date,
     };
@@ -2531,6 +2970,8 @@ async fn handle_expunge<W: AsyncWrite + Unpin>(
         return write_line(writer, &tagged_no(tag, "[READ-ONLY] EXPUNGE not permitted")).await;
     }
 
+    refresh_session_view(session).await;
+
     let mut client = session.client.clone();
     let req = ExpungeRequest {
         account_id: session.account_id.clone(),
@@ -2557,6 +2998,10 @@ async fn handle_expunge<W: AsyncWrite + Unpin>(
     session.uid_map.retain(|u| !resp.expunged_uids.contains(u));
     session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
 
+    if !resp.expunged_uids.is_empty() {
+        responses.push_str(&format!("* {} EXISTS\r\n", session.exists));
+    }
+
     responses.push_str(&tagged_ok(tag, "EXPUNGE completed"));
     write_line(writer, &responses).await
 }
@@ -2578,6 +3023,7 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
             if mb.exists != session.exists {
                 responses.push_str(&format!("* {} EXISTS\r\n", mb.exists));
                 session.exists = mb.exists;
+                refresh_session_view(session).await;
             }
             if mb.recent != session.recent {
                 responses.push_str(&format!("* {} RECENT\r\n", mb.recent));
@@ -2877,14 +3323,42 @@ async fn run_idle<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                         return Ok(());
                     }
                     Ok(_) => {
-                        if line.trim().eq_ignore_ascii_case("DONE") {
+                        let tokens: Vec<&str> = line.split_whitespace().collect();
+                        if tokens.is_empty() {
+                            continue;
+                        }
+                        let is_done = tokens
+                            .last()
+                            .map(|t| t.eq_ignore_ascii_case("DONE"))
+                            .unwrap_or(false);
+                        if is_done {
                             let mut g = session.lock().await;
                             g.idle = false;
                             drop(g);
                             write_line(writer, &tagged_ok(tag, "IDLE terminated")).await?;
                             return Ok(());
                         }
-                        debug!("Ignoring command received during IDLE");
+                        // RFC 2177: only DONE is permitted while idling. A
+                        // LOGOUT ends the session cleanly; anything else gets
+                        // a BAD and IDLE continues.
+                        let is_logout = tokens
+                            .get(1)
+                            .map(|t| t.eq_ignore_ascii_case("LOGOUT"))
+                            .unwrap_or(false);
+                        if is_logout {
+                            let mut g = session.lock().await;
+                            g.idle = false;
+                            g.state = SessionState::Logout;
+                            drop(g);
+                            write_line(
+                                writer,
+                                &format!("{}{}", bye("Logging out"), tagged_ok(tokens[0], "LOGOUT completed")),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        let cmd_tag = tokens.first().map(|s| s.to_string()).unwrap_or_default();
+                        write_line(writer, &tagged_bad(&cmd_tag, "Command not allowed during IDLE")).await?;
                     }
                     Err(e) => {
                         warn!("IDLE read error: {}", e);
@@ -2938,12 +3412,17 @@ async fn handle_connection(
     // Connect to mailstore with a timeout so mobile clients don't hang waiting
     // for the IMAP greeting while gRPC connects. A lazy channel is used so the
     // greeting is sent immediately without waiting for mailstore to be up.
-    let channel = Channel::from_shared(mailstore_addr.clone())
-        .with_context(|| "Invalid mailstore address")?
+    // Limits are raised to 64 MiB so large messages (e.g. 5 MB APPENDs) pass.
+    let uri: tonic::transport::Uri = mailstore_addr
+        .parse()
+        .with_context(|| "Invalid mailstore address")?;
+    let channel = Channel::builder(uri)
         .timeout(Duration::from_secs(30))
         .connect_lazy();
 
-    let client = MailstoreServiceClient::new(channel);
+    let client = MailstoreServiceClient::new(channel)
+        .max_decoding_message_size(64 * 1024 * 1024)
+        .max_encoding_message_size(64 * 1024 * 1024);
     let session = Arc::new(Mutex::new({
         let mut s = ImapSession::new(client);
         s.tls_active = is_tls;
@@ -2957,7 +3436,7 @@ async fn handle_connection(
             match acceptor.accept(stream).await {
                 Ok(tls_stream) => {
                     let (reader, writer) = tokio::io::split(tls_stream);
-                    serve(session, reader, writer).await?;
+                    serve(session, reader, writer, true).await?;
                 }
                 Err(e) => {
                     warn!("TLS handshake failed: {}", e);
@@ -2969,9 +3448,17 @@ async fn handle_connection(
         handle_plaintext_with_starttls(stream, acceptor, session, allow_insecure_auth).await?;
     } else {
         // IMAP (143) without TLS configured: serve plaintext directly but keep
-        // the auth policy (LOGIN/AUTHENTICATE only when insecure auth allowed).
+        // the auth policy (LOGIN/AUTHENTICATE only when insecure auth allowed)
+        // and do not advertise STARTTLS since there is no certificate.
         let (reader, writer) = tokio::io::split(stream);
-        serve(session, reader, writer).await?;
+        let greeting = {
+            let g = session.lock().await;
+            greeting_line(g.tls_active, g.allow_insecure_auth, false)
+        };
+        let mut writer = writer;
+        writer.write_all(greeting.as_bytes()).await?;
+        writer.flush().await?;
+        serve(session, reader, writer, false).await?;
     }
 
     Ok(())
@@ -2982,7 +3469,10 @@ async fn handle_connection(
 /// Reads commands line-by-line. When the client sends STARTTLS, responds with
 /// an OK, upgrades the TCP stream to TLS, then delegates to `serve()` for the
 /// rest of the session. Before STARTTLS, only CAPABILITY/NOOP/STARTTLS are
-/// allowed per RFC 3501 §6.2.1.
+/// allowed per RFC 3501 §6.2.1 — except that LOGIN/AUTHENTICATE are routed
+/// through the normal handlers so they are refused with `[PRIVACYREQUIRED]`
+/// on a plaintext connection (unless IMAP_ALLOW_INSECURE_AUTH=true, in which
+/// case the session continues in plaintext).
 async fn handle_plaintext_with_starttls(
     stream: TcpStream,
     acceptor: TlsAcceptor,
@@ -2998,32 +3488,24 @@ async fn handle_plaintext_with_starttls(
     let mut writer = write_half;
 
     // Send greeting
-    let greeting = greeting_line(false, allow_insecure_auth);
+    let greeting = greeting_line(false, allow_insecure_auth, true);
     writer.write_all(greeting.as_bytes()).await?;
     writer.flush().await?;
 
-    let mut line = String::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => return Ok(()), // client disconnected
-            Ok(_) => {}
+        // Re-read commands with literal support in case a client uses a
+        // literal for its username.
+        let command = match read_command(&mut reader, &mut writer).await {
+            Ok(Some(c)) => c,
+            Ok(None) => return Ok(()),
             Err(e) => {
-                warn!("Plaintext read error: {}", e);
+                warn!("Error reading command before STARTTLS: {}", e);
                 return Ok(());
             }
-        }
+        };
+        let (tag, cmd, args, literals) = command;
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
-        let tag = parts.first().unwrap_or(&"*");
-        let cmd = parts.get(1).unwrap_or(&"").to_uppercase();
-
-        match cmd.as_str() {
+        match cmd.to_uppercase().as_str() {
             "STARTTLS" => {
                 let resp = format!("{tag} OK Begin TLS negotiation now\r\n");
                 writer.write_all(resp.as_bytes()).await?;
@@ -3035,10 +3517,10 @@ async fn handle_plaintext_with_starttls(
                         info!("STARTTLS upgrade successful");
                         // The connection is now encrypted: mark the session as
                         // TLS so auth is permitted and STARTTLS is no longer
-                        // advertised.
+                        // advertised. No second greeting is sent.
                         session.lock().await.tls_active = true;
                         let (tls_reader, tls_writer) = tokio::io::split(tls_stream);
-                        serve(session, tls_reader, tls_writer).await?;
+                        serve(session, tls_reader, tls_writer, false).await?;
                         return Ok(());
                     }
                     Err(e) => {
@@ -3048,7 +3530,7 @@ async fn handle_plaintext_with_starttls(
                 }
             }
             "CAPABILITY" => {
-                let caps = capability_list(false, allow_insecure_auth);
+                let caps = capability_list(false, allow_insecure_auth, true);
                 let resp = format!(
                     "* CAPABILITY {}\r\n{tag} OK CAPABILITY completed\r\n",
                     caps.join(" ")
@@ -3060,6 +3542,31 @@ async fn handle_plaintext_with_starttls(
                 let resp = format!("{tag} OK NOOP completed\r\n");
                 writer.write_all(resp.as_bytes()).await?;
                 writer.flush().await?;
+            }
+            "LOGOUT" => {
+                let resp = format!("* BYE Logging out\r\n{tag} OK LOGOUT completed\r\n");
+                writer.write_all(resp.as_bytes()).await?;
+                writer.flush().await?;
+                return Ok(());
+            }
+            "LOGIN" | "AUTHENTICATE" => {
+                // Route through the real handlers so the security policy
+                // ([PRIVACYREQUIRED] unless insecure auth is enabled) and the
+                // AUTHENTICATE PLAIN exchange work exactly as on TLS.
+                let mut g = session.lock().await;
+                let result = handle_command(&mut g, &tag, &cmd, &args, &mut reader, &mut writer, &literals).await;
+                let state = g.state;
+                drop(g);
+                if let Err(e) = result {
+                    let resp = tagged_bad(&tag, &format!("Error: {}", e));
+                    writer.write_all(resp.as_bytes()).await?;
+                    writer.flush().await?;
+                }
+                if state != SessionState::NotAuthenticated {
+                    // Authenticated over plaintext (only possible when
+                    // IMAP_ALLOW_INSECURE_AUTH=true): continue the session.
+                    return serve(session, reader, writer, false).await;
+                }
             }
             _ => {
                 // Per RFC 3501, before STARTTLS only CAPABILITY, NOOP, and
@@ -3076,20 +3583,23 @@ async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin
     session: Arc<Mutex<ImapSession>>,
     reader: R,
     writer: W,
+    send_greeting: bool,
 ) -> Result<()> {
     let mut reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
 
-    // RFC 3501 §6.2.1 forbids advertising STARTTLS on an already-TLS connection.
-    let (tls_active, allow_insecure_auth) = {
-        let g = session.lock().await;
-        (g.tls_active, g.allow_insecure_auth)
-    };
-    let greeting = greeting_line(tls_active, allow_insecure_auth);
-    writer.write_all(greeting.as_bytes()).await?;
-    writer.flush().await?;
-
-    let mut line = String::new();
+    if send_greeting {
+        // RFC 3501 §6.2.1 forbids advertising STARTTLS on an already-TLS
+        // connection. The greeting is only sent once per connection: on the
+        // plaintext path the pre-STARTTLS loop sends it before delegating here.
+        let (tls_active, allow_insecure_auth) = {
+            let g = session.lock().await;
+            (g.tls_active, g.allow_insecure_auth)
+        };
+        let greeting = greeting_line(tls_active, allow_insecure_auth, true);
+        writer.write_all(greeting.as_bytes()).await?;
+        writer.flush().await?;
+    }
 
     loop {
         // If the session is idling, wait for DONE / mailbox updates / timeout.
@@ -3106,33 +3616,20 @@ async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin
             continue;
         }
 
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break,
-            Ok(_) => {}
+        // Read the next command with full literal support. Errors here mean
+        // the stream is desynchronized (e.g. a truncated literal): close the
+        // connection rather than trying to resync.
+        let command = match read_command(&mut reader, &mut writer).await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
             Err(e) => {
-                warn!("Read error: {}", e);
+                warn!("Error reading command: {}", e);
                 break;
             }
-        }
-
-        let trimmed = line.trim_end().to_string();
-        if trimmed.is_empty() {
-            continue;
-        }
+        };
+        let (cmd_tag, cmd_name, cmd_args, literals) = command;
 
         let mut session_guard = session.lock().await;
-
-        let (cmd_tag, cmd_name, cmd_args) = match parse_imap_line(&trimmed) {
-            Ok(p) => p,
-            Err(_) => {
-                let resp = tagged_bad("*", "Invalid command format");
-                drop(session_guard);
-                writer.write_all(resp.as_bytes()).await?;
-                writer.flush().await?;
-                continue;
-            }
-        };
 
         let result = handle_command(
             &mut session_guard,
@@ -3141,6 +3638,7 @@ async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin
             &cmd_args,
             &mut reader,
             &mut writer,
+            &literals,
         )
         .await;
         drop(session_guard);
@@ -3402,16 +3900,208 @@ mod tests {
 
     #[test]
     fn capability_advertisement_respects_security_policy() {
-        let tls = capability_list(true, false);
+        let tls = capability_list(true, false, true);
         assert!(tls.contains(&"AUTH=PLAIN"));
         assert!(!tls.contains(&"STARTTLS"));
-        let plain = capability_list(false, false);
+        let plain = capability_list(false, false, true);
         assert!(plain.contains(&"STARTTLS"));
         assert!(plain.contains(&"LOGINDISABLED"));
         assert!(!plain.contains(&"AUTH=PLAIN"));
-        let plain_allow = capability_list(false, true);
+        let plain_allow = capability_list(false, true, true);
         assert!(plain_allow.contains(&"STARTTLS"));
         assert!(plain_allow.contains(&"AUTH=PLAIN"));
         assert!(!plain_allow.contains(&"LOGINDISABLED"));
+        // No TLS cert configured: STARTTLS must not be advertised.
+        let no_starttls = capability_list(false, false, false);
+        assert!(!no_starttls.contains(&"STARTTLS"));
+        assert!(no_starttls.contains(&"LOGINDISABLED"));
+    }
+
+    #[test]
+    fn unquote_processes_backslash_escapes() {
+        assert_eq!(unquote("\"plain\""), "plain");
+        assert_eq!(unquote("\"a\\\"b\""), "a\"b");
+        assert_eq!(unquote("\"a\\\\b\""), "a\\b");
+        assert_eq!(unquote("\"INBOX/\\\\Sent\""), "INBOX/\\Sent");
+        assert_eq!(unquote("atom"), "atom");
+        assert_eq!(unquote("\"trailing\\\\\""), "trailing\\");
+    }
+
+    #[test]
+    fn tokenizer_keeps_escaped_quotes_inside_quoted_strings() {
+        let toks = tokenize_command_args("\"a\\\"b\" c");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0], "\"a\\\"b\"");
+        assert_eq!(toks[1], "c");
+        let toks = tokenize_command_args("\"My Folder\" (\\Seen \\Flagged) {1234}");
+        assert_eq!(toks.len(), 3);
+        assert_eq!(toks[0], "\"My Folder\"");
+        assert_eq!(toks[1], "(\\Seen \\Flagged)");
+        assert_eq!(toks[2], "{1234}");
+        let toks = tokenize_command_args("INBOX {100+}");
+        assert_eq!(toks, vec!["INBOX", "{100+}"]);
+    }
+
+    #[test]
+    fn utf7_round_trips_mailbox_names() {
+        assert_eq!(imap_utf7_decode("&g0l6Pw-"), "草稿");
+        assert_eq!(imap_utf7_encode("草稿"), "&g0l6Pw-");
+        assert_eq!(imap_utf7_encode("Sent"), "Sent");
+        assert_eq!(imap_utf7_decode("Sent"), "Sent");
+        assert_eq!(imap_utf7_encode("a&b"), "a&-b");
+        assert_eq!(imap_utf7_decode("a&-b"), "a&b");
+        assert_eq!(imap_utf7_encode("已发送"), "&XfJT0ZAB-");
+        assert_eq!(imap_utf7_decode("&XfJT0ZAB-"), "已发送");
+        // ASCII mixed with non-ASCII
+        let mixed = "Work/项目";
+        assert_eq!(imap_utf7_decode(&imap_utf7_encode(mixed)), mixed);
+        // Invalid sequences pass through
+        assert_eq!(imap_utf7_decode("plain&name"), "plain&name");
+    }
+
+    #[test]
+    fn literal_spec_scanner_finds_token_boundary_literals() {
+        assert_eq!(
+            find_literal_spec("SEARCH HEADER Subject {5}"),
+            Some((22, 25, 5, false))
+        );
+        assert_eq!(find_literal_spec("LOGIN {5} {6}"), Some((6, 9, 5, false)));
+        assert_eq!(find_literal_spec("APPEND INBOX {100+}"), Some((13, 19, 100, true)));
+        // Inside quoted strings literals are not specs
+        assert_eq!(find_literal_spec("SEARCH SUBJECT \"{5}\""), None);
+        // Not at a token boundary
+        assert_eq!(find_literal_spec("BODY[]{5}"), None);
+        // No closing brace
+        assert_eq!(find_literal_spec("SEARCH {5"), None);
+        assert_eq!(find_literal_spec("SEARCH {abc}"), None);
+    }
+
+    #[test]
+    fn literal_markers_resolve() {
+        let literals = vec![b"hello".to_vec(), b"world".to_vec()];
+        assert_eq!(resolve_token("\x01LIT0\x01", &literals), "hello");
+        assert_eq!(resolve_token("\x01LIT1\x01", &literals), "world");
+        assert_eq!(resolve_token("\"quoted\"", &literals), "quoted");
+        assert_eq!(literal_index("\x01LIT0\x01"), Some(0));
+        assert_eq!(literal_index("plain"), None);
+        assert_eq!(
+            token_literal_bytes("\x01LIT1\x01", &literals),
+            Some(b"world".as_slice())
+        );
+        assert_eq!(token_literal_bytes("plain", &literals), None);
+    }
+
+    #[tokio::test]
+    async fn read_command_handles_sync_literal_in_login() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
+        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+
+        let client_task = tokio::spawn(async move {
+            client_io.write_all(b"a1 LOGIN {5}\r\n").await.unwrap();
+            let mut buf = [0u8; 64];
+            let n = client_io.read(&mut buf).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&buf[..n]).starts_with('+'),
+                "expected continuation prompt, got {:?}",
+                String::from_utf8_lossy(&buf[..n])
+            );
+            client_io.write_all(b"admin {6}\r\nsecret\r\n").await.unwrap();
+            // Keep the stream open until the server side is dropped below.
+            let mut sink = [0u8; 8];
+            let _ = client_io.read(&mut sink).await;
+        });
+
+        let (tag, cmd, args, literals) = read_command(&mut reader, &mut server_w)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(reader);
+        drop(server_w);
+        client_task.await.unwrap();
+
+        assert_eq!(tag, "a1");
+        assert_eq!(cmd, "LOGIN");
+        let tokens = tokenize_command_args(&args);
+        assert_eq!(resolve_token(&tokens[0], &literals), "admin");
+        assert_eq!(resolve_token(&tokens[1], &literals), "secret");
+    }
+
+    #[tokio::test]
+    async fn read_command_handles_literal_plus_and_crlf_inside_data() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
+        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+
+        // LITERAL+ (no continuation) with embedded CRLF in the data.
+        let client_task = tokio::spawn(async move {
+            client_io
+                .write_all(b"a2 APPEND INBOX {6+}\r\nab\r\ncd\r\n")
+                .await
+                .unwrap();
+            // No continuation prompt should arrive for {8+}: a read returns
+            // EOF once the server side of the duplex is dropped below.
+            let mut buf = [0u8; 16];
+            let n = client_io.read(&mut buf).await.unwrap();
+            assert_eq!(n, 0, "unexpected data: {:?}", String::from_utf8_lossy(&buf[..n]));
+        });
+
+        let (tag, cmd, args, literals) = read_command(&mut reader, &mut server_w)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(reader);
+        drop(server_w);
+        client_task.await.unwrap();
+
+        assert_eq!(tag, "a2");
+        assert_eq!(cmd, "APPEND");
+        let tokens = tokenize_command_args(&args);
+        assert_eq!(resolve_token(&tokens[0], &literals), "INBOX");
+        assert_eq!(token_literal_bytes(&tokens[1], &literals), Some(b"ab\r\ncd".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn read_command_reports_truncated_literal() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
+        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+
+        // Client declares {10} but sends only 3 bytes, then closes.
+        let client_task = tokio::spawn(async move {
+            client_io.write_all(b"a3 SEARCH HEADER Subject {10}\r\nabc").await.unwrap();
+            let mut buf = [0u8; 16];
+            let n = client_io.read(&mut buf).await.unwrap();
+            assert!(String::from_utf8_lossy(&buf[..n]).starts_with('+'));
+            drop(client_io);
+        });
+
+        let result = read_command(&mut reader, &mut server_w).await;
+        client_task.await.unwrap();
+        assert!(result.is_err(), "truncated literal must be an error, got {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn read_command_ignores_blank_lines_between_commands() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
+        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+
+        let client_task = tokio::spawn(async move {
+            client_io.write_all(b"\r\n\r\na4 NOOP\r\n").await.unwrap();
+        });
+
+        let (tag, cmd, args, _) = read_command(&mut reader, &mut server_w)
+            .await
+            .unwrap()
+            .unwrap();
+        client_task.await.unwrap();
+        assert_eq!(tag, "a4");
+        assert_eq!(cmd, "NOOP");
+        assert_eq!(args, "");
     }
 }

@@ -1208,9 +1208,11 @@ mod tests {
     }
 
     async fn insert_verified_domain(pool: &PgPool, tenant_id: &str, domain: &str) -> String {
-        let id = bounded_id("dom");
+        // Prod domain ids are uuid; the send path casts domain_id::uuid, so
+        // the test fixture must use uuid ids too.
+        let id = Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO domains (id, tenant_id, domain, status)
+            "INSERT INTO domains (id, tenant_id, name, status)
              VALUES ($1, $2, $3, 'verified')",
         )
         .bind(&id)
@@ -1290,6 +1292,7 @@ mod tests {
 
         let tenant_id = insert_test_tenant(&pool, "message-queue").await;
         let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+
         let scheduled_at = Utc::now() + chrono::Duration::minutes(15);
         let body = SendMessageRequest {
             from: "sender@example.com".into(),
@@ -1308,9 +1311,15 @@ mod tests {
             .begin()
             .await
             .expect("failed to begin message transaction");
-        let persisted = insert_message_and_queue(&mut tx, &tenant_id, &body, &body.metadata, None)
-            .await
-            .expect("failed to persist message delivery");
+        let persisted = insert_message_and_queue(
+            &mut tx,
+            &tenant_id,
+            &body,
+            &body.metadata,
+            Some(domain_id.clone()),
+        )
+        .await
+        .expect("failed to persist message delivery");
         tx.commit()
             .await
             .expect("failed to commit message transaction");
@@ -1327,8 +1336,8 @@ mod tests {
         assert_eq!(message_row.1, Some(scheduled_at));
 
         let queue_rows: Vec<(String, String, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-            "SELECT \"to\", message_id, domain_id, scheduled_at
-             FROM email_queue WHERE message_id = $1 ORDER BY \"to\"",
+            r#"SELECT "to", message_id::text, domain_id, scheduled_at
+             FROM email_queue WHERE message_id = $1::uuid ORDER BY "to""#,
         )
         .bind(&persisted.id)
         .fetch_all(&pool)
@@ -1364,10 +1373,10 @@ mod tests {
         apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-suppression").await;
-        insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
 
         sqlx::query(
-            "INSERT INTO suppressions (id, tenant_id, email, type, source, created_at)
+            "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
              VALUES ($1, $2, $3, $4, $5, NOW())",
         )
         .bind(apexmail_lib::id::generate_id("sup", 22))
@@ -1560,7 +1569,7 @@ mod tests {
         apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-cancel").await;
-        insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
         let body = SendMessageRequest {
             from: "sender@example.com".into(),
             to: vec!["to@example.com".into()],
@@ -1578,9 +1587,15 @@ mod tests {
             .begin()
             .await
             .expect("failed to begin create transaction");
-        let persisted = insert_message_and_queue(&mut create_tx, &tenant_id, &body, &body.metadata, None)
-            .await
-            .expect("failed to persist message delivery");
+        let persisted = insert_message_and_queue(
+            &mut create_tx,
+            &tenant_id,
+            &body,
+            &body.metadata,
+            Some(domain_id.clone()),
+        )
+        .await
+        .expect("failed to persist message delivery");
         create_tx
             .commit()
             .await
@@ -1610,7 +1625,7 @@ mod tests {
         assert_eq!(message_status.0, "cancelled");
 
         let queue_statuses: Vec<(String,)> =
-            sqlx::query_as("SELECT DISTINCT status FROM email_queue WHERE message_id = $1")
+            sqlx::query_as("SELECT DISTINCT status FROM email_queue WHERE message_id = $1::uuid")
                 .bind(&persisted.id)
                 .fetch_all(&pool)
                 .await

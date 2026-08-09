@@ -259,23 +259,18 @@ async fn log_tenant_audit(state: &AppState, action: &str, tenant_id: Option<&str
         json!({"redacted": true})
     };
 
-    if let Err(e) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
-         VALUES (NOW(), $1, 'tenant', $2, $3, $4)",
+    crate::audit_log::insert_audit_log_best_effort(
+        &state.db,
+        tenant_id,
+        None,
+        action,
+        "tenant",
+        resource_id,
+        metadata,
+        None,
+        None,
     )
-    .bind(action)
-    .bind(resource_id)
-    .bind(tenant_id)
-    .bind(metadata)
-    .execute(&state.db)
-    .await
-    {
-        if let Some(tenant_id) = tenant_id {
-            tracing::warn!(tenant_id = %tenant_id, action = %action, error = %e, "Failed to write tenant audit log");
-        } else {
-            tracing::warn!(action = %action, error = %e, "Failed to write tenant audit log");
-        }
-    }
+    .await;
 }
 
 #[cfg(test)]

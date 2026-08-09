@@ -130,10 +130,10 @@ jobs:
           # Mirrors deploy/DEPLOYMENT.md exactly — update both together.
           # Must cover EVERY ghcr.io image referenced in docker-compose.prod.yml
           # (api-server mta imap-server mailstore worker enterprise
-          #  tracking-service observability marketing).
+          #  tracking-service observability marketing status-server).
           canonical=(
             api-server mta imap-server mailstore worker enterprise tracking-service
-            observability marketing
+            observability marketing status-server
           )
           # Third-party images that are allowed as-is (pinned upstream images).
           allowed_third_party=(
@@ -383,6 +383,25 @@ jobs:
           push: true
           target: mailstore
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mailstore:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mailstore:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          attestations: |
+            type=sbom,enabled=true
+            type=provenance,enabled=true
+
+      # Status server (public status page + status API). The Dockerfile stage
+      # is named `auth-server` (the binary inside the image is `auth-server`),
+      # but the IMAGE is published as `status-server` — the name referenced by
+      # docker-compose.prod.yml and the nginx vhost for status.apexmail.ee.
+      - name: Build and push status-server image
+        uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
+        with:
+          context: .
+          file: services/mail-server/Dockerfile
+          push: true
+          target: auth-server
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/status-server:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/status-server:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max

@@ -76,11 +76,12 @@ CREATE INDEX idx_api_keys_prefix ON api_keys(key_prefix);
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS domains (
-    id VARCHAR(26) PRIMARY KEY,
+    id VARCHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
     verification_token VARCHAR(100),
     is_verified BOOLEAN NOT NULL DEFAULT false,
+    verified BOOLEAN NOT NULL DEFAULT false,
     verified_at TIMESTAMPTZ,
     accepts_inbound BOOLEAN NOT NULL DEFAULT false,
     dkim_selector VARCHAR(100),
@@ -149,9 +150,9 @@ CREATE INDEX idx_template_versions_template ON template_versions(template_id);
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS messages (
-    id VARCHAR(26) PRIMARY KEY,
+    id UUID PRIMARY KEY,
     tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    domain_id VARCHAR(26) REFERENCES domains(id) ON DELETE SET NULL,
+    domain_id VARCHAR(64) REFERENCES domains(id) ON DELETE SET NULL,
     template_id VARCHAR(26) REFERENCES templates(id) ON DELETE SET NULL,
     idempotency_key VARCHAR(255),
     message_id_header VARCHAR(255),
@@ -199,7 +200,7 @@ CREATE INDEX idx_messages_message_id ON messages(message_id_header);
 
 CREATE TABLE IF NOT EXISTS message_queue (
     id VARCHAR(26) PRIMARY KEY,
-    message_id VARCHAR(26) NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     priority INTEGER NOT NULL DEFAULT 5,
     status VARCHAR(20) NOT NULL DEFAULT 'pending',
@@ -223,29 +224,46 @@ CREATE INDEX idx_queue_locked ON message_queue(locked_at) WHERE locked_at IS NOT
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS email_queue (
-    id VARCHAR(26) PRIMARY KEY,
-    message_id VARCHAR(26) NOT NULL,
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
+    message_id UUID NOT NULL,
     tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    domain_id VARCHAR(26) REFERENCES domains(id) ON DELETE SET NULL,
+    domain_id VARCHAR(64) REFERENCES domains(id) ON DELETE SET NULL,
     "from" VARCHAR(255) NOT NULL,
     "to" VARCHAR(255) NOT NULL,
+    from_address TEXT NOT NULL,
+    to_addresses TEXT[] NOT NULL,
+    cc_addresses TEXT[] DEFAULT '{}',
+    bcc_addresses TEXT[] DEFAULT '{}',
+    reply_to TEXT,
     subject VARCHAR(255) NOT NULL,
     html TEXT,
     text TEXT,
+    html_body TEXT,
+    text_body TEXT,
     headers JSONB,
     attachments JSONB,
     campaign_id VARCHAR(26),
-    tags JSONB,
+    tags TEXT[],
     metadata JSONB,
     scheduled_at TIMESTAMPTZ,
     priority INTEGER NOT NULL DEFAULT 5,
-    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'sent', 'failed', 'deferred',
+                          'cancelled', 'bounced', 'suppressed')),
     attempt INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 5,
     locked_until TIMESTAMPTZ,
+    next_retry_at TIMESTAMPTZ,
+    sent_at TIMESTAMPTZ,
     error_message TEXT,
+    smtp_message_id TEXT,
+    last_error TEXT,
+    sequence_id VARCHAR(26),
+    contact_id VARCHAR(26),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, created_at)
 );
 
 CREATE INDEX idx_email_queue_processing ON email_queue(status, priority DESC, created_at) 
@@ -278,7 +296,7 @@ CREATE INDEX idx_bounce_events_recipient ON bounce_events(original_recipient)
 CREATE TABLE IF NOT EXISTS events (
     id VARCHAR(26) PRIMARY KEY,
     tenant_id VARCHAR(26) NOT NULL,
-    message_id VARCHAR(26),
+    message_id VARCHAR(64),
     event_type VARCHAR(50) NOT NULL,
     recipient VARCHAR(255),
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -400,7 +418,7 @@ CREATE INDEX idx_webhook_queue_webhook ON webhook_queue(webhook_id);
 CREATE TABLE IF NOT EXISTS inbound_messages (
     id VARCHAR(26) PRIMARY KEY,
     tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    domain_id VARCHAR(26) REFERENCES domains(id) ON DELETE SET NULL,
+    domain_id VARCHAR(64) REFERENCES domains(id) ON DELETE SET NULL,
     message_id_header VARCHAR(255),
     from_address VARCHAR(255) NOT NULL,
     to_address VARCHAR(255) NOT NULL,

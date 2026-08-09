@@ -40,17 +40,18 @@ fn build_proxy_audit_metadata(
 }
 
 async fn log_proxy_audit(db: &sqlx::PgPool, host: &str, metadata: serde_json::Value) {
-    if let Err(error) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
-         VALUES (NOW(), 'control_plane.proxy.requested', 'proxy_request', $1, $2::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        db,
+        None,
+        None,
+        "control_plane.proxy.requested",
+        "proxy_request",
+        Some(host),
+        metadata,
+        None,
+        None,
     )
-    .bind(host)
-    .bind(metadata)
-    .execute(db)
-    .await
-    {
-        tracing::warn!(host = %host, error = %error, "Failed to write proxy audit log");
-    }
+    .await;
 }
 
 #[derive(Debug, Deserialize)]

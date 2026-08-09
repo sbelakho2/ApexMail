@@ -67,19 +67,18 @@ fn build_risk_audit_entry(mutation: &RiskMutation) -> RiskAuditEntry {
 async fn log_risk_audit(state: &AppState, mutation: &RiskMutation) {
     let entry = build_risk_audit_entry(mutation);
 
-    if let Err(error) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
-         VALUES (NOW(), $1, 'risk', $2, $3, $4::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        &state.db,
+        entry.tenant_id.as_deref(),
+        None,
+        &entry.action,
+        "risk",
+        entry.resource_id.as_deref(),
+        entry.metadata,
+        None,
+        None,
     )
-    .bind(entry.action)
-    .bind(entry.resource_id)
-    .bind(entry.tenant_id)
-    .bind(entry.metadata)
-    .execute(&state.db)
-    .await
-    {
-        tracing::warn!(action = entry.action, error = %error, "Failed to write risk audit log");
-    }
+    .await;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,20 +134,9 @@ async fn ensure_risk_settings_table(db: &sqlx::PgPool) -> Result<(), ApiError> {
         return Ok(());
     }
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS risk_settings (
-            id INTEGER PRIMARY KEY,
-            thresholds JSONB NOT NULL DEFAULT '{}'::jsonb,
-            last_assessed_at TIMESTAMPTZ,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(db)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO risk_settings (id, thresholds, updated_at)
-         VALUES (1, '{}'::jsonb, NOW())
-         ON CONFLICT (id) DO NOTHING",
+        "INSERT INTO risk_settings (tenant_id, thresholds, updated_at)
+         VALUES ('system', '{}'::jsonb, NOW())
+         ON CONFLICT (tenant_id) DO NOTHING",
     )
     .execute(db)
     .await?;
@@ -161,9 +149,11 @@ async fn load_risk_settings(db: &sqlx::PgPool) -> Result<RiskSettings, ApiError>
     ensure_risk_settings_table(db).await?;
 
     let row: Option<(serde_json::Value, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as("SELECT thresholds, last_assessed_at FROM risk_settings WHERE id = 1")
-            .fetch_optional(db)
-            .await?;
+        sqlx::query_as(
+            "SELECT thresholds, last_assessed_at FROM risk_settings WHERE tenant_id = 'system'",
+        )
+        .fetch_optional(db)
+        .await?;
 
     Ok(match row {
         Some((thresholds_json, last_assessed_at)) => RiskSettings {
@@ -184,7 +174,7 @@ async fn save_thresholds(db: &sqlx::PgPool, thresholds: &Thresholds) -> Result<(
         "UPDATE risk_settings
          SET thresholds = $1::jsonb,
              updated_at = NOW()
-         WHERE id = 1",
+         WHERE tenant_id = 'system'",
     )
     .bind(serde_json::to_value(thresholds)?)
     .execute(db)
@@ -203,7 +193,7 @@ async fn save_last_assessed_at(
         "UPDATE risk_settings
          SET last_assessed_at = $1,
              updated_at = NOW()
-         WHERE id = 1",
+         WHERE tenant_id = 'system'",
     )
     .bind(assessed_at)
     .execute(db)

@@ -24,17 +24,18 @@ fn build_inbox_audit_metadata(body: &UpdateInboxMessage) -> serde_json::Value {
 }
 
 async fn log_inbox_audit(db: &sqlx::PgPool, message_id: &str, metadata: serde_json::Value) {
-    if let Err(error) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
-         VALUES (NOW(), 'control_plane.inbox.updated', 'autopilot_inbox_message', $1, $2::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        db,
+        None,
+        None,
+        "control_plane.inbox.updated",
+        "autopilot_inbox_message",
+        Some(message_id),
+        metadata,
+        None,
+        None,
     )
-    .bind(message_id)
-    .bind(metadata)
-    .execute(db)
-    .await
-    {
-        tracing::warn!(message_id = %message_id, error = %error, "Failed to write inbox audit log");
-    }
+    .await;
 }
 
 #[derive(Debug, Deserialize)]

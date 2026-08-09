@@ -31,19 +31,18 @@ async fn log_sales_audit(
     resource_id: Option<&str>,
     metadata: serde_json::Value,
 ) {
-    if let Err(error) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
-         VALUES (NOW(), $1, $2, $3, $4::jsonb)",
+    crate::audit_log::insert_audit_log_best_effort(
+        db,
+        None,
+        None,
+        action,
+        resource_type,
+        resource_id,
+        metadata,
+        None,
+        None,
     )
-    .bind(action)
-    .bind(resource_type)
-    .bind(resource_id)
-    .bind(metadata)
-    .execute(db)
-    .await
-    {
-        tracing::warn!(action = %action, resource_type = %resource_type, error = %error, "Failed to write sales audit log");
-    }
+    .await;
 }
 
 fn sales_autopilot_base_url(state: &AppState) -> String {
@@ -1042,10 +1041,11 @@ async fn start_outreach(
 
     sqlx::query(
         "INSERT INTO drip_campaigns (
-            id, name, status, campaign_type, sequence, stats, created_at, started_at, updated_at
-         ) VALUES ($1, $2, 'active', 'email', $3, $4, NOW(), NOW(), NOW())",
+            id, tenant_id, name, status, campaign_type, sequence, stats, created_at, started_at, updated_at
+         ) VALUES ($1, $2, $3, 'active', 'email', $4, $5, NOW(), NOW(), NOW())",
     )
     .bind(&campaign_id)
+    .bind(&auth.tenant_id)
     .bind(&campaign_name)
     .bind(&sequence)
     .bind(&stats)
@@ -1150,13 +1150,9 @@ async fn save_settings(
     static SALES_SETTINGS_ENSURE: OnceLock<()> = OnceLock::new();
     if SALES_SETTINGS_ENSURE.get().is_none() {
         if let Err(e) = sqlx::query(
-            "CREATE TABLE IF NOT EXISTS sales_settings (
-                id SERIAL PRIMARY KEY,
-                scoring_weights JSONB NOT NULL DEFAULT '{}'::jsonb,
-                schedule JSONB NOT NULL DEFAULT '{}'::jsonb,
-                notifications JSONB NOT NULL DEFAULT '{}'::jsonb,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-             )",
+            "INSERT INTO sales_settings (tenant_id, scoring_weights, schedule, notifications, updated_at)
+             VALUES ('system', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, NOW())
+             ON CONFLICT (tenant_id) DO NOTHING",
         )
         .execute(&state.db)
         .await
@@ -1168,9 +1164,9 @@ async fn save_settings(
 
     // Upsert settings (single row)
     sqlx::query(
-        "INSERT INTO sales_settings (id, scoring_weights, schedule, notifications, updated_at)
-         VALUES (1, $1, $2, $3, NOW())
-         ON CONFLICT (id) DO UPDATE SET
+        "INSERT INTO sales_settings (tenant_id, scoring_weights, schedule, notifications, updated_at)
+         VALUES ('system', $1, $2, $3, NOW())
+         ON CONFLICT (tenant_id) DO UPDATE SET
             scoring_weights = EXCLUDED.scoring_weights,
             schedule = EXCLUDED.schedule,
             notifications = EXCLUDED.notifications,

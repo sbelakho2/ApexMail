@@ -179,8 +179,8 @@ fn build_audit_query_plan(
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let sql = format!(
-        "SELECT id, timestamp, action, resource_type, resource_id,
-                user_id, tenant_id, ip_address, user_agent, metadata
+        "SELECT id, timestamp, action, resource, resource_id,
+                user_id, tenant_id, ip_address, user_agent, details
          FROM audit_logs
          {where_clause}
          ORDER BY timestamp DESC, id DESC

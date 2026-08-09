@@ -329,12 +329,12 @@ async fn get_cross_tenant_plans(
             "created_at"
         };
         let sql = format!(
-            "SELECT COALESCE(a.metadata->>'previousPlan', 'unknown'),
-                    COALESCE(a.metadata->>'newPlan', 'unknown'),
+            "SELECT COALESCE(a.details->>'previousPlan', 'unknown'),
+                    COALESCE(a.details->>'newPlan', 'unknown'),
                     a.{audit_time_col}
              FROM audit_logs a
              WHERE a.action = 'plan.changed'
-               AND a.metadata IS NOT NULL
+               AND a.details IS NOT NULL
                AND a.{audit_time_col} >= $1",
         );
         sqlx::query_as::<_, (String, String, DateTime<Utc>)>(&sql)

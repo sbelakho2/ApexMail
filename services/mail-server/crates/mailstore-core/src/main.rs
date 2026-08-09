@@ -91,8 +91,14 @@ async fn main() -> Result<()> {
     let addr = cli.listen.parse()?;
     info!("Starting gRPC server on {}", addr);
 
+    // Message limits raised to 64 MiB so large messages (e.g. 5 MB APPENDs or
+    // inbound SMTP deliveries) round-trip without hitting the 4 MiB default.
+    let service = MailstoreServiceServer::new(service)
+        .max_decoding_message_size(64 * 1024 * 1024)
+        .max_encoding_message_size(64 * 1024 * 1024);
+
     Server::builder()
-        .add_service(MailstoreServiceServer::new(service))
+        .add_service(service)
         .serve_with_shutdown(addr, async {
             tokio::signal::ctrl_c().await.ok();
             info!("Shutdown signal received");

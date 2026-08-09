@@ -5,6 +5,7 @@
     clippy::result_large_err
 )]
 pub mod app;
+pub mod audit_log;
 pub mod config;
 pub mod error;
 pub mod ip_provider;
