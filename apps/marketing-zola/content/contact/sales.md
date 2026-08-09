@@ -1,13 +1,13 @@
 +++
 title = "Talk to Sales"
 description = "Discuss enterprise rollout plans, compliance requirements, and private cloud deployment options with ApexMail."
-template = "page.html"
+template = "prose.html"
 
 [extra]
 form_id = "sales-contact"
 +++
 
-# Talk to Sales
+## Talk to Sales
 
 For enterprise buying, security review, or private-cloud planning, complete the form below. Our team reviews submissions and responds within 2 business days.
 

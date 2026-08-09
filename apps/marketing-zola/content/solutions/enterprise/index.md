@@ -1,10 +1,10 @@
 +++
 title = "Enterprise Solution"
 description = "Enterprise transactional email: procurement, contract options, SLA, support, security review, data residency, Private Cloud, migration, billing, account management. Annual commitment from €3,000/month."
-template = "page.html"
+template = "prose.html"
 +++
 
-# Enterprise
+## Enterprise
 
 Enterprise-grade transactional email for organizations exceeding 5M emails/month. Architecture review, dedicated tenancy or BYOC deployment, negotiated support, contractual SLA, quarterly business reviews, and custom retention policies.
 

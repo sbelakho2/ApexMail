@@ -1,10 +1,10 @@
 +++
 title = "Transactional Email Solution"
 description = "Application-driven transactional email: password resets, receipts, notifications. EU-hosted REST API and SMTP relay with signed webhooks."
-template = "page.html"
+template = "prose.html"
 +++
 
-# Transactional Email
+## Transactional Email
 
 Send application-generated email through ApexMail's REST API or SMTP relay. Every message is tracked from acceptance to delivery with per-message event history.
 

@@ -1,13 +1,13 @@
 +++
 title = "Enterprise Contact"
 description = "Request an enterprise deployment review, pricing discussion, or private cloud assessment with the ApexMail team."
-template = "page.html"
+template = "prose.html"
 
 [extra]
 form_id = "enterprise-contact"
 +++
 
-# Enterprise Contact
+## Enterprise Contact
 
 For organisations evaluating ApexMail Enterprise Shared, Dedicated Tenant, or BYOC deployments, use this form or email [support@apexmail.ee](mailto:support@apexmail.ee) directly.
 

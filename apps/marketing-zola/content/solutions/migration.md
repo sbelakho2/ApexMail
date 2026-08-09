@@ -1,10 +1,10 @@
 +++
 title = "Migration Solution"
 description = "Migrate from SendGrid, Postmark, Mailgun, SES, or Resend to ApexMail. IP warm-up, domain transition, template migration, and parallel-send validation."
-template = "page.html"
+template = "prose.html"
 +++
 
-# Migration
+## Migration
 
 Move your transactional email infrastructure to ApexMail without disruption. This solution covers domain transition, IP warm-up, template migration, webhook compatibility, and parallel-send validation.
 

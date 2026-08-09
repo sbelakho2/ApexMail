@@ -1,10 +1,10 @@
 +++
 title = "SaaS Platform Email Solution"
 description = "Multi-tenant email infrastructure for B2B and B2C SaaS. Subaccounts, domain isolation, RBAC, SSO, and white-label delivery."
-template = "page.html"
+template = "prose.html"
 +++
 
-# SaaS Platforms
+## SaaS Platforms
 
 Provide your customers with reliable, isolated email infrastructure without building and maintaining your own email layer. ApexMail's subaccount model gives each of your tenants independent domains, API keys, suppression lists, and event streams.
 

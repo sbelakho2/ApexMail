@@ -1,13 +1,13 @@
 +++
 title = "Security Questionnaire Request"
 description = "Request ApexMail security documentation, SIG/CAIQ responses, penetration test summaries, or schedule a security architecture review."
-template = "page.html"
+template = "prose.html"
 
 [extra]
 form_id = "security-contact"
 +++
 
-# Security Questionnaire Request
+## Security Questionnaire Request
 
 ApexMail provides security documentation to qualified Enterprise prospects and customers under NDA where required. Use this form to request SIG, CAIQ, HECVAT, or custom security questionnaires, or to schedule a security architecture review.
 

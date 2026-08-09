@@ -1,10 +1,10 @@
 +++
 title = "High-Volume Sending Solution"
 description = "Millions of transactional emails per month. Managed dedicated IPs, automated warm-up, queue prioritization, batch APIs, and contractual SLAs."
-template = "page.html"
+template = "prose.html"
 +++
 
-# High-Volume Sending
+## High-Volume Sending
 
 Send millions of transactional emails per month with predictable throughput, dedicated IP reputation, automated warm-up, and contractual availability guarantees.
 

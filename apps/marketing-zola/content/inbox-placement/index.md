@@ -1,13 +1,13 @@
 +++
 title = "Inbox Placement, Measured"
-template = "page.html"
+template = "prose.html"
 description = "ApexMail polls Google Postmaster Tools and Microsoft SNDS every six hours, scores your sender reputation, and throttles outbound automatically when the data says back off."
 
 [extra]
 og_image = "/images/og-image.svg"
 +++
 
-# Inbox Placement, Backed By the Mailbox Providers Themselves
+## Inbox Placement, Backed By the Mailbox Providers Themselves
 
 Most "deliverability dashboards" are seed-list theatre. ApexMail reads the
 **actual** signal that Gmail and Outlook publish about your domain — and

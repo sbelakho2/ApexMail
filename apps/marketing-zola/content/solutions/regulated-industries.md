@@ -1,10 +1,10 @@
 +++
 title = "Regulated Industries Email Solution"
 description = "GDPR, HIPAA, and contractual compliance for transactional email. DPA support, BAA review eligibility, data residency, audit logs, private deployment."
-template = "page.html"
+template = "prose.html"
 +++
 
-# Regulated Industries
+## Regulated Industries
 
 Send transactional email from infrastructure designed for organizations subject to GDPR, HIPAA, SOC 2, ISO 27001, or contractual compliance obligations. EU data residency, DPA, BAA eligibility, audit logs, and private deployment models.
 
