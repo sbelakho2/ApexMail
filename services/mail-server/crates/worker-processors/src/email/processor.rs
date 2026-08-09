@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use moka::sync::Cache;
 use sqlx::PgPool;
 use std::sync::{Mutex, RwLock};
@@ -38,6 +38,71 @@ const ERROR_THRESHOLD: usize = 10;
 
 /// Cooldown duration when error rate is too high.
 const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// One `email_queue` row as decoded by `fetch_jobs`, before per-recipient
+/// expansion (FIX-8).
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct QueuedEmailRow {
+    id: String,
+    #[sqlx(rename = "messageId")]
+    message_id: String,
+    #[sqlx(rename = "tenantId")]
+    tenant_id: String,
+    #[sqlx(rename = "domainId")]
+    domain_id: String,
+    #[sqlx(rename = "from")]
+    from: String,
+    to: String,
+    #[sqlx(rename = "toAddresses")]
+    to_addresses: Option<Vec<String>>,
+    subject: String,
+    html: Option<String>,
+    text: Option<String>,
+    headers: Option<serde_json::Value>,
+    attachments: Option<serde_json::Value>,
+    #[sqlx(rename = "campaignId")]
+    campaign_id: Option<String>,
+    tags: Option<Vec<String>>,
+    metadata: Option<serde_json::Value>,
+    #[sqlx(rename = "scheduledAt")]
+    scheduled_at: Option<DateTime<Utc>>,
+    attempt: i32,
+    #[sqlx(rename = "createdAt")]
+    created_at: DateTime<Utc>,
+}
+
+/// FIX-8: expand one queued row into one [`EmailJob`] per recipient. When
+/// `to_addresses` is present and non-empty, a send unit is created for EVERY
+/// address (previously only the first recipient was used). When it is empty
+/// or NULL, the legacy single-recipient `to` fallback is preserved.
+fn queued_row_to_jobs(row: QueuedEmailRow) -> Vec<EmailJob> {
+    let recipients: Vec<String> = match row.to_addresses.as_deref() {
+        Some(addrs) if !addrs.is_empty() => addrs.to_vec(),
+        _ => vec![row.to.clone()],
+    };
+    recipients
+        .into_iter()
+        .map(|to| EmailJob {
+            id: row.id.clone(),
+            message_id: row.message_id.clone(),
+            tenant_id: row.tenant_id.clone(),
+            domain_id: row.domain_id.clone(),
+            from: row.from.clone(),
+            to,
+            subject: row.subject.clone(),
+            html: row.html.clone(),
+            text: row.text.clone(),
+            headers: row.headers.clone(),
+            attachments: row.attachments.clone(),
+            campaign_id: row.campaign_id.clone(),
+            tags: row.tags.clone(),
+            metadata: row.metadata.clone(),
+            scheduled_at: row.scheduled_at,
+            attempt: row.attempt,
+            created_at: row.created_at,
+        })
+        .collect()
+}
 
 /// Email processor for sending emails from the queue.
 pub struct EmailProcessor {
@@ -276,7 +341,7 @@ impl EmailProcessor {
         };
         let lock_until = Utc::now() + chrono::Duration::milliseconds(visibility_ms_i64);
 
-        let jobs = sqlx::query_as::<_, EmailJob>(
+        let rows = sqlx::query_as::<_, QueuedEmailRow>(
             r#"
             UPDATE email_queue
             SET status = 'processing', locked_until = $1, updated_at = NOW()
@@ -297,6 +362,7 @@ impl EmailProcessor {
                 COALESCE(domain_id::text, '') as "domainId",
                 COALESCE("from", from_address) as "from",
                 COALESCE("to", to_addresses[1], '') as "to",
+                to_addresses as "toAddresses",
                 subject, html, text, headers, attachments,
                 campaign_id::text as "campaignId", tags, metadata, scheduled_at as "scheduledAt",
                 attempt, created_at as "createdAt"
@@ -307,7 +373,12 @@ impl EmailProcessor {
         .fetch_all(&self.db)
         .await?;
 
-        Ok(jobs)
+        // FIX-8: expand one queued row into one send unit PER recipient so
+        // multi-recipient messages no longer drop recipients 2..N.
+        Ok(rows
+            .into_iter()
+            .flat_map(queued_row_to_jobs)
+            .collect())
     }
 
     /// Batch suppression check for efficiency.
@@ -1610,6 +1681,90 @@ mod tests {
             60_i64.saturating_mul(1_073_741_824),
             "attempt 30: delay capped at 2^30 * base"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // FIX-8: multi-recipient job expansion
+    // ---------------------------------------------------------------------------
+
+    fn queued_row(
+        to: &str,
+        to_addresses: Option<Vec<String>>,
+    ) -> QueuedEmailRow {
+        QueuedEmailRow {
+            id: "job-1".into(),
+            message_id: "msg-1".into(),
+            tenant_id: "tenant-1".into(),
+            domain_id: "domain-1".into(),
+            from: "sender@example.com".into(),
+            to: to.into(),
+            to_addresses,
+            subject: "Hello".into(),
+            html: None,
+            text: Some("hi".into()),
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            tags: None,
+            metadata: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_queued_row_with_two_recipients_expands_to_two_jobs() {
+        // A queued message with 2 recipients must produce 2 send units
+        // (previously recipient 2 was silently dropped).
+        let row = queued_row(
+            "first@example.com",
+            Some(vec![
+                "first@example.com".into(),
+                "second@example.com".into(),
+            ]),
+        );
+        let jobs = queued_row_to_jobs(row);
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].to, "first@example.com");
+        assert_eq!(jobs[1].to, "second@example.com");
+        // Identity fields are preserved on every expanded job.
+        for job in &jobs {
+            assert_eq!(job.id, "job-1");
+            assert_eq!(job.message_id, "msg-1");
+            assert_eq!(job.tenant_id, "tenant-1");
+            assert_eq!(job.from, "sender@example.com");
+        }
+    }
+
+    #[test]
+    fn test_queued_row_single_recipient_single_job() {
+        // 1-recipient message → exactly 1 send (no regression).
+        let row = queued_row(
+            "solo@example.com",
+            Some(vec!["solo@example.com".into()]),
+        );
+        let jobs = queued_row_to_jobs(row);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].to, "solo@example.com");
+    }
+
+    #[test]
+    fn test_queued_row_empty_to_addresses_falls_back_to_legacy_to() {
+        // Empty array → fall back to the legacy single-recipient "to".
+        let row = queued_row("legacy@example.com", Some(vec![]));
+        let jobs = queued_row_to_jobs(row);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].to, "legacy@example.com");
+    }
+
+    #[test]
+    fn test_queued_row_null_to_addresses_falls_back_to_legacy_to() {
+        // NULL to_addresses → fall back to the legacy single-recipient "to".
+        let row = queued_row("legacy@example.com", None);
+        let jobs = queued_row_to_jobs(row);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].to, "legacy@example.com");
     }
 
     #[tokio::test]
