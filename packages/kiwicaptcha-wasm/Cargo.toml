@@ -5,6 +5,8 @@ edition = "2021"
 description = "KiwiCaptcha WASM solvers (SHA-256 + Argon2id proof-of-work)"
 license = "MIT"
 
+[workspace]
+members = ["tools/embed"]
 [lib]
 crate-type = ["cdylib"]
 

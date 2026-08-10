@@ -115,7 +115,10 @@ change to the solver:
 packages/kiwicaptcha-wasm/build.sh
 ```
 
-Requires `wasm-pack`, the `wasm32-unknown-unknown` target, and Node.js.
+Requires `cargo`, the `wasm32-unknown-unknown` target, and `wasm-bindgen-cli`
+(installed automatically via `cargo install` if missing). The pipeline is
+pure Rust — no Node.js, no wasm-pack: `build.sh` runs `cargo build`, the
+`wasm-bindgen` CLI, and the embed tool in `packages/kiwicaptcha-wasm/tools/embed/`.
 
 ## API Reference
 

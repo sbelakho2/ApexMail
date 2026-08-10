@@ -1,0 +1,9 @@
+[package]
+name = "kiwicaptcha-embed"
+version = "0.1.0"
+edition = "2021"
+description = "Embeds the kiwicaptcha WASM + wasm-bindgen glue as a single self-contained script"
+license = "MIT"
+
+[dependencies]
+base64 = "0.22"
