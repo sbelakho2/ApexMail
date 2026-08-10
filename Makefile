@@ -35,12 +35,12 @@ RSYNC_SSH   := -e "ssh -o StrictHostKeyChecking=no"
 
 # Code directories that get synced. Each rsync uses --delete so the server
 # has EXACTLY the current repo state — no stale files, no old binaries.
-SYNC_DIRS := services/mail-server packages/kiwicaptcha apps/marketing-zola deploy
+SYNC_DIRS := services/mail-server packages/kiwicaptcha packages/kiwicaptcha-wasm apps/marketing-zola deploy
 SYNC_FILES := docker-compose.yml docker-compose.prod.yml
 
 # Map service names to the code directories they depend on (for partial deploys).
 # When you do `make deploy-service S=api-server`, only these dirs are synced.
-SERVICE_DEPS_api-server    := services/mail-server/crates/api-server services/mail-server/crates/ui-foundation services/mail-server/Cargo.toml packages/kiwicaptcha
+SERVICE_DEPS_api-server    := services/mail-server/crates/api-server services/mail-server/crates/ui-foundation services/mail-server/Cargo.toml packages/kiwicaptcha packages/kiwicaptcha-wasm
 SERVICE_DEPS_mta           := services/mail-server/crates/mta services/mail-server/crates/mail-common services/mail-server/crates/mail-proto services/mail-server/Cargo.toml
 SERVICE_DEPS_imap-server   := services/mail-server/crates/imap-server services/mail-server/crates/mailstore-core services/mail-server/Cargo.toml
 SERVICE_DEPS_mailstore     := services/mail-server/crates/mailstore-core services/mail-server/Cargo.toml
