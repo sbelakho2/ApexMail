@@ -1,46 +1,61 @@
 //! Proof-of-work verification for KiwiCaptcha.
 //!
 //! Given a stored [`ChallengeRecord`] and a client-submitted counter, this
-//! module re-derives the SHA-256 hash (`SHA-256(challenge_prefix || counter || salt)`)
-//! and checks that the raw output has at least `target_bits` leading zero bits.
+//! module re-derives the hash (`SHA-256(prefix || counter || salt)` or
+//! `Argon2id(prefix || counter, salt)` per the record's algorithm) and checks
+//! that the raw output has at least `target_bits` leading zero bits.
 //!
-//! Because SHA-256 is a fast hash, the server re-derivation costs a single
-//! hash — but the client pays the brute-force cost of finding a counter whose
-//! hash meets the target. This is the asymmetry that makes PoW work:
-//! cheap to verify, expensive to solve.
+//! Because the computation is driven by the record's explicit algorithm and
+//! difficulty, the verifier always performs exactly the work the issuer
+//! configured — the client cannot downgrade difficulty or switch modes.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
+use argon2::{Argon2, Algorithm, Version, Params};
 
-use crate::challenge::{payload_from_record, verify_signature, ChallengeRecord};
+use crate::challenge::{payload_from_record, verify_signature, ChallengeRecord, PoWAlgorithm};
 
-/// Compute the SHA-256 hash for the given record + counter.
+/// Compute the hash for the given record + counter.
 ///
-/// KiwiCaptcha uses a fast hash (SHA-256) with high difficulty (many brute-force
-/// attempts required), rather than a slow KDF with low difficulty. A fast hash
-/// means a legitimate browser and a bot have comparable per-hash cost, so the
-/// difficulty target is meaningful and tunable.
-///
-/// The input is `SHA-256(challenge_prefix || counter || salt)`:
-/// - challenge_prefix embeds the signed challenge (binds to nonce/IP/scope)
-/// - counter is the brute-force variable
-/// - salt is the challenge's base64-decoded salt
-///
-/// At 20-bit difficulty (~1M expected hashes), a browser solves in ~2-5
-/// seconds. The server re-derives ONE hash for verification — effectively free.
+/// The computation is driven by the challenge's explicit [`PoWAlgorithm`],
+/// never by a numeric heuristic:
+/// 1. [`PoWAlgorithm::Sha256`] — `SHA-256(prefix || counter || salt)`
+/// 2. [`PoWAlgorithm::Argon2id`] — `Argon2id(prefix || counter, salt)` with
+///    the record's m_kib/t/p parameters.
 fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], VerifyError> {
     let salt = B64
         .decode(&record.salt)
         .map_err(|_| VerifyError::MalformedRecord)?;
-    let input = format!("{}{}", record.prefix, counter);
 
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hasher.update(&salt);
-    let result = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    Ok(out)
+    match record.algorithm {
+        PoWAlgorithm::Argon2id => {
+            // Reject implausible parameters up front: the verifier must never
+            // run a memory-hard computation with impossible parameters, and
+            // the minimum (m_kib >= 8 * p) is enforced at issuance too.
+            if record.m_kib < 8 * record.p || record.m_kib > crate::challenge::SOLVER_MAX_ARGON2_M_KIB {
+                return Err(VerifyError::MalformedRecord);
+            }
+            let params = Params::new(record.m_kib, record.t, record.p, Some(32))
+                .map_err(|_| VerifyError::MalformedRecord)?;
+            let hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+            let password = format!("{}{}", record.prefix, counter);
+            let mut output = [0u8; 32];
+            hasher
+                .hash_password_into(password.as_bytes(), &salt, &mut output)
+                .map_err(|_| VerifyError::InsufficientWork)?;
+            Ok(output)
+        }
+        PoWAlgorithm::Sha256 => {
+            let input = format!("{}{}", record.prefix, counter);
+            let mut hasher = Sha256::new();
+            hasher.update(input.as_bytes());
+            hasher.update(&salt);
+            let result = hasher.finalize();
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&result);
+            Ok(out)
+        }
+    }
 }
 
 /// Count the number of leading zero bits in a byte slice (big-endian bit order).
@@ -133,8 +148,12 @@ pub fn verify_solution(ctx: &VerifyContext<'_>) -> VerifyOutcome {
     }
 
     // 3. Minimum duration (only enforced for non-trivial difficulties; a 0
-    //    min_duration_ms disables this check, useful in tests).
-    if ctx.min_duration_ms > 0 && ctx.duration_ms < ctx.min_duration_ms {
+    //    min_duration_ms disables this check, useful in tests). The floor is
+    //    per-challenge: it was derived at issuance from the algorithm and
+    //    difficulty so it can never conflict with the solver (e.g. auto-tuned
+    //    low difficulty or a fast WASM solver both stay above their floor).
+    let floor = ctx.min_duration_ms.max(ctx.record.min_duration_ms);
+    if floor > 0 && ctx.duration_ms < floor {
         return VerifyOutcome::Invalid(VerifyError::TooFast);
     }
 
@@ -209,6 +228,8 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
     let dm = telemetry.get("dm").and_then(|v| v.as_u64()).unwrap_or(0);
     let pl = telemetry.get("pl").and_then(|v| v.as_u64()).unwrap_or(0);
 
+    // Hard rejection signals:
+    // 1. Solve completes in >30s with zero mouse/key events (headless solver).
     if duration_ms > 30_000 && me == 0 && ke == 0 {
         tracing::warn!(
             duration_ms,
@@ -219,14 +240,68 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
         return true;
     }
 
-    if duration_ms > 120_000 {
+    // 2. Solve takes >300s total (well beyond expected). Increased from 120s to allow for very slow devices.
+    if duration_ms > 300_000 {
         tracing::warn!(
             duration_ms,
-            "KiwiCaptcha: bot suspected — solve took >120s"
+            "KiwiCaptcha: bot suspected — solve took >300s"
         );
         return true;
     }
 
+    // 3. Entropy check: if there are interactions, check for timing variance.
+    //    Bots often simulate events with perfectly uniform intervals.
+    //
+    //    This check is deliberately conservative:
+    //    - It only considers *discrete* events (the widget records pointerdown,
+    //      non-repeat keydown, wheel, and click — never coalesced mousemove or
+    //      OS key auto-repeat), so a uniform interval across 24+ discrete
+    //      human events is not something a person can produce.
+    //    - The coefficient of variation must be near zero (< 2%) AND the mean
+    //      interval must be ≥ 8 ms, so a burst of sub-frame events (which can
+    //      round to identical millisecond timestamps) is never misclassified.
+    if let Some(et) = telemetry.get("et").and_then(|v| v.as_array()) {
+        if et.len() >= 24 {
+            let mut diffs = Vec::with_capacity(et.len() - 1);
+            for i in 1..et.len() {
+                if let (Some(t1), Some(t0)) = (et[i].as_u64(), et[i - 1].as_u64()) {
+                    if t1 >= t0 {
+                        diffs.push(t1 - t0);
+                    }
+                }
+            }
+
+            if diffs.len() >= 23 {
+                let mut sum: u64 = 0;
+                for &d in &diffs {
+                    sum += d;
+                }
+                let mean = sum as f64 / diffs.len() as f64;
+                if mean >= 8.0 {
+                    let variance: f64 = diffs
+                        .iter()
+                        .map(|&d| {
+                            let diff = d as f64 - mean;
+                            diff * diff
+                        })
+                        .sum::<f64>()
+                        / diffs.len() as f64;
+                    let cv = variance.sqrt() / mean;
+                    if cv < 0.02 {
+                        tracing::warn!(
+                            cv,
+                            mean,
+                            n = diffs.len(),
+                            "KiwiCaptcha: bot suspected — near-zero timing variance in discrete events"
+                        );
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Soft signals (logged but NOT rejected):
     if hc == 0 && dm == 0 {
         tracing::info!(
             hc,
@@ -249,16 +324,19 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::challenge::{issue_challenge, ChallengeConfig};
+    use crate::challenge::{issue_challenge, ChallengeConfig, PoWAlgorithm};
 
     fn make_record(target_bits: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
-            m_kib: 100, // reserved param — fast enough for tests
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 100,
             t: 1,
             p: 1,
             target_bits,
+            argon2_target_bits: 8,
             ttl_secs: 120,
+            min_duration_ms: None,
             auto_tune: false,
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
@@ -267,20 +345,70 @@ mod tests {
         issued.record
     }
 
-    #[test]
-    fn valid_solution_is_accepted() {
-        let record = make_record(8); // 8 bits — fast solve
-        let counter = solve_for_test(&record).expect("solver finds a counter");
+    fn make_argon2_record(target_bits: u32, m_kib: u32) -> ChallengeRecord {
+        let config = ChallengeConfig {
+            secret_key: "test-key".into(),
+            algorithm: PoWAlgorithm::Argon2id,
+            m_kib,
+            t: 1,
+            p: 1,
+            target_bits,
+            argon2_target_bits: target_bits,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+        };
+        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 0).unwrap();
+        issued.record
+    }
+
+    fn verify(record: &ChallengeRecord, counter: u64, duration_ms: u64) -> VerifyOutcome {
         let ctx = VerifyContext {
-            record: &record,
+            record,
             secret_key: "test-key",
             counter,
-            duration_ms: 5000,
+            duration_ms,
             now_unix: 1_000_001,
             min_duration_ms: 0,
             expected_scope: None,
         };
-        assert_eq!(verify_solution(&ctx), VerifyOutcome::Valid);
+        verify_solution(&ctx)
+    }
+
+    #[test]
+    fn valid_solution_is_accepted() {
+        let record = make_record(8); // 8 bits — fast solve
+        let counter = solve_for_test(&record).expect("solver finds a counter");
+        assert_eq!(verify(&record, counter, 5000), VerifyOutcome::Valid);
+    }
+
+    #[test]
+    fn argon2_solution_is_accepted() {
+        let record = make_argon2_record(4, 128); // low bits, small memory for tests
+        let counter = solve_for_test(&record).expect("solver finds an argon2 counter");
+        assert_eq!(verify(&record, counter, 5000), VerifyOutcome::Valid);
+    }
+
+    #[test]
+    fn argon2_issuance_rejects_invalid_memory_params() {
+        // m_kib < 8 * p must fail at issuance, not at verification time.
+        let config = ChallengeConfig {
+            secret_key: "test-key".into(),
+            algorithm: PoWAlgorithm::Argon2id,
+            m_kib: 4,
+            t: 1,
+            p: 1,
+            target_bits: 4,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+        };
+        assert!(issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 0).is_err());
     }
 
     #[test]
@@ -289,17 +417,8 @@ mod tests {
         // Find a valid counter, then use a different one.
         let valid = solve_for_test(&record).unwrap();
         let bad = if valid == 0 { 1 } else { 0 };
-        let ctx = VerifyContext {
-            record: &record,
-            secret_key: "test-key",
-            counter: bad,
-            duration_ms: 5000,
-            now_unix: 1_000_001,
-            min_duration_ms: 0,
-            expected_scope: None,
-        };
         assert_eq!(
-            verify_solution(&ctx),
+            verify(&record, bad, 5000),
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         );
     }
@@ -325,21 +444,35 @@ mod tests {
 
     #[test]
     fn too_fast_solution_is_rejected() {
-        let record = make_record(8);
+        let record = make_record(20); // high difficulty => non-trivial floor
         let counter = solve_for_test(&record).unwrap();
+        let floor = record.min_duration_ms.max(1);
         let ctx = VerifyContext {
             record: &record,
             secret_key: "test-key",
             counter,
-            duration_ms: 10, // impossibly fast
+            duration_ms: floor - 1, // below the issued floor
             now_unix: 1_000_001,
-            min_duration_ms: 100,
+            min_duration_ms: 0,
             expected_scope: None,
         };
         assert_eq!(
             verify_solution(&ctx),
             VerifyOutcome::Invalid(VerifyError::TooFast)
         );
+    }
+
+    #[test]
+    fn issued_min_duration_is_floor_for_derived_difficulty() {
+        // The floor is derived at issuance from the algorithm + difficulty:
+        // it is always positive, scales with difficulty, and Argon2id
+        // (memory-hard) floors are far above SHA-256 floors at equal bits.
+        let low = make_record(10);
+        let high = make_record(20);
+        assert!(low.min_duration_ms > 0);
+        assert!(high.min_duration_ms >= low.min_duration_ms);
+        let argon = make_argon2_record(10, 128);
+        assert!(argon.min_duration_ms > low.min_duration_ms);
     }
 
     #[test]
@@ -368,5 +501,72 @@ mod tests {
         assert_eq!(leading_zero_bits(&[0x00, 0x00, 0x01]), 23);
         assert_eq!(leading_zero_bits(&[0xFF]), 0);
         assert_eq!(leading_zero_bits(&[]), 0);
+    }
+
+    #[test]
+    fn telemetry_bot_detection_works() {
+        use serde_json::json;
+
+        // Normal user: irregular discrete-event timings (jittered pointerdowns)
+        let t1 = json!({
+            "wd": false,
+            "me": 50,
+            "ke": 10,
+            "et": [100, 187, 296, 412, 531, 640, 772, 881, 990, 1107, 1221, 1330, 1449, 1561, 1670, 1788, 1899, 2012, 2124, 2233, 2348, 2461, 2577, 2688, 2801, 2913]
+        });
+        assert!(!score_telemetry(&t1, 5000));
+
+        // Webdriver rejection
+        let t2 = json!({"wd": true});
+        assert!(score_telemetry(&t2, 5000));
+
+        // Too slow rejection
+        assert!(score_telemetry(&t1, 301_000));
+
+        // Zero interaction long solve rejection
+        let t3 = json!({"wd": false, "me": 0, "ke": 0});
+        assert!(score_telemetry(&t3, 31_000));
+
+        // Bot simulation rejection: 24+ discrete events at perfectly uniform
+        // intervals (CV ~ 0, mean >= 8ms).
+        let uniform: Vec<u64> = (0..30).map(|i| 100 + i * 100).collect();
+        let t4 = json!({
+            "wd": false,
+            "me": 20,
+            "ke": 0,
+            "et": uniform
+        });
+        assert!(score_telemetry(&t4, 5000));
+
+        // Human-like jittered timing must NOT be rejected even with many events.
+        let jittered: Vec<u64> = (0..30).map(|i| i * 97 + (i * 7 % 13)).collect();
+        let t5 = json!({
+            "wd": false,
+            "me": 20,
+            "ke": 0,
+            "et": jittered
+        });
+        assert!(!score_telemetry(&t5, 5000));
+
+        // Sub-frame events (1-2ms diffs) must NOT be rejected: coalesced events
+        // can round to identical millisecond timestamps.
+        let subframe: Vec<u64> = (0..30).map(|i| i * 2).collect();
+        let t6 = json!({
+            "wd": false,
+            "me": 20,
+            "ke": 0,
+            "et": subframe
+        });
+        assert!(!score_telemetry(&t6, 5000));
+
+        // Sparse human events (mean interval > 8ms, high variance) pass.
+        let sparse: Vec<u64> = (0..30).map(|i| i * 143 + (i * 11 % 37)).collect();
+        let t7 = json!({
+            "wd": false,
+            "me": 20,
+            "ke": 0,
+            "et": sparse
+        });
+        assert!(!score_telemetry(&t7, 5000));
     }
 }

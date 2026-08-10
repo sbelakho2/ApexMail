@@ -1,20 +1,22 @@
 [package]
 name = "kiwicaptcha"
-description = "A quantum-safe SHA-256 proof-of-work CAPTCHA engine"
-version = "0.1.0"
+description = "KiwiCaptcha: a privacy-first, self-contained proof-of-work CAPTCHA engine (SHA-256 + Argon2id)"
+version = "1.0.0"
 edition = "2021"
-authors = ["KiwiCaptcha Contributors"]
+authors = ["Bel Consulting OÜ <hello@bel.ee>"]
 license = "MIT"
-repository = "https://github.com/sbelakho2/kiwicaptcha"
-keywords = ["captcha", "proof-of-work", "sha256", "security", "anti-bot"]
+repository = "https://github.com/sbelakho2/ApexMail"
+keywords = ["captcha", "proof-of-work", "sha256", "argon2", "security", "privacy"]
 categories = ["web-programming", "cryptography", "authentication"]
 
 [dependencies]
 sha2 = "0.10"
+argon2 = "0.5"
 hmac = "0.12"
 base64 = "0.22"
 rand = "0.8"
+hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
+thiserror = "1"
 tracing = "0.1"

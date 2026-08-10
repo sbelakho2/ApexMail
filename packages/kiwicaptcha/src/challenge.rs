@@ -1,7 +1,7 @@
 //! Challenge issuance for KiwiCaptcha.
 //!
 //! A challenge is an HMAC-signed, nonce-stamped, IP-bound token that the client
-//! must fold into a SHA-256 proof-of-work. The signature binds the challenge
+//! must fold into a proof-of-work. The signature binds the challenge
 //! to the server's secret key (so clients cannot forge challenges), the issuing
 //! time (for TTL enforcement), the client IP hash (for replay-across-clients
 //! prevention), and the scope (so a login challenge can't be used for signup).
@@ -22,6 +22,34 @@ use sha2::{Digest, Sha256};
 use crate::token::IssuedChallenge;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// The proof-of-work algorithm a challenge uses.
+///
+/// The algorithm is decided at issuance time and carried explicitly on both
+/// the wire (`IssuedChallenge.algorithm`) and the stored record
+/// (`ChallengeRecord.algorithm`), so the solver and the verifier can never
+/// disagree about which computation to perform — a numeric `m_kib` flag was
+/// previously used as an implicit mode switch, which broke every challenge
+/// once the two sides interpreted it differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PoWAlgorithm {
+    /// Classic CPU-bound SHA-256 PoW: fast to verify, difficulty up to
+    /// [`SOLVER_MAX_TARGET_BITS`].
+    Sha256,
+    /// Memory-hard Argon2id PoW: ASIC/GPU resistant, difficulty capped at
+    /// [`SOLVER_MAX_ARGON2_TARGET_BITS`] because every hash is expensive.
+    Argon2id,
+}
+
+impl PoWAlgorithm {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PoWAlgorithm::Sha256 => "sha256",
+            PoWAlgorithm::Argon2id => "argon2id",
+        }
+    }
+}
 
 /// The signed payload embedded inside a challenge string.
 ///
@@ -52,6 +80,10 @@ pub struct ChallengeRecord {
     pub ip_hash: String,
     pub issued_at: u64,
     pub expires_at: u64,
+    /// The proof-of-work algorithm this challenge was issued with. A mode
+    /// switch based on a numeric flag is rejected by design — the verifier
+    /// only ever computes what the record says.
+    pub algorithm: PoWAlgorithm,
     /// The difficulty parameters this challenge was issued with, so a
     /// difficulty downgrade attack (client claims a lower target_bits) is
     /// rejected — the server always verifies against the parameters it issued.
@@ -65,6 +97,12 @@ pub struct ChallengeRecord {
     /// The signed challenge string (`base64(payload).signature`) — stored so the
     /// verifier can re-check the HMAC without re-parsing the prefix.
     pub challenge: String,
+    /// The minimum plausible solve time in milliseconds for the issued
+    /// difficulty, computed at issuance from the algorithm and target bits.
+    /// Solutions reporting less than this are physically implausible and
+    /// rejected. An override (e.g. operator tuning) replaces the computed
+    /// value; 0 disables the check.
+    pub min_duration_ms: u64,
 }
 
 /// Configuration for the challenge issuer. Mirrors the server config block but
@@ -75,18 +113,33 @@ pub struct ChallengeConfig {
     /// HMAC secret key (server-side). Challenges signed with this key cannot
     /// be verified by a server using a different key.
     pub secret_key: String,
-    /// Reserved difficulty parameter (kept for struct/wire stability).
+    /// The proof-of-work algorithm to issue. If [`PoWAlgorithm::Sha256`], the
+    /// memory-hard parameters below are ignored and `target_bits` is used.
+    pub algorithm: PoWAlgorithm,
+    /// Memory cost in KiB for Argon2id challenges (ignored for SHA-256).
+    /// Must satisfy `m_kib >= 8 * p` (Argon2 minimum) and be browser-solvable.
     pub m_kib: u32,
-    /// Reserved difficulty parameter (kept for struct stability).
+    /// Time cost for Argon2id challenges.
     pub t: u32,
-    /// Reserved difficulty parameter (kept for struct stability).
+    /// Parallelism for Argon2id challenges.
     pub p: u32,
-    /// Required leading zero bits in the SHA-256 output (difficulty).
+    /// Required leading zero bits in the hash output. For SHA-256 this is the
+    /// primary difficulty; for Argon2id the effective difficulty is
+    /// `argon2_target_bits` (see below) because every Argon2 hash is ~1000x
+    /// more expensive than SHA-256.
     pub target_bits: u32,
+    /// Difficulty (leading zero bits) for Argon2id challenges. Clamped to
+    /// [`SOLVER_MAX_ARGON2_TARGET_BITS`] so the widget can always finish.
+    pub argon2_target_bits: u32,
     /// Challenge lifetime in seconds.
     pub ttl_secs: u64,
+    /// Minimum plausible solve time in ms. When `Some`, it replaces the
+    /// difficulty-derived minimum for every issued challenge; `None` means
+    /// derive it from the algorithm + difficulty. `Some(0)` disables the check.
+    pub min_duration_ms: Option<u64>,
     /// When enabled, `target_bits` is automatically adjusted based on active
     /// solver load: higher load -> higher difficulty; idle -> lower difficulty.
+    /// Only applies to SHA-256 challenges; Argon2id difficulty is static.
     pub auto_tune: bool,
     /// Minimum target bits when auto-tuning is idle (no load).
     pub auto_tune_min_bits: u32,
@@ -95,14 +148,13 @@ pub struct ChallengeConfig {
 }
 
 impl ChallengeConfig {
-    /// Compute the adjusted target bits based on current active solver count.
-    /// When `auto_tune` is disabled, returns the static `target_bits`.
+    /// Compute the adjusted SHA-256 target bits based on current active solver
+    /// count. When `auto_tune` is disabled, returns the static `target_bits`.
     /// Otherwise linearly interpolates between `auto_tune_min_bits` (0 active)
     /// and `auto_tune_max_bits` (50+ active solvers).
     ///
     /// The result is clamped to [`SOLVER_MAX_TARGET_BITS`] so the issued
-    /// difficulty always stays within what the browser solver can finish
-    /// (~74% of solves would fail at 24 bits with the 5M-hash solver cap).
+    /// difficulty always stays within what the browser solver can finish.
     pub fn tuned_target_bits(&self, active_solves: u64) -> u32 {
         // Both bounds are clamped to the solver ceiling; the upper bound is
         // re-raised to at least the lower bound so the interpolation range
@@ -119,6 +171,36 @@ impl ChallengeConfig {
         let range = max_bits.saturating_sub(min_bits) as f64;
         let adjusted = min_bits as f64 + load * range;
         adjusted as u32
+    }
+
+    /// The effective difficulty for the configured algorithm.
+    pub fn effective_target_bits(&self, active_solves: u64) -> u32 {
+        match self.algorithm {
+            PoWAlgorithm::Sha256 => self.tuned_target_bits(active_solves),
+            PoWAlgorithm::Argon2id => self.argon2_target_bits.min(SOLVER_MAX_ARGON2_TARGET_BITS),
+        }
+    }
+
+    /// Derive the minimum plausible solve time (ms) for the issued difficulty.
+    ///
+    /// The floor is set so it only rejects solutions that arrive faster than
+    /// any real device could compute the work:
+    /// - SHA-256: assumes up to 5e9 hashes/sec (beyond any browser; catches
+    ///   hardware-accelerated/precomputed solves) with an absolute 5 ms floor.
+    /// - Argon2id: assumes up to 5e5 hashes/sec (memory-hard; the wasm solver
+    ///   manages ~1e3-1e4/s), floor 50 ms.
+    pub fn min_duration_ms_for(&self, target_bits: u32) -> u64 {
+        let expected_hashes = 1u64 << target_bits.min(32);
+        match self.algorithm {
+            PoWAlgorithm::Sha256 => {
+                let ms = (expected_hashes as f64 / 5e9 * 1000.0).ceil() as u64;
+                ms.max(5)
+            }
+            PoWAlgorithm::Argon2id => {
+                let ms = (expected_hashes as f64 / 5e5 * 1000.0).ceil() as u64;
+                ms.max(50)
+            }
+        }
     }
 }
 
@@ -197,7 +279,7 @@ pub struct ChallengeCache {
     ttl: Duration,
 }
 
-/// Maximum difficulty the in-browser solver can reliably complete.
+/// Maximum difficulty the in-browser SHA-256 solver can reliably complete.
 ///
 /// The widget solver (`packages/kiwicaptcha/src/widget.rs`) caps its search
 /// at `MAX = 5_000_000` hashes. At `n` target bits the expected work is
@@ -206,6 +288,27 @@ pub struct ChallengeCache {
 /// fail). Difficulty is therefore clamped to this ceiling so the auto-tuner
 /// can never issue a challenge the widget cannot solve.
 pub const SOLVER_MAX_TARGET_BITS: u32 = 20;
+
+/// Maximum difficulty for Argon2id challenges.
+///
+/// Every Argon2id hash is memory-hard and costs tens of milliseconds in the
+/// browser (vs ~nanoseconds for SHA-256), so the difficulty must be far lower.
+/// At 10 bits the expected work is 1024 hashes (~10-60 s at 8-64 MiB memory),
+/// which is the practical ceiling for an interactive widget.
+pub const SOLVER_MAX_ARGON2_TARGET_BITS: u32 = 10;
+
+/// Hard upper bound on Argon2id memory cost (KiB) that a browser widget can be
+/// expected to allocate. 64 MiB keeps the WASM heap (and the server's verify
+/// memory) within reason while still being memory-hard against ASICs/GPUs.
+pub const SOLVER_MAX_ARGON2_M_KIB: u32 = 65536;
+
+/// Expected hashes a browser solver can attempt per second (SHA-256, WASM).
+/// Used to derive the per-challenge minimum solve duration.
+pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
+
+/// Expected hashes per second for the Argon2id wasm solver at moderate memory
+/// (8-64 MiB). Used to derive the per-challenge minimum solve duration.
+pub const ARGON2_SOLVER_HASHES_PER_SEC: f64 = 5e5;
 
 impl ChallengeCache {
     pub fn new() -> Self {
@@ -306,7 +409,13 @@ pub fn issue_challenge(
     let salt = B64.encode(salt_bytes);
 
     let ip_hash = hash_ip(client_ip, &config.secret_key);
-    let target_bits = config.tuned_target_bits(active_solves);
+    let algorithm = config.algorithm;
+    let target_bits = config.effective_target_bits(active_solves);
+    // Argon2id minimum memory is 8 * p KiB; reject configurations that could
+    // never produce a valid hash instead of failing every verification later.
+    if algorithm == PoWAlgorithm::Argon2id && config.m_kib < 8 * config.p {
+        return Err(SignError::InvalidArgon2Params);
+    }
 
     let payload = ChallengePayload {
         nonce: nonce.clone(),
@@ -316,7 +425,7 @@ pub fn issue_challenge(
     };
     let signature = sign_payload(&payload, &config.secret_key)?;
 
-    // The challenge string the client folds into SHA-256: it contains the
+    // The challenge string the client folds into the hash: it contains the
     // signed payload so a client cannot tamper with nonce/scope/ip/issued_at
     // without invalidating the signature.
     let challenge = format!("{}.{}", B64.encode(canonical_signing_input(&payload)), signature);
@@ -326,12 +435,19 @@ pub fn issue_challenge(
 
     let expires_at = now_unix.saturating_add(config.ttl_secs);
 
+    // Minimum plausible solve duration: derived from the issued difficulty, or
+    // replaced by an operator override (Some(0) disables the check).
+    let min_duration_ms = config
+        .min_duration_ms
+        .unwrap_or_else(|| config.min_duration_ms_for(target_bits));
+
     let record = ChallengeRecord {
         nonce: nonce.clone(),
         scope: scope.to_string(),
         ip_hash,
         issued_at: now_unix,
         expires_at,
+        algorithm,
         m_kib: config.m_kib,
         t: config.t,
         p: config.p,
@@ -339,6 +455,7 @@ pub fn issue_challenge(
         salt: salt.clone(),
         prefix: prefix.clone(),
         challenge: challenge.clone(),
+        min_duration_ms,
     };
 
     let challenge_token = IssuedChallenge {
@@ -351,6 +468,8 @@ pub fn issue_challenge(
         target_bits,
         ttl_secs: config.ttl_secs,
         prefix,
+        algorithm,
+        min_duration_ms,
     };
 
     Ok(Issued {
@@ -376,6 +495,8 @@ pub enum SignError {
     KeyTooShort,
     #[error("scope contains invalid character '|'")]
     InvalidScope,
+    #[error("Argon2id parameters are invalid (m_kib must be >= 8 * p)")]
+    InvalidArgon2Params,
 }
 
 // Minimal hex encode/decode to avoid pulling in a `hex` crate dependency —
@@ -398,7 +519,10 @@ mod tests {
     fn issued_challenge_has_correct_difficulty() {
         let config = ChallengeConfig {
             secret_key: "super-secret-key".into(),
+            algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
             t: 2,
             p: 1,
             target_bits: 18,
@@ -446,10 +570,13 @@ mod tests {
     fn each_challenge_has_unique_nonce() {
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
+            algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
             p: 1,
             target_bits: 18,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
             ttl_secs: 120,
             auto_tune: false,
             auto_tune_min_bits: 10,
@@ -464,10 +591,13 @@ mod tests {
     fn auto_tune_adjusts_target_bits() {
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
+            algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
             p: 1,
             target_bits: 18,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
             ttl_secs: 120,
             auto_tune: true,
             auto_tune_min_bits: 10,
@@ -489,10 +619,13 @@ mod tests {
     fn auto_tune_never_exceeds_solver_cap_even_without_tuning() {
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
+            algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
             p: 1,
             target_bits: 24,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
             ttl_secs: 120,
             auto_tune: false,
             auto_tune_min_bits: 10,
@@ -509,7 +642,10 @@ mod tests {
         let issued = issue_challenge(
             &ChallengeConfig {
                 secret_key: "test-key".into(),
+                algorithm: PoWAlgorithm::Sha256,
                 m_kib: 65_536,
+                argon2_target_bits: 8,
+                min_duration_ms: None,
                 t: 2,
                 p: 1,
                 target_bits: 18,
@@ -540,10 +676,13 @@ mod tests {
         let mut cache = ChallengeCache::with_ttl(Duration::from_millis(20));
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
+            algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
             p: 1,
             target_bits: 18,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
             ttl_secs: 120,
             auto_tune: false,
             auto_tune_min_bits: 10,
@@ -563,10 +702,13 @@ mod tests {
     fn challenge_cache_hit_returns_same_challenge() {
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
+            algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
             p: 1,
             target_bits: 18,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
             ttl_secs: 120,
             auto_tune: false,
             auto_tune_min_bits: 10,
@@ -584,10 +726,13 @@ mod tests {
     fn challenge_cache_miss_on_different_scope() {
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
+            algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
             p: 1,
             target_bits: 18,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
             ttl_secs: 120,
             auto_tune: false,
             auto_tune_min_bits: 10,

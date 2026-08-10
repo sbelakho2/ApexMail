@@ -12,32 +12,40 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 
+use crate::challenge::PoWAlgorithm;
+
 /// A single issued challenge, returned by `POST /api/kcaptcha/challenge`.
 ///
 /// The `challenge` field is the HMAC-signed challenge string the client must
-/// fold into the SHA-256 proof-of-work. The difficulty target is included so
-/// the client solver and the server verifier run identical computations.
+/// fold into the proof-of-work. The difficulty target and algorithm are
+/// included so the client solver and the server verifier run identical
+/// computations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssuedChallenge {
     /// Single-use nonce (base64, 32 random bytes). The client must include this
     /// in the solution token so the server can look up the stored challenge record.
     pub nonce: String,
     /// Opaque challenge string (base64 of the signed payload). The client
-    /// passes this verbatim into the SHA-256 preimage.
+    /// passes this verbatim into the hash preimage.
     pub challenge: String,
-    /// Base64-encoded salt (16 bytes). Folded into the SHA-256 input so that
+    /// Base64-encoded salt (16 bytes). Folded into the hash input so that
     /// identical challenge + counter pairs still vary across challenges.
     pub salt: String,
-    /// Reserved difficulty parameter (kept for wire compatibility).
+    /// The proof-of-work algorithm. The solver MUST dispatch on this field,
+    /// never on a numeric heuristic.
+    pub algorithm: PoWAlgorithm,
+    /// Memory cost in KiB for Argon2id challenges (0 for SHA-256 challenges).
     pub m_kib: u32,
-    /// Reserved difficulty parameter (kept for wire compatibility).
+    /// Time cost for Argon2id challenges.
     pub t: u32,
-    /// Reserved difficulty parameter (kept for wire compatibility).
+    /// Parallelism for Argon2id challenges.
     pub p: u32,
-    /// Number of leading zero bits required in the SHA-256 output (difficulty).
+    /// Number of leading zero bits required in the hash output (difficulty).
     pub target_bits: u32,
     /// Challenge lifetime in seconds (for client-side countdown display).
     pub ttl_secs: u64,
+    /// Minimum plausible solve duration in ms (server-enforced).
+    pub min_duration_ms: u64,
     /// The prefix the client must prepend to the counter when forming inputs
     /// (bound to the challenge so the solver cannot reuse a counter from a
     /// different challenge).
