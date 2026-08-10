@@ -40,6 +40,7 @@ FROM deps AS api-server-builder
 COPY docs /app/docs
 COPY apps/marketing-zola/public /app/apps/marketing-zola/public
 COPY packages/kiwicaptcha /app/packages/kiwicaptcha
+COPY packages/kiwicaptcha-wasm /app/packages/kiwicaptcha-wasm
 
 RUN cargo build --release --bin api-server
 
@@ -49,6 +50,7 @@ FROM deps AS builder
 COPY docs /app/docs
 COPY apps/marketing-zola/public /app/apps/marketing-zola/public
 COPY packages/kiwicaptcha /app/packages/kiwicaptcha
+COPY packages/kiwicaptcha-wasm /app/packages/kiwicaptcha-wasm
 
 RUN cargo build --release
 
