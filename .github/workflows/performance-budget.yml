@@ -23,16 +23,23 @@ concurrency:
 
 jobs:
   performance-budget:
-    name: Lighthouse Performance Budgets
+    name: Performance Budgets
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install Lighthouse
-        run: npm install -g lighthouse
+      - name: Install chromium and jq (if missing)
+        run: |
+          if ! command -v chromium >/dev/null 2>&1 && \
+             ! command -v chromium-browser >/dev/null 2>&1 && \
+             ! command -v google-chrome >/dev/null 2>&1 && \
+             ! command -v google-chrome-stable >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends chromium
+          fi
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get install -y jq
+          fi
       - name: Run performance budget check
         run: |
           chmod +x deploy/tests/performance-budget.sh

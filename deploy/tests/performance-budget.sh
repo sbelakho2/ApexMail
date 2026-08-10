@@ -1,66 +1,198 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # =============================================================================
-# performance-budget.sh — Lighthouse CI performance budget enforcement.
-# Checks LCP, INP/CLS, TTFB, total JS/CSS/image bytes, font bytes,
-# third-party requests, total page weight against defined thresholds.
-# Fails if any Critical threshold is exceeded.
+# performance-budget.sh — performance budget enforcement (Node-free).
+# Measures TTFB, total download size and request count with curl, and byte
+# budgets per resource class (JS/CSS/image/font) by enumerating every
+# resource the rendered page references (headless chromium --dump-dom),
+# fetching each with curl and classifying by content type.
+#
+# Node-free rewrite (zero node/npm/npx/lighthouse):
+#   - TTFB: curl time_starttransfer (ms).
+#   - lcp/tti/cls: not measurable without a lab browser driver
+#     (Lighthouse/Playwright); reported as null and their budgets are
+#     skipped (documented).
+#   - js_bytes/css_bytes/image_bytes/font_bytes: summed transfer sizes of
+#     DOM-referenced resources fetched via curl, classified by Content-Type
+#     (with extension fallback); fonts referenced from CSS url() are also
+#     counted and sized.
+#   - total_bytes: page weight + all resources; third_party: resources on
+#     hosts other than BASE_URL; number of requests: resources + 1.
+#   - 'skipped' fallback per URL when chromium is unavailable.
+#   Report is still written to .performance-budget-report.json as
+#   {checked_at, critical, warnings, results[]} where each result keeps the
+#   original field names: url, lcp, tti, cls, ttfb, js_bytes, css_bytes,
+#   image_bytes, font_bytes, total_bytes, third_party.
 # =============================================================================
 readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPORT_FILE="${SCRIPT_DIR}/.performance-budget-report.json"
+readonly WORK_DIR="${TMPDIR:-/tmp}/apexmail-perf-budget"
 
 : "${BASE_URL:=https://apexmail.ee}"
 : "${TEST_URLS:=/ /pricing/ /docs/ /features/}"
-: "${LHCI_PORT:=9222}"
+: "${CHROMIUM_BIN:=}"
 
-declare -A BUDGETS
-BUDGETS["lcp_homepage"]="2500"
-BUDGETS["lcp_pricing"]="2500"
-BUDGETS["lcp_docs"]="2000"
-BUDGETS["lcp_landing"]="2500"
-BUDGETS["tti_all"]="4000"
-BUDGETS["cls_all"]="0.1"
-BUDGETS["ttfb_all"]="600"
-BUDGETS["js_bytes_all"]="350000"
-BUDGETS["css_bytes_all"]="150000"
-BUDGETS["image_bytes_all"]="500000"
-BUDGETS["font_bytes_all"]="200000"
-BUDGETS["total_weight_all"]="2000000"
-BUDGETS["third_party_count"]="5"
+LCP_BUDGET=2500
+TTI_BUDGET=4000
+CLS_BUDGET=0.1
+TTFB_BUDGET=600
+JS_BYTES_BUDGET=350000
+CSS_BYTES_BUDGET=150000
+IMAGE_BYTES_BUDGET=500000
+FONT_BYTES_BUDGET=200000
+TOTAL_WEIGHT_BUDGET=2000000
+THIRD_PARTY_BUDGET=5
 
 CRITICAL=0
 WARNINGS=0
 RESULTS="[]"
 
-run_lighthouse() {
-    local url="$1"
-    echo "  Auditing: $url"
-
-    if command -v lighthouse &>/dev/null; then
-        lighthouse "$url" \
-            --chrome-flags="--headless --no-sandbox --disable-gpu" \
-            --output=json --output-path=stdout \
-            --quiet \
-            --only-categories=performance \
-            --throttling-method=simulate \
-            --preset=desktop 2>/dev/null | \
-            jq '{
-                url: .requestedUrl,
-                lcp: .audits["largest-contentful-paint"].numericValue,
-                tti: .audits["interactive"].numericValue,
-                cls: .audits["cumulative-layout-shift"].numericValue,
-                ttfb: .audits["server-response-time"].numericValue,
-                js_bytes: .audits["network-requests"].details.items | map(select(.resourceType=="Script")) | map(.transferSize) | add,
-                css_bytes: .audits["network-requests"].details.items | map(select(.resourceType=="Stylesheet")) | map(.transferSize) | add,
-                image_bytes: .audits["network-requests"].details.items | map(select(.resourceType=="Image")) | map(.transferSize) | add,
-                font_bytes: .audits["network-requests"].details.items | map(select(.resourceType=="Font")) | map(.transferSize) | add,
-                total_bytes: .audits["total-byte-weight"].numericValue,
-                third_party: .audits["third-party-summary"].details.items | length
-            }' 2>/dev/null
-    else
-        echo '{"url":"'"$url"'","skipped":true,"reason":"lighthouse not installed"}'
+resolve_chromium() {
+    local bin
+    if [[ -n "${CHROMIUM_BIN:-}" && "$(command -v "$CHROMIUM_BIN" 2>/dev/null)" ]]; then
+        return 0
     fi
+    for bin in chromium chromium-browser google-chrome google-chrome-stable chrome; do
+        if command -v "$bin" >/dev/null 2>&1; then
+            CHROMIUM_BIN="$bin"
+            return 0
+        fi
+    done
+    return 1
+}
+
+base_host() {
+    printf '%s' "$1" | sed -E 's|https?://([^/]*).*|\1|'
+}
+
+# Print the absolute resource URLs referenced by rendered HTML (stdin).
+# Only URLs with a resource-like file extension are kept — navigation links
+# (/pricing/, /docs/…) are excluded so request/byte counts mirror what the
+# page actually downloads (as Lighthouse measured).
+extract_resource_urls() {
+    local base_url="$1" res abs path
+    grep -oE '(href|src|srcset)="[^"]+"' \
+        | sed -E 's/^(href|src|srcset)="([^"]+)"/\2/' \
+        | awk '{ if (match($0, /^[^,]+/)) print substr($0, RSTART, RLENGTH) }' \
+        | sort -u | while read -r res; do
+            case "$res" in
+                http://*|https://*) abs="$res" ;;
+                //*) abs="https:${res}" ;;
+                /*) abs="${base_url}${res}" ;;
+                '#'*|''|data:*|mailto:*|tel:*) continue ;;
+                *) abs="${base_url}/${res}" ;;
+            esac
+            path="${abs%%\?*}"
+            case "$path" in
+                *.css|*.js|*.mjs|*.png|*.jpg|*.jpeg|*.gif|*.webp|*.svg|*.ico|*.avif|*.bmp|*.woff|*.woff2|*.ttf|*.otf|*.eot|*.json|*.txt|*.xml|*.pdf|*.map|*.wasm|*.webmanifest)
+                    echo "$abs" ;;
+            esac
+        done
+}
+
+# Fetch one resource and print "content_type size" (empty on failure).
+fetch_meta() {
+    curl -fsSL --max-time 30 -o /dev/null -w '%{content_type} %{size_download}' "$1" 2>/dev/null || true
+}
+
+run_audit() {
+    local url="$1"
+
+    if ! resolve_chromium; then
+        echo '{"url":"'"$url"'","skipped":true,"reason":"chromium not available"}'
+        return 0
+    fi
+
+    # TTFB + page weight via curl
+    local timing ttfb_s size ttfb
+    timing="$(curl -fsSL --max-time 60 -o /dev/null -w '%{time_starttransfer} %{size_download}' "$url" 2>/dev/null || echo "0 0")"
+    ttfb_s="${timing%% *}"
+    size="${timing##* }"
+    ttfb="$(echo "$ttfb_s * 1000" | bc -l | awk '{ printf "%.0f", $1 }')"
+
+    # Rendered DOM for resource enumeration
+    local dump html res_urls
+    dump="$("$CHROMIUM_BIN" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+        --no-first-run --no-default-browser-check --virtual-time-budget=10000 \
+        --dump-dom "$url" 2>/dev/null || true)"
+    html="$(printf '%s' "$dump" | sed -n '/<html/,/<\/html>/p')"
+    [[ -n "$html" ]] && printf '%s' "$html" > "${WORK_DIR}/dom.html" || > "${WORK_DIR}/dom.html"
+
+    local base bhost reqs js_bytes css_bytes img_bytes font_bytes total_bytes third meta ctype csize abs host
+    base="${BASE_URL}"
+    bhost="$(base_host "$url")"
+    reqs=1
+    js_bytes=0; css_bytes=0; img_bytes=0; font_bytes=0
+    total_bytes="$size"
+    third=0
+
+    extract_resource_urls "$base" < "${WORK_DIR}/dom.html" > "${WORK_DIR}/urls.txt" || true
+
+    while IFS= read -r abs; do
+        [[ -n "$abs" ]] || continue
+        reqs=$((reqs+1))
+        host="$(base_host "$abs")"
+        [[ "$host" != "$bhost" ]] && third=$((third+1))
+        meta="$(fetch_meta "$abs")"
+        [[ -n "$meta" ]] || continue
+        ctype="${meta%% *}"
+        csize="${meta##* }"
+        [[ "$csize" =~ ^[0-9]+$ ]] || continue
+        total_bytes=$((total_bytes+csize))
+        case "$ctype" in
+            application/javascript|text/javascript|application/x-javascript|*javascript*)
+                js_bytes=$((js_bytes+csize)) ;;
+            text/css)
+                css_bytes=$((css_bytes+csize)) ;;
+            image/*)
+                img_bytes=$((img_bytes+csize)) ;;
+            font/*)
+                font_bytes=$((font_bytes+csize)) ;;
+            *)
+                case "$abs" in
+                    *.js*) js_bytes=$((js_bytes+csize)) ;;
+                    *.css*) css_bytes=$((css_bytes+csize)) ;;
+                    *.woff*|*.ttf|*.otf|*.eot) font_bytes=$((font_bytes+csize)) ;;
+                    *.png|*.jpg|*.jpeg|*.gif|*.webp|*.svg|*.ico|*.avif) img_bytes=$((img_bytes+csize)) ;;
+                esac ;;
+        esac
+    done < "${WORK_DIR}/urls.txt"
+
+    # Fonts referenced from CSS url() that are not in the DOM already
+    local css_url css_file font_url
+    while IFS= read -r css_url; do
+        css_file="$(curl -fsSL --max-time 30 "$css_url" 2>/dev/null || true)"
+        [[ -n "$css_file" ]] || continue
+        while IFS= read -r font_url; do
+            [[ -n "$font_url" ]] || continue
+            case "$font_url" in
+                http://*|https://*) ;;
+                //*) font_url="https:${font_url}" ;;
+                /*) font_url="${BASE_URL}${font_url}" ;;
+                *) continue ;;
+            esac
+            grep -qF "$font_url" "${WORK_DIR}/urls.txt" && continue
+            meta="$(fetch_meta "$font_url")"
+            [[ -n "$meta" ]] || continue
+            csize="${meta##* }"
+            [[ "$csize" =~ ^[0-9]+$ ]] || continue
+            reqs=$((reqs+1))
+            font_bytes=$((font_bytes+csize))
+            total_bytes=$((total_bytes+csize))
+            host="$(base_host "$font_url")"
+            [[ "$host" != "$bhost" ]] && third=$((third+1))
+        done < <(printf '%s' "$css_file" | grep -oE 'url\([^)]+\.(woff2?|ttf|otf|eot)[^)]*\)' \
+            | sed -E 's/url\(["'"'"']?([^)"'"'"']+).*/\1/' | sort -u)
+    done < <(grep -E '\.css([?#]|$)' "${WORK_DIR}/urls.txt")
+
+    jq -nc --arg url "$url" \
+        --argjson lcp null --argjson tti null --argjson cls null \
+        --argjson ttfb "$ttfb" \
+        --argjson js_bytes "$js_bytes" --argjson css_bytes "$css_bytes" \
+        --argjson image_bytes "$img_bytes" --argjson font_bytes "$font_bytes" \
+        --argjson total_bytes "$total_bytes" --argjson third_party "$third" \
+        '{url:$url,lcp:$lcp,tti:$tti,cls:$cls,ttfb:$ttfb,js_bytes:$js_bytes,css_bytes:$css_bytes,image_bytes:$image_bytes,font_bytes:$font_bytes,total_bytes:$total_bytes,third_party:$third_party,requests:'"$reqs"'}'
 }
 
 check_budget() {
@@ -76,23 +208,31 @@ check_budget() {
 
 main() {
     echo "=== ApexMail Performance Budget Check ==="
+    rm -rf "$WORK_DIR"
+    mkdir -p "$WORK_DIR"
+
+    if ! command -v curl >/dev/null 2>&1 || ! command -v bc >/dev/null 2>&1; then
+        echo "SKIP: curl or bc not available"
+        jq -n --arg checked_at "$TIMESTAMP" \
+            '{checked_at:$checked_at,skipped:true,reason:"curl or bc not available"}' \
+            > "$REPORT_FILE"
+        exit 0
+    fi
 
     for path in $TEST_URLS; do
         local url="${BASE_URL}${path}"
+        echo "  Auditing: $url"
         local audit
-        audit="$(run_lighthouse "$url")"
+        audit="$(run_audit "$url")"
 
         RESULTS="$(echo "$RESULTS" | jq ". + [$audit]")"
 
         if echo "$audit" | jq -e '.skipped' >/dev/null 2>&1; then
-            echo "  SKIP: Lighthouse not available"
+            echo "  SKIP: chromium not available"
             continue
         fi
 
-        local lcp tti cls ttfb js_bytes css_bytes image_bytes font_bytes total third
-        lcp="$(echo "$audit" | jq -r '.lcp // 0')"
-        tti="$(echo "$audit" | jq -r '.tti // 0')"
-        cls="$(echo "$audit" | jq -r '.cls // 0')"
+        local ttfb js_bytes css_bytes image_bytes font_bytes total third
         ttfb="$(echo "$audit" | jq -r '.ttfb // 0')"
         js_bytes="$(echo "$audit" | jq -r '.js_bytes // 0')"
         css_bytes="$(echo "$audit" | jq -r '.css_bytes // 0')"
@@ -101,16 +241,16 @@ main() {
         total="$(echo "$audit" | jq -r '.total_bytes // 0')"
         third="$(echo "$audit" | jq -r '.third_party // 0')"
 
-        check_budget "LCP" "$lcp" "${BUDGETS["lcp_landing"]}" "$path"
-        check_budget "TTI" "$tti" "${BUDGETS["tti_all"]}" "$path"
-        check_budget "CLS" "$cls" "${BUDGETS["cls_all"]}" "$path"
-        check_budget "TTFB" "$ttfb" "${BUDGETS["ttfb_all"]}" "$path"
-        check_budget "JS Bytes" "$js_bytes" "${BUDGETS["js_bytes_all"]}" "$path"
-        check_budget "CSS Bytes" "$css_bytes" "${BUDGETS["css_bytes_all"]}" "$path"
-        check_budget "Image Bytes" "$image_bytes" "${BUDGETS["image_bytes_all"]}" "$path"
-        check_budget "Font Bytes" "$font_bytes" "${BUDGETS["font_bytes_all"]}" "$path"
-        check_budget "Total Weight" "$total" "${BUDGETS["total_weight_all"]}" "$path"
-        check_budget "Third-Party Requests" "$third" "${BUDGETS["third_party_count"]}" "$path"
+        # LCP/TTI/CLS cannot be measured without a lab browser driver
+        # (previously Lighthouse); their budgets are skipped.
+        echo "    SKIP: LCP/TTI/CLS require a lab browser driver (was Lighthouse)"
+        check_budget "TTFB" "$ttfb" "$TTFB_BUDGET" "$path"
+        check_budget "JS Bytes" "$js_bytes" "$JS_BYTES_BUDGET" "$path"
+        check_budget "CSS Bytes" "$css_bytes" "$CSS_BYTES_BUDGET" "$path"
+        check_budget "Image Bytes" "$image_bytes" "$IMAGE_BYTES_BUDGET" "$path"
+        check_budget "Font Bytes" "$font_bytes" "$FONT_BYTES_BUDGET" "$path"
+        check_budget "Total Weight" "$total" "$TOTAL_WEIGHT_BUDGET" "$path"
+        check_budget "Third-Party Requests" "$third" "$THIRD_PARTY_BUDGET" "$path"
     done
 
     jq -n --argjson results "$RESULTS" \
