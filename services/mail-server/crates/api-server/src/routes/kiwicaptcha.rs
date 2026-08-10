@@ -57,6 +57,9 @@ pub struct ChallengeResponse {
     pub nonce: String,
     pub challenge: String,
     pub salt: String,
+    /// The proof-of-work algorithm ("sha256" | "argon2id"). The widget
+    /// dispatches on this field; it must never infer the mode from a number.
+    pub algorithm: String,
     #[serde(rename = "mKib")]
     pub m_kib: u32,
     #[serde(rename = "t")]
@@ -67,6 +70,8 @@ pub struct ChallengeResponse {
     pub target_bits: u32,
     #[serde(rename = "ttlSecs")]
     pub ttl_secs: u64,
+    #[serde(rename = "minDurationMs")]
+    pub min_duration_ms: u64,
     pub prefix: String,
 }
 
@@ -86,11 +91,13 @@ async fn issue_challenge_handler(
             nonce: "dev".into(),
             challenge: "dev".into(),
             salt: "dev".into(),
-            m_kib: 8,
+            algorithm: "sha256".into(),
+            m_kib: 0,
             t: 1,
             p: 1,
             target_bits: 1,
             ttl_secs: 120,
+            min_duration_ms: 0,
             prefix: "dev|dev|".into(),
         }));
     }
@@ -155,11 +162,14 @@ async fn issue_challenge_handler(
 
     let kc_config = kiwicaptcha::ChallengeConfig {
         secret_key: state.config.kiwi_secret_key.clone(),
-        m_kib: state.config.kiwi_pbkdf2_iterations,
+        algorithm: state.config.kiwi_algorithm,
+        m_kib: state.config.kiwi_argon_m_kib,
         t: state.config.kiwi_argon_t,
         p: state.config.kiwi_argon_p,
         target_bits: state.config.kiwi_difficulty_bits,
+        argon2_target_bits: state.config.kiwi_argon2_difficulty_bits,
         ttl_secs: state.config.kiwi_challenge_ttl_secs,
+        min_duration_ms: state.config.kiwi_min_duration_ms,
         auto_tune: state.config.kiwi_auto_tune,
         auto_tune_min_bits: state.config.kiwi_auto_tune_min_bits,
         auto_tune_max_bits: state.config.kiwi_auto_tune_max_bits,
@@ -206,11 +216,13 @@ fn challenge_response(issued: &kiwicaptcha::Issued) -> ChallengeResponse {
         nonce: issued.challenge.nonce.clone(),
         challenge: issued.challenge.challenge.clone(),
         salt: issued.challenge.salt.clone(),
+        algorithm: issued.challenge.algorithm.as_str().to_string(),
         m_kib: issued.challenge.m_kib,
         t: issued.challenge.t,
         p: issued.challenge.p,
         target_bits: issued.challenge.target_bits,
         ttl_secs: issued.challenge.ttl_secs,
+        min_duration_ms: issued.challenge.min_duration_ms,
         prefix: issued.challenge.prefix.clone(),
     }
 }

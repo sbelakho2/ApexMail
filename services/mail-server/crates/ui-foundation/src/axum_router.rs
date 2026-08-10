@@ -873,14 +873,15 @@ mod tests {
                         && script.contains("/v1/auth/mfa/");
                     // Inline KiwiCaptcha proof-of-work widget script. Self-contained
                     // IIFE that fetches a challenge from /api/kcaptcha/challenge,
-                    // solves a PBKDF2 proof-of-work via WebCrypto, and fills the
-                    // hidden token input. No external dependencies. The script
-                    // body references the token input via a DOM selector, so we
-                    // match on the challenge endpoint URL + the PBKDF2 solver
-                    // function name instead of the input field name.
+                    // solves the proof-of-work (WASM + JS fallback), and fills the
+                    // hidden token input. No external dependencies. The widget
+                    // driver references the challenge endpoint URL, and the WASM
+                    // embed is the generated solver bootstrap (base64 wasm), which
+                    // contains the `__kiwiCaptchaWasm` global and solver export
+                    // names. Both are inline, nonce-stamped scripts.
                     let is_kiwi_widget_script = !opening_tag.contains("src=")
-                        && script.contains("/api/kcaptcha/challenge")
-                        && script.contains("deriveHash");
+                        && (script.contains("/api/kcaptcha/challenge")
+                            || script.contains("__kiwiCaptchaWasm"));
                     // External client-side hydration script emitted by the web and
                     // control-plane root layouts. It wires SSR tables/forms/buttons to the
                     // JSON API and is served from /assets/console.js. Allowed only with

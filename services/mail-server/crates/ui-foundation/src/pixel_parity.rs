@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn parity_detects_class_mutation_on_real_page() {
         let html = leptos_views::web_login_page("");
-        let tampered = html.replacen("rounded-sm", "rounded-none", 1);
+        let tampered = html.replacen("rounded-xl", "rounded-none", 1);
         let result = check_parity(&html, &tampered);
         assert!(
             !result.is_identical,
@@ -776,10 +776,10 @@ mod tests {
 
         let required = [
             "min-h-screen",
-            "rounded-sm",
+            "rounded-xl",
+            "rounded-2xl",
             "border",
             "bg-white",
-            "shadow-premium",
             "font-bold",
             "bg-primary",
         ];
@@ -800,9 +800,9 @@ mod tests {
 
         let required = [
             "min-h-screen",
-            "rounded-sm",
+            "rounded-xl",
+            "rounded-2xl",
             "border",
-            "shadow-premium",
             "text-3xl",
             "font-bold",
             "bg-primary",

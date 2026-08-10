@@ -1307,7 +1307,9 @@ mod tests {
 
             kiwi_enabled: false,
             kiwi_secret_key: "dev".into(),
-            kiwi_pbkdf2_iterations: 50_000,
+            kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,
+            kiwi_argon_m_kib: 0,
+            kiwi_argon2_difficulty_bits: 8,
             kiwi_argon_t: 2,
             kiwi_argon_p: 1,
             kiwi_difficulty_bits: 16,

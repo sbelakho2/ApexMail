@@ -51,6 +51,14 @@ fn register_rate_limit_message() -> String {
 /// The Redis key prefix under which issued KiwiCaptcha challenges are stored.
 const KIWI_CHALLENGE_PREFIX: &str = "apexmail:kiwi:";
 
+/// Maximum verification attempts per issued challenge nonce.
+///
+/// Each attempt can trigger a server-side proof re-derivation (Argon2id is
+/// memory-hard), so the count is bounded to keep a single nonce from being
+/// used to burn unbounded server CPU/memory. The record itself is only
+/// consumed on success, so this cap is the primary cost control.
+const KIWI_MAX_VERIFY_ATTEMPTS: i64 = 20;
+
 /// Atomic single-use consumption of a KiwiCaptcha challenge record.
 ///
 /// The record is deleted only if it still equals the exact JSON the caller
@@ -142,6 +150,7 @@ pub async fn verify_kiwi_token(
         scope = %record.scope,
         expires_at = record.expires_at,
         ip_hash = %record.ip_hash,
+        algorithm = record.algorithm.as_str(),
         m_kib = record.m_kib,
         target_bits = record.target_bits,
         "KiwiCaptcha: challenge record found"
@@ -162,14 +171,57 @@ pub async fn verify_kiwi_token(
         ]));
     }
 
+    // Per-nonce attempt cap: each challenge may only be tried a bounded number
+    // of times before it is burned. This bounds the server-side cost of a
+    // memory-hard (Argon2id) verification and defeats counter-guessing loops —
+    // the challenge record itself is only consumed on success, so without this
+    // cap a single issued nonce could trigger unbounded expensive verifications.
+    let attempt_key = format!("{KIWI_CHALLENGE_PREFIX}attempts:{}", solution.nonce);
+    {
+        let mut conn = redis_pool.get().await?;
+        let attempts: i64 = deadpool_redis::redis::Script::new(
+            r#"
+                local key = KEYS[1]
+                local max = tonumber(ARGV[1])
+                local ttl = tonumber(ARGV[2])
+                local count = redis.call('INCR', key)
+                if count == 1 then
+                    redis.call('EXPIRE', key, ttl)
+                end
+                if count > max then
+                    return 1
+                end
+                return 0
+            "#,
+        )
+        .key(&attempt_key)
+        .arg(KIWI_MAX_VERIFY_ATTEMPTS)
+        .arg(config.kiwi_challenge_ttl_secs.max(1))
+        .invoke_async::<i64>(&mut *conn)
+        .await
+        .unwrap_or(0);
+        if attempts > 0 {
+            tracing::warn!(
+                nonce = %solution.nonce,
+                attempts,
+                "KiwiCaptcha: verify attempt cap exceeded for nonce"
+            );
+            return Err(ApiError::Validation(vec![
+                "CAPTCHA verification failed — please refresh and try again".into(),
+            ]));
+        }
+    }
+
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    // Minimum duration: reject solves faster than theoretically possible.
-    // Configurable via KIWI_MIN_DURATION_MS (default 80ms).
-    let min_duration_ms: u64 = config.kiwi_min_duration_ms.unwrap_or(80);
+    // Minimum duration: the per-challenge floor was derived at issuance from
+    // the algorithm + difficulty (an operator override via KIWI_MIN_DURATION_MS
+    // is applied at issuance too). Rejecting faster-than-possible solves is
+    // enforced by the verify module against that floor.
+    let min_duration_ms: u64 = 0; // floor comes from record.min_duration_ms
 
     // Telemetry scoring: detect headless/automated clients.
     if kiwicaptcha::score_telemetry(&solution.telemetry, solution.duration_ms) {
@@ -3157,11 +3209,14 @@ mod tests {
 
         let kc_config = kiwicaptcha::ChallengeConfig {
             secret_key: config.kiwi_secret_key.clone(),
-            m_kib: config.kiwi_pbkdf2_iterations,
+            algorithm: config.kiwi_algorithm,
+            m_kib: config.kiwi_argon_m_kib,
             t: config.kiwi_argon_t,
             p: config.kiwi_argon_p,
             target_bits: config.kiwi_difficulty_bits,
+            argon2_target_bits: config.kiwi_argon2_difficulty_bits,
             ttl_secs: config.kiwi_challenge_ttl_secs,
+            min_duration_ms: config.kiwi_min_duration_ms,
             auto_tune: false,
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 20,

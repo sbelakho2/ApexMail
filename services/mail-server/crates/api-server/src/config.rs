@@ -5,7 +5,7 @@
 use std::env;
 use std::time::Duration;
 
-use kiwicaptcha::SOLVER_MAX_TARGET_BITS;
+use kiwicaptcha::{SOLVER_MAX_ARGON2_M_KIB, SOLVER_MAX_ARGON2_TARGET_BITS, SOLVER_MAX_TARGET_BITS};
 
 /// Top-level configuration for the API server.
 #[derive(Debug, Clone)]
@@ -163,26 +163,35 @@ pub struct Config {
     /// HMAC secret key used to sign and verify KiwiCaptcha challenges.
     /// In development, set to "dev" to bypass verification.
     pub kiwi_secret_key: String,
-    /// PBKDF2 iteration count (previously named KIWI_ARGON_M_KIB for backward
-    /// compatibility — old name still accepted via env). Default 50,000.
-    pub kiwi_pbkdf2_iterations: u32,
-    /// Reserved (unused by PBKDF2; kept for wire compatibility).
+    /// Proof-of-work algorithm for issued challenges ("sha256" | "argon2id").
+    /// Decided explicitly, never inferred from a numeric flag.
+    pub kiwi_algorithm: kiwicaptcha::PoWAlgorithm,
+    /// Argon2id memory cost in KiB (ignored for SHA-256 challenges).
+    /// Must satisfy m_kib >= 8 * p and be browser-solvable (<= 65536).
+    pub kiwi_argon_m_kib: u32,
+    /// Argon2id time cost.
     pub kiwi_argon_t: u32,
-    /// Reserved (unused by PBKDF2; kept for wire compatibility).
+    /// Argon2id parallelism.
     pub kiwi_argon_p: u32,
-    /// Required leading zero bits in the PBKDF2 output (difficulty).
-    /// Default 16 (~1–3s solve on commodity CPU).
+    /// Required leading zero bits for SHA-256 challenges.
+    /// Default 20 (~1M expected hashes = ~2-5s on a browser).
     pub kiwi_difficulty_bits: u32,
+    /// Required leading zero bits for Argon2id challenges. Argon2id hashes are
+    /// memory-hard and ~1000x slower than SHA-256, so the difficulty must be
+    /// far lower (default 8, clamped to the browser-solvable ceiling).
+    pub kiwi_argon2_difficulty_bits: u32,
     /// Challenge lifetime in seconds. Default 120.
     pub kiwi_challenge_ttl_secs: u64,
-    /// Minimum acceptable solve duration in milliseconds. Rejects solves
-    /// faster than this as infeasible. Default 80ms.
+    /// Minimum acceptable solve duration in milliseconds. When set, it
+    /// overrides the per-challenge difficulty-derived floor; 0 disables the
+    /// check. Default: derived from difficulty at issuance.
     pub kiwi_min_duration_ms: Option<u64>,
     /// Enable auto-tuning of difficulty based on server load. Default false.
+    /// Only applies to SHA-256 challenges; Argon2id difficulty is static.
     pub kiwi_auto_tune: bool,
     /// Minimum target bits when auto-tuning is idle. Default 10.
     pub kiwi_auto_tune_min_bits: u32,
-    /// Maximum target bits when auto-tuning is under peak load. Default 24.
+    /// Maximum target bits when auto-tuning is under peak load. Default 20.
     pub kiwi_auto_tune_max_bits: u32,
 
     // ── HTTP Client ─────────────────────────────────────────
@@ -651,14 +660,23 @@ impl Config {
 
         let kiwi_enabled = env_or("KIWI_ENABLED", "false").parse().unwrap_or(false);
         let kiwi_secret_key = env_or("KIWI_SECRET_KEY", "dev");
-        // KiwiCaptcha uses SHA-256 (fast hash, high difficulty) — same model as
-        // FriendlyCaptcha, Anubis, ALTCHA. The m_kib field is no longer used
-        // for iterations but kept for wire-format compatibility.
-        let kiwi_pbkdf2_iterations = env::var("KIWI_PBKDF2_ITERATIONS")
-            .or_else(|_| env::var("KIWI_ARGON_M_KIB"))
-            .unwrap_or_else(|_| "1".into())
+        // Proof-of-work algorithm: explicit, never inferred from a numeric
+        // flag. KIWI_ALGORITHM accepts "sha256" (default) or "argon2id".
+        let kiwi_algorithm_raw = env_or("KIWI_ALGORITHM", "sha256").to_ascii_lowercase();
+        let kiwi_algorithm = if kiwi_algorithm_raw == "argon2id" {
+            kiwicaptcha::PoWAlgorithm::Argon2id
+        } else {
+            kiwicaptcha::PoWAlgorithm::Sha256
+        };
+        // Argon2id memory cost (KiB). Only meaningful for Argon2id challenges;
+        // SHA-256 challenges ignore it. The legacy env name KIWI_ARGON_M_KIB
+        // remains accepted. Default 0 => SHA-256 mode is fully functional
+        // without any Argon2 configuration.
+        let kiwi_argon_m_kib = env::var("KIWI_ARGON_M_KIB")
+            .or_else(|_| env::var("KIWI_PBKDF2_ITERATIONS"))
+            .unwrap_or_else(|_| "0".into())
             .parse()
-            .unwrap_or(1);
+            .unwrap_or(0);
         let kiwi_argon_t = env_or("KIWI_ARGON_T", "1").parse().unwrap_or(1);
         let kiwi_argon_p = env_or("KIWI_ARGON_P", "1").parse().unwrap_or(1);
         // 20-bit difficulty = ~1M expected SHA-256 hashes = ~2-5s on a browser.
@@ -666,6 +684,12 @@ impl Config {
         let kiwi_difficulty_bits = env_or("KIWI_DIFFICULTY_BITS", "20")
             .parse()
             .unwrap_or(20);
+        // Argon2id difficulty: far lower than SHA-256 because every hash is
+        // memory-hard. Clamped to the browser-solvable ceiling.
+        let kiwi_argon2_difficulty_bits = env_or("KIWI_ARGON2_DIFFICULTY_BITS", "8")
+            .parse()
+            .unwrap_or(8)
+            .min(SOLVER_MAX_ARGON2_TARGET_BITS);
         let kiwi_challenge_ttl_secs = env_or("KIWI_CHALLENGE_TTL_SECS", "120")
             .parse()
             .unwrap_or(120);
@@ -686,6 +710,31 @@ impl Config {
         if !environment.is_production() && kiwi_secret_key == "dev" {
             tracing::info!(
                 "KiwiCaptcha configured with dev key — CAPTCHA verification will be bypassed"
+            );
+        }
+        if kiwi_algorithm == kiwicaptcha::PoWAlgorithm::Argon2id
+            && kiwi_argon_m_kib < 8 * kiwi_argon_p
+        {
+            tracing::error!(
+                m_kib = kiwi_argon_m_kib,
+                p = kiwi_argon_p,
+                "KiwiCaptcha: Argon2id requires m_kib >= 8 * p — refusing to issue impossible challenges"
+            );
+            return Err(ConfigError::Invalid {
+                var: "KIWI_ARGON_M_KIB".into(),
+                reason: format!(
+                    "must be >= 8 * KIWI_ARGON_P ({}), got {kiwi_argon_m_kib}",
+                    kiwi_argon_p * 8
+                ),
+            });
+        }
+        if kiwi_algorithm == kiwicaptcha::PoWAlgorithm::Argon2id
+            && kiwi_argon_m_kib > SOLVER_MAX_ARGON2_M_KIB
+        {
+            tracing::warn!(
+                m_kib = kiwi_argon_m_kib,
+                max = SOLVER_MAX_ARGON2_M_KIB,
+                "KiwiCaptcha: Argon2id m_kib exceeds the browser-solvable ceiling — clamping"
             );
         }
 
@@ -825,10 +874,12 @@ impl Config {
 
             kiwi_enabled,
             kiwi_secret_key,
-            kiwi_pbkdf2_iterations,
+            kiwi_algorithm,
+            kiwi_argon_m_kib,
             kiwi_argon_t,
             kiwi_argon_p,
             kiwi_difficulty_bits,
+            kiwi_argon2_difficulty_bits,
             kiwi_challenge_ttl_secs,
             kiwi_min_duration_ms,
             kiwi_auto_tune,
@@ -1262,10 +1313,12 @@ pub(crate) mod tests {
 
             kiwi_enabled: true,
             kiwi_secret_key: "prod-kiwi-secret-key-67890".into(),
-            kiwi_pbkdf2_iterations: 1,
+            kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,
+            kiwi_argon_m_kib: 0,
             kiwi_argon_t: 1,
             kiwi_argon_p: 1,
             kiwi_difficulty_bits: 20,
+            kiwi_argon2_difficulty_bits: 8,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
             kiwi_auto_tune: false,
@@ -1402,7 +1455,9 @@ pub(crate) mod tests {
 
             kiwi_enabled: false,
             kiwi_secret_key: "dev".into(),
-            kiwi_pbkdf2_iterations: 1,
+            kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,
+            kiwi_argon_m_kib: 0,
+            kiwi_argon2_difficulty_bits: 8,
             kiwi_argon_t: 1,
             kiwi_argon_p: 1,
             kiwi_difficulty_bits: 20,

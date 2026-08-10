@@ -1,38 +1,45 @@
-//! KiwiCaptcha logo — an elegant kiwi bird silhouette.
+//! KiwiCaptcha logo — an elegant, stylized kiwi bird.
+//! Released by Bel Consulting OÜ under MIT License.
 
-/// Compact kiwi mark for the widget icon (24x24).
-/// The kiwi faces right: plump round body, long slender beak, tiny eye, stubby legs.
+/// Compact kiwi mark for the widget icon (32x32).
+/// Features a stylized, plump kiwi bird with a friendly wink.
 pub fn kiwi_mark_svg() -> &'static str {
-    r##"<svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
-  <path d="M6 20 C6 12 11 8 17 8 C20 8 22 9 23.5 11 L30 9.5 C30.8 9.3 31.5 9.8 31.5 10.5 C31.5 11.2 31 11.7 30.2 11.8 L24 13 C24.6 14.5 25 16.2 25 18 C25 23 21 26 16 26 C11 26 6 23 6 18 Z" fill="currentColor"/>
-  <circle cx="20" cy="12.5" r="1.2" fill="#fff"/>
-  <circle cx="20.3" cy="12.2" r="0.5" fill="currentColor"/>
-  <path d="M12 26.5 L10.5 30.5 M15.5 26.5 L14.5 30.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    r##"<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M22 18.5C22 23.1944 18.1944 27 13.5 27C8.80558 27 5 23.1944 5 18.5C5 13.8056 8.80558 10 13.5 10C15.1186 10 16.6147 10.4532 17.881 11.2381L25.6464 3.47275C26.037 3.08222 26.6701 3.08222 27.0607 3.47275C27.4512 3.86327 27.4512 4.49644 27.0607 4.88696L19.2953 12.6523C20.9878 14.106 22 16.1848 22 18.5Z" fill="currentColor"/>
+  <circle cx="17.5" cy="15.5" r="1.2" fill="white"/>
+  <circle cx="18" cy="15" r="0.5" fill="currentColor">
+    <animate attributeName="opacity" values="1;1;0;1;1" keyTimes="0;0.95;0.97;0.99;1" dur="5s" repeatCount="indefinite" />
+  </circle>
+  <path d="M10 27V29.5C10 30.0523 9.55228 30.5 9 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M17 27V29.5C17 30.0523 17.4477 30.5 18 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
 </svg>"##
 }
 
-/// Full kiwi bird.
+/// Full kiwi bird logo.
 pub fn kiwi_logo_svg() -> &'static str {
     kiwi_mark_svg()
 }
 
 /// Lockup: kiwi mark + wordmark.
 pub fn kiwi_lockup_svg() -> &'static str {
-    r##"<svg viewBox="0 0 160 32" fill="none" aria-hidden="true">
-  <path d="M6 20 C6 12 11 8 17 8 C20 8 22 9 23.5 11 L30 9.5 C30.8 9.3 31.5 9.8 31.5 10.5 C31.5 11.2 31 11.7 30.2 11.8 L24 13 C24.6 14.5 25 16.2 25 18 C25 23 21 26 16 26 C11 26 6 23 6 18 Z" fill="currentColor"/>
-  <circle cx="20" cy="12.5" r="1.2" fill="#fff"/>
-  <path d="M12 26.5 L10.5 30.5 M15.5 26.5 L14.5 30.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-  <text x="38" y="21" font-family="Inter,system-ui,sans-serif" font-size="14" font-weight="800" letter-spacing="-0.02em" fill="currentColor">KiwiCaptcha</text>
+    r##"<svg viewBox="0 0 180 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M22 18.5C22 23.1944 18.1944 27 13.5 27C8.80558 27 5 23.1944 5 18.5C5 13.8056 8.80558 10 13.5 10C15.1186 10 16.6147 10.4532 17.881 11.2381L25.6464 3.47275C26.037 3.08222 26.6701 3.08222 27.0607 3.47275C27.4512 3.86327 27.4512 4.49644 27.0607 4.88696L19.2953 12.6523C20.9878 14.106 22 16.1848 22 18.5Z" fill="currentColor"/>
+  <circle cx="17.5" cy="15.5" r="1.2" fill="white"/>
+  <circle cx="18" cy="15" r="0.5" fill="currentColor"/>
+  <path d="M10 27V29.5C10 30.0523 9.55228 30.5 9 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M17 27V29.5C17 30.0523 17.4477 30.5 18 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="38" y="22" font-family="system-ui,sans-serif" font-size="18" font-weight="700" letter-spacing="-0.04em" fill="currentColor">KiwiCaptcha</text>
 </svg>"##
 }
 
-/// Shield variant.
+/// Shield variant for security contexts.
 pub fn kiwi_shield_svg() -> &'static str {
-    r##"<svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
-  <path d="M16 2L6 6v8c0 7 4.5 12 10 14 5.5-2 10-7 10-14V6L16 2z" fill="currentColor" opacity="0.08" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-  <g transform="translate(-2, -1)">
-    <path d="M6 20 C6 13 10 10 15 10 C17.5 10 19.5 10.8 21 12.5 L27.5 11 C28.2 10.8 28.8 11.2 28.8 12 C28.8 12.6 28.4 13 27.7 13.2 L22 14.5 C22.5 15.8 22.8 17.2 22.8 18.8 C22.8 23 19.5 25.5 15.5 25.5 C11.5 25.5 7.5 23 7.5 18.5 Z" fill="currentColor"/>
-    <circle cx="19" cy="13.5" r="1" fill="#fff"/>
+    r##"<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M16 2L6 6v8c0 7 4.5 12 10 14 5.5-2 10-7 10-14V6L16 2z" fill="currentColor" opacity="0.1"/>
+  <path d="M16 2L6 6v8c0 7 4.5 12 10 14 5.5-2 10-7 10-14V6L16 2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+  <g transform="translate(6, 6) scale(0.625)">
+    <path d="M22 18.5C22 23.1944 18.1944 27 13.5 27C8.80558 27 5 23.1944 5 18.5C5 13.8056 8.80558 10 13.5 10C15.1186 10 16.6147 10.4532 17.881 11.2381L25.6464 3.47275C26.037 3.08222 26.6701 3.08222 27.0607 3.47275C27.4512 3.86327 27.4512 4.49644 27.0607 4.88696L19.2953 12.6523C20.9878 14.106 22 16.1848 22 18.5Z" fill="currentColor"/>
+    <circle cx="17.5" cy="15.5" r="1.2" fill="white"/>
   </g>
 </svg>"##
 }

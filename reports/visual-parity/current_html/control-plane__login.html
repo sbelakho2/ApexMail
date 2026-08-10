@@ -1,102 +1,524 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexMail Control Plane</title><meta name="description" content="ApexMail administration and monitoring"><script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();</script><link rel="stylesheet" href="/assets/globals.css"></head><body class="antialiased bg-background text-surface-950"><main class="min-h-screen bg-surface-50 relative overflow-hidden"><div class="relative mx-auto flex min-h-screen w-full max-w-7xl items-center justify-center px-6 py-20"><div class="w-full max-w-[440px] mx-auto"><div class="text-center mb-8"><span class="inline-block text-3xl font-bold tracking-tighter font-apex"><span class="text-primary">Apex</span><span class="text-surface-950">Mail</span></span><h1 class="mt-4 text-[28px] font-bold text-surface-950 tracking-tight leading-tight">Operator access</h1><p class="text-sm text-surface-500 mt-2 font-medium">Sign in to the ApexMail control plane</p></div><div class="bg-card rounded-sm shadow-premium border border-surface-200/80 overflow-hidden"><form class="p-10 space-y-6" action="/api/auth/login" method="POST"><input type="hidden" name="_csrf" value="" /><div class="space-y-2"><label class="text-[11px] font-bold uppercase tracking-tight text-surface-950" for="login-email">Email or username</label><input id="login-email" name="email" type="text" required autocomplete="username" placeholder="Email or username" class="w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950" /></div><div class="space-y-2"><div class="flex items-center justify-between"><label class="text-[11px] font-bold uppercase tracking-tight text-surface-950" for="login-password">Password</label></div><div class="relative"><input id="login-password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••" class="w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-10" /><button type="button" class="absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100" aria-label="Show password" aria-pressed="false" data-password-toggle="login-password" aria-controls="login-password">Show</button></div></div><div class="flex items-center gap-3 py-1"><input id="rememberMe" name="rememberMe" type="checkbox" checked class="h-4 w-4 rounded-sm border-surface-300 text-primary focus:ring-primary" /><label for="rememberMe" class="text-xs text-surface-500 font-medium">Keep me signed in for 30 days.</label></div><div class="kiwi-widget rounded-sm border border-surface-200 bg-card p-5 transition-premium hover:border-surface-300" id="kiwicaptcha-widget" data-kiwi-widget role="status" aria-live="polite" aria-label="Security verification">
-  <div class="flex items-start gap-3.5">
-    <div class="flex items-center justify-center w-9 h-9 rounded-sm bg-brand-50 text-brand-600 shrink-0 transition-premium" data-kiwi-icon><svg viewBox="0 0 24 24" fill="none" aria-hidden="true" role="img" aria-label="Protected by KiwiCaptcha"><path d="M12 2L4 5v6c0 5 3.5 9 8 11 4.5-2 8-6 8-11V5l-8-3z" fill="currentColor" opacity="0.12" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><g transform="translate(2.5, 3) scale(0.78)"><path d="M8.5 9C8.5 6.5 10.5 5 13 5c1.8 0 3.2.8 4 2L21 5.5c.4-.1.8.1.9.5.1.4-.1.8-.5.9L16.8 8.4c.1.5.2 1 .2 1.6 0 .7-.1 1.3-.3 1.9.5.3.9.7 1.1 1.2.2.4 0 .8-.4 1-.4.2-.8 0-1-.4-.2-.3-.4-.5-.7-.7-1 1.2-2.5 2-4.2 2-2.5 0-4.5-1.5-4.5-4 0-.3 0-.7.1-1l-.6-.2c-.4-.1-.6-.5-.5-.9.1-.4.5-.6.9-.5l.5.2c.2-.5.5-1 .9-1.4-.8.2-1.5.6-2 1.2-.3.3-.7.3-1 0-.3-.3-.3-.7 0-1 .7-.8 1.7-1.3 2.8-1.5L8.5 9z" fill="currentColor"/><circle cx="14" cy="9" r="0.9" fill="#fff"/></g></svg></div>
-    <div class="flex-1 min-w-0">
-      <div class="flex items-center justify-between gap-2">
-        <span class="text-[11px] font-bold uppercase tracking-[0.16em] text-surface-900" data-kiwi-status>Preparing verification&hellip;</span>
-        <span class="kiwi-pill inline-flex items-center gap-1.5 rounded-sm border border-surface-200 bg-surface-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] text-surface-400 transition-premium" data-kiwi-pill>Idle</span>
-      </div>
-      <div class="mt-2.5 h-[3px] w-full rounded-full bg-surface-100 overflow-hidden">
-        <div class="kiwi-fill h-full rounded-full bg-brand-500 transition-all duration-300 ease-premium" style="width:0%"></div>
-      </div>
-      <div class="mt-2 flex items-center justify-between gap-2">
-        <p class="text-[10px] leading-[1.45] text-surface-400 font-medium" data-kiwi-hint>Memory-hard proof-of-work runs in your browser.</p>
-        <span class="kiwi-countdown text-[9px] font-mono tabular-nums text-surface-300 shrink-0" data-kiwi-countdown></span>
-      </div>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexMail Control Plane</title><meta name="description" content="ApexMail administration and monitoring"><script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();</script><link rel="stylesheet" href="/assets/globals.css"></head><body class="antialiased bg-background text-surface-950"><main class="min-h-screen bg-[#fafafa] relative flex items-center justify-center p-6"><div class="absolute inset-0 z-0 opacity-[0.03] pointer-events-none" style="background-image: radial-gradient(#000 1px, transparent 1px); background-size: 20px 20px;"></div><div class="relative z-10 w-full max-w-[420px]"><div class="text-center mb-10"><div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-white shadow-sm border border-surface-200 mb-6 group transition-all hover:scale-105"><span class="text-2xl font-black text-primary tracking-tighter">A</span></div><h1 class="text-3xl font-bold text-surface-950 tracking-tight">Operator access</h1><p class="text-surface-500 mt-3 font-medium">Sign in to the ApexMail control plane</p></div><div class="bg-white rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-surface-200/60 overflow-hidden"><form class="p-10 space-y-6" action="/api/auth/login" method="POST"><input type="hidden" name="_csrf" value="" /><div class="space-y-2"><label class="text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950" for="login-email">Operator Identity</label><input id="login-email" name="email" type="text" required autocomplete="username" placeholder="Email or username" class="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950" /></div><div class="space-y-2"><div class="flex items-center justify-between"><label class="text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950" for="login-password">Access Password</label></div><div class="relative"><input id="login-password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••" class="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-12" /><button type="button" class="absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors" aria-label="Show password" aria-pressed="false" data-password-toggle="login-password" aria-controls="login-password">Show</button></div></div><div class="flex items-center gap-3 py-1"><input id="rememberMe" name="rememberMe" type="checkbox" checked class="h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary cursor-pointer" /><label for="rememberMe" class="text-xs text-surface-500 font-medium cursor-pointer">Maintain session security</label></div><style>
+  .kiwi-widget {
+    --kiwi-brand: #e11d48;
+    --kiwi-brand-light: #fff1f2;
+    --kiwi-success: #10b981;
+    --kiwi-success-light: #ecfdf5;
+    --kiwi-error: #ef4444;
+    --kiwi-bg: #ffffff;
+    --kiwi-text: #1e293b;
+    --kiwi-text-muted: #64748b;
+    --kiwi-border: #f1f5f9;
+    --kiwi-radius: 16px;
+    --kiwi-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px;
+    background: var(--kiwi-bg);
+    border: 1px solid var(--kiwi-border);
+    border-radius: var(--kiwi-radius);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--kiwi-text);
+    box-shadow: var(--kiwi-shadow);
+    transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    width: 100%;
+    max-width: 420px;
+    position: relative;
+    overflow: hidden;
+    box-sizing: border-box;
+    cursor: default;
+    user-select: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    .kiwi-widget {
+      --kiwi-bg: #0f172a;
+      --kiwi-text: #f8fafc;
+      --kiwi-text-muted: #94a3b8;
+      --kiwi-border: #1e293b;
+      --kiwi-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.4);
+    }
+    .kiwi-icon-box { background: linear-gradient(135deg, #4c0519, #881337) !important; }
+    .kiwi-pill { background: #1e293b !important; color: #94a3b8 !important; border-color: #334155 !important; }
+    .kiwi-progress-container { background: #1e293b !important; }
+  }
+  .kiwi-widget:hover { transform: translateY(-2px); box-shadow: 0 10px 20px -5px rgba(0,0,0,0.1); }
+  .kiwi-widget * { box-sizing: border-box; }
+  .kiwi-icon-box {
+    flex-shrink: 0;
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #fff1f2, #ffe4e6);
+    color: var(--kiwi-brand);
+    transition: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    position: relative;
+  }
+  .kiwi-widget[data-state="solving"] .kiwi-icon-box { animation: kiwi-pulse 2s infinite ease-in-out; }
+  .kiwi-widget[data-state="done"] .kiwi-icon-box {
+    background: linear-gradient(135deg, #d1fae5, #10b981) !important;
+    color: #ffffff !important;
+    transform: rotate(360deg) scale(1.1);
+  }
+  @keyframes kiwi-pulse { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+
+  .kiwi-content { flex: 1; min-width: 0; }
+  .kiwi-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .kiwi-status { font-size: 14px; font-weight: 600; color: var(--kiwi-text); letter-spacing: -0.01em; }
+  .kiwi-pill {
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: #f8fafc;
+    color: #64748b;
+    border: 1px solid #e2e8f0;
+    transition: all 0.3s ease;
+  }
+  .kiwi-widget[data-state="solving"] .kiwi-pill { background: #fff1f2 !important; color: #e11d48 !important; border-color: #fda4af !important; }
+  .kiwi-widget[data-state="done"] .kiwi-pill { background: #ecfdf5 !important; color: #059669 !important; border-color: #6ee7b7 !important; }
+
+  .kiwi-progress-container { height: 6px; width: 100%; border-radius: 3px; background: #f1f5f9; overflow: hidden; position: relative; }
+  .kiwi-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--kiwi-brand), #fb7185);
+    transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    width: 0%;
+    border-radius: 3px;
+  }
+  .kiwi-widget[data-state="done"] .kiwi-progress-fill { background: linear-gradient(90deg, #10b981, #34d399); }
+
+  .kiwi-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+  .kiwi-hint { font-size: 11px; color: var(--kiwi-text-muted); font-weight: 500; margin: 0; opacity: 0.8; }
+  .kiwi-countdown { font-size: 10px; font-weight: 800; color: var(--kiwi-brand); font-variant-numeric: tabular-nums; }
+
+  /* Whimsy: Sparkles on completion */
+  .kiwi-sparkle { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: #fbbf24; opacity: 0; pointer-events: none; }
+  .kiwi-widget[data-state="done"] .kiwi-sparkle { animation: sparkle-fly 0.8s ease-out forwards; }
+  @keyframes sparkle-fly {
+    0% { transform: translate(0,0) scale(0); opacity: 1; }
+    100% { transform: translate(var(--tx), var(--ty)) scale(1.5); opacity: 0; }
+  }
+</style>
+<div class="kiwi-widget" id="kiwicaptcha-widget" data-kiwi-widget role="status" aria-live="polite" aria-label="Security verification" data-state="idle">
+  <div class="kiwi-icon-box" data-kiwi-icon>
+    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M22 18.5C22 23.1944 18.1944 27 13.5 27C8.80558 27 5 23.1944 5 18.5C5 13.8056 8.80558 10 13.5 10C15.1186 10 16.6147 10.4532 17.881 11.2381L25.6464 3.47275C26.037 3.08222 26.6701 3.08222 27.0607 3.47275C27.4512 3.86327 27.4512 4.49644 27.0607 4.88696L19.2953 12.6523C20.9878 14.106 22 16.1848 22 18.5Z" fill="currentColor"/>
+  <circle cx="17.5" cy="15.5" r="1.2" fill="white"/>
+  <circle cx="18" cy="15" r="0.5" fill="currentColor">
+    <animate attributeName="opacity" values="1;1;0;1;1" keyTimes="0;0.95;0.97;0.99;1" dur="5s" repeatCount="indefinite" />
+  </circle>
+  <path d="M10 27V29.5C10 30.0523 9.55228 30.5 9 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M17 27V29.5C17 30.0523 17.4477 30.5 18 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
+    <div class="kiwi-sparkle" style="--tx:-20px;--ty:-20px"></div>
+    <div class="kiwi-sparkle" style="--tx:20px;--ty:-15px"></div>
+    <div class="kiwi-sparkle" style="--tx:15px;--ty:20px"></div>
+    <div class="kiwi-sparkle" style="--tx:-15px;--ty:15px"></div>
+  </div>
+  <div class="kiwi-content">
+    <div class="kiwi-header">
+      <span class="kiwi-status" data-kiwi-status>Preparing...</span>
+      <span class="kiwi-pill" data-kiwi-pill>Idle</span>
+    </div>
+    <div class="kiwi-progress-container">
+      <div class="kiwi-progress-fill" data-kiwi-fill></div>
+    </div>
+    <div class="kiwi-footer">
+      <p class="kiwi-hint" data-kiwi-hint>Privacy-first verification by Bel Consulting.</p>
+      <span class="kiwi-countdown" data-kiwi-countdown></span>
     </div>
   </div>
   <input type="hidden" name="kiwi__token" id="kiwi-token-input" value="" />
 </div>
 <script>
+/* Generated by packages/kiwicaptcha-wasm/build-embed.mjs — do not edit. */
+/* Source: wasm-pack --target web (wasm-bindgen 0.2.127), wasm inlined as base64. */
+(function () {
+  "use strict";
+  var KIWI_WASM_B64 = "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/w+DfnwiBiAFhUIoiSIFIAd8IAdCAYZC/v///x+DIAVC/////w+DfnwiByAEhUIwiSIEIAFBKGoiGykDACIDIAFBCGoiHCkDACIIfCAIQgGGQv7///8fgyADQv////8Pg358IgggAUHoAGoiHSkDAIVCIIkiCyABQcgAaiIeKQMAIgx8IAxCAYZC/v///x+DIAtC/////w+DfnwiDCADhUIoiSIDIAh8IAhCAYZC/v///x+DIANC/////w+DfnwiCCALhUIwiSILIAx8IAxCAYZC/v///x+DIAtC/////w+DfnwiDCADhUIBiSIDIAFBIGoiHykDACIPIAEpAwAiCnwgCkIBhkL+////H4MgD0L/////D4N+fCIKIAFB4ABqIiApAwCFQiCJIhAgAUFAayIhKQMAIhN8IBNCAYZC/v///x+DIBBC/////w+DfnwiEyAPhUIoiSIPIAp8IApCAYZC/v///x+DIA9C/////w+DfnwiCnwgCkIBhkL+////H4MgA0L/////D4N+fCIJhUIgiSIUIAFBMGoiIikDACIRIAFBEGoiIykDACINfCANQgGGQv7///8fgyARQv////8Pg358Ig0gAUHwAGoiJCkDAIVCIIkiEiABQdAAaiIBKQMAIg58IA5CAYZC/v///x+DIBJC/////w+DfnwiDiARhUIoiSIRIA18IA1CAYZC/v///x+DIBFC/////w+DfnwiDSAShUIwiSISIA58IA5CAYZC/v///x+DIBJC/////w+DfnwiDnwgDkIBhkL+////H4MgFEL/////D4N+fCIVIAOFQiiJIgMgCXwgCUIBhkL+////H4MgA0L/////D4N+fCIJNwMAIBkgCSAUhUIwiSIJNwMAIAEgCSAVfCAVQgGGQv7///8fgyAJQv////8Pg358Igk3AwAgGyADIAmFQgGJNwMAICAgBCAGfCAGQgGGQv7///8fgyAEQv////8Pg358IgQgDiARhUIBiSIGIAh8IAhCAYZC/v///x+DIAZC/////w+DfnwiAyAKIBCFQjCJIgiFQiCJIgp8IApCAYZC/v///x+DIARC/////w+DfnwiECAGhUIoiSIGIAN8IANCAYZC/v///x+DIAZC/////w+DfnwiCSAKhUIwiSIDNwMAIBwgCTcDACAaIAMgEHwgEEIBhkL+////H4MgA0L/////D4N+fCIDNwMAICIgAyAGhUIBiTcDACAdIAQgBYVCAYkiBSANfCANQgGGQv7///8fgyAFQv////8Pg358IgQgC4VCIIkiBiAIIBN8IBNCAYZC/v///x+DIAhC/////w+DfnwiA3wgA0IBhkL+////H4MgBkL/////D4N+fCIIIAWFQiiJIgUgBHwgBEIBhkL+////H4MgBUL/////D4N+fCILIAaFQjCJIgQ3AwAgIyALNwMAICEgBCAIfCAIQgGGQv7///8fgyAEQv////8Pg358IgQ3AwAgFiAEIAWFQgGJNwMAICQgByADIA+FQgGJIgV8IAVCAYZC/v///x+DIAdC/////w+DfnwiByAShUIgiSIEIAx8IAxCAYZC/v///x+DIARC/////w+DfnwiBiAFhUIoiSIFIAd8IAdCAYZC/v///x+DIAVC/////w+DfnwiAyAEhUIwiSIHNwMAIBggAzcDACAeIAYgB3wgBkIBhkL+////H4MgB0L/////D4N+fCIHNwMAIB8gBSAHhUIBiTcDACACQYABaiICQYAIRw0AC0GAfyECA0AgF0GACGoiJSACaiIBQYABaiIWIAFBiARqIhgpAwAiBSABQYgCaiIZKQMAIgd8IAdCAYZC/v///x+DIAVC/////w+DfnwiByABQYgIaiIaKQMAhUIgiSIEIAFBiAZqIhspAwAiBnwgBkIBhkL+////H4MgBEL/////D4N+fCIGIAWFQiiJIgUgB3wgB0IBhkL+////H4MgBUL/////D4N+fCIHIASFQjCJIgQgAUGIA2oiHCkDACIDIAFBiAFqIh0pAwAiCHwgCEIBhkL+////H4MgA0L/////D4N+fCIIIAFBiAdqIh4pAwCFQiCJIgsgAUGIBWoiHykDACIMfCAMQgGGQv7///8fgyALQv////8Pg358IgwgA4VCKIkiAyAIfCAIQgGGQv7///8fgyADQv////8Pg358IgggC4VCMIkiCyAMfCAMQgGGQv7///8fgyALQv////8Pg358IgwgA4VCAYkiAyABQYADaiIgKQMAIg8gFikDACIKfCAKQgGGQv7///8fgyAPQv////8Pg358IgogAUGAB2oiFikDAIVCIIkiECABQYAFaiIhKQMAIhN8IBNCAYZC/v///x+DIBBC/////w+DfnwiEyAPhUIoiSIPIAp8IApCAYZC/v///x+DIA9C/////w+DfnwiCnwgCkIBhkL+////H4MgA0L/////D4N+fCIJhUIgiSIUIAFBgARqIiIpAwAiESABQYACaiIjKQMAIg18IA1CAYZC/v///x+DIBFC/////w+DfnwiDSABQYAIaiIkKQMAhUIgiSISIAFBgAZqIgEpAwAiDnwgDkIBhkL+////H4MgEkL/////D4N+fCIOIBGFQiiJIhEgDXwgDUIBhkL+////H4MgEUL/////D4N+fCINIBKFQjCJIhIgDnwgDkIBhkL+////H4MgEkL/////D4N+fCIOfCAOQgGGQv7///8fgyAUQv////8Pg358IhUgA4VCKIkiAyAJfCAJQgGGQv7///8fgyADQv////8Pg358Igk3AwAgGiAJIBSFQjCJIgk3AwAgASAJIBV8IBVCAYZC/v///x+DIAlC/////w+DfnwiCTcDACAcIAMgCYVCAYk3AwAgFiAEIAZ8IAZCAYZC/v///x+DIARC/////w+DfnwiBCAOIBGFQgGJIgYgCHwgCEIBhkL+////H4MgBkL/////D4N+fCIDIAogEIVCMIkiCIVCIIkiCnwgCkIBhkL+////H4MgBEL/////D4N+fCIQIAaFQiiJIgYgA3wgA0IBhkL+////H4MgBkL/////D4N+fCIJIAqFQjCJIgM3AwAgHSAJNwMAIBsgAyAQfCAQQgGGQv7///8fgyADQv////8Pg358IgM3AwAgIiADIAaFQgGJNwMAIB4gBCAFhUIBiSIFIA18IA1CAYZC/v///x+DIAVC/////w+DfnwiBCALhUIgiSIGIAggE3wgE0IBhkL+////H4MgCEL/////D4N+fCIDfCADQgGGQv7///8fgyAGQv////8Pg358IgggBYVCKIkiBSAEfCAEQgGGQv7///8fgyAFQv////8Pg358IgsgBoVCMIkiBDcDACAjIAs3AwAgISAEIAh8IAhCAYZC/v///x+DIARC/////w+DfnwiBDcDACAYIAQgBYVCAYk3AwAgJCAHIAMgD4VCAYkiBXwgBUIBhkL+////H4MgB0L/////D4N+fCIHIBKFQiCJIgQgDHwgDEIBhkL+////H4MgBEL/////D4N+fCIGIAWFQiiJIgUgB3wgB0IBhkL+////H4MgBUL/////D4N+fCIDIASFQjCJIgc3AwAgGSADNwMAIB8gBiAHfCAGQgGGQv7///8fgyAHQv////8Pg358Igc3AwAgICAFIAeFQgGJNwMAIAJBEGoiAg0ACyAlIBcQMyAAICVBgAj8CgAAJAALqBQCHH8CfiMAQcABayIDJAAgA0EAQcAA/AsAIAEgAkEGdGohGSAAKAIAIQ8gACgCBCEQIAAoAgghESAAKAIMIRIgACgCECETIAAoAhQhFCAAKAIYIRUgACgCHCEWA0AgAUFAa0EAIQIDQCACIANqIAEgAmooAAAiDEH/gfwHcUEIeCAMQRh4Qf+B/AdxcjYCACACQQRqIgJBwABHDQALIAMgAygCACIbNgKsASADIAMoAgQiHDYCqAEgAyADKAIIIh02AqQBIAMgAygCDCIeNgKgASADIBA2AkQgAyAUNgJMIAMgDzYCQCADIBM2AkggAyARNgJQIAMgEjYCVCADIBU2AlggAyAWNgJcIAMoAhwhASADKAIYIQIgAygCFCEMIAMgAygCECINNgJsIAMgDDYCaCADIAI2AmQgAyABNgJgIAMoAiwhDiADKAIoIQcgAygCJCEIIAMgAygCICIXNgJ8IAMgCDYCeCADIAc2AnQgAyAONgJwIAMoAjwhCSADKAI4IQogAygCNCELIAMgAygCMCIYNgKMASADIAs2AogBIAMgCjYChAEgAyAJNgKAASADQbABaiIEIANB0ABqIgUgA0FAayIGIBxBkYndiQdqIBtBmN+olARqEBkgAyADKQK4ATcDWCADIAMpArABNwNQIAQgBiAFIB5B28iosgFrIB1BsYj80QRrEBkgAyADKQK4ATcDSCADIAMpArABNwNAIAQgBSAGIAxB8aPEzwVqIA1B24TbygNqEBkgAyADKQK4ATcDWCADIAMpArABNwNQIAQgBiAFIAFBq8KOpwVrIAJB3PqB7gZrEBkgAyADKQK4ATcDSCADIAMpArABNwNAIAQgBSAGIAhBgbaNlAFqIBdB6KrhvwJrEBkgAyADKQK4ATcDWCADIAMpArABNwNQIAQgBiAFIA5Bw/uxqAVqIAdBvovGoQJqEBkgAyADKQK4ATcDSCADIAMpArABNwNAIAQgBSAGIAtBgpyF+QdrIBhB9Lr5lQdqEBkgAyADKQK4ATcDWCADIAMpArABNwNQIAQgBiAFIAlBjJ2Q8wNrIApB2fKPoQZrEBkgAyADKQK4ATcDSCADIAMpArABNwNAIANBkAFqIgcgA0GgAWoiCCANIANB8ABqIgogA0GAAWoiCRAYIAMoApABIQEgAygClAEhAiAEIAUgBiADKAKYAUH68IaCAWsgAygCnAEiDEG/rJLbAWsQGSADIAMpArgBNwNYIAMgAykCsAE3A1AgBCAGIAUgAUHMw7KgAmogAkHGu4b+AGoQGSADIAMpArgBNwNIIAMgAykCsAE3A0AgCCADQeAAaiILIBcgCSAHEBggAygCoAEhASADKAKkASECIAQgBSAGIAMoAqgBQaqJ0tMEaiADKAKsASINQe/YpO8CahAZIAMgAykCuAE3A1ggAyADKQKwATcDUCAEIAYgBSABQdqR5rcHaiACQdzTwuUFahAZIAMgAykCuAE3A0ggAyADKQKwATcDQCALIAogGCAHIAgQGCADKAJgIQEgAygCZCECIAQgBSAGIAMoAmhBk/O4vgVrIAMoAmwiDkGu3Ya+BmsQGSADIAMpArgBNwNYIAMgAykCsAE3A1AgBCAGIAUgAUG5gJqFBGsgAkG4sPP/BGsQGSADIAMpArgBNwNIIAMgAykCsAE3A0AgCiAJIAwgCCALEBggAygCcCEBIAMoAnQhAiAEIAUgBiADKAJ4Qbnd4dICayADKAJ8IgxBjej/yANrEBkgAyADKQK4ATcDWCADIAMpArABNwNQIAQgBiAFIAFB59KkoQFqIAJB0capNmoQGSADIAMpArgBNwNIIAMgAykCsAE3A0AgCSAHIA0gCyAKEBggAygCgAEhASADKAKEASECIAQgBSAGIAMoAogBQbjC7PACaiADKAKMASINQYWV3L0CahAZIAMgAykCuAE3A1ggAyADKQKwATcDUCAEIAYgBSABQZOa4JkFaiACQfzbsekEahAZIAMgAykCuAE3A0ggAyADKQKwATcDQCAHIAggDiAKIAkQGCADKAKQASEBIAMoApQBIQIgBCAFIAYgAygCmAFBu5WoswdqIAMoApwBIg5B1OapqAZqEBkgAyADKQK4ATcDWCADIAMpArABNwNQIAQgBiAFIAFB+6a37AZrIAJB0u308QdrEBkgAyADKQK4ATcDSCADIAMpArABNwNAIAggCyAMIAkgBxAYIAMoAqABIQEgAygCpAEhAiAEIAUgBiADKAKoAUG1s5a/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IAIgAigCBEF+cTYCBCABIABBAXI2AgQgAiAANgIADwsgASADEBILAkACQEHQmsAAAn8CQAJAAkACQCACKAIEIgNBAnFFBEAgAkG8msAAKAIARg0CIAJBuJrAACgCAEYNAyACIANBeHEiAhASIAEgACACaiIAQQFyNgIEIAAgAWogADYCACABQbiawAAoAgBHDQFBsJrAACAANgIADwsgAiADQX5xNgIEIAEgAEEBcjYCBCAAIAFqIAA2AgALIABBgAJJDQQgASAAEBNB0JrAAEHQmsAAKAIAQQFrIgA2AgAgAA0GQZiYwAAoAgAiAA0CQf8fDAMLQbyawAAgATYCAEG0msAAQbSawAAoAgAgAGoiADYCACABIABBAXI2AgRBuJrAACgCACABRgRAQbCawABBADYCAEG4msAAQQA2AgALIABByJrAACgCACICTQ0FQbyawAAoAgAiAEUNBUG0msAAKAIAIgNBKUkNBEGQmMAAIQEDQCAAIAEoAgAiBE8EQCAAIAQgASgCBGpJDQYLIAEoAgghAQwACwALQbiawAAgATYCAEGwmsAAQbCawAAoAgAgAGoiADYCACABIABBAXI2AgQgACABaiAANgIADwtBACEBA0AgAUEBaiEBIAAoAggiAA0AC0H/HyABIAFB/x9NGws2AgAPCwJAQaiawAAoAgAiAkEBIABBA3Z0IgNxRQRAQaiawAAgAiADcjYCACAAQfgBcUGgmMAAaiIAIQIMAQsgAEH4AXEiAEGgmMAAaiECIABBqJjAAGooAgAhAAsgAiABNgIIIAAgATYCDCABIAI2AgwgASAANgIIDwtB0JrAAEGYmMAAKAIAIgAEf0EAIQEDQCABQQFqIQEgACgCCCIADQALQf8fIAEgAUH/H00bBUH/Hws2AgAgAiADTw0AQciawABBfzYCAAsLrgQBC38gACgCBCEJIAAoAgAhCiAAKAIIIQsCQANAIAYNAQJ/AkAgAiAESQ0AA0AgASAEaiEFAkACQAJAAkACQCACIARrIgZBB00EQCACIARHDQEgAiEEDAcLIAVBA2pBfHEiACAFRg0BIAAgBWshA0EAIQADQCAAIAVqLQAAQQpGDQUgAyAAQQFqIgBHDQALIAMgBkEIayIASw0DDAILQQAhAANAIAAgBWotAABBCkYNBCAGIABBAWoiAEcNAAsgAiEEDAUL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AhA3AAsgASAFNgIECyAAIAI2AgQgACABKAIENgIAC0oBAX8CQCABaUEBRw0AIAFBACAAQYCAgIB4IAFrTRsiAkUNACAABEACfyACQQlPBEAgAiAAEBEMAQsgABAGCyIBRQ0BCyABDwsAC1QBAX8CQAJAIAAoAgAgACgCCCIDayACSQRAIAAgAyACEB8gACgCCCEDDAELIAJFDQELIAJFDQAgACgCBCADaiABIAL8CgAACyAAIAIgA2o2AghBAAtUAQF/AkACQCAAKAIAIAAoAggiA2sgAkkEQCAAIAMgAhAgIAAoAgghAwwBCyACRQ0BCyACRQ0AIAAoAgQgA2ogASAC/AoAAAsgACACIANqNgIIQQALTgIBfwF+IwBBIGsiAyQAIAMgATYCDCADIAA2AgggA0KAgICAECIEIANBCGqthDcDGCADIAQgA0EMaq2ENwMQQbCAwAAgA0EQaiACEC8AC08BAn8gACgCBCECIAAoAgAhAwJAIAAoAggiAC0AAEUNACADQdySwABBBCACKAIMEQAARQ0AQQEPCyAAIAFBCkY6AAAgAyABIAIoAhARAQALSgECfyMAIgRBgAhrQUBxIgMkACABIAEpAzBCAXw3AzAgAyACIAEQByAAIANBgAj8CgAAIAMgAiAAEAcgACADQYAI/AoAACAEJAALSgAgACgCAEGAgICAeEcEQCABKAIAIAAoAgQgACgCCCABKAIEKAIMEQAADwsgASgCACABKAIEIAAoAgwoAgAiACgCACAAKAIEEA8LNgACQCADaUEBRw0AIANBACABQYCAgIB4IANrTRsiA0UNACAAIAEgAyACEAwiAEUNACAADwsAC94BAgF/AX4jAEEgayIDJAAgAyABNgIQIAMgADYCDCADQQE7ARwgAyACNgIYIAMgA0EMajYCFCMAQRBrIgEkACADQRRqIgApAgAhBCABIAA2AgwgASAENwIEIwBBEGsiACQAIAFBBGoiASgCACICKAIEIgNBAXEEQCACKAIAIQIgACADQQF2NgIEIAAgAjYCACAAQaSTwAAgASgCBCABKAIIIgAtAAggAC0ACRAaAAsgAEGAgICAeDYCACAAIAE2AgwgAEHAk8AAIAEoAgQgASgCCCIALQAIIAAtAAkQGgALPgECfyABKAIEIQIgASgCACEDQQgQBiIBRQRAEEYACyABIAI2AgQgASADNgIAIABB7JXAADYCBCAAIAE2AgALOAACQCACQYCAxABGDQAgACACIAEoAhARAQBFDQBBAQ8LIANFBEBBAA8LIAAgA0EAIAEoAgwRAAAL6wEBA38jAEEQayIAJABB+JbAAC0AAEEDRwRAIABBAToADyAAQQ9qIQECQAJAAkACQAJAAkBB+JbAAC0AAEEBaw4DAgEFAAtB+JbAAEECOgAAIAEtAAAgAUEAOgAARQ0CAkBBjJfAACgCAEH/////B3EEQEH8lsAAKAIADQELQYSXwAAoAgANBEH4lsAAQQM6AABBiJfAAEEBNgIADAULQaiVwABB6QBB3JXAABAvAAtBrovAAEHxAEH0isAAEC8AC0GEi8AAQdUAQfSKwAAQLwALQdCQwABBK0Hoi8AAEDkACwALCyAAQRBqJAALLAECfwNAIAAgAmoiAyADKQMAIAEgAmopAwCFNwMAIAJBCGoiAkGACEcNAAsLLAEBfyMAQRBrIgEkACABIAFBD2qtQoCAgIDAAIQ3AwBB24HAACABIAAQLwALHAEBfyAAKAIAIgFBAEoEQCAAKAIEIAFBARAkCwsZAQF/IAAoAgAiAQRAIAAoAgQgAUEBECQLCxkAIAAEQBBGAAtBmIzAAEEjQayMwAAQLwALHAAgASgCACAAKAIAIAAoAgQgASgCBCgCDBEAAAsRACAAIAFBAXRBAXIgAhAvAAsZACABKAIAQbyOwABBESABKAIEKAIMEQAACxkAIAEoAgBBsI/AAEEFIAEoAgQoAgwRAAALHAAgAEHkk8AAKQIANwIIIABB3JPAACkCADcCAAscACAAQfSTwAApAgA3AgggAEHsk8AAKQIANwIACw8AIAEEQCAAIAEgAhAkCwsUACAAKAIAIAEgACgCBCgCDBEBAAsQACABIAAoAgAgACgCBBALCxMAIABB7JXAADYCBCAAIAE2AgALDgAgACgCACAAKAIEECMLDwAgAEHAj8AAIAEgAhAPCw8AIABBuJDAACABIAIQDwsPACAAQYyTwAAgASACEA8LDQBB1JrAAEEBOgAAAAsNACABQeCSwABBGBALCwwAIAAgASkCADcDAAvjAQEEfyMAQSBrIgAkAEEBIQQCQCABKAIAIgJB+pLAAEERIAEoAgQiBSgCDCIDEQAADQACQCABLQAKQYABcUUEQCACQbKQwABBASADEQAADQIgAUH4ksAAQQIQC0UNAQwCCyACQbOQwABBAiADEQAADQEgAEEBOgAPIAAgBTYCBCAAIAI2AgAgAEG4kMAANgIUIAAgASkCCDcCGCAAIABBD2o2AgggACAANgIQIABBEGpB+JLAAEECEAsNASAAQbCQwABBAhAODQELIAJBtZDAAEEBIAMRAAAhBAsgAEEgaiQAIAQLCQAgAEEANgIACwIACwuAFwUAQYCAwAAL1wzAATrAATrAABZzbGljZSBpbmRleCBzdGFydHMgYXQgwA0gYnV0IGVuZHMgYXQgwAAgaW5kZXggb3V0IG9mIGJvdW5kczogdGhlIGxlbiBpcyDAEiBidXQgdGhlIGluZGV4IGlzIMAAEnJhbmdlIHN0YXJ0IGluZGV4IMAiIG91dCBvZiByYW5nZSBmb3Igc2xpY2Ugb2YgbGVuZ3RoIMAAEHJhbmdlIGVuZCBpbmRleCDAIiBvdXQgb2YgcmFuZ2UgZm9yIHNsaWNlIG9mIGxlbmd0aCDAAMACOiDAAC9Vc2Vycy9zYWJlbGFraG91YS8uY2FyZ28vcmVnaXN0cnkvc3JjL2luZGV4LmNyYXRlcy5pby0xOTQ5Y2Y4YzZiNWI1NTdmL2FyZ29uMi0wLjUuMy9zcmMvcGFyYW1zLnJzAC9ydXN0Yy9hYzY4ZmFhMjBjNThjYmNjZDAxZWU3MjA4YmYzYjZlOTNhN2Q3Zjk2L2xpYnJhcnkvc3RkL3NyYy9zeXMvc3luYy9yd2xvY2svbm9fdGhyZWFkcy5ycwAvVXNlcnMvc2FiZWxha2hvdWEvLmNhcmdvL3JlZ2lzdHJ5L3NyYy9pbmRleC5jcmF0ZXMuaW8tMTk0OWNmOGM2YjViNTU3Zi9hcmdvbjItMC41LjMvc3JjL2Jsb2NrLnJzAC9Vc2Vycy9zYWJlbGFraG91YS8uY2FyZ28vcmVnaXN0cnkvc3JjL2luZGV4LmNyYXRlcy5pby0xOTQ5Y2Y4YzZiNWI1NTdmL2FyZ29uMi0wLjUuMy9zcmMvYmxha2UyYl9sb25nLnJzAC9ydXN0Yy9hYzY4ZmFhMjBjNThjYmNjZDAxZWU3MjA4YmYzYjZlOTNhN2Q3Zjk2L2xpYnJhcnkvYWxsb2Mvc3JjL3N0cmluZy5ycwAvcnVzdGMvYWM2OGZhYTIwYzU4Y2JjY2QwMWVlNzIwOGJmM2I2ZTkzYTdkN2Y5Ni9saWJyYXJ5L3N0ZC9zcmMvcGFuaWNraW5nLnJzAC9Vc2Vycy9zYWJlbGFraG91YS8uY2FyZ28vcmVnaXN0cnkvc3JjL2luZGV4LmNyYXRlcy5pby0xOTQ5Y2Y4YzZiNWI1NTdmL3dhc20tYmluZGdlbi0wLjIuMTI3L3NyYy9leHRlcm5yZWYucnMAL3J1c3RjL2FjNjhmYWEyMGM1OGNiY2NkMDFlZTcyMDhiZjNiNmU5M2E3ZDdmOTYvbGlicmFyeS9zdGQvc3JjL3N5bmMvb25jZS5ycwAvcnVzdGMvYWM2OGZhYTIwYzU4Y2JjY2QwMWVlNzIwOGJmM2I2ZTkzYTdkN2Y5Ni9saWJyYXJ5L2FsbG9jL3NyYy9yYXdfdmVjL21vZC5ycwAvcnVzdC9kZXBzL2RsbWFsbG9jLTAuMi4xMS9zcmMvZGxtYWxsb2MucnMAL1VzZXJzL3NhYmVsYWtob3VhLy5jYXJnby9yZWdpc3RyeS9zcmMvaW5kZXguY3JhdGVzLmlvLTE5NDljZjhjNmI1YjU1N2YvY29uc29sZV9lcnJvcl9wYW5pY19ob29rLTAuMS43L3NyYy9saWIucnMAL1VzZXJzL3NhYmVsYWtob3VhLy5jYXJnby9yZWdpc3RyeS9zcmMvaW5kZXguY3JhdGVzLmlvLTE5NDljZjhjNmI1YjU1N2YvYXJnb24yLTAuNS4zL3NyYy9saWIucnMAJmNvcHlfZnJvbV9zbGljZTogc291cmNlIHNsaWNlIGxlbmd0aCAowCspIGRvZXMgbm90IG1hdGNoIGRlc3RpbmF0aW9uIHNsaWNlIGxlbmd0aCAowAEpAAAABRAACgAAAJUAAAAJAAAAOQQQAHEAAACVAAAADgAAAE9uY2UgaW5zdGFuY2UgaGFzIHByZXZpb3VzbHkgYmVlbiBwb2lzb25lZG9uZS10aW1lIGluaXRpYWxpemF0aW9uIG1heSBub3QgYmUgcGVyZm9ybWVkIHJlY3Vyc2l2ZWx5AABwAxAATAAAAKYAAAAyAAAAZ+YJaoWuZ7ty8248OvVPpX9SDlGMaAWbq9mDHxnN4FtjYXBhY2l0eSBvdmVyZmxvdwAAAL0DEABQAAAAHAAAAAUAAABjaHVuayBzaXplIG11c3QgYmUgbm9uLXplcm8AQeCMwAALyQEBAAAABQAAAHNob3VsZCBiZSA4IGJ5dGVzAAAAngEQAGEAAABCAAAAPQAAAJ4BEABhAAAAQgAAAA0AAACrBBAAXwAAAC8BAAAoAAAAqwQQAF8AAACGAQAAHQAAAKsEEABfAAAAuQEAACwAAACrBBAAXwAAALkBAABIAAAAqwQQAF8AAAC+AQAAHQAAAKsEEABfAAAAvAEAAB0AAACrBBAAXwAAAOQBAAAdAAAAqwQQAF8AAADwAQAAEwAAAKsEEABfAAAA6QEAABsAQbSOwAALoQEBAAAABgAAAEludmFsaWRCdWZmZXJTaXplAAAAAAIQAGgAAABLAAAAJAAAAGludmFsaWQgQmxha2UyYlZhciBvdXQgbGVuZ3RoAAAAAAIQAGgAAABMAAAACgAAAN0AEABiAAAAVAEAAAEAAADdABAAYgAAAOgAAAAJAAAARXJyb3IKClN0YWNrOgoKAAcAAAAMAAAABAAAAAgAAAAJAAAACgBB4I/AAAuNBwEAAAALAAAAYSBEaXNwbGF5IGltcGxlbWVudGF0aW9uIHJldHVybmVkIGFuIGVycm9yIHVuZXhwZWN0ZWRseQBpAhAASwAAAGQLAAAOAAAALAooKAopAAAAAAAADAAAAAQAAAAMAAAADQAAAA4AAABjYWxsZWQgYE9wdGlvbjo6dW53cmFwKClgIG9uIGEgYE5vbmVgIHZhbHVlMDAwMTAyMDMwNDA1MDYwNzA4MDkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjEyMjIzMjQyNTI2MjcyODI5MzAzMTMyMzMzNDM1MzYzNzM4Mzk0MDQxNDI0MzQ0NDU0NjQ3NDg0OTUwNTE1MjUzNTQ1NTU2NTc1ODU5NjA2MTYyNjM2NDY1NjY2NzY4Njk3MDcxNzI3Mzc0NzU3Njc3Nzg3OTgwODE4MjgzODQ4NTg2ODc4ODg5OTA5MTkyOTM5NDk1OTY5Nzk4OTlhdHRlbXB0IHRvIGRpdmlkZSBieSB6ZXJvICAgIFJlZkNlbGwgYWxyZWFkeSBib3Jyb3dlZCgpVHJ5RnJvbVNsaWNlRXJyb3IADwAAAAwAAAAEAAAAEAAAABEAAAASAAAAAAAAAAgAAAAEAAAAEwAAABQAAAAVAAAAFgAAABcAAAAQAAAABAAAABgAAAAZAAAAGgAAABsAAABtXcvWLFDrY3hBpldxG4u5K4FbAb2GUewMtMKc5MnHBGFzc2VydGlvbiBmYWlsZWQ6IHBzaXplID49IHNpemUgKyBtaW5fb3ZlcmhlYWQAAA4EEAAqAAAAsQQAAAkAAABhc3NlcnRpb24gZmFpbGVkOiBwc2l6ZSA8PSBzaXplICsgbWF4X292ZXJoZWFkAAAOBBAAKgAAALcEAAANAAAAcndsb2NrIG92ZXJmbG93ZWQgcmVhZCBsb2Nrc0ABEABdAAAAFQAAACwAAABjYW5ub3QgbW9kaWZ5IHRoZSBwYW5pYyBob29rIGZyb20gYSBwYW5pY2tpbmcgdGhyZWFktQIQAEwAAACQAAAACQAAAAAAAAAIAAAABAAAABwAAABwYW5pY2tlZCBhdCAPAAAADAAAAAQAAAAdAAAAcndsb2NrIGhhcyBub3QgYmVlbiBsb2NrZWQgZm9yIHJlYWRpbmcAAEABEABdAAAAPgAAAAkAAAACAxAAbQAAAIQAAAARAAAAAgMQAG0AAACSAAAAEQBB8JbAAAsFBAAAAB4AcAlwcm9kdWNlcnMCCGxhbmd1YWdlAQRSdXN0AAxwcm9jZXNzZWQtYnkDBXJ1c3RjHTEuOTYuMCAoYWM2OGZhYTIwIDIwMjYtMDUtMjUpBndhbHJ1cwYwLjI2LjQMd2FzbS1iaW5kZ2VuBzAuMi4xMjcAaw90YXJnZXRfZmVhdHVyZXMGKw9tdXRhYmxlLWdsb2JhbHMrE25vbnRyYXBwaW5nLWZwdG9pbnQrC2J1bGstbWVtb3J5KwhzaWduLWV4dCsPcmVmZXJlbmNlLXR5cGVzKwptdWx0aXZhbHVl";
+/* @ts-self-types="./kiwicaptcha_wasm.d.ts" */
+
+/**
+ * Install the panic hook that forwards Rust panics to console.error.
+ * Safe to call multiple times; only the first call installs the hook.
+ */
+function init_panic_hook() {
+    wasm.init_panic_hook();
+}
+
+/**
+ * Search `[start_counter, start_counter + chunk_size)` for a counter whose
+ * `Argon2id(prefix || decimal(counter), salt)` output has at least
+ * `target_bits` leading zero bits. Returns the counter or -1.
+ *
+ * `m_kib`/`t`/`p` are the Argon2id parameters; they must match the server's
+ * issued challenge parameters exactly. Invalid parameters return -1 so the
+ * widget can fall back cleanly.
+ * @param {number} prefix_ptr
+ * @param {number} prefix_len
+ * @param {number} salt_ptr
+ * @param {number} salt_len
+ * @param {number} target_bits
+ * @param {number} m_kib
+ * @param {number} t
+ * @param {number} p
+ * @param {number} start_counter
+ * @param {number} chunk_size
+ * @returns {number}
+ */
+function solve_argon2_chunk(prefix_ptr, prefix_len, salt_ptr, salt_len, target_bits, m_kib, t, p, start_counter, chunk_size) {
+    const ret = wasm.solve_argon2_chunk(prefix_ptr, prefix_len, salt_ptr, salt_len, target_bits, m_kib, t, p, start_counter, chunk_size);
+    return ret;
+}
+
+/**
+ * Search `[start_counter, start_counter + chunk_size)` for a counter whose
+ * `SHA-256(prefix || decimal(counter) || salt)` output has at least
+ * `target_bits` leading zero bits. Returns the counter or -1.
+ * @param {number} prefix_ptr
+ * @param {number} prefix_len
+ * @param {number} salt_ptr
+ * @param {number} salt_len
+ * @param {number} target_bits
+ * @param {number} start_counter
+ * @param {number} chunk_size
+ * @returns {number}
+ */
+function solve_sha256_chunk(prefix_ptr, prefix_len, salt_ptr, salt_len, target_bits, start_counter, chunk_size) {
+    const ret = wasm.solve_sha256_chunk(prefix_ptr, prefix_len, salt_ptr, salt_len, target_bits, start_counter, chunk_size);
+    return ret;
+}
+function __wbg_get_imports() {
+    const import0 = {
+        __proto__: null,
+        __wbg_error_757e9472f8410341: function(arg0, arg1) {
+            let deferred0_0;
+            let deferred0_1;
+            try {
+                deferred0_0 = arg0;
+                deferred0_1 = arg1;
+                console.error(getStringFromWasm0(arg0, arg1));
+            } finally {
+                wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
+            }
+        },
+        __wbg_new_227d7c05414eb861: function() {
+            const ret = new Error();
+            return ret;
+        },
+        __wbg_stack_3b0d974bbf31e44f: function(arg0, arg1) {
+            const ret = arg1.stack;
+            const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
+        __wbindgen_init_externref_table: function() {
+            const table = wasm.__wbindgen_externrefs;
+            const offset = table.grow(4);
+            table.set(0, undefined);
+            table.set(offset + 0, undefined);
+            table.set(offset + 1, null);
+            table.set(offset + 2, true);
+            table.set(offset + 3, false);
+        },
+    };
+    return {
+        __proto__: null,
+        "./kiwicaptcha_wasm_bg.js": import0,
+    };
+}
+
+let cachedDataViewMemory0 = null;
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
+}
+
+function getStringFromWasm0(ptr, len) {
+    return decodeText(ptr >>> 0, len);
+}
+
+let cachedUint8ArrayMemory0 = null;
+function getUint8ArrayMemory0() {
+    if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
+        cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
+    }
+    return cachedUint8ArrayMemory0;
+}
+
+function passStringToWasm0(arg, malloc, realloc) {
+    if (realloc === undefined) {
+        const buf = cachedTextEncoder.encode(arg);
+        const ptr = malloc(buf.length, 1) >>> 0;
+        getUint8ArrayMemory0().subarray(ptr, ptr + buf.length).set(buf);
+        WASM_VECTOR_LEN = buf.length;
+        return ptr;
+    }
+
+    let len = arg.length;
+    let ptr = malloc(len, 1) >>> 0;
+
+    const mem = getUint8ArrayMemory0();
+
+    let offset = 0;
+
+    for (; offset < len; offset++) {
+        const code = arg.charCodeAt(offset);
+        if (code > 0x7F) break;
+        mem[ptr + offset] = code;
+    }
+    if (offset !== len) {
+        if (offset !== 0) {
+            arg = arg.slice(offset);
+        }
+        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
+        const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
+        const ret = cachedTextEncoder.encodeInto(arg, view);
+
+        offset += ret.written;
+        ptr = realloc(ptr, len, offset, 1) >>> 0;
+    }
+
+    WASM_VECTOR_LEN = offset;
+    return ptr;
+}
+
+let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+cachedTextDecoder.decode();
+const MAX_SAFARI_DECODE_BYTES = 2146435072;
+let numBytesDecoded = 0;
+function decodeText(ptr, len) {
+    numBytesDecoded += len;
+    if (numBytesDecoded >= MAX_SAFARI_DECODE_BYTES) {
+        cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+        cachedTextDecoder.decode();
+        numBytesDecoded = len;
+    }
+    return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+}
+
+const cachedTextEncoder = new TextEncoder();
+
+if (!('encodeInto' in cachedTextEncoder)) {
+    cachedTextEncoder.encodeInto = function (arg, view) {
+        const buf = cachedTextEncoder.encode(arg);
+        view.set(buf);
+        return {
+            read: arg.length,
+            written: buf.length
+        };
+    };
+}
+
+let WASM_VECTOR_LEN = 0;
+
+let wasmModule, wasmInstance, wasm;
+function __wbg_finalize_init(instance, module) {
+    wasmInstance = instance;
+    wasm = instance.exports;
+    wasmModule = module;
+    cachedDataViewMemory0 = null;
+    cachedUint8ArrayMemory0 = null;
+    wasm.__wbindgen_start();
+    return wasm;
+}
+
+async function __wbg_load(module, imports) {
+    if (typeof Response === 'function' && module instanceof Response) {
+        if (!module.ok) {
+            throw new Error(`failed to fetch Wasm: ${module.status} ${module.statusText} fetching '${module.url}'`);
+        }
+
+        if (typeof WebAssembly.instantiateStreaming === 'function') {
+            try {
+                return await WebAssembly.instantiateStreaming(module, imports);
+            } catch (e) {
+                const validResponse = expectedResponseType(module.type);
+
+                if (validResponse && module.headers.get('Content-Type') !== 'application/wasm') {
+                    console.warn("`WebAssembly.instantiateStreaming` failed because your server does not serve Wasm with `application/wasm` MIME type. Falling back to `WebAssembly.instantiate` which is slower. Original error:\n", e);
+
+                } else { throw e; }
+            }
+        }
+
+        const bytes = await module.arrayBuffer();
+        return await WebAssembly.instantiate(bytes, imports);
+    } else {
+        const instance = await WebAssembly.instantiate(module, imports);
+
+        if (instance instanceof WebAssembly.Instance) {
+            return { instance, module };
+        } else {
+            return instance;
+        }
+    }
+
+    function expectedResponseType(type) {
+        switch (type) {
+            case 'basic': case 'cors': case 'default': return true;
+        }
+        return false;
+    }
+}
+
+function initSync(module) {
+    if (wasm !== undefined) return wasm;
+
+
+    if (module !== undefined) {
+        if (Object.getPrototypeOf(module) === Object.prototype) {
+            ({module} = module)
+        } else {
+            console.warn('using deprecated parameters for `initSync()`; pass a single object instead')
+        }
+    }
+
+    const imports = __wbg_get_imports();
+    if (!(module instanceof WebAssembly.Module)) {
+        module = new WebAssembly.Module(module);
+    }
+    const instance = new WebAssembly.Instance(module, imports);
+    return __wbg_finalize_init(instance, module);
+}
+
+async function __wbg_init(module_or_path) {
+    if (wasm !== undefined) return wasm;
+
+
+    if (module_or_path !== undefined) {
+        if (Object.getPrototypeOf(module_or_path) === Object.prototype) {
+            ({module_or_path} = module_or_path)
+        } else {
+            console.warn('using deprecated parameters for the initialization function; pass a single object instead')
+        }
+    }
+
+    
+    const imports = __wbg_get_imports();
+
+    
+
+    const { instance, module } = await __wbg_load(await module_or_path, imports);
+
+    return __wbg_finalize_init(instance, module);
+}
+
+
+  async function load() {
+    var bytes = Uint8Array.from(atob(KIWI_WASM_B64), function (c) { return c.charCodeAt(0); });
+    return __wbg_init(bytes);
+  }
+  if (typeof window !== "undefined") {
+    window.__kiwiCaptchaWasm = { load: load, initSync: initSync };
+  }
+})();
+
+</script>
+<script>
 (function() {
   var W = document.querySelector("[data-kiwi-widget]");
-  if (!W) return;
+  if (!W || W.dataset.kiwiStarted) return;
+  W.dataset.kiwiStarted = "1";
   var statusEl = W.querySelector("[data-kiwi-status]");
   var pillEl = W.querySelector("[data-kiwi-pill]");
-  var fillEl = W.querySelector(".kiwi-fill");
+  var fillEl = W.querySelector("[data-kiwi-fill]");
   var hintEl = W.querySelector("[data-kiwi-hint]");
-  var iconEl = W.querySelector("[data-kiwi-icon]");
+  var countdownEl = W.querySelector("[data-kiwi-countdown]");
   var tokenEl = document.getElementById("kiwi-token-input");
-  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var encoder = new TextEncoder();
 
   function setStatus(label, pillText, state) {
     if (statusEl) statusEl.textContent = label;
-    if (pillEl) {
-      pillEl.textContent = pillText;
-      var baseClass = "kiwi-pill inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] transition-premium ";
-      var stateClasses = {
-        idle: "border-surface-200 bg-surface-50 text-surface-400",
-        connecting: "border-brand-200 bg-brand-50 text-brand-600",
-        solving: "border-brand-300 bg-brand-100 text-brand-700",
-        done: "border-success-200 bg-success-50 text-success-700",
-        failed: "border-primary/30 bg-primary/5 text-primary"
-      };
-      pillEl.className = baseClass + (stateClasses[state] || stateClasses.idle);
-    }
-    if (iconEl) {
-      var iconBase = "flex items-center justify-center w-9 h-9 rounded-sm shrink-0 transition-premium ";
-      var iconStates = {
-        idle: "bg-brand-50 text-brand-600",
-        connecting: "bg-brand-100 text-brand-700",
-        solving: "bg-brand-100 text-brand-700",
-        done: "bg-success-50 text-success-600",
-        failed: "bg-primary/10 text-primary"
-      };
-      iconEl.className = iconBase + (iconStates[state] || iconStates.idle);
-      if (state === "solving" && !reduceMotion) iconEl.className += " animate-pulse";
-    }
+    if (pillEl) pillEl.textContent = pillText;
+    if (W) W.setAttribute("data-state", state);
   }
-
   function setHint(text) { if (hintEl) hintEl.textContent = text; }
-
   function setProgress(pct) {
     if (fillEl) fillEl.style.width = Math.max(0, Math.min(100, pct)) + "%";
   }
 
-  function fail(msg) {
-    setStatus(msg || "Verification failed", "Failed", "failed");
-    setHint("Please reload the page to retry.");
-    setProgress(0);
-    if (tokenEl) tokenEl.value = "";
-    stopCountdown();
-  }
-
-  var countdownEl = W.querySelector("[data-kiwi-countdown]");
-  var countdownTimer = null;
-
-  function startCountdown(ttlSecs) {
-    if (!countdownEl) return;
-    var remaining = ttlSecs;
-    function tick() { if (remaining > 0) countdownEl.textContent = remaining + "s"; }
-    tick();
-    stopCountdown();
-    countdownTimer = setInterval(function() {
-      remaining--;
-      if (remaining < 0) { countdownEl.textContent = "expired"; clearInterval(countdownTimer); countdownTimer = null; return; }
-      countdownEl.textContent = remaining + "s";
-    }, 1000);
-  }
-
-  function stopCountdown() {
-    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
-    if (countdownEl) countdownEl.textContent = "";
-  }
-
+  // ── Interaction telemetry ────────────────────────────────────────────
+  // Only DISCRETE, human-initiated events are recorded for the entropy
+  // check: pointerdown, non-repeat keydown, wheel, click. Coalesced
+  // mousemove and OS key auto-repeat are excluded — both produce naturally
+  // uniform intervals and would otherwise trigger false bot positives.
   var mouseEvents = 0, keyEvents = 0;
-  document.addEventListener("mousemove", function(){mouseEvents++;},{passive:true});
-  document.addEventListener("keydown", function(){keyEvents++;},{passive:true});
+  var eventTimings = [];
+  function recordEvent(e) {
+    if (e.type === "keydown" && e.repeat) return;
+    if (eventTimings.length < 50) eventTimings.push(Math.round(performance.now()));
+    if (e.type === "keydown") keyEvents++;
+    else mouseEvents++;
+  }
+  document.addEventListener("pointerdown", recordEvent, {passive:true});
+  document.addEventListener("keydown", recordEvent, {passive:true});
+  document.addEventListener("wheel", recordEvent, {passive:true});
+  document.addEventListener("click", recordEvent, {passive:true});
+  document.addEventListener("touchstart", recordEvent, {passive:true});
 
-  // ── PBKDF2-HMAC-SHA256 via WebCrypto (zero dependencies) ──────────
+  // ── Optimized synchronous SHA-256 (pure JS, recycled buffers) ───────
+  //    The WASM solver is preferred; this is the fallback for browsers
+  //    without WebAssembly.
+  var _h = new Uint32Array(8);
+  var _w = new Uint32Array(64);
+  var _k = new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+
+  function sha256sync(data, result) {
+    _h[0] = 0x6a09e667; _h[1] = 0xbb67ae85; _h[2] = 0x3c6ef372; _h[3] = 0xa54ff53a;
+    _h[4] = 0x510e527f; _h[5] = 0x9b05688c; _h[6] = 0x1f83d9ab; _h[7] = 0x5be0cd19;
+
+    var l = data.length * 8;
+    var padLen = (data.length % 64 < 56) ? (56 - data.length % 64) : (120 - data.length % 64);
+    var msg = new Uint8Array(data.length + padLen + 8);
+    msg.set(data);
+    msg[data.length] = 0x80;
+    var view = new DataView(msg.buffer);
+    view.setUint32(msg.length - 4, l, false);
+
+    var a, b, c, d, e, f, g, hh, s0, s1, ch, maj, t1, t2;
+    for (var i = 0; i < msg.length; i += 64) {
+      for (var j = 0; j < 16; j++) {
+        _w[j] = view.getUint32(i + j * 4, false);
+      }
+      for (j = 16; j < 64; j++) {
+        var x = _w[j - 15];
+        s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+        var y = _w[j - 2];
+        s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+        _w[j] = (_w[j - 16] + s0 + _w[j - 7] + s1) | 0;
+      }
+      a = _h[0]; b = _h[1]; c = _h[2]; d = _h[3]; e = _h[4]; f = _h[5]; g = _h[6]; hh = _h[7];
+      for (j = 0; j < 64; j++) {
+        s1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+        ch = (e & f) ^ (~e & g);
+        t1 = (hh + s1 + ch + _k[j] + _w[j]) | 0;
+        s0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+        maj = (a & b) ^ (a & c) ^ (b & c);
+        t2 = (s0 + maj) | 0;
+        hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      _h[0] = (_h[0] + a) | 0; _h[1] = (_h[1] + b) | 0; _h[2] = (_h[2] + c) | 0; _h[3] = (_h[3] + d) | 0;
+      _h[4] = (_h[4] + e) | 0; _h[5] = (_h[5] + f) | 0; _h[6] = (_h[6] + g) | 0; _h[7] = (_h[7] + hh) | 0;
+    }
+    for (i = 0; i < 8; i++) {
+      result[i * 4] = (_h[i] >>> 24) & 0xff;
+      result[i * 4 + 1] = (_h[i] >>> 16) & 0xff;
+      result[i * 4 + 2] = (_h[i] >>> 8) & 0xff;
+      result[i * 4 + 3] = _h[i] & 0xff;
+    }
+  }
+
   function b64decode(str) {
     str = str.replace(/-/g, "+").replace(/_/g, "/");
     while (str.length % 4) str += "=";
@@ -112,32 +534,174 @@
     return n;
   }
 
-  async function deriveHash(prefix, counter, saltBytes, iterations) {
-    var password = new TextEncoder().encode(prefix + counter);
-    var algo = { name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: iterations };
-    var key = await crypto.subtle.importKey("raw", password, {name:"PBKDF2"}, false, ["deriveBits"]);
-    return crypto.subtle.deriveBits(algo, key, 256);
+  var _hashBuf = new Uint8Array(32);
+  var _inputBuf = null;
+
+  // SHA-256(prefix || counter || salt) — synchronous.
+  function deriveHash(prefixBytes, counter, saltBytes) {
+    var cStr = counter.toString();
+    var cLen = cStr.length;
+    var totalLen = prefixBytes.length + cLen + saltBytes.length;
+    if (!_inputBuf || _inputBuf.length !== totalLen) _inputBuf = new Uint8Array(totalLen);
+    _inputBuf.set(prefixBytes, 0);
+    for (var i = 0; i < cLen; i++) _inputBuf[prefixBytes.length + i] = cStr.charCodeAt(i);
+    _inputBuf.set(saltBytes, prefixBytes.length + cLen);
+    sha256sync(_inputBuf, _hashBuf);
+    return _hashBuf;
   }
 
-  async function solve(prefix, saltB64, iterations, targetBits) {
-    var salt = b64decode(saltB64);
-    var solveStart = performance.now();
-    var expectedHashes = Math.pow(2, targetBits);
-    for (var counter = 0; counter < 500000; counter++) {
-      var buf = await deriveHash(prefix, counter, salt, iterations);
-      var bytes = new Uint8Array(buf);
-      if (leadingZeros(bytes) >= targetBits) {
-        return { counter: counter, duration: Math.round(performance.now() - solveStart) };
+  // Optimized yielding using MessageChannel (bypasses 4ms setTimeout clamping)
+  var channel = new MessageChannel();
+  var yieldQueue = [];
+  channel.port1.onmessage = function() { if (yieldQueue.length) yieldQueue.shift()(); };
+  function fastYield(fn) { yieldQueue.push(fn); channel.port2.postMessage(0); }
+
+  // ── WASM solver ──────────────────────────────────────────────────────
+  var wasm = null;
+  var wasmLoader = (typeof window !== "undefined" && window.__kiwiCaptchaWasm) ? window.__kiwiCaptchaWasm : null;
+
+  async function initWasm() {
+    if (wasm) return wasm;
+    if (!wasmLoader) return null;
+    try {
+      wasm = await wasmLoader.load();
+      // Surface Rust panics via console.error instead of silent traps.
+      if (wasm.init_panic_hook) {
+        try { wasm.init_panic_hook(); } catch (_) {}
       }
-      if (counter % 500 === 0) {
-        setProgress(Math.min(92, (counter * 100) / expectedHashes));
-        await new Promise(function(r) { setTimeout(r, 0); });
-      }
+      return wasm;
+    } catch (e) {
+      console.warn("KiwiCaptcha: WASM init failed, falling back to JS", e);
+      return null;
     }
-    return null;
+  }
+
+  // Copy bytes into wasm memory (explicit malloc/free — the raw-pointer ABI
+  // avoids wasm-bindgen's Vec/slice glue entirely).
+  function wasmAlloc(w, bytes) {
+    var ptr = w.__wbindgen_malloc(bytes.length, 1);
+    new Uint8Array(w.memory.buffer).set(bytes, ptr);
+    return ptr;
+  }
+  function wasmFree(w, ptr, len) {
+    if (w.__wbindgen_free) w.__wbindgen_free(ptr, len, 1);
+  }
+
+  // Solver cap: 5M hashes for SHA-256 (99.1% success at 20 bits). Argon2id
+  // uses its own tighter cap (see solveArgon2) because every hash is slow.
+  var MAX_SHA_HASHES = 5000000;
+
+  function solve(prefix, saltBytes, targetBits, algorithm, m_kib, t, p) {
+    return new Promise(async function(resolve) {
+      var prefixBytes = encoder.encode(prefix);
+      var expectedHashes = Math.pow(2, targetBits);
+      var solveStart = performance.now();
+      var counter = 0;
+      var w = await initWasm();
+
+      if (algorithm === "argon2id") {
+        // Argon2id has no JS fallback (memory-hard hashing is only feasible
+        // in WASM). If the WASM solver is unavailable or the parameters are
+        // out of range, the challenge cannot be solved — fail cleanly.
+        if (!w || !w.solve_argon2_chunk || !w.__wbindgen_malloc || m_kib < 8 * p) {
+          resolve(null);
+          return;
+        }
+        // Cap the search: expected hashes * 8 with a floor, bounded so a
+        // pathological challenge cannot peg the CPU forever.
+        var argMax = Math.min(MAX_SHA_HASHES, Math.max(1024, expectedHashes * 8));
+        // Chunk to yield to the UI; each Argon2 hash is slow, so keep chunks
+        // small (16 hashes) for responsive progress.
+        var CHUNK = 16;
+        function argon2Chunk() {
+          try {
+            var pp = wasmAlloc(w, prefixBytes);
+            var sp = wasmAlloc(w, saltBytes);
+            var res = w.solve_argon2_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, m_kib, t, p, counter, CHUNK);
+            wasmFree(w, pp, prefixBytes.length);
+            wasmFree(w, sp, saltBytes.length);
+            if (res !== -1) {
+              resolve({ counter: res, duration: Math.round(performance.now() - solveStart) });
+              return;
+            }
+          } catch (e) {
+            console.error("KiwiCaptcha: Argon2 WASM solve failed", e);
+            resolve(null);
+            return;
+          }
+          counter += CHUNK;
+          if (counter >= argMax) { resolve(null); return; }
+          setProgress(Math.min(95, (counter * 100) / expectedHashes));
+          fastYield(argon2Chunk);
+        }
+        fastYield(argon2Chunk);
+        return;
+      }
+
+      // SHA-256: WASM chunked solver with a pure-JS fallback.
+      var CHUNK = w && w.solve_sha256_chunk ? 50000 : 8000;
+      function chunk() {
+        if (w && w.solve_sha256_chunk && w.__wbindgen_malloc) {
+          try {
+            var pp = wasmAlloc(w, prefixBytes);
+            var sp = wasmAlloc(w, saltBytes);
+            var res = w.solve_sha256_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, counter, CHUNK);
+            wasmFree(w, pp, prefixBytes.length);
+            wasmFree(w, sp, saltBytes.length);
+            if (res !== -1) {
+              resolve({ counter: res, duration: Math.round(performance.now() - solveStart) });
+              return;
+            }
+            counter += CHUNK;
+          } catch (e) {
+            console.error("KiwiCaptcha: WASM solve failed, falling back", e);
+            w = null;
+          }
+        }
+        if (!w) {
+          var end = counter + CHUNK;
+          if (end > MAX_SHA_HASHES) end = MAX_SHA_HASHES;
+          for (; counter < end; counter++) {
+            if (leadingZeros(deriveHash(prefixBytes, counter, saltBytes)) >= targetBits) {
+              resolve({ counter: counter, duration: Math.round(performance.now() - solveStart) });
+              return;
+            }
+          }
+        }
+        if (counter >= MAX_SHA_HASHES) { resolve(null); return; }
+        setProgress(Math.min(92, (counter * 100) / expectedHashes));
+        fastYield(chunk);
+      }
+      fastYield(chunk);
+    });
   }
 
   // ── Widget driver ──────────────────────────────────────────────────
+  var countdownTimer = null;
+  function startCountdown(ttlSecs) {
+    if (!countdownEl) return;
+    var remaining = ttlSecs;
+    function tick() { if (remaining > 0) countdownEl.textContent = remaining + "s"; }
+    tick();
+    stopCountdown();
+    countdownTimer = setInterval(function() {
+      remaining--;
+      if (remaining < 0) { countdownEl.textContent = "expired"; clearInterval(countdownTimer); countdownTimer = null; return; }
+      countdownEl.textContent = remaining + "s";
+    }, 1000);
+  }
+  function stopCountdown() {
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    if (countdownEl) countdownEl.textContent = "";
+  }
+  function fail(msg) {
+    setStatus(msg || "Verification failed", "Failed", "failed");
+    setHint("Please reload the page to retry.");
+    setProgress(0);
+    if (tokenEl) tokenEl.value = "";
+    stopCountdown();
+  }
+
   async function run() {
     try {
       setStatus("Requesting challenge\u2026", "Connecting", "connecting");
@@ -156,9 +720,11 @@
       var data = await resp.json();
       if (data.ttlSecs) startCountdown(data.ttlSecs);
 
-      setStatus("Computing proof-of-work\u2026", "Verifying", "solving");
-      setHint("Running memory-hard verification in your browser.");
-      var result = await solve(data.prefix, data.salt, data.mKib || 50000, data.targetBits);
+      // The server explicitly states the algorithm ("sha256" | "argon2id").
+      var algorithm = data.algorithm || "sha256";
+      setStatus("Proof-of-work verification\u2026", "Verifying", "solving");
+      setHint(algorithm === "argon2id" ? "Running a memory-hard hash challenge locally." : "Running a short hash challenge locally.");
+      var result = await solve(data.prefix, b64decode(data.salt), data.targetBits, algorithm, data.mKib || 0, data.t || 1, data.p || 1);
       if (!result) throw new Error("solver exhausted");
 
       var telemetry = {
@@ -169,6 +735,7 @@
         la: navigator.language || "",
         cd: window.screen.colorDepth || 0,
         me: mouseEvents, ke: keyEvents,
+        et: eventTimings,
         sw: window.screen.width || 0, sh: window.screen.height || 0,
         iw: window.innerWidth || 0, ih: window.innerHeight || 0
       };
@@ -184,13 +751,8 @@
     }
   }
 
-  if (window.crypto && window.crypto.subtle) {
-    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
-    else run();
-  } else {
-    setStatus("Browser not supported", "Unsupported", "failed");
-    setHint("This browser does not support WebCrypto.");
-  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
+  else run();
 })();
-</script><button type="submit" class="w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-tight flex items-center justify-center gap-3 py-4 rounded-sm shadow-premium transition-all group"><span>Sign In</span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><path d="M5 12h12m-4-4 4 4-4 4"></path></svg></button><div id="login-mfa" data-mfa-section class="hidden" aria-hidden="true"><p class="text-[11px] font-bold uppercase tracking-tight text-surface-500">Additional verification required. Enter your MFA code.</p><p class="text-[10px] text-surface-400 font-medium leading-relaxed mt-1">Check your spam folder if you haven't received the code.</p><label class="sr-only" for="mfaCode">MFA code</label><input id="mfaCode" name="mfaCode" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="000000" class="flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all" /></div><div id="login-form-errors" class="hidden" role="alert" aria-live="assertive" data-error-key="auth.error.rate_limited"></div></form><div class="px-10 pb-10"><p class="text-center text-xs text-surface-500 font-medium">Operator console restricted to authorized administrators.</p></div></div></div></div><script>(function(){var ALLOWED={'/v1/auth/login':['email','password','mfaCode','kiwi__token'],'/api/auth/login':['email','password','mfaCode','kiwi__token'],'/v1/auth/signup':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/register':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/forgot-password':['email','kiwi__token'],'/v1/auth/reset-password':['token','email','password','confirmPassword','kiwi__token']};function destFor(action){if(action.indexOf('/login')>-1)return '/dashboard';if(action.indexOf('/signup')>-1||action.indexOf('/register')>-1)return '/verify-email';if(action.indexOf('/forgot-password')>-1)return null;if(action.indexOf('/reset-password')>-1)return '/login?reset=1';return null;}function showError(form,msg){var box=form.querySelector('[data-error-key],[role="alert"]');if(!box){box=document.createElement('div');box.setAttribute('role','alert');box.className='text-sm text-warning-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Request failed. Please try again.';}function showSuccess(form,msg){var box=form.querySelector('[data-success]');if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Done.';}function togglePassword(btn){var id=btn.getAttribute('data-password-toggle')||btn.getAttribute('aria-controls');var input=id?document.getElementById(id):null;if(!input)return;var showing=input.type==='text';input.type=showing?'password':'text';btn.setAttribute('aria-pressed',showing?'false':'true');btn.setAttribute('aria-label',showing?'Show password':'Hide password');btn.textContent=showing?'Show':'Hide';}function bindPasswordToggles(){document.querySelectorAll('[data-password-toggle]').forEach(function(btn){btn.dataset.passwordToggleBound='1';});if(document.documentElement.dataset.passwordTogglesBound==='1')return;document.documentElement.dataset.passwordTogglesBound='1';document.addEventListener('click',function(ev){var target=ev.target&&ev.target.closest?ev.target.closest('[data-password-toggle]'):null;if(!target)return;ev.preventDefault();togglePassword(target);});}async function submitForm(ev){var form=ev.currentTarget;var action=form.getAttribute('action')||'';if(action.indexOf('/v1/auth/')!==0&&action.indexOf('/api/auth/')!==0)return;ev.preventDefault();var btn=form.querySelector('button[type="submit"]');if(btn){btn.disabled=true;btn.dataset.originalLabel=btn.textContent;}var fd=new FormData(form);var allowed=ALLOWED[action]||null;var payload={};fd.forEach(function(v,k){if(k==='_csrf')return;if(allowed&&allowed.indexOf(k)===-1)return;payload[k]=v;});if(form.dataset.mfaToken&&payload.mfaCode){action=form.dataset.mfaOriginalAction.replace('/login','/mfa/verify');payload={challenge_token:form.dataset.mfaToken,mfa_code:payload.mfaCode};form.dataset.mfaToken='';}var headers={'Content-Type':'application/json','Accept':'application/json'};var csrf=fd.get('_csrf');if(csrf)headers['X-CSRF-Token']=csrf;try{var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-origin',body:JSON.stringify(payload)});var data=null;try{data=await res.json();}catch(_e){}if(res.ok){if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}else if(res.status===202&&data&&data.challengeToken){form.dataset.mfaToken=data.challengeToken;form.dataset.mfaOriginalAction=action;var mfaEl=form.querySelector('[data-mfa-section]');if(mfaEl){mfaEl.classList.remove('hidden');mfaEl.removeAttribute('aria-hidden');mfaEl.removeAttribute('inert');}var sbtn=form.querySelector('button[type=submit]');if(sbtn){sbtn.dataset.originalMfaLabel=sbtn.textContent;sbtn.textContent='Verify MFA';sbtn.disabled=false;}if(btn){btn.disabled=false;}
+</script><button type="submit" class="w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-[0.1em] flex items-center justify-center gap-3 py-4 rounded-xl shadow-[0_4px_12px_rgba(221,82,76,0.15)] transition-all active:scale-[0.99] group"><span>Authorize Access</span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><path d="M5 12h12m-4-4 4 4-4 4"></path></svg></button><div id="login-mfa" data-mfa-section class="hidden" aria-hidden="true"><p class="text-[11px] font-bold uppercase tracking-tight text-surface-500">Additional verification required. Enter your MFA code.</p><p class="text-[10px] text-surface-400 font-medium leading-relaxed mt-1">Check your spam folder if you haven't received the code.</p><label class="sr-only" for="mfaCode">MFA code</label><input id="mfaCode" name="mfaCode" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="000000" class="flex h-12 w-full rounded-xl border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all" /></div><div id="login-form-errors" class="hidden" role="alert" aria-live="assertive" data-error-key="auth.error.rate_limited"></div></form><div class="px-10 pb-10"><p class="text-center text-xs text-surface-500 font-medium">Operator console restricted to authorized administrators.</p></div></div></div><script>(function(){var ALLOWED={'/v1/auth/login':['email','password','mfaCode','kiwi__token'],'/api/auth/login':['email','password','mfaCode','kiwi__token'],'/v1/auth/signup':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/register':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/forgot-password':['email','kiwi__token'],'/v1/auth/reset-password':['token','email','password','confirmPassword','kiwi__token']};function destFor(action){if(action.indexOf('/login')>-1)return '/dashboard';if(action.indexOf('/signup')>-1||action.indexOf('/register')>-1)return '/verify-email';if(action.indexOf('/forgot-password')>-1)return null;if(action.indexOf('/reset-password')>-1)return '/login?reset=1';return null;}function showError(form,msg){var box=form.querySelector('[data-error-key],[role="alert"]');if(!box){box=document.createElement('div');box.setAttribute('role','alert');box.className='text-sm text-warning-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Request failed. Please try again.';}function showSuccess(form,msg){var box=form.querySelector('[data-success]');if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Done.';}function togglePassword(btn){var id=btn.getAttribute('data-password-toggle')||btn.getAttribute('aria-controls');var input=id?document.getElementById(id):null;if(!input)return;var showing=input.type==='text';input.type=showing?'password':'text';btn.setAttribute('aria-pressed',showing?'false':'true');btn.setAttribute('aria-label',showing?'Show password':'Hide password');btn.textContent=showing?'Show':'Hide';}function bindPasswordToggles(){document.querySelectorAll('[data-password-toggle]').forEach(function(btn){btn.dataset.passwordToggleBound='1';});if(document.documentElement.dataset.passwordTogglesBound==='1')return;document.documentElement.dataset.passwordTogglesBound='1';document.addEventListener('click',function(ev){var target=ev.target&&ev.target.closest?ev.target.closest('[data-password-toggle]'):null;if(!target)return;ev.preventDefault();togglePassword(target);});}async function submitForm(ev){var form=ev.currentTarget;var action=form.getAttribute('action')||'';if(action.indexOf('/v1/auth/')!==0&&action.indexOf('/api/auth/')!==0)return;ev.preventDefault();var btn=form.querySelector('button[type="submit"]');if(btn){btn.disabled=true;btn.dataset.originalLabel=btn.textContent;}var fd=new FormData(form);var allowed=ALLOWED[action]||null;var payload={};fd.forEach(function(v,k){if(k==='_csrf')return;if(allowed&&allowed.indexOf(k)===-1)return;payload[k]=v;});if(form.dataset.mfaToken&&payload.mfaCode){action=form.dataset.mfaOriginalAction.replace('/login','/mfa/verify');payload={challenge_token:form.dataset.mfaToken,mfa_code:payload.mfaCode};form.dataset.mfaToken='';}var headers={'Content-Type':'application/json','Accept':'application/json'};var csrf=fd.get('_csrf');if(csrf)headers['X-CSRF-Token']=csrf;try{var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-origin',body:JSON.stringify(payload)});var data=null;try{data=await res.json();}catch(_e){}if(res.ok){if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}else if(res.status===202&&data&&data.challengeToken){form.dataset.mfaToken=data.challengeToken;form.dataset.mfaOriginalAction=action;var mfaEl=form.querySelector('[data-mfa-section]');if(mfaEl){mfaEl.classList.remove('hidden');mfaEl.removeAttribute('aria-hidden');mfaEl.removeAttribute('inert');}var sbtn=form.querySelector('button[type=submit]');if(sbtn){sbtn.dataset.originalMfaLabel=sbtn.textContent;sbtn.textContent='Verify MFA';sbtn.disabled=false;}if(btn){btn.disabled=false;}
 }else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}}}else{var msg=(data&&data.error&&(data.error.message||data.error.code))||(data&&data.message)||('Request failed ('+res.status+').');showError(form,msg);delete form.dataset.mfaToken;if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}}catch(err){showError(form,'Network error. Please try again.');if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}}function bind(){bindPasswordToggles();document.querySelectorAll('form[action^="/v1/auth/"],form[action^="/api/auth/"]').forEach(function(f){if(f.dataset.authBound==='1')return;f.dataset.authBound='1';f.addEventListener('submit',submitForm);});}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind);}else{bind();}})();</script></main></body></html>
