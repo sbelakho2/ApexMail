@@ -1,0 +1,30 @@
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+        public: false
+
+    KiwiCaptcha\Symfony\Controller\ChallengeController:
+        arguments:
+            $issuer: '@kiwicaptcha.issuer'
+        tags: ['controller.service_arguments']
+
+    KiwiCaptcha\Symfony\Twig\KiwiCaptchaRuntime:
+        arguments:
+            $issuer: null  # set by extension
+            $routePrefix: '' # set by extension
+        tags: ['twig.runtime']
+
+    KiwiCaptcha\Symfony\Twig\KiwiCaptchaExtension:
+        tags: ['twig.extension']
+
+    KiwiCaptcha\Symfony\Form\KiwiCaptchaType:
+        arguments:
+            $verifier: null  # set by extension
+            $tokenField: 'kiwi__token' # set by extension
+        tags: ['form.type']
+
+    KiwiCaptcha\Symfony\Validator\KiwiCaptchaValidator:
+        arguments:
+            $verifier: '@kiwicaptcha.verifier'
+        tags: ['validator.constraint_validator']

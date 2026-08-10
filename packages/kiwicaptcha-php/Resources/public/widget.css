@@ -1,0 +1,108 @@
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+  .kiwi-container {
+    --kiwi-primary: #f43f5e;
+    --kiwi-primary-rgb: 244, 63, 94;
+    --kiwi-success: #10b981;
+    --kiwi-bg: #ffffff;
+    --kiwi-text: #0f172a;
+    --kiwi-text-muted: #64748b;
+    --kiwi-border: #e2e8f0;
+    --kiwi-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02);
+    --kiwi-radius: 20px;
+    
+    display: inline-flex;
+    align-items: center;
+    width: 100%;
+    max-width: 440px;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    position: relative;
+    box-sizing: border-box;
+  }
+  @media (prefers-color-scheme: dark) {
+    .kiwi-container {
+      --kiwi-bg: #1e293b;
+      --kiwi-text: #f8fafc;
+      --kiwi-text-muted: #94a3b8;
+      --kiwi-border: #334155;
+      --kiwi-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.1);
+    }
+  }
+  .kiwi-widget {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 18px;
+    background: var(--kiwi-bg);
+    border: 1px solid var(--kiwi-border);
+    border-radius: var(--kiwi-radius);
+    color: var(--kiwi-text);
+    box-shadow: var(--kiwi-shadow);
+    transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    width: 100%;
+    position: relative;
+    overflow: hidden;
+    cursor: default;
+    user-select: none;
+  }
+  .kiwi-widget:hover { transform: translateY(-2px); box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); border-color: var(--kiwi-primary); }
+  
+  .kiwi-icon-wrapper {
+    flex-shrink: 0;
+    width: 52px;
+    height: 52px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(var(--kiwi-primary-rgb), 0.08);
+    color: var(--kiwi-primary);
+    transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+    position: relative;
+  }
+  .kiwi-widget[data-state="solving"] .kiwi-icon-wrapper { animation: kiwi-float 2s infinite ease-in-out; }
+  .kiwi-widget[data-state="done"] .kiwi-icon-wrapper {
+    background: var(--kiwi-success) !important;
+    color: #ffffff !important;
+    transform: rotate(360deg) scale(1.1);
+  }
+  @keyframes kiwi-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  
+  .kiwi-main { flex: 1; min-width: 0; }
+  .kiwi-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .kiwi-label { font-size: 15px; font-weight: 700; color: var(--kiwi-text); letter-spacing: -0.02em; }
+  .kiwi-badge {
+    font-size: 9px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--kiwi-border);
+    color: var(--kiwi-text-muted);
+    transition: all 0.4s ease;
+  }
+  .kiwi-widget[data-state="solving"] .kiwi-badge { background: rgba(var(--kiwi-primary-rgb), 0.15) !important; color: var(--kiwi-primary) !important; }
+  .kiwi-widget[data-state="done"] .kiwi-badge { background: rgba(16, 185, 129, 0.15) !important; color: var(--kiwi-success) !important; }
+  
+  .kiwi-track { height: 4px; width: 100%; border-radius: 2px; background: var(--kiwi-border); overflow: hidden; }
+  .kiwi-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--kiwi-primary), #fda4af);
+    transition: width 0.6s cubic-bezier(0.65, 0, 0.35, 1);
+    width: 0%;
+  }
+  .kiwi-widget[data-state="done"] .kiwi-bar { background: var(--kiwi-success); }
+  
+  .kiwi-bottom { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+  .kiwi-info { font-size: 11px; color: var(--kiwi-text-muted); font-weight: 500; margin: 0; }
+  .kiwi-timer { font-size: 10px; font-weight: 700; color: var(--kiwi-primary); font-variant-numeric: tabular-nums; }
+  
+  /* Premium Finish Anim */
+  .kiwi-glow {
+    position: absolute;
+    top: 0; left: -100%; width: 50%; height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+    transform: skewX(-25deg);
+    pointer-events: none;
+  }
+  .kiwi-widget[data-state="done"] .kiwi-glow { animation: kiwi-shine 1s ease-in-out forwards; }

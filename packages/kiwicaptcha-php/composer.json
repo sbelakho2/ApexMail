@@ -1,0 +1,50 @@
+{
+    "name": "kiwicaptcha/kiwicaptcha-php",
+    "description": "KiwiCaptcha: privacy-first proof-of-work CAPTCHA engine for PHP and Symfony. Zero external services, zero tracking, pure-PHP verification.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["captcha", "proof-of-work", "sha256", "argon2", "security", "privacy", "symfony"],
+    "require": {
+        "php": ">=8.1",
+        "ext-json": "*",
+        "ext-openssl": "*",
+        "ext-sodium": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5",
+        "symfony/http-foundation": "^6.4|^7.0",
+        "symfony/http-kernel": "^6.4|^7.0",
+        "symfony/config": "^6.4|^7.0",
+        "symfony/dependency-injection": "^6.4|^7.0",
+        "symfony/twig-bridge": "^6.4|^7.0",
+        "symfony/form": "^6.4|^7.0",
+        "symfony/validator": "^6.4|^7.0",
+        "symfony/cache": "^6.4|^7.0",
+        "psr/cache": "^3.0",
+        "psr/log": "^3.0"
+    },
+    "suggest": {
+        "psr/cache": "Required for the PSR-6 challenge storage adapter (Symfony Cache etc.)",
+        "symfony/cache": "Recommended storage backend in Symfony apps",
+        "psr/log": "Optional structured logging of verify outcomes"
+    },
+    "autoload": {
+        "psr-4": {
+            "KiwiCaptcha\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "KiwiCaptcha\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-main": "1.0.x-dev"
+        }
+    },
+    "minimum-stability": "stable"
+}
