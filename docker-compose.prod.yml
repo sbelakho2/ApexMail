@@ -273,11 +273,18 @@ services:
       BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:?BILLING_COMPANY_IBAN is required in production}
       BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:?BILLING_COMPANY_PHONE is required in production}
       # ── KiwiCaptcha (native Rust login CAPTCHA protection) ────────────────
-      KIWI_ENABLED: "true"
+      # The proof-of-work algorithm is explicit (sha256 | argon2id). SHA-256 is
+      # the default and needs no further config; Argon2id mode requires
+      # KIWI_ALGORITHM=argon2id plus valid memory params (m_kib >= 8 * p).
+      KIWI_ENABLED: "${KIWI_ENABLED:-true}"
       KIWI_SECRET_KEY_FILE: /run/secrets/kiwi_secret_key
-      KIWI_ARGON_M_KIB: "${KIWI_PBKDF2_ITERATIONS:-1}"
+      KIWI_ALGORITHM: "${KIWI_ALGORITHM:-sha256}"
+      KIWI_ARGON_M_KIB: "${KIWI_ARGON_M_KIB:-0}"
+      KIWI_ARGON_T: "${KIWI_ARGON_T:-1}"
+      KIWI_ARGON_P: "${KIWI_ARGON_P:-1}"
       KIWI_DIFFICULTY_BITS: "${KIWI_DIFFICULTY_BITS:-20}"
-      KIWI_CHALLENGE_TTL_SECS: "120"
+      KIWI_ARGON2_DIFFICULTY_BITS: "${KIWI_ARGON2_DIFFICULTY_BITS:-8}"
+      KIWI_CHALLENGE_TTL_SECS: "${KIWI_CHALLENGE_TTL_SECS:-120}"
       METRICS_PORT: 9090
     depends_on:
       postgres:
