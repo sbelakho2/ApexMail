@@ -5,13 +5,14 @@
 /// Features a stylized, plump kiwi bird with a friendly wink.
 pub fn kiwi_mark_svg() -> &'static str {
     r##"<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M22 18.5C22 23.1944 18.1944 27 13.5 27C8.80558 27 5 23.1944 5 18.5C5 13.8056 8.80558 10 13.5 10C15.1186 10 16.6147 10.4532 17.881 11.2381L25.6464 3.47275C26.037 3.08222 26.6701 3.08222 27.0607 3.47275C27.4512 3.86327 27.4512 4.49644 27.0607 4.88696L19.2953 12.6523C20.9878 14.106 22 16.1848 22 18.5Z" fill="currentColor"/>
-  <circle cx="17.5" cy="15.5" r="1.2" fill="white"/>
-  <circle cx="18" cy="15" r="0.5" fill="currentColor">
-    <animate attributeName="opacity" values="1;1;0;1;1" keyTimes="0;0.95;0.97;0.99;1" dur="5s" repeatCount="indefinite" />
+  <path d="M28 20C28 25.5228 23.5228 30 18 30C12.4772 30 8 25.5228 8 20C8 16 10.5 11.5 14.5 10.5C15.5 10.25 17 10 19 10C24.5228 10 28 14.4772 28 20Z" fill="currentColor"/>
+  <path d="M14.5 10.5C12.5 9 11.5 6.5 12 4.5C12.5 2.5 14.5 1.5 16.5 2C18.5 2.5 19.5 4.5 19 6.5C18.8 7.5 18.5 8.5 19 10" fill="currentColor"/>
+  <path d="M12.5 5L3 9.5C2.5 9.7 2.5 10.3 3 10.5L13.5 12" fill="currentColor"/>
+  <circle cx="15.5" cy="5.5" r="1.2" fill="white"/>
+  <circle cx="16" cy="5" r="0.6" fill="currentColor">
+    <animate attributeName="opacity" values="1;1;0;1;1" keyTimes="0;0.95;0.97;0.99;1" dur="4s" repeatCount="indefinite" />
   </circle>
-  <path d="M10 27V29.5C10 30.0523 9.55228 30.5 9 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M17 27V29.5C17 30.0523 17.4477 30.5 18 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M14 30V32M22 30V32" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
 </svg>"##
 }
 
@@ -22,13 +23,15 @@ pub fn kiwi_logo_svg() -> &'static str {
 
 /// Lockup: kiwi mark + wordmark.
 pub fn kiwi_lockup_svg() -> &'static str {
-    r##"<svg viewBox="0 0 180 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M22 18.5C22 23.1944 18.1944 27 13.5 27C8.80558 27 5 23.1944 5 18.5C5 13.8056 8.80558 10 13.5 10C15.1186 10 16.6147 10.4532 17.881 11.2381L25.6464 3.47275C26.037 3.08222 26.6701 3.08222 27.0607 3.47275C27.4512 3.86327 27.4512 4.49644 27.0607 4.88696L19.2953 12.6523C20.9878 14.106 22 16.1848 22 18.5Z" fill="currentColor"/>
-  <circle cx="17.5" cy="15.5" r="1.2" fill="white"/>
-  <circle cx="18" cy="15" r="0.5" fill="currentColor"/>
-  <path d="M10 27V29.5C10 30.0523 9.55228 30.5 9 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M17 27V29.5C17 30.0523 17.4477 30.5 18 30.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-  <text x="38" y="22" font-family="system-ui,sans-serif" font-size="18" font-weight="700" letter-spacing="-0.04em" fill="currentColor">KiwiCaptcha</text>
+    r##"<svg viewBox="0 0 200 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g transform="translate(0, 4)">
+    <path d="M28 20C28 25.5228 23.5228 30 18 30C12.4772 30 8 25.5228 8 20C8 16 10.5 11.5 14.5 10.5C15.5 10.25 17 10 19 10C24.5228 10 28 14.4772 28 20Z" fill="currentColor"/>
+    <path d="M14.5 10.5C12.5 9 11.5 6.5 12 4.5C12.5 2.5 14.5 1.5 16.5 2C18.5 2.5 19.5 4.5 19 6.5C18.8 7.5 18.5 8.5 19 10" fill="currentColor"/>
+    <path d="M12.5 5L3 9.5C2.5 9.7 2.5 10.3 3 10.5L13.5 12" fill="currentColor"/>
+    <circle cx="15.5" cy="5.5" r="1.2" fill="white"/>
+    <path d="M14 30V32M22 30V32" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  </g>
+  <text x="44" y="27" font-family="system-ui,sans-serif" font-size="22" font-weight="800" letter-spacing="-0.03em" fill="currentColor">KiwiCaptcha</text>
 </svg>"##
 }
 
@@ -37,9 +40,12 @@ pub fn kiwi_shield_svg() -> &'static str {
     r##"<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
   <path d="M16 2L6 6v8c0 7 4.5 12 10 14 5.5-2 10-7 10-14V6L16 2z" fill="currentColor" opacity="0.1"/>
   <path d="M16 2L6 6v8c0 7 4.5 12 10 14 5.5-2 10-7 10-14V6L16 2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-  <g transform="translate(6, 6) scale(0.625)">
-    <path d="M22 18.5C22 23.1944 18.1944 27 13.5 27C8.80558 27 5 23.1944 5 18.5C5 13.8056 8.80558 10 13.5 10C15.1186 10 16.6147 10.4532 17.881 11.2381L25.6464 3.47275C26.037 3.08222 26.6701 3.08222 27.0607 3.47275C27.4512 3.86327 27.4512 4.49644 27.0607 4.88696L19.2953 12.6523C20.9878 14.106 22 16.1848 22 18.5Z" fill="currentColor"/>
-    <circle cx="17.5" cy="15.5" r="1.2" fill="white"/>
+  <g transform="translate(7, 7) scale(0.56)">
+    <path d="M28 20C28 25.5228 23.5228 30 18 30C12.4772 30 8 25.5228 8 20C8 16 10.5 11.5 14.5 10.5C15.5 10.25 17 10 19 10C24.5228 10 28 14.4772 28 20Z" fill="currentColor"/>
+    <path d="M14.5 10.5C12.5 9 11.5 6.5 12 4.5C12.5 2.5 14.5 1.5 16.5 2C18.5 2.5 19.5 4.5 19 6.5C18.8 7.5 18.5 8.5 19 10" fill="currentColor"/>
+    <path d="M12.5 5L3 9.5C2.5 9.7 2.5 10.3 3 10.5L13.5 12" fill="currentColor"/>
+    <circle cx="15.5" cy="5.5" r="1.2" fill="white"/>
+    <path d="M14 30V32M22 30V32" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
   </g>
 </svg>"##
 }

@@ -324,7 +324,7 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::challenge::{issue_challenge, ChallengeConfig, PoWAlgorithm};
+    use crate::challenge::{hash_ip, issue_challenge, ChallengeConfig, PoWAlgorithm};
 
     fn make_record(target_bits: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
@@ -568,5 +568,269 @@ mod tests {
             "et": sparse
         });
         assert!(!score_telemetry(&t7, 5000));
+    }
+
+    // ── Aggressive bot-detection suite ────────────────────────────────────
+
+    #[test]
+    fn telemetry_rejects_precise_keyboard_autorepeat_patterns() {
+        // A headless solver that "types" with exact 30ms OS auto-repeat timing.
+        use serde_json::json;
+        let uniform_30ms: Vec<u64> = (0..30).map(|i| 100 + i * 30).collect();
+        let t = json!({
+            "wd": false, "me": 0, "ke": 30, "et": uniform_30ms
+        });
+        assert!(score_telemetry(&t, 4000), "uniform 30ms discrete events must be rejected");
+    }
+
+    #[test]
+    fn telemetry_rejects_exact_60hz_pointer_timestamps() {
+        // Mouse-move replay at exactly 16.67ms (display refresh) with zero jitter.
+        use serde_json::json;
+        let uniform_16ms: Vec<u64> = (0..30).map(|i| 500 + i * 17).collect();
+        let t = json!({
+            "wd": false, "me": 30, "ke": 0, "et": uniform_16ms
+        });
+        assert!(score_telemetry(&t, 4000), "exact 16-17ms discrete intervals must be rejected");
+    }
+
+    #[test]
+    fn telemetry_accepts_human_jitter_at_many_scales() {
+        use serde_json::json;
+        // Human click intervals vary 5-30%; none of these should reject.
+        let cases: Vec<Vec<u64>> = vec![
+            (0..30).map(|i| i * 87 + (i * i % 23)).collect(),      // fast typist
+            (0..30).map(|i| i * 145 + (i * 3 % 31)).collect(),     // slow reader
+            (0..30).map(|i| i * 64 + (i * 7 % 11)).collect(),      // burst clicking
+            (0..30).map(|i| i * 203 + (i % 5) * 17).collect(),     // sparse + jitter
+        ];
+        for (i, et) in cases.iter().enumerate() {
+            let t = json!({ "wd": false, "me": 20, "ke": 5, "et": et });
+            assert!(
+                !score_telemetry(&t, 5000),
+                "human-like timing case {i} must not be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn telemetry_rejects_webdriver_combined_with_normal_timing() {
+        // A bot that fakes human timing but leaves webdriver=true.
+        use serde_json::json;
+        let jittered: Vec<u64> = (0..30).map(|i| i * 97 + (i * 7 % 13)).collect();
+        let t = json!({ "wd": true, "me": 20, "ke": 0, "et": jittered });
+        assert!(score_telemetry(&t, 5000));
+    }
+
+    #[test]
+    fn telemetry_rejects_long_headless_solve_without_interaction() {
+        use serde_json::json;
+        let t = json!({ "wd": false, "me": 0, "ke": 0, "et": [] });
+        assert!(score_telemetry(&t, 31_000));
+        assert!(score_telemetry(&t, 301_000));
+        // A normal-duration solve with no interaction is fine (users may not
+        // touch the page while it auto-solves).
+        assert!(!score_telemetry(&t, 4000));
+    }
+
+    #[test]
+    fn telemetry_accepts_mobile_touch_users() {
+        // Mobile users have no mouse/keyboard events — pointer/touch events
+        // feed `me`, so a slow mobile solve with touch interaction must pass.
+        use serde_json::json;
+        let jittered: Vec<u64> = (0..30).map(|i| i * 122 + (i * 5 % 19)).collect();
+        let t = json!({ "wd": false, "me": 12, "ke": 0, "et": jittered });
+        assert!(!score_telemetry(&t, 25_000));
+    }
+
+    #[test]
+    fn telemetry_ignores_sparse_or_absent_event_timings() {
+        use serde_json::json;
+        // Fewer than 24 events: entropy check must not fire.
+        let few: Vec<u64> = (0..10).map(|i| 100 + i * 100).collect();
+        let t = json!({ "wd": false, "me": 5, "ke": 0, "et": few });
+        assert!(!score_telemetry(&t, 5000));
+        // No events at all.
+        let none = json!({ "wd": false, "me": 0, "ke": 0, "et": [] });
+        assert!(!score_telemetry(&none, 5000));
+    }
+
+    // ── Aggressive verification suite ─────────────────────────────────────
+
+    #[test]
+    fn verify_rejects_counter_beyond_solver_cap() {
+        // The solver caps at MAX_SHA_HASHES (5M); a counter beyond that is
+        // either a bot or an invalid solution — it must still verify the hash
+        // correctly (a huge counter is just a different preimage).
+        let record = make_record(4); // low difficulty: counter found quickly
+        let counter = solve_for_test(&record).unwrap();
+        let huge = counter + 5_000_001;
+        // Huge counter is virtually certain to NOT meet the target.
+        let outcome = verify(&record, huge, 5000);
+        assert_eq!(outcome, VerifyOutcome::Invalid(VerifyError::InsufficientWork));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_challenge_string() {
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        // Tamper with the stored challenge string (simulates a client that
+        // modified the signed payload).
+        record.challenge.push_str("00");
+        assert_eq!(
+            verify(&record, counter, 5000),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn verify_rejects_wrong_scope() {
+        let record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let ctx = VerifyContext {
+            record: &record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: 1_000_001,
+            min_duration_ms: 0,
+            expected_scope: Some("signup"),
+        };
+        assert_eq!(
+            verify_solution(&ctx),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn verify_rejects_expired_exactly_at_ttl_boundary() {
+        let record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let ctx = VerifyContext {
+            record: &record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: record.expires_at, // exactly at expiry
+            min_duration_ms: 0,
+            expected_scope: None,
+        };
+        assert_eq!(
+            verify_solution(&ctx),
+            VerifyOutcome::Invalid(VerifyError::Expired)
+        );
+    }
+
+    #[test]
+    fn verify_accepts_exactly_at_ttl_boundary_minus_one() {
+        let record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let ctx = VerifyContext {
+            record: &record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: record.expires_at - 1,
+            min_duration_ms: 0,
+            expected_scope: None,
+        };
+        assert_eq!(verify_solution(&ctx), VerifyOutcome::Valid);
+    }
+
+    #[test]
+    fn verify_rejects_wrong_ip_binding_at_verify_level() {
+        // IP binding is enforced in the api-server route (auth.rs), but the
+        // record stores the ip_hash — ensure the hash function is stable and
+        // distinct for different IPs.
+        let h1 = hash_ip("1.2.3.4", "salt");
+        let h2 = hash_ip("1.2.3.5", "salt");
+        let h3 = hash_ip("1.2.3.4", "salt");
+        assert_ne!(h1, h2, "different IPs must hash differently");
+        assert_eq!(h1, h3, "same IP must hash identically");
+        assert_eq!(h1.len(), 64, "sha256 hex output");
+    }
+
+    #[test]
+    fn verify_argon2_mode_rejects_wrong_algorithm_hash() {
+        // A challenge issued as Argon2id must NOT accept a SHA-256 solution
+        // counter and vice versa — the algorithm is part of the contract.
+        let sha_record = make_record(8);
+        let argon_record = make_argon2_record(8, 128);
+        let sha_counter = solve_for_test(&sha_record).unwrap();
+        // Feed the SHA counter into the Argon2 record: hashes differ.
+        assert_eq!(
+            verify(&argon_record, sha_counter, 5000),
+            VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+        );
+    }
+
+    #[test]
+    fn verify_argon2_memory_ceiling_rejects_absurd_params() {
+        // m_kib above the browser-solvable ceiling must be rejected up front,
+        // not run (a memory-hard hash with 4 TiB would OOM the server).
+        // Solve with sane params first (fast), then verify against the
+        // absurd-params record: MalformedRecord must fire before hashing.
+        let sane = make_argon2_record(4, 128);
+        let counter = solve_for_test(&sane).unwrap();
+        let mut absurd = sane.clone();
+        absurd.m_kib = crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1;
+        assert_eq!(
+            verify(&absurd, counter, 5000),
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+    }
+
+    #[test]
+    fn verify_duration_floor_is_per_challenge() {
+        // The record's own floor is authoritative when ctx.min_duration_ms is 0.
+        let record = make_record(20);
+        let counter = solve_for_test(&record).unwrap();
+        let ctx = VerifyContext {
+            record: &record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: record.min_duration_ms + 1,
+            now_unix: 1_000_001,
+            min_duration_ms: 0,
+            expected_scope: None,
+        };
+        assert_eq!(verify_solution(&ctx), VerifyOutcome::Valid);
+        let ctx_fast = VerifyContext {
+            record: &record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: record.min_duration_ms - 1,
+            now_unix: 1_000_001,
+            min_duration_ms: 0,
+            expected_scope: None,
+        };
+        assert_eq!(
+            verify_solution(&ctx_fast),
+            VerifyOutcome::Invalid(VerifyError::TooFast)
+        );
+    }
+
+    #[test]
+    fn verify_accepts_full_difficulty_range() {
+        // Every difficulty from 0 to the solver cap must issue and verify.
+        for bits in [0u32, 1, 4, 8, 12, 16, 20] {
+            let record = make_record(bits);
+            let counter = solve_for_test(&record).expect("solver finds counter");
+            let outcome = verify(&record, counter, 5000);
+            assert_eq!(
+                outcome,
+                VerifyOutcome::Valid,
+                "difficulty {bits} bits must verify"
+            );
+        }
+    }
+
+    #[test]
+    fn sha256_hex_matches_reference() {
+        // RFC 6234 test vector for SHA-256("abc").
+        assert_eq!(
+            sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

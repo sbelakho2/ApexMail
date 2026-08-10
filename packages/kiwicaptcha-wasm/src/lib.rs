@@ -28,6 +28,36 @@ pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
+/// Allocate `len` bytes in WASM linear memory and return the pointer.
+///
+/// This is the widget's buffer allocator for the raw-pointer solver ABI.
+/// It is an explicit wasm-bindgen public symbol (rather than relying on
+/// wasm-bindgen's generated `__wbindgen_malloc`) so that wasm-opt/binaryen
+/// cannot dead-code-eliminate it, and so the name is stable across toolchain
+/// versions.
+///
+/// The returned pointer must be released with [`dealloc`].
+#[wasm_bindgen]
+pub fn alloc(len: usize) -> *mut u8 {
+    let mut buf = Vec::with_capacity(len);
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf); // ownership transferred to JS; dealloc frees it
+    ptr
+}
+
+/// Free a buffer previously returned by [`alloc`].
+///
+/// `len` must match the allocation size exactly (it is the Vec capacity).
+/// Safety: the caller must pass a pointer/len produced by [`alloc`] and must
+/// not use the pointer afterwards.
+#[wasm_bindgen]
+pub unsafe fn dealloc(ptr: *mut u8, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    drop(Vec::from_raw_parts(ptr, 0, len));
+}
+
 /// Search `[start_counter, start_counter + chunk_size)` for a counter whose
 /// `SHA-256(prefix || decimal(counter) || salt)` output has at least
 /// `target_bits` leading zero bits. Returns the counter or -1.

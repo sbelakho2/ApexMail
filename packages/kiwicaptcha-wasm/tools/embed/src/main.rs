@@ -206,8 +206,22 @@ fn main() {
     let glue = transform(&glue_raw);
 
     // Sanity checks: the transformed glue must be plain classic JS.
-    if glue.contains("export ") || glue.contains("import.meta") {
+    // A plain `contains("export ")` would false-positive on prose inside
+    // wasm-bindgen's copied doc comments, so only line-leading ESM
+    // statements and live `import.meta` references are rejected.
+    let has_esm = glue.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("export ") || t.starts_with("import ")
+    });
+    let has_import_meta = glue.contains("import.meta");
+    if has_esm || has_import_meta {
         eprintln!("FATAL: transformed glue still contains ESM/import.meta");
+        for (i, line) in glue.lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("export ") || t.starts_with("import ") || line.contains("import.meta") {
+                eprintln!("  line {}: {}", i + 1, line.chars().take(120).collect::<String>());
+            }
+        }
         std::process::exit(1);
     }
 

@@ -73,12 +73,26 @@ let issued = issue_challenge(&config, "login", &client_ip, now_unix, 0)?;
 
 ### 2. Render the Widget
 
+The inline widget fetches the challenge, solves it with the embedded
+WASM solver (JS fallback), and fills the hidden token input.
+
 ```rust
 use kiwicaptcha::kiwi_widget_html;
 
-// The inline widget fetches the challenge, solves it with the embedded
-// WASM solver (JS fallback), and fills the hidden token input:
+// Returns a self-contained HTML block with styles and scripts.
 let html = kiwi_widget_html();
+```
+
+#### Framework Integration (React, Vue, etc.)
+
+KiwiCaptcha exposes a global `window.KiwiCaptcha` API for manual initialization in single-page applications:
+
+```javascript
+// Manually initialize a widget
+KiwiCaptcha.init(document.querySelector('.kiwi-container'));
+
+// Or re-scan the DOM for all widgets
+KiwiCaptcha.render('[data-kiwi-widget]');
 ```
 
 ### 3. Verify the Solution

@@ -218,6 +218,11 @@ if [[ -f "${CERT_SRC}/fullchain.pem" && -f "${CERT_SRC}/privkey.pem" ]]; then
     install -m 644 "${CERT_SRC}/fullchain.pem" "${NGINX_SSL_DIR}/fullchain.pem"
     install -m 600 "${CERT_SRC}/privkey.pem"   "${NGINX_SSL_DIR}/privkey.pem"
     install -m 644 "${CERT_SRC}/chain.pem"     "${NGINX_SSL_DIR}/ca-chain.pem"
+    # The nginx container runs as uid 101 (nginx). A root-owned 600 key makes
+    # every nginx reload fail with BIO_new_file Permission denied, so the
+    # private key must be readable by gid 101 (group-read; not world-readable).
+    chown :101 "${NGINX_SSL_DIR}/privkey.pem" 2>/dev/null || true
+    chmod 640 "${NGINX_SSL_DIR}/privkey.pem"
     for name in apexmail.crt apexmail.key mta.crt mta.key fullchain.pem privkey.pem; do
         case "$name" in
             *.crt|fullchain.pem) cp "${CERT_SRC}/fullchain.pem" "${CERT_DIR}/${name}" ;;
