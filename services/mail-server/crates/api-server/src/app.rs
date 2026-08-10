@@ -1778,7 +1778,8 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         assert!(verify_csp.contains("script-src 'self' 'nonce-"));
-        assert!(verify_csp.contains("style-src 'self' 'nonce-"));
+        assert!(verify_csp.contains("'wasm-unsafe-eval'"));
+        assert!(verify_csp.contains("style-src 'self' 'unsafe-inline' 'nonce-"));
         let verify_body = response_body_string(verify_response).await;
         assert!(verify_body.contains("Verify your email"));
         assert!(verify_body.contains("Back to sign in"));
@@ -1835,7 +1836,7 @@ mod tests {
         let csp = csp.to_str().expect("csp header should be utf-8");
 
         assert!(csp.contains("img-src 'self' data: https://analytics.example.com"));
-        assert!(csp.contains("script-src 'self' 'nonce-test-nonce'"));
+        assert!(csp.contains("script-src 'self' 'nonce-test-nonce' 'wasm-unsafe-eval'"));
     }
 
     #[test]
@@ -1857,7 +1858,8 @@ mod tests {
         let csp = csp.to_str().expect("csp header should be utf-8");
 
         assert!(csp.contains("connect-src 'self';"));
-        assert!(csp.contains("script-src 'self' 'nonce-test-nonce';"));
+        assert!(csp.contains("script-src 'self' 'nonce-test-nonce' 'wasm-unsafe-eval'"));
+        assert!(csp.contains("style-src 'self' 'unsafe-inline' 'nonce-test-nonce'"));
         assert!(csp.contains("frame-src 'none'"));
         // No external hosts leaked into the CSP.
         assert!(!csp.contains("captcha.apexmail"));
