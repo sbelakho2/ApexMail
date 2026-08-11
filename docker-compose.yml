@@ -461,7 +461,7 @@ services:
     build:
       context: .
       dockerfile: services/mail-server/Dockerfile
-      target: smtp-edge
+      target: mta
     restart: unless-stopped
     ports:
       - "25:25"

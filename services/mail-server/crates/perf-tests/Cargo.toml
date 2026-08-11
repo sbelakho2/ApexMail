@@ -15,7 +15,6 @@ template-renderer = { path = "../template-renderer" }
 analytics = { path = "../analytics" }
 compliance = { path = "../compliance" }
 observability-service = { path = "../observability-service" }
-ops-service = { path = "../ops-service" }
 devex-service = { path = "../devex-service" }
 
 tokio = { workspace = true, features = ["full", "test-util"] }

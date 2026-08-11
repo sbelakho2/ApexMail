@@ -92,39 +92,6 @@ ENTRYPOINT ["/usr/bin/tini", "--", "outbound-queue"]
 CMD ["--listen", "0.0.0.0:50052"]
 
 # =============================================================================
-# SMTP Edge Server
-# =============================================================================
-FROM runtime-base AS smtp-edge
-
-COPY --from=builder /app/target/release/smtp-edge /usr/local/bin/
-
-USER apexmail
-EXPOSE 25
-# Port 25 requires NET_BIND_SERVICE when running as non-root.
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 25"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "smtp-edge"]
-CMD ["--listen", "0.0.0.0:25"]
-
-# =============================================================================
-# Submission Server
-# =============================================================================
-FROM runtime-base AS submission
-
-COPY --from=builder /app/target/release/submission-server /usr/local/bin/
-
-USER apexmail
-EXPOSE 587 465
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 587"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "submission-server"]
-CMD ["--listen", "0.0.0.0:587"]
-
-# =============================================================================
 # Mailstore Service
 # =============================================================================
 FROM runtime-base AS mailstore

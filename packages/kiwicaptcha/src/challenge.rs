@@ -318,14 +318,6 @@ impl ChallengeCache {
         }
     }
 
-    /// A `ChallengeCache` with a custom entry lifetime (for tests).
-    fn with_ttl(ttl: Duration) -> Self {
-        ChallengeCache {
-            entries: HashMap::new(),
-            ttl,
-        }
-    }
-
     fn cache_key(ip_hash: &str, scope: &str) -> String {
         format!("{ip_hash}|{scope}")
     }

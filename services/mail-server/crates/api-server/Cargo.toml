@@ -60,7 +60,6 @@ urlencoding = { workspace = true }
 # Internal crates
 email-grader = { path = "../email-grader" }
 threat-intel = { path = "../threat-intel" }
-ops-service = { path = "../ops-service" }
 billing-service = { path = "../billing-service" }
 billing-common = { path = "../billing-common" }
 ui-foundation = { path = "../ui-foundation" }

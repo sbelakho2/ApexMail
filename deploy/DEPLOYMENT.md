@@ -53,25 +53,25 @@ Notes:
   `status-server`, matching its compose service key and the nginx upstream
   name. The stage is not renamed to avoid touching the `auth-server` crate
   references; only the image name is canonical.
-- `ops-service` is intentionally **not** built or deployed — it had no compose
-  consumer and existed only as drift.
-- The dev `docker-compose.yml` builds the `mta` service from the `smtp-edge`
-  target (a lighter edge listener for local/dev use). Production uses the full
-  `mta` target image from GHCR. This dev/prod divergence is intentional and
-  documented; it is not a naming conflict.
+- The dev `docker-compose.yml` builds the `mta` service from the **`mta`**
+  target (same stage as production). There is no separate dev edge listener;
+  the legacy `smtp-edge` crate/stage was removed.
 
-## Legacy / not-deployed crates
+## Legacy / removed crates
 
-These crates exist in the workspace but are **not** part of the production
-stack. Do not add them to compose, do not deploy them:
+The following crates were **removed** from the workspace — they were legacy
+duplicates that production never used and have no residual references:
 
-- **`submission`** (`services/mail-server/crates/submission`, binary
-  `submission-server`) — dev/duplicate SMTP-submission implementation.
-  Production SMTP submission (ports 25/465/587) is served exclusively by
-  `mta`. Not referenced in any compose file, not built by `deploy.yml`.
-- **`smtp-edge`** — dev-only. The dev `docker-compose.yml` `mta` service
-  builds the `smtp-edge` Dockerfile stage for local use; production uses the
-  full `mta` image. Never referenced in `docker-compose.prod.yml`.
+- **`submission`** (binary `submission-server`) — duplicate SMTP-submission
+  implementation. Production SMTP submission (ports 25/465/587) is served
+  exclusively by `mta`.
+- **`smtp-edge`** — dev-only edge listener superseded by `mta`; its Dockerfile
+  stage and dev-compose target were removed.
+- **`ops-service`** — had no compose consumer and existed only as drift; its
+  test-only consumers (fuzz/load/perf/smoke/integration tests) were removed
+  with it.
+- **`bounce-analytics`** — unreferenced; its functionality lives in
+  `worker-processors`/`mta`.
 
 > `auth-server` (`services/mail-server/crates/auth-server`) is **deployed**
 > — as the `status-server` service/image (see the canonical map above). It is

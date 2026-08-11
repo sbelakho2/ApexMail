@@ -398,7 +398,6 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "observability-service",
- "ops-service",
  "parking_lot",
  "rand 0.9.4",
  "redis",
@@ -1558,33 +1557,6 @@ checksum = "e412e2cd0f2b2d93e02543ceae7917b3c70331573df19ee046bcbc35e45e87d7"
 dependencies = [
  "byteorder",
  "cipher",
-]
-
-[[package]]
-name = "bounce-analytics"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dashmap 6.1.0",
- "dotenvy",
- "futures",
- "mail-common",
- "metrics",
- "observability-service",
- "parking_lot",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -3583,7 +3555,6 @@ dependencies = [
  "dlp-engine",
  "ids-engine",
  "observability-service",
- "ops-service",
  "pattern-matcher",
  "proptest",
  "proptest-derive",
@@ -4934,7 +4905,6 @@ dependencies = [
  "hyper 1.9.0",
  "ids-engine",
  "observability-service",
- "ops-service",
  "parking_lot",
  "pattern-matcher",
  "reqwest",
@@ -5695,7 +5665,6 @@ dependencies = [
  "compliance",
  "devex-service",
  "observability-service",
- "ops-service",
  "pattern-matcher",
  "rand 0.9.4",
  "sales-autopilot",
@@ -6670,34 +6639,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ops-service"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "apexmail-db",
- "apexmail-lib",
- "aws-config",
- "aws-sdk-sesv2",
- "axum 0.7.9",
- "chrono",
- "dashmap 6.1.0",
- "observability-service",
- "parking_lot",
- "rand 0.9.4",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tower 0.4.13",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7013,7 +6954,6 @@ dependencies = [
  "compliance",
  "devex-service",
  "observability-service",
- "ops-service",
  "pattern-matcher",
  "sales-autopilot",
  "serde_json",
@@ -9339,7 +9279,6 @@ dependencies = [
  "isolation",
  "mta",
  "observability-service",
- "ops-service",
  "pattern-matcher",
  "queue-provider",
  "sales-autopilot",
@@ -9349,35 +9288,6 @@ dependencies = [
  "tokio",
  "uuid",
  "worker-processors",
-]
-
-[[package]]
-name = "smtp-edge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.7.9",
- "bytes",
- "chrono",
- "clap",
- "dashmap 6.1.0",
- "futures",
- "hickory-resolver",
- "mail-auth 0.5.1",
- "mail-common",
- "mail-parser 0.10.2",
- "mail-proto",
- "observability-service",
- "rustls 0.23.40",
- "rustls-pemfile 2.2.0",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls 0.26.4",
- "tonic",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -9762,38 +9672,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "submission"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "apexmail-lib",
- "argon2",
- "async-trait",
- "base64 0.22.1",
- "bcrypt 0.16.0",
- "chrono",
- "clap",
- "hickory-resolver",
- "mail-common",
- "mail-proto",
- "moka",
- "observability-service",
- "rand 0.9.4",
- "rustls-pemfile 2.2.0",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls 0.26.4",
- "tonic",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zeroize",
 ]
 
 [[package]]

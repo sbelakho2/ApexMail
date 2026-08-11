@@ -1343,6 +1343,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             redis,
+            config: Default::default(),
             crm: CrmBackend::postgres(db.clone()),
             enrichment: EnrichmentService::mock(),
             campaigns: CampaignManager::new(10, db.clone()),
@@ -1374,6 +1375,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             redis,
+            config: Default::default(),
             crm: CrmBackend::postgres(db.clone()),
             enrichment: EnrichmentService::mock(),
             campaigns: CampaignManager::new(10, db.clone()),

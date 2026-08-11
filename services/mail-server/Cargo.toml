@@ -2,9 +2,7 @@
 resolver = "2"
 members = [
     "crates/mailstore-core",
-    "crates/smtp-edge",
-    "crates/submission",
-    "crates/outbound-queue",
+            "crates/outbound-queue",
     "crates/mail-proto",
     "crates/mail-common",
     "crates/tracking-service",
@@ -29,8 +27,7 @@ members = [
     "crates/billing-common",
     "crates/devex-service",
     "crates/observability-service",
-    "crates/ops-service",
-    "crates/ui-foundation",
+        "crates/ui-foundation",
     "crates/sales-autopilot",
     "crates/ai-service",
     "crates/pdf-renderer",
@@ -54,8 +51,7 @@ members = [
     "crates/dlp-engine",
     "crates/threat-intel",
     "crates/email-grader",
-    "crates/bounce-analytics",
-    "crates/inbox-placement",
+        "crates/inbox-placement",
     # KiwiCaptcha — native Rust proof-of-work CAPTCHA engine
 ]
 
