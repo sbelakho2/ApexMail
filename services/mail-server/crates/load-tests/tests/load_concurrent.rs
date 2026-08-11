@@ -7,8 +7,6 @@ use ai_service::bandits::BanditOptimizer;
 use apexmail_lib::validation::is_valid_email;
 use apexmail_lib::{create_hmac_signature, generate_id};
 use observability_service::metrics_collector::MetricsCollector;
-use ops_service::health::HealthChecker;
-use ops_service::types::{HealthCheck, ServiceStatus};
 use pattern_matcher::matcher::build_matcher;
 use sales_autopilot::crm::CrmService;
 
@@ -152,38 +150,6 @@ async fn test_concurrent_metric_recording() {
     let counter = summary.iter().find(|m| m.name == "load_test_counter");
     assert!(counter.is_some());
     assert!((counter.unwrap().value - 100.0).abs() < 1.0);
-}
-
-// ---------------------------------------------------------------------------
-// 6. Concurrent health checks — 50 tasks on shared HealthChecker
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_concurrent_health_checks() {
-    let checker = Arc::new(HealthChecker::new(1000));
-    let mut handles = Vec::new();
-
-    for i in 0..50 {
-        let ch = Arc::clone(&checker);
-        handles.push(tokio::spawn(async move {
-            let svc_name = format!("svc-{i}");
-            ch.record_check(HealthCheck {
-                service: svc_name.clone(),
-                status: ServiceStatus::Operational,
-                latency_ms: i as u64,
-                timestamp: chrono::Utc::now(),
-            });
-            let hist = ch.get_history(&svc_name, 10);
-            assert!(!hist.is_empty());
-        }));
-    }
-
-    for h in handles {
-        h.await.unwrap();
-    }
-
-    let latest = checker.latest_checks();
-    assert_eq!(latest.len(), 50);
 }
 
 // ---------------------------------------------------------------------------

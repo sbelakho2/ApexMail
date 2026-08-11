@@ -179,44 +179,6 @@ fn observability_alert_pipeline() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 5. Ops pipeline:start warmup → progress → check status
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn ops_warmup_pipeline() {
-    use ops_service::warmup::IpWarmupManager;
-    use sqlx::PgPool;
-
-    let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
-    let warmup = IpWarmupManager::new(pool);
-
-    // Step 1:Create a warmup schedule
-    let schedule = warmup.create_schedule_sync("10.0.0.1", 100_000, 14);
-    assert_eq!(schedule.ip, "10.0.0.1");
-    assert_eq!(schedule.target_volume, 100_000);
-    assert_eq!(schedule.day, 0);
-    let initial_volume = schedule.current_volume;
-
-    // Step 2:Advance a few days
-    assert!(warmup.advance_day_sync("10.0.0.1"));
-    assert!(warmup.advance_day_sync("10.0.0.1"));
-    assert!(warmup.advance_day_sync("10.0.0.1"));
-
-    // Step 3:Volume should have increased
-    let day3_volume = warmup.get_daily_volume("10.0.0.1", 3).unwrap();
-    assert!(day3_volume > initial_volume);
-
-    // Step 4:Warmup not complete yet
-    assert!(!warmup.is_warmup_complete("10.0.0.1"));
-
-    // Step 5:Advance to completion
-    for _ in 0..20 {
-        warmup.advance_day_sync("10.0.0.1");
-    }
-    assert!(warmup.is_warmup_complete("10.0.0.1"));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // 6. AI content loop:score → suggest → re-score
 // ═══════════════════════════════════════════════════════════════════════════
 

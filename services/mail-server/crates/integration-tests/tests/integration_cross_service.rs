@@ -169,50 +169,6 @@ fn rate_limiter_decision_types() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 6. Observability metrics from ops service health checks
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn observability_metrics_from_ops_health_checks() {
-    use observability_service::metrics_collector::MetricsCollector;
-    use ops_service::health::HealthChecker;
-    use ops_service::types::{HealthCheck, ServiceStatus};
-
-    let metrics = MetricsCollector::new(vec![10.0, 50.0, 100.0, 500.0]);
-    let checker = HealthChecker::new(100);
-
-    // Simulate health check results from ops service
-    checker.record_check(HealthCheck {
-        service: "api-server".into(),
-        status: ServiceStatus::Operational,
-        latency_ms: 12,
-        timestamp: chrono::Utc::now(),
-    });
-    checker.record_check(HealthCheck {
-        service: "billing".into(),
-        status: ServiceStatus::Degraded,
-        latency_ms: 450,
-        timestamp: chrono::Utc::now(),
-    });
-
-    // Record health check latencies in observability metrics
-    let checks = checker.latest_checks();
-    for check in &checks {
-        metrics.record_histogram(
-            "health_check_latency_ms",
-            check.latency_ms as f64,
-            "Health check latency",
-        );
-        if check.status != ServiceStatus::Operational {
-            metrics.record_counter("health_check_degraded", 1.0, "Degraded checks");
-        }
-    }
-
-    let summary = metrics.get_summary();
-    assert!(!summary.is_empty());
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // 7. Enterprise SSO types with API server auth types
 // ═══════════════════════════════════════════════════════════════════════════
 

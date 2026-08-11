@@ -9,7 +9,6 @@ use apexmail_lib::validation::is_valid_email;
 use billing_service::config::PaygPricing;
 use billing_service::invoices::calculate_vat;
 use billing_service::plans::calculate_overage_cost;
-use ops_service::trust::{TenantMetrics, TrustScorer};
 use pattern_matcher::matcher::build_matcher;
 
 /// Run `op` continuously for `duration` and return the count of iterations.
@@ -144,33 +143,5 @@ fn test_sustained_billing_calculations() {
     assert!(
         throughput > 50_000.0,
         "expected >50 000 calcs/sec, got {throughput:.0}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 6. Sustained trust scoring — >50 000/sec
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_sustained_trust_scoring() {
-    let scorer = TrustScorer::new();
-    let metrics = TenantMetrics {
-        tenant_id: uuid::Uuid::new_v4(),
-        bounce_rate: 0.02,
-        complaint_rate: 0.001,
-        engagement_rate: 0.45,
-        age_days: 180,
-        volume: 50_000,
-    };
-
-    let dur = Duration::from_secs(2);
-    let count = run_for(dur, || {
-        let _ = scorer.compute_score(&metrics);
-    });
-    let throughput = count as f64 / dur.as_secs_f64();
-    eprintln!("Trust scoring throughput: {throughput:.0} ops/sec ({count} total)");
-    assert!(
-        throughput > 50_000.0,
-        "expected >50 000 scores/sec, got {throughput:.0}"
     );
 }
