@@ -77,6 +77,9 @@ final class ValidatorTest extends TestCase
     public function testValidTokenPasses(): void
     {
         $challenge = $this->issuer->issue('login', '198.51.100.7');
+        // The core enforces the minimum solve duration with a server-measured
+        // clock; wait out the floor before verifying.
+        usleep(($challenge->minDurationMs + 10) * 1000);
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -122,5 +125,43 @@ final class ValidatorTest extends TestCase
 
         self::assertCount(1, $violations);
         self::assertSame(KiwiCaptcha::NOT_SOLVED_ERROR, $violations[0]->getCode());
+    }
+
+    public function testArgon2CapacityExhaustionFailsClosedAsViolation(): void
+    {
+        \BelConsulting\KiwiCaptchaBundle\Security\Argon2Semaphore::resetForTests();
+        \BelConsulting\KiwiCaptchaBundle\Security\Argon2Semaphore::setMaxWaitSecsForTests(0.05);
+        try {
+            $challenge = $this->issuer->issue('login', '198.51.100.7');
+            usleep(($challenge->minDurationMs + 10) * 1000);
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+            // Saturate the cap so the throttled verifier is refused.
+            self::assertTrue(\BelConsulting\KiwiCaptchaBundle\Security\Argon2Semaphore::acquire(1));
+
+            $stack = new RequestStack();
+            $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+
+            $validator = new KiwiCaptchaValidator(
+                new \BelConsulting\KiwiCaptchaBundle\Security\ThrottledVerifier($this->verifier, 1),
+                $stack,
+                self::SECRET,
+            );
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+            $violations = $engine->validate($dto);
+
+            self::assertCount(1, $violations);
+            self::assertSame(KiwiCaptcha::NOT_SOLVED_ERROR, $violations[0]->getCode());
+        } finally {
+            \BelConsulting\KiwiCaptchaBundle\Security\Argon2Semaphore::resetForTests();
+        }
     }
 }

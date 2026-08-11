@@ -6,6 +6,9 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
+use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
+use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
+use BelConsulting\KiwiCaptchaBundle\Security\ThrottledVerifier;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaExtension as TwigExtension;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
@@ -18,15 +21,50 @@ use KiwiCaptcha\Verifier;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\Extension\Extension;
+use Symfony\Component\DependencyInjection\Extension\PrependExtensionInterface;
 use Symfony\Component\DependencyInjection\Reference;
 
-final class KiwiCaptchaExtension extends Extension
+final class KiwiCaptchaExtension extends Extension implements PrependExtensionInterface
 {
     private const ARRAY_STORAGE_ID = 'kiwi_captcha.storage.array';
 
     public function getAlias(): string
     {
         return 'kiwi_captcha';
+    }
+
+    /**
+     * Auto-register the bundle's challenge route so POST /kiwi-captcha/challenge
+     * works out of the box.
+     *
+     * Bundle controllers are never scanned for #[Route] attributes (the
+     * framework only scans the application's src/Controller), so the bundle
+     * must contribute its own routing resource. The framework.router.resource
+     * option is a single value owned by the application: this prepend only
+     * sets it when the application has NOT configured the router at all (a
+     * fresh app). Applications that configure framework.router themselves must
+     * import the bundle's routes file manually:
+     *
+     *     # config/routes.yaml
+     *     kiwi_captcha:
+     *         resource: '@KiwiCaptchaBundle/Resources/config/routes.php'
+     */
+    public function prepend(ContainerBuilder $container): void
+    {
+        if (!$container->hasExtension('framework')) {
+            return;
+        }
+        foreach ($container->getExtensionConfig('framework') as $config) {
+            if (isset($config['router'])) {
+                // The app configures the router itself (own resource or
+                // explicitly disabled) — never touch it.
+                return;
+            }
+        }
+
+        $container->prependExtensionConfig('framework', [
+            'router' => ['resource' => __DIR__.'/../Resources/config/routes.php'],
+        ]);
     }
 
     public function load(array $configs, ContainerBuilder $container): void
@@ -57,15 +95,41 @@ final class KiwiCaptchaExtension extends Extension
             $storageRef,
         ]))->setPublic(true));
 
-        $container->setDefinition('kiwi_captcha.verifier', (new Definition(Verifier::class, [
-            $storageRef,
-        ]))->setPublic(true));
+        // Verifier: wrapped in ThrottledVerifier for Argon2id mode so the
+        // aggregate verification concurrency cap is enforced (KiwiCaptcha\Verifier
+        // is final; the bundle-owned wrapper exposes the same verify()).
+        $innerVerifier = (new Definition(Verifier::class, [$storageRef]))->setPublic(true);
+        if ($config['algorithm'] === 'argon2id' && $config['argon2_max_concurrent_verifications'] > 0) {
+            $container->setDefinition('kiwi_captcha.verifier.inner', $innerVerifier);
+            $container->setDefinition('kiwi_captcha.verifier', (new Definition(ThrottledVerifier::class, [
+                new Reference('kiwi_captcha.verifier.inner'),
+                $config['argon2_max_concurrent_verifications'],
+            ]))->setPublic(true));
+        } else {
+            $container->setDefinition('kiwi_captcha.verifier', $innerVerifier);
+        }
         $container->setAlias(StorageInterface::class, (string) $storageRef);
 
-        // ── Challenge endpoint controller ──
+        // ── Challenge endpoint controller (+ optional issuance rate limiter) ──
+        $rateLimiterRef = null;
+        if ($config['rate_limit'] > 0) {
+            $poolRef = $config['rate_limit_cache'] !== null ? new Reference($config['rate_limit_cache']) : null;
+            $container->setDefinition('kiwi_captcha.rate_limiter', (new Definition(IssuanceRateLimiter::class, [
+                $config['rate_limit'],
+                $config['rate_limit_window_secs'],
+                $poolRef,
+            ]))->setPublic(true));
+            $rateLimiterRef = new Reference('kiwi_captcha.rate_limiter');
+        }
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
+            $rateLimiterRef,
         ]))->addTag('controller.service_arguments')->setPublic(true));
+
+        // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──
+        $container->setDefinition(KiwiCaptchaRouteLoader::class, (new Definition(KiwiCaptchaRouteLoader::class, [
+            '%kiwi_captcha.route_prefix%',
+        ]))->addTag('routing.loader'));
 
         // ── Form type (renders the widget through the form theme) ──
         $container->setDefinition(KiwiCaptchaType::class, (new Definition(KiwiCaptchaType::class, [

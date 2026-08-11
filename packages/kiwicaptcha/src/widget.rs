@@ -96,8 +96,11 @@ mod tests {
             None,
         );
 
-        assert!(html.contains("data-kiwi-endpoint=\"/x&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\""));
-        assert!(html.contains("data-kiwi-scope=\"login&quot;&gt;&lt;img src=x onerror=alert(2)&gt;\""));
+        assert!(html
+            .contains("data-kiwi-endpoint=\"/x&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\""));
+        assert!(
+            html.contains("data-kiwi-scope=\"login&quot;&gt;&lt;img src=x onerror=alert(2)&gt;\"")
+        );
         // No raw attacker markup survives.
         assert!(!html.contains("<script>alert(1)"));
         assert!(!html.contains("<img src=x"));

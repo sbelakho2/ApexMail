@@ -9,11 +9,14 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *
  * There is no real Redis in CI. Predis dispatches every command through
  * `__call`, so this fake intercepts exactly the commands RedisStorage sends
- * (get, set, del, eval, expire) and emulates the Lua scripts' semantics:
+ * (get, set, del, eval, expire, exists) and emulates the Lua scripts'
+ * semantics:
  *
  *  - GETDEL script: return-and-delete (atomic single-use).
- *  - INCR script: per-key counter with cap enforcement, DECR on overflow,
- *    and TTL set on first increment.
+ *  - INCR script: existence-aware per-key counter — the challenge key
+ *    (KEYS[1]) must exist, else -1 (no record, no key created); the attempt
+ *    key (KEYS[2]) is INCR'd with cap enforcement and TTL on first
+ *    increment; the counter is left incremented when the cap is exceeded.
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
  * assert on the Redis commands issued (Lua usage, EX expiration, etc.).
@@ -43,6 +46,7 @@ final class FakePredisClient extends \Predis\Client
             'SET' => $this->fakeSet($arguments),
             'DEL' => $this->fakeDel($arguments),
             'EXPIRE' => 1,
+            'EXISTS' => isset($this->store[(string) $arguments[0]]) ? 1 : 0,
             'EVAL' => $this->fakeEval($arguments),
             default => null,
         };
@@ -95,22 +99,27 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, "redis.call('INCR'")) {
-            $key = (string) $keys[0];
+            // Emulates the existence-aware INCR script: KEYS[1] = challenge
+            // key, KEYS[2] = attempt counter key.
+            $challengeKey = (string) $keys[0];
+            $attemptKey = (string) $keys[1];
+            if (!isset($this->store[$challengeKey])) {
+                return -1;
+            }
             $max = (int) $rest[0];
             $ttl = (int) ($rest[1] ?? 0);
-            $next = (int) ($this->store[$key] ?? 0) + 1;
+            $next = (int) ($this->store[$attemptKey] ?? 0) + 1;
+            $this->store[$attemptKey] = (string) $next;
             if ($next > $max) {
-                // Mirrors the Lua DECR-on-overflow.
-                $this->store[$key] = (string) ($next - 1);
-
-                return 0;
+                // Mirrors the Lua script: the counter is left incremented
+                // (no DECR) and the cap rejection is signalled.
+                return 1;
             }
-            $this->store[$key] = (string) $next;
             if ($next === 1) {
-                $this->expirations[$key] = $ttl;
+                $this->expirations[$attemptKey] = $ttl;
             }
 
-            return 1;
+            return 0;
         }
 
         return null;

@@ -22,6 +22,9 @@ use KiwiCaptcha\StorageInterface;
  * TTL as the key expiration. Attempt counters are stored on a separate key
  * (`<prefix><nonce>:attempts`) incremented atomically in Lua, with an
  * expiration set on first increment so stale counters cannot accumulate.
+ * The Lua script is existence-aware: the counter key is only created when
+ * the challenge record itself exists, so random/fake nonces never litter
+ * Redis with 1h-TTL keys.
  */
 final class RedisStorage implements StorageInterface
 {
@@ -36,23 +39,30 @@ final class RedisStorage implements StorageInterface
     private const ATTEMPTS_TTL_SECS = 3600;
 
     /**
-     * INCR the per-nonce counter; set the TTL on first increment; DECR back
-     * when the cap is exceeded so the counter always reflects live attempts.
+     * Existence-aware attempt counting: the challenge key must exist before
+     * the counter is touched, so random/fake nonces never create Redis keys
+     * (they previously left 1h-TTL counter keys behind on every submit).
      *
-     * KEYS[1]  = attempt counter key
+     * KEYS[1]  = challenge key (<prefix><nonce>)
+     * KEYS[2]  = attempt counter key (<prefix><nonce>:attempts)
      * ARGV[1]  = maxAttempts
      * ARGV[2]  = TTL in seconds
+     *
+     * Returns: -1 = no challenge record (counter untouched, no key created);
+     *           1 = cap exceeded (counter left incremented); 0 = recorded.
      */
     private const INCREMENT_SCRIPT = <<<'LUA'
-local n = redis.call('INCR', KEYS[1])
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return -1
+end
+local n = redis.call('INCR', KEYS[2])
 if n == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[2])
+    redis.call('EXPIRE', KEYS[2], ARGV[2])
 end
 if n > tonumber(ARGV[1]) then
-    redis.call('DECR', KEYS[1])
-    return 0
+    return 1
 end
-return 1
+return 0
 LUA;
 
     private const GETDEL_SCRIPT = 'return redis.call("GETDEL", KEYS[1])';
@@ -118,11 +128,18 @@ LUA;
     {
         $result = $this->eval(
             self::INCREMENT_SCRIPT,
-            [$this->prefix.$nonce.self::ATTEMPTS_SUFFIX],
+            [
+                $this->prefix.$nonce,
+                $this->prefix.$nonce.self::ATTEMPTS_SUFFIX,
+            ],
             [(string) $maxAttempts, (string) self::ATTEMPTS_TTL_SECS],
         );
 
-        return (bool) $result;
+        // -1: no challenge record exists — the counter was NOT incremented
+        // and no key was created. Not a cap rejection: return true so the
+        // verifier proceeds to consume(), which returns null and fails with
+        // RecordNotFound — the same outcome as before, minus the key litter.
+        return $result !== 1;
     }
 
     /**

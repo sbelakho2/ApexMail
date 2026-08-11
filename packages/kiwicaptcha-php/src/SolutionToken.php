@@ -47,12 +47,20 @@ final class SolutionToken
      */
     public static function decode(string $raw): self
     {
+        // Early size cap: legitimately encoded tokens are a few hundred bytes;
+        // anything larger is an abuse probe, not a solution.
+        if (\strlen($raw) > 32_768) {
+            throw DecodeError::malformed();
+        }
+
         $plain = base64_decode(trim($raw), true);
         if ($plain === false) {
             throw DecodeError::invalidBase64();
         }
         $plain = (string) $plain;
-        if (!mb_check_encoding($plain, 'UTF-8')) {
+        // PCRE is always available in PHP 8.1 (no undeclared mbstring
+        // dependency): /u makes the match fail on invalid UTF-8.
+        if (preg_match('//u', $plain) !== 1) {
             throw DecodeError::invalidUtf8();
         }
 
@@ -61,6 +69,13 @@ final class SolutionToken
             throw DecodeError::malformed();
         }
         [$nonce, $counterStr, $durationStr, $telemetryStr] = $parts;
+
+        // The nonce is base64(32 random bytes): exactly 44 chars, standard
+        // alphabet with one padding '='. Anything else cannot come from
+        // Issuer::issue().
+        if (\strlen($nonce) !== 44 || preg_match('/^[A-Za-z0-9+\/]{43}=$/', $nonce) !== 1) {
+            throw DecodeError::malformed();
+        }
 
         // Rust's `u64::from_str` accepts leading zeros ("007" -> 7) and
         // rejects empty/"+1"/"1.5". ctype_digit mirrors that exactly.

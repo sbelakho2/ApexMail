@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Removed
+- Bundled Symfony layer (`KiwiCaptcha\Symfony` namespace, widget Twig
+  template, `tests/Symfony`, and the framework-specific composer dev
+  dependencies). The core is now framework-neutral; Symfony integrations use
+  the standalone `bel-consulting/kiwicaptcha-symfony` bundle.
+
 ## [1.0.0] — 2026-08-10
 
 ### Added

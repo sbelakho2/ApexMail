@@ -8,9 +8,9 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Storage\Psr6Storage;
+use KiwiCaptcha\Tests\Fixtures\ArrayPool;
 use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
-use Symfony\Component\Cache\Adapter\ArrayAdapter;
 
 /**
  * Psr6Storage behaviour, including the regression test for the broken
@@ -39,9 +39,9 @@ final class Psr6StorageTest extends TestCase
         );
     }
 
-    private function makePool(): ArrayAdapter
+    private function makePool(): ArrayPool
     {
-        return new ArrayAdapter();
+        return new ArrayPool();
     }
 
     public function testStoreThenConsumeReturnsRecord(): void

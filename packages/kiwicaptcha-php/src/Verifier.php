@@ -18,9 +18,13 @@ namespace KiwiCaptcha;
  *   2. TTL: now < expires_at.
  *   3. Scope: challenge scope matches the expected flow.
  *   4. Minimum duration: measured SERVER-SIDE from the record's issued_at_ns
- *      to the verification timestamp — the client-reported duration can no
- *      longer be forged to bypass the floor. Records without issued_at_ns
- *      (pre-upgrade) fall back to the legacy client-duration check.
+ *      (epoch microseconds) to the verification receipt time — the
+ *      client-reported duration can no longer be forged to bypass the floor.
+ *      Records without issued_at_ns (pre-upgrade) fall back to the legacy
+ *      client-duration check. Host clock skew up to SKEW_TOLERANCE_US is
+ *      absorbed (the floor check is skipped, the PoW check still applies);
+ *      a receipt time that precedes issuance beyond the tolerance is
+ *      impossible and rejected as TooFast.
  *   5. Telemetry (optional, opt-in): when enforceTelemetry is set, the
  *      client-controlled telemetry is scored and bot signals rejected.
  *   6. Re-derive the hash (SHA-256 or Argon2id per the record's algorithm)
@@ -28,6 +32,21 @@ namespace KiwiCaptcha;
  */
 final class Verifier
 {
+    /**
+     * Host-clock skew tolerance for the server-measured minimum-duration
+     * check, in MICROSECONDS.
+     *
+     * issued_at_ns is a wall-clock timestamp written by whichever host
+     * issued the challenge; verification may run on a different host whose
+     * clock is slightly behind. A receipt time that precedes issuance by
+     * less than the tolerance is therefore treated as unmeasurable elapsed
+     * time (the floor check is skipped for that verification — the PoW
+     * check still applies), while a receipt time preceding issuance by
+     * MORE than the tolerance is physically impossible and rejected as
+     * TooFast. Hosts should be NTP-synced; 5s of skew is a generous bound.
+     */
+    private const SKEW_TOLERANCE_US = 5_000_000;
+
     /**
      * @var \Closure|null clock override for tests
      */
@@ -43,8 +62,9 @@ final class Verifier
      * @param string      $secretKey       HMAC secret key
      * @param string|null $expectedScope   required challenge scope (null = any)
      * @param string|null $clientIp        client IP for the optional IP binding
-     * @param int|null    $nowNs           server receipt time in nanoseconds
-     *                                     (defaults to hrtime(true)); used for
+     * @param int|null    $nowNs           server receipt time in epoch
+     *                                     MICROSECONDS (defaults to
+     *                                     microtime(true) * 1e6); used for
      *                                     the server-measured minimum-duration
      *                                     check. Test hook.
      * @param bool        $enforceTelemetry when true, bot-signal telemetry is
@@ -119,11 +139,11 @@ final class Verifier
             }
         }
 
-        // 3. Minimum duration, measured on the SERVER: elapsed_ns is the gap
-        //    between the record's high-resolution issuance timestamp and the
-        //    verification timestamp. The client-reported durationMs is
-        //    forgeable, so it no longer drives the TooFast check — it is kept
-        //    only as telemetry input below.
+        // 3. Minimum duration, measured on the SERVER: elapsed_us is the gap
+        //    between the record's high-resolution issuance timestamp (epoch
+        //    microseconds) and the verification receipt time. The
+        //    client-reported durationMs is forgeable, so it no longer drives
+        //    the TooFast check — it is kept only as telemetry input below.
         //
         //    Backward compatibility: records without issued_at_ns (issued by
         //    older builds) fall back to the legacy client-duration check so
@@ -131,10 +151,27 @@ final class Verifier
         $floor = max(0, $record->minDurationMs);
         $tooFast = false;
         if ($record->issuedAtNs > 0) {
-            // hrtime(true) is already nanoseconds; no scaling (1e9 would
-            // overflow int64 within seconds of uptime).
-            $receiptNs = $nowNs ?? (int) hrtime(true);
-            $tooFast = $floor > 0 && $receiptNs - $record->issuedAtNs < $floor * 1_000_000;
+            // Epoch-microsecond domain: both values are wall clock, so the
+            // elapsed delta is comparable across hosts (unlike the per-host
+            // monotonic hrtime() domain).
+            $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
+            $elapsedUs = $receiptNs - $record->issuedAtNs;
+            if ($elapsedUs < 0) {
+                if ($elapsedUs < -self::SKEW_TOLERANCE_US) {
+                    // Receipt before issuance by more than the skew bound is
+                    // physically impossible — reject as TooFast.
+                    $tooFast = true;
+                } else {
+                    // Receipt before issuance within the skew bound: the two
+                    // hosts' clocks are slightly unsynced, so the elapsed
+                    // time cannot be measured reliably. Skip the floor check
+                    // for this verification — the proof-of-work check still
+                    // applies, so no attacker advantage is gained.
+                    $tooFast = false;
+                }
+            } else {
+                $tooFast = $floor > 0 && $elapsedUs < $floor * 1_000;
+            }
         } else {
             $tooFast = $floor > 0 && $token->durationMs < $floor;
         }
@@ -144,8 +181,10 @@ final class Verifier
 
         // 3b. Telemetry scoring (opt-in). The telemetry is client-controlled,
         //     so this is a defense-in-depth signal, not a hard gate — it only
-        //     runs when the caller explicitly opts in.
-        if ($enforceTelemetry && !empty($token->telemetry) && Telemetry::score($token->telemetry, $token->durationMs)) {
+        //     runs when the caller explicitly opts in. An EMPTY telemetry
+        //     payload ({} or []) is itself a bot signal (a real widget always
+        //     reports fields): it must not bypass strict mode.
+        if ($enforceTelemetry && (empty($token->telemetry) || Telemetry::score($token->telemetry, $token->durationMs))) {
             return VerifyOutcome::invalid(VerifyError::TelemetryRejected);
         }
 

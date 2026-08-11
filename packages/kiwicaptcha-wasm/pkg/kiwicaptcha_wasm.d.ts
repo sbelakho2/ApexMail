@@ -10,14 +10,35 @@
  * cannot dead-code-eliminate it, and so the name is stable across toolchain
  * versions.
  *
- * The returned pointer must be released with [`dealloc`].
+ * # Allocation contract
+ *
+ * The allocation is made directly through [`std::alloc`] with the layout
+ * `Layout::from_size_align(len, 8)`. The returned pointer must be released
+ * with [`dealloc`], passing the **exact same** `len` — the deallocator
+ * rebuilds the identical layout, which is what makes
+ * [`std::alloc::dealloc`] sound. (A `Vec::with_capacity`-based allocator
+ * would be unsound here: `with_capacity` only guarantees `capacity >= len`,
+ * while `Vec::from_raw_parts` requires the exact original capacity.)
+ *
+ * `len == 0` returns a dangling-but-aligned pointer (non-null, 8-byte
+ * aligned) that must never be dereferenced or passed to [`dealloc`] — no
+ * backing memory is allocated. A layout that cannot be represented
+ * (e.g. `len` beyond `isize::MAX`) panics, which is acceptable for a
+ * callers-in-process allocation this size.
+ *
+ * The JS glue passes back the exact original byte length, so the contract
+ * holds across the boundary.
  */
 export function alloc(len: number): number;
 
 /**
  * Free a buffer previously returned by [`alloc`].
  *
- * `len` must match the allocation size exactly (it is the Vec capacity).
+ * `len` must match the allocation size **exactly** (it is the length passed
+ * to [`alloc`]); the same `Layout::from_size_align(len, 8)` is rebuilt so
+ * the deallocation is sound. Null pointers and zero-length requests are
+ * no-ops (nothing was allocated for them).
+ *
  * Safety: the caller must pass a pointer/len produced by [`alloc`] and must
  * not use the pointer afterwards.
  */

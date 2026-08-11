@@ -74,6 +74,7 @@ final class ChallengeFlowTest extends TestCase
         // Issue
         $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
         $challenge = json_decode((string) $controller->challenge($request)->getContent(), true);
+        $this->waitOutMinDuration((float) $challenge['minDurationMs']);
 
         // Solve in pure PHP (8 bits — fast)
         $counter = 0;
@@ -128,6 +129,7 @@ final class ChallengeFlowTest extends TestCase
 
         $challenge = $issuer->issue('login', '198.51.100.7');
         self::assertSame('argon2id', $challenge->algorithm->value);
+        $this->waitOutMinDuration((float) $challenge->minDurationMs);
 
         // Solve via libsodium (same parameters as the verifier)
         $counter = 0;
@@ -147,6 +149,16 @@ final class ChallengeFlowTest extends TestCase
         $token = \KiwiCaptcha\SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
         $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
+    }
+
+    /**
+     * The core enforces the minimum solve duration with a server-measured
+     * clock; tests issue and verify in the same process, so wait out the
+     * floor before submitting.
+     */
+    private function waitOutMinDuration(float $minDurationMs): void
+    {
+        usleep(((int) $minDurationMs + 10) * 1000);
     }
 
     public function testWrongSecretKeyRejected(): void

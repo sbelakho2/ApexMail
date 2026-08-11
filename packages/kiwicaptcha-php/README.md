@@ -1,6 +1,6 @@
-# KiwiCaptcha PHP SDK (Symfony bundle)
+# KiwiCaptcha PHP SDK
 
-Privacy-preserving proof-of-work anti-abuse protection with first-party behavioral heuristics as a supplementary signal, for PHP 8.1+ and Symfony 6.4/7.x. No third-party services, no third-party requests, no third-party tracking, no iframes — the widget is an inline script that solves a SHA-256 (or memory-hard Argon2id) proof-of-work via an embedded WASM solver with a pure-JS fallback.
+Privacy-preserving proof-of-work anti-abuse protection with first-party behavioral heuristics as a supplementary signal, for PHP 8.1+. No third-party services, no third-party requests, no third-party tracking, no iframes — the widget is an inline script that solves a SHA-256 (or memory-hard Argon2id) proof-of-work via an embedded WASM solver with a pure-JS fallback. This package is the **framework-neutral core**; the Symfony integration lives in the separate [`bel-consulting/kiwicaptcha-symfony`](packages/kiwicaptcha/integrations/symfony/README.md) bundle.
 
 **KiwiCaptcha is not a reliable human-vs-bot discriminator.** A human never solves the challenge — their CPU does, and a bot's CPU can do the same work. The core value is economic: every signup/login/reset/scraping attempt carries a real, tunable computational cost, making mass abuse uneconomical. Browser behavioral telemetry is a **supplement, not the security boundary** — it is client-controlled and forgeable.
 
@@ -27,9 +27,17 @@ Byte-for-byte compatible with the reference implementation in
   not a guarantee — IPs change behind NAT/proxies and operators can disable
   the check.
 - minimum solve duration: enforced **server-side**, measured from challenge
-  issuance to verification receipt (high-resolution issuance timestamp vs
-  server receipt time, passed as `nowNs`). The client-reported duration is
-  forgeable and used only as telemetry.
+  issuance to verification receipt. Server timing uses **wall-clock epoch
+  microseconds** (`issuedAtNs` in the record and `nowNs` in
+  `Verifier::verify()`, both `microtime(true) * 1_000_000` truncated) so the
+  delta is comparable across hosts — `hrtime()` is **never persisted**
+  (monotonic clocks are per-host and would break verification between
+  machines). Hosts should be NTP-synced; a 5-second clock-skew tolerance
+  (`Verifier::SKEW_TOLERANCE_US`) absorbs slightly unsynced hosts (the
+  duration floor is skipped for that verification, the PoW check still
+  applies), and a receipt time preceding issuance beyond the tolerance is
+  rejected as TooFast. The client-reported duration is forgeable and used
+  only as telemetry.
 - single-use: verification consumes the challenge; per-nonce attempt caps
   (`maxAttempts`) bound the cost of wrong candidates. Strict single-use under
   concurrency requires an atomic consume (`RedisStorage`, Redis `GETDEL`,
@@ -45,7 +53,23 @@ drift apart.
 composer require kiwicaptcha/kiwicaptcha-php
 ```
 
-If you do not use Symfony, the core works standalone:
+If you use Symfony, the core works through the standalone bundle:
+
+```bash
+composer require bel-consulting/kiwicaptcha-symfony
+```
+
+which registers in `config/bundles.php`:
+
+```php
+BelConsulting\KiwiCaptchaBundle\KiwiCaptchaBundle::class => ['all' => true],
+```
+
+and provides the Twig widget (`kiwi_captcha_widget`), the `KiwiCaptchaType`
+form field, the `KiwiCaptcha` validator constraint, and the
+`POST /kiwi-captcha/challenge` endpoint — see its
+[README](packages/kiwicaptcha/integrations/symfony/README.md) for
+configuration. Without Symfony, use the core directly:
 
 ```php
 use KiwiCaptcha\Config;
@@ -87,122 +111,26 @@ $outcome = $verifier->verify(
     clientIp: $clientIp,           // IP binding (null disables the check)
     enforceTelemetry: true,        // reject on hard bot signals
     maxAttempts: 20,               // per-nonce attempt cap
-    nowNs: hrtime(true),           // high-resolution server receipt time
+    nowNs: (int) (microtime(true) * 1_000_000), // epoch-µs receipt time (default)
 );
 if ($outcome->isOk()) { /* allow */ }
 ```
 
-## Symfony setup
+## Symfony integration
 
-### 1. Register the bundle
+The Symfony integration is **not bundled in this package** — it lives in the
+separate [`bel-consulting/kiwicaptcha-symfony`](packages/kiwicaptcha/integrations/symfony/README.md)
+bundle, which depends on this core via Composer. It provides:
 
-`config/bundles.php`:
+- the Twig widget (`kiwi_captcha_widget`),
+- the `KiwiCaptchaType` form field,
+- the `KiwiCaptcha` validator constraint,
+- the `POST /kiwi-captcha/challenge` endpoint (auto-registered, prefix
+  configurable via `route_prefix`),
+- production hardening: per-IP rate limiting of challenge issuance and an
+  Argon2id verification concurrency cap.
 
-```php
-return [
-    // ...
-    KiwiCaptcha\Symfony\KiwiCaptchaBundle::class => ['all' => true],
-];
-```
-
-### 2. Configure
-
-`config/packages/kiwicaptcha.yaml`:
-
-```yaml
-kiwicaptcha:
-    secret: '%env(KIWI_SECRET_KEY)%'   # min 16 bytes
-    algorithm: sha256                  # sha256 | argon2id
-    difficulty_bits: 20                # SHA-256 leading zero bits
-    argon_m_kib: 0                     # Argon2id memory (KiB); 0 = sha256 only
-    argon_t: 3                         # Argon2id requires t >= 3 and p == 1
-    argon_p: 1
-    challenge_ttl_secs: 120
-    # Production requires a shared storage (Redis). The bundle fails fast if
-    # ArrayStorage is configured outside the test environment.
-    # storage: kiwicaptcha.storage.redis   # atomic single-use via GETDEL
-    # route_prefix: /kiwi-captcha
-```
-
-> `KIWI_SECRET_KEY` is the same key you would use with the Rust implementation,
-> so a PHP app and a Rust service can verify each other's challenges.
-
-### 3. Render the widget
-
-The bundle registers a Twig function:
-
-```twig
-{{ kiwi_captcha_widget('login') }}
-```
-
-Pass a nonce to emit CSP-safe markup:
-
-```twig
-{{ kiwi_captcha_widget('login', null, csp_nonce('script')) }}
-```
-
-With a nonce, the emitted `<style>` and `<script>` tags carry `nonce="..."`;
-without one the widget still works under CSP that allows `'unsafe-inline'`,
-or where the application post-processes the HTML (as ApexMail does).
-
-It renders the container, inlines the shared CSS, the embedded WASM solver,
-and the driver script, and points the widget at the bundle's challenge route.
-The driver is also exposed globally as `window.KiwiCaptcha.init/render` for
-SPA usage.
-
-### 4. Validate in a form
-
-```php
-use KiwiCaptcha\Symfony\Form\KiwiCaptchaType;
-use Symfony\Component\Form\AbstractType;
-use Symfony\Component\Form\FormBuilderInterface;
-
-final class LoginFormType extends AbstractType
-{
-    public function buildForm(FormBuilderInterface $builder, array $options): void
-    {
-        $builder
-            ->add('email')
-            ->add('password')
-            ->add('captcha', KiwiCaptchaType::class, [
-                'scope' => 'login',
-                'expected_scope' => 'login',
-                'secret_key' => $this->secretKey, // or omit to use the bundle config
-            ]);
-    }
-}
-```
-
-The type renders a hidden `kiwi__token` field and validates the solution on
-submit, attaching a field error when the captcha fails.
-
-### 5. Or use the Validator constraint
-
-```php
-use KiwiCaptcha\Symfony\Validator\KiwiCaptcha;
-
-final class LoginDto
-{
-    // ...
-    #[KiwiCaptcha(scope: 'login')]
-    public ?string $kiwiToken = null;
-}
-```
-
-### 6. Challenge endpoint
-
-The bundle ships `POST /kiwi-captcha/challenge` (configurable via
-`route_prefix`). The widget fetches it to obtain a challenge. If you prefer
-your own route, set `data-kiwi-endpoint` on the widget container and point it
-anywhere you like.
-
-**Trusted proxies.** Both the challenge endpoint and the verifier/form use
-`Request::getClientIp()` (the same source), so configure Symfony's
-`trusted_proxies`/`trusted_headers` consistently (e.g. in the front controller
-or `framework.trusted_proxies`) when running behind a reverse proxy — that is
-also the IP the challenge binds to when `bind_ip` is enabled. Never override
-this with `$_SERVER['REMOTE_ADDR']` in the application, or IP binding will
-mismatch the issued challenge.
+This package itself is framework-neutral: it requires only PHP + libsodium.
 
 ## Storage
 
@@ -220,22 +148,10 @@ In production, use `RedisStorage` (or any `StorageInterface` backed by an
 atomic `GETDEL`-style consume) so challenges are shared across workers and
 consumed exactly once.
 
-The Symfony bundle fails fast: if `storage` is left at the default
-`kiwicaptcha.storage.array` in any environment other than `test`/`dev`
-(`kernel.environment` or `APP_ENV`), the container throws a `LogicException`
-with this guidance instead of silently losing every challenge between
-requests under PHP-FPM.
-
-## Widget assets
-
-The widget markup/CSS/JS is a **single source of truth** in the Rust
-repository. After updating it, re-sync the bundled copies:
-
-```bash
-bin/sync-assets.sh
-```
-
-The PHP tests fail loudly if the assets are missing.
+The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) fails fast: if
+`storage` is left at the in-memory default in any environment other than
+`test`/`dev`, the container throws a `LogicException` with this guidance
+instead of silently losing every challenge between requests under PHP-FPM.
 
 ## Testing
 
@@ -244,11 +160,11 @@ composer install
 vendor/bin/phpunit
 ```
 
-99 tests / 219 assertions covering cross-language parity (SHA-256 + Argon2id
+102 tests / 217 assertions covering cross-language parity (SHA-256 + Argon2id
 fixtures generated by the Rust crate), token codec edge cases, replay,
-tampering, expiry, IP binding, minimum duration, the Twig runtime, and
-real-kernel integration (service wiring, widget markup, challenge endpoint,
-end-to-end validation).
+tampering, expiry, IP binding, minimum duration, clock-skew tolerance, and
+the storage adapters (Array, PSR-6, Redis). The Symfony integration is tested
+in the `bel-consulting/kiwicaptcha-symfony` package.
 
 ## Limitations
 
@@ -264,8 +180,12 @@ end-to-end validation).
    check entirely; it is a relay mitigation, not a guarantee.
 4. **Server-side timing needs a trusted clock.** The minimum-duration floor is
    measured by your server, so a client cannot buy its way out of it — but
-   the server clock must be correct. An attacker with fast requests still
-   pays the full PoW cost on every attempt.
+   the server clock must be correct. Timing uses wall-clock epoch
+   microseconds (persisted in the challenge record), so all hosts involved
+   must be NTP-synced; a 5s skew tolerance (`Verifier::SKEW_TOLERANCE_US`)
+   keeps slightly unsynced hosts from failing verification, and the
+   proof-of-work check is never skipped. An attacker with fast requests
+   still pays the full PoW cost on every attempt.
 5. **The WASM solver and its JS fallback are open source.** An attacker can
    always write their own solver (or reuse the source). The value is the
    **cost** per attempt, not the impossibility of solving.

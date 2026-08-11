@@ -187,6 +187,34 @@ final class KernelIntegrationTest extends TestCase
         self::assertSame(KiwiCaptcha::NOT_SOLVED_ERROR, $violations[0]->getCode());
     }
 
+    /**
+     * P2 scope/expected_scope consistency: the form's scope option drives the
+     * constraint's expected scope, so a token minted for a 'signup' challenge
+     * must be rejected by a form that declares scope 'login' (and vice versa).
+     */
+    public function testFormScopeIsEnforcedAgainstChallengeScope(): void
+    {
+        $issuer = $this->container()->get('kiwi_captcha.issuer');
+        $challenge = $issuer->issue('signup', '198.51.100.7');
+        $this->waitOutMinDuration($challenge);
+
+        $factory = $this->container()->get('form.factory');
+        $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['scope' => 'login']);
+        $form->submit($this->solveToken($challenge));
+
+        self::assertFalse($form->isValid(), 'a signup-scoped token must not satisfy a login-scoped form');
+        $errors = $this->describe($form->getErrors(true));
+        self::assertStringContainsString('security check failed', $errors);
+
+        // The matching scope still passes (the rejection above is scope-driven,
+        // not token corruption).
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $this->waitOutMinDuration($challenge);
+        $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['scope' => 'login']);
+        $form->submit($this->solveToken($challenge));
+        self::assertTrue($form->isValid(), $this->describe($form->getErrors(true)));
+    }
+
     private function describe(\Traversable $errors): string
     {
         $messages = [];

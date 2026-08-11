@@ -241,7 +241,14 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 }
 
 /// Sign the payload with the secret key, returning a hex HMAC tag.
+///
+/// The secret key must be at least 16 bytes (the same minimum the PHP
+/// implementation enforces); 32 random bytes is the recommended size. Shorter
+/// keys are rejected with [`SignError::KeyTooShort`] before any hashing.
 pub fn sign_payload(payload: &ChallengePayload, secret_key: &str) -> Result<String, SignError> {
+    if secret_key.len() < 16 {
+        return Err(SignError::KeyTooShort);
+    }
     let mut mac =
         HmacSha256::new_from_slice(secret_key.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
     mac.update(canonical_signing_input(payload).as_bytes());
@@ -249,28 +256,29 @@ pub fn sign_payload(payload: &ChallengePayload, secret_key: &str) -> Result<Stri
 }
 
 /// Verify that a signature matches the payload under the given key.
+///
+/// The key minimum from [`sign_payload`] (16 bytes) applies here too — a key
+/// too short to have ever signed a valid challenge is rejected up front. The
+/// comparison itself is done in constant time: the hex signature is decoded
+/// to bytes and checked with `Mac::verify_slice`, which never short-circuits
+/// on a mismatching prefix and processes the full tag regardless of the
+/// inputs' relationship to the expected value.
 pub fn verify_signature(
     payload: &ChallengePayload,
     signature: &str,
     secret_key: &str,
 ) -> Result<bool, SignError> {
-    let expected = sign_payload(payload, secret_key)?;
-    Ok(hmac_ct_eq(&expected, signature))
-}
-
-/// Constant-time string comparison. Even if lengths differ, the comparison
-/// still iterates over `min(a.len(), b.len())` bytes using XOR accumulation
-/// so the timing is proportional to the shorter input — not short-circuited.
-fn hmac_ct_eq(a: &str, b: &str) -> bool {
-    let mut diff: u8 = 0;
-    let min_len = a.len().min(b.len());
-    for (x, y) in a.bytes().take(min_len).zip(b.bytes().take(min_len)) {
-        diff |= x ^ y;
+    if secret_key.len() < 16 {
+        return Err(SignError::KeyTooShort);
     }
-    if a.len() != b.len() {
-        diff |= 1;
-    }
-    diff == 0
+    let signature_bytes = match hex::decode(signature) {
+        Some(bytes) => bytes,
+        None => return Ok(false), // malformed signature can never match
+    };
+    let mut mac =
+        HmacSha256::new_from_slice(secret_key.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
+    mac.update(canonical_signing_input(payload).as_bytes());
+    Ok(mac.verify_slice(&signature_bytes).is_ok())
 }
 
 /// The result of issuing a challenge: the client-facing [`IssuedChallenge`] and
@@ -376,8 +384,7 @@ impl ChallengeCache {
         // retain closure while `self.entries` is borrowed mutably (E0502 on
         // newer rustc versions).
         let ttl = self.ttl;
-        self.entries
-            .retain(|_, (_, ts)| ts.elapsed() < ttl);
+        self.entries.retain(|_, (_, ts)| ts.elapsed() < ttl);
     }
 
     /// Number of cached entries (for tests/metrics).
@@ -399,14 +406,25 @@ impl Default for ChallengeCache {
 /// Issue a new challenge.
 ///
 /// - `config` — difficulty + secret key.
-/// - `scope` — the auth flow ("login", "signup", "forgot-password", etc.).
+/// - `scope` — the auth flow ("login", "signup", "forgot-password", etc.);
+///   must be 1..=128 bytes and must not contain `|` (the canonical payload
+///   separator) — anything else is rejected with [`SignError::InvalidScope`].
 /// - `client_ip` — the client's IP address (hashed before storage).
-/// - `now_unix` — current Unix timestamp (injected for testability).
+/// - `now_unix` — current Unix timestamp in seconds (injected for
+///   testability); used for the signed payload, TTL, and the client-facing
+///   challenge.
+/// - `now_ns` — high-resolution issuance timestamp in nanoseconds, used
+///   exclusively for server-side minimum-duration enforcement.
 /// - `active_solves` — current number of active solvers (for auto-tuning).
-/// Issue a new challenge. `now_unix` is the current Unix time in seconds (for
-/// the signed payload, TTL, and the client-facing challenge); `now_ns` is the
-/// high-resolution issuance timestamp in nanoseconds, used exclusively for
-/// server-side minimum-duration enforcement.
+///
+/// # Deployment note (aggregate DoS)
+///
+/// Per-nonce attempt caps ([`VerifyContext::max_attempts`]) bound repeated
+/// verification of **one** challenge; they do not bound the aggregate memory
+/// of concurrent verifications. Deployments must additionally rate-limit
+/// challenge issuance and cap concurrent Argon2id verification (e.g. a
+/// semaphore sized to the available memory), otherwise an attacker who mints
+/// many challenges can still drive unbounded aggregate memory-hard work.
 pub fn issue_challenge(
     config: &ChallengeConfig,
     scope: &str,
@@ -415,7 +433,7 @@ pub fn issue_challenge(
     now_ns: u64,
     active_solves: u64,
 ) -> Result<Issued, SignError> {
-    if scope.contains('|') {
+    if scope.is_empty() || scope.len() > 128 || scope.contains('|') {
         return Err(SignError::InvalidScope);
     }
     // 32-byte nonce.
@@ -457,7 +475,11 @@ pub fn issue_challenge(
     // The challenge string the client folds into the hash: it contains the
     // signed payload so a client cannot tamper with nonce/scope/ip/issued_at
     // without invalidating the signature.
-    let challenge = format!("{}.{}", B64.encode(canonical_signing_input(&payload)), signature);
+    let challenge = format!(
+        "{}.{}",
+        B64.encode(canonical_signing_input(&payload)),
+        signature
+    );
 
     // The prefix binds the client's counter input to this exact challenge.
     let prefix = format!("{challenge}|{salt}|");
@@ -522,9 +544,13 @@ pub fn payload_from_record(record: &ChallengeRecord) -> ChallengePayload {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignError {
-    #[error("HMAC secret key is too short")]
+    /// The HMAC secret key must be at least 16 bytes (the PHP implementation
+    /// enforces the same minimum); 32 random bytes is the recommended size.
+    #[error("HMAC secret key is too short (minimum 16 bytes; 32 random bytes recommended)")]
     KeyTooShort,
-    #[error("scope contains invalid character '|'")]
+    /// The auth scope must be 1..=128 bytes and must not contain '|' (the
+    /// canonical payload separator).
+    #[error("scope must be 1..=128 bytes and must not contain '|'")]
     InvalidScope,
     #[error("Argon2id parameters are invalid (m_kib must be >= 8 * p; for PHP/libsodium cross-verification t must be >= 3 and p == 1)")]
     InvalidArgon2Params,
@@ -539,6 +565,29 @@ mod hex {
             s.push_str(&format!("{b:02x}"));
         }
         s
+    }
+
+    /// Decode a hex string (lower- or upper-case) into bytes, or `None` if it
+    /// has an odd length or contains a non-hex character.
+    pub fn decode(s: &str) -> Option<Vec<u8>> {
+        if s.len() % 2 != 0 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(s.len() / 2);
+        let mut high = None;
+        for c in s.bytes() {
+            let nibble = match c {
+                b'0'..=b'9' => c - b'0',
+                b'a'..=b'f' => c - b'a' + 10,
+                b'A'..=b'F' => c - b'A' + 10,
+                _ => return None,
+            };
+            match high.take() {
+                Some(h) => out.push((h << 4) | nibble),
+                None => high = Some(nibble),
+            }
+        }
+        Some(out)
     }
 }
 
@@ -562,7 +611,8 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 1000000000000000, 0).unwrap();
+        let issued =
+            issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 1000000000000000, 0).unwrap();
         assert_eq!(issued.challenge.m_kib, 65_536);
         assert_eq!(issued.challenge.t, 2);
         assert_eq!(issued.challenge.p, 1);
@@ -573,7 +623,10 @@ mod tests {
         assert!(!issued.challenge.nonce.is_empty());
         // The nonce in the IssuedChallenge should match the record nonce.
         assert_eq!(issued.challenge.nonce, issued.record.nonce);
-        assert!(issued.challenge.prefix.starts_with(&issued.challenge.challenge));
+        assert!(issued
+            .challenge
+            .prefix
+            .starts_with(&issued.challenge.challenge));
         // Record expiry = issued + ttl.
         assert_eq!(issued.record.expires_at, 1_000_120);
         // IP is hashed, not stored raw.
@@ -582,25 +635,130 @@ mod tests {
 
     #[test]
     fn signatures_verify_round_trip() {
+        let key = "this-is-a-16-byte-key";
+        let payload = ChallengePayload {
+            nonce: "n".into(),
+            scope: "login".into(),
+            ip_hash: hash_ip("9.9.9.9", key),
+            issued_at: 123,
+        };
+        let sig = sign_payload(&payload, key).unwrap();
+        assert!(verify_signature(&payload, &sig, key).unwrap());
+        assert!(!verify_signature(&payload, &sig, "wrong-key-16-bytes").unwrap());
+        // Tampering with the nonce breaks the signature.
+        let mut tampered = payload.clone();
+        tampered.nonce = "x".into();
+        assert!(!verify_signature(&tampered, &sig, key).unwrap());
+    }
+
+    #[test]
+    fn short_secret_key_is_rejected_before_signing() {
         let payload = ChallengePayload {
             nonce: "n".into(),
             scope: "login".into(),
             ip_hash: hash_ip("9.9.9.9", "key"),
             issued_at: 123,
         };
-        let sig = sign_payload(&payload, "key").unwrap();
-        assert!(verify_signature(&payload, &sig, "key").unwrap());
-        assert!(!verify_signature(&payload, &sig, "wrong-key").unwrap());
-        // Tampering with the nonce breaks the signature.
-        let mut tampered = payload.clone();
-        tampered.nonce = "x".into();
-        assert!(!verify_signature(&tampered, &sig, "key").unwrap());
+        for key in ["", "x", "0123456789abcde"] {
+            // 0, 1 and 15 bytes — all below the 16-byte minimum.
+            assert!(
+                matches!(sign_payload(&payload, key), Err(SignError::KeyTooShort)),
+                "key {key:?} must be rejected"
+            );
+            assert!(
+                matches!(
+                    verify_signature(&payload, "abc", key),
+                    Err(SignError::KeyTooShort)
+                ),
+                "key {key:?} must be rejected"
+            );
+        }
+        // Exactly 16 bytes is the minimum — accepted.
+        let key16 = "0123456789abcdef";
+        assert!(sign_payload(&payload, key16).is_ok());
+        // 32 random bytes (recommended) — accepted.
+        let key32 = "0123456789abcdef0123456789abcdef";
+        assert!(sign_payload(&payload, key32).is_ok());
+    }
+
+    #[test]
+    fn verify_signature_rejects_malformed_hex() {
+        let payload = ChallengePayload {
+            nonce: "n".into(),
+            scope: "login".into(),
+            ip_hash: hash_ip("9.9.9.9", "key"),
+            issued_at: 123,
+        };
+        // A valid tag must verify…
+        let sig = sign_payload(&payload, "this-is-a-16-byte-key").unwrap();
+        assert!(verify_signature(&payload, &sig, "this-is-a-16-byte-key").unwrap());
+        // …and an undecodable "signature" must be a mismatch, never an error.
+        assert_eq!(
+            verify_signature(&payload, "not-hex!", "this-is-a-16-byte-key").unwrap(),
+            false
+        );
+        assert_eq!(
+            verify_signature(&payload, "abc", "this-is-a-16-byte-key").unwrap(),
+            false
+        );
+    }
+
+    #[test]
+    fn hex_decode_round_trips() {
+        assert_eq!(hex::decode("").unwrap(), Vec::<u8>::new());
+        assert_eq!(hex::decode("00ff").unwrap(), vec![0x00, 0xff]);
+        assert_eq!(hex::decode("00FF").unwrap(), vec![0x00, 0xff]);
+        assert_eq!(
+            hex::decode(&hex::encode(b"kiwi")).unwrap(),
+            b"kiwi".to_vec()
+        );
+        assert!(hex::decode("0").is_none(), "odd length must fail");
+        assert!(hex::decode("0g").is_none(), "non-hex char must fail");
+    }
+
+    #[test]
+    fn scope_length_ceiling_is_enforced() {
+        let config = ChallengeConfig {
+            secret_key: "0123456789abcdef0123456789abcdef".into(),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 65_536,
+            t: 2,
+            p: 1,
+            target_bits: 18,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
+            ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
+        };
+        // Empty scope and 129-byte scope must be rejected…
+        assert!(
+            matches!(
+                issue_challenge(&config, "", "1.2.3.4", 1, 1_000_000_000, 0),
+                Err(SignError::InvalidScope)
+            ),
+            "empty scope must be rejected"
+        );
+        let long_scope = "s".repeat(129);
+        assert!(
+            matches!(
+                issue_challenge(&config, &long_scope, "1.2.3.4", 1, 1_000_000_000, 0),
+                Err(SignError::InvalidScope)
+            ),
+            "129-byte scope must be rejected"
+        );
+        // …while the 128-byte boundary is accepted.
+        let boundary_scope = "s".repeat(128);
+        assert!(issue_challenge(&config, &boundary_scope, "1.2.3.4", 1, 1_000_000_000, 0).is_ok());
+        // The '|' separator is still rejected within the allowed length.
+        assert!(issue_challenge(&config, "login|admin", "1.2.3.4", 1, 1_000_000_000, 0).is_err());
     }
 
     #[test]
     fn each_challenge_has_unique_nonce() {
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -621,7 +779,7 @@ mod tests {
     #[test]
     fn auto_tune_adjusts_target_bits() {
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -649,7 +807,7 @@ mod tests {
     #[test]
     fn auto_tune_never_exceeds_solver_cap_even_without_tuning() {
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -672,7 +830,7 @@ mod tests {
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_millis(20));
         let issued = issue_challenge(
             &ChallengeConfig {
-                secret_key: "test-key".into(),
+                secret_key: "test-key-16-bytes!".into(),
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 65_536,
                 argon2_target_bits: 8,
@@ -707,7 +865,7 @@ mod tests {
     fn challenge_cache_put_prunes_expired_entries() {
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_millis(20));
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -733,7 +891,7 @@ mod tests {
     #[test]
     fn challenge_cache_hit_returns_same_challenge() {
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -757,7 +915,7 @@ mod tests {
     #[test]
     fn challenge_cache_miss_on_different_scope() {
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,

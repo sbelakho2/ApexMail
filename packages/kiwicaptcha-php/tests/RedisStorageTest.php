@@ -173,21 +173,25 @@ final class RedisStorageTest extends TestCase
     {
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
+        // The challenge record must exist for the counter to be created.
+        $storage->store($this->makeRecord('n1'));
 
         self::assertTrue($storage->incrementAttempts('n1', 2));
         self::assertSame(1, $storage->attemptsUsed('n1'));
         self::assertTrue($storage->incrementAttempts('n1', 2));
         self::assertSame(2, $storage->attemptsUsed('n1'));
-        // Third attempt must be rejected and the counter left at the cap
-        // (the Lua script DECRs on overflow).
+        // Third attempt must be rejected; the counter is left incremented
+        // (the Lua script no longer DECRs on overflow).
         self::assertFalse($storage->incrementAttempts('n1', 2));
-        self::assertSame(2, $storage->attemptsUsed('n1'));
+        self::assertSame(3, $storage->attemptsUsed('n1'));
     }
 
     public function testAttemptCounterIsPerNonce(): void
     {
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord('a'));
+        $storage->store($this->makeRecord('b'));
 
         self::assertTrue($storage->incrementAttempts('a', 5));
         self::assertTrue($storage->incrementAttempts('b', 5));
@@ -196,20 +200,54 @@ final class RedisStorageTest extends TestCase
         self::assertSame(1, $storage->attemptsUsed('b'));
     }
 
+    public function testIncrementAttemptsOnMissingChallengeDoesNotCreateKeys(): void
+    {
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+
+        // No challenge record for 'ghost': the Lua script must return -1
+        // without touching any key. The method treats that as "not blocked"
+        // so the verifier proceeds to consume(), which returns null →
+        // RecordNotFound (the same outcome as before, minus the key litter).
+        self::assertTrue($storage->incrementAttempts('ghost', 3));
+        self::assertSame(0, $storage->attemptsUsed('ghost'), 'no counter may be created for a fake nonce');
+        self::assertNull($storage->consume('ghost'));
+
+        // Assert via the fake's key set: NO keys exist for the fake nonce.
+        self::assertArrayNotHasKey('kiwicaptcha:ghost', $client->store);
+        self::assertArrayNotHasKey('kiwicaptcha:ghost:attempts', $client->store);
+        self::assertArrayNotHasKey('kiwicaptcha:ghost:attempts', $client->expirations);
+
+        // End-to-end: verify() with a fake nonce and maxAttempts fails with
+        // RecordNotFound, not TooManyAttempts.
+        $fakeToken = \KiwiCaptcha\SolutionToken::create(
+            base64_encode(str_repeat('x', 32)),
+            1,
+            100,
+            ['wd' => false],
+        )->encode();
+        $outcome = (new Verifier($storage))->verify($fakeToken, Vectors::SECRET, null, null, maxAttempts: 3);
+        self::assertSame(VerifyError::RecordNotFound, $outcome->error);
+    }
+
     public function testIncrementAttemptsUsesLuaWithCapAndTtl(): void
     {
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord('n1'));
 
         $storage->incrementAttempts('n1', 3);
 
         $evals = array_filter($client->calls, fn ($c) => $c[0] === 'EVAL');
         self::assertNotEmpty($evals);
         $eval = array_values($evals)[0][1];
+        self::assertStringContainsString("redis.call('EXISTS'", (string) $eval[0]);
         self::assertStringContainsString("redis.call('INCR'", (string) $eval[0]);
-        self::assertSame(1, (int) $eval[1]);
-        self::assertSame('kiwicaptcha:n1:attempts', $eval[2]);
-        self::assertSame('3', $eval[3]);
+        // Two KEYS: challenge key + attempt counter key.
+        self::assertSame(2, (int) $eval[1]);
+        self::assertSame('kiwicaptcha:n1', $eval[2]);
+        self::assertSame('kiwicaptcha:n1:attempts', $eval[3]);
+        self::assertSame('3', $eval[4]);
         self::assertGreaterThanOrEqual(1, $client->expirations['kiwicaptcha:n1:attempts']);
     }
 
@@ -247,10 +285,12 @@ final class RedisStorageTest extends TestCase
         $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', maxAttempts: 1);
         self::assertTrue($first->isOk(), sprintf('first verify failed: %s', $first->code()));
 
-        // The record is consumed AND the atomic counter rejects the second
-        // attempt with a distinguishable error.
+        // The record is consumed by the first verify, so the second attempt
+        // fails the Lua EXISTS gate (-1 = no challenge record): no counter
+        // key is created for the replay, and consume() yields
+        // RecordNotFound.
         $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', maxAttempts: 1);
-        self::assertSame(VerifyError::TooManyAttempts, $second->error);
+        self::assertSame(VerifyError::RecordNotFound, $second->error);
         self::assertSame(1, $storage->attemptsUsed($challenge->nonce));
     }
 }

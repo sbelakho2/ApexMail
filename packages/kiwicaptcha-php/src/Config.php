@@ -18,13 +18,25 @@ namespace KiwiCaptcha;
 final class Config
 {
     /**
+     * Hard ceiling for SHA-256 target bits. The browser/wasm solver caps at
+     * 20 bits (MAX_SHA_HASHES = 5,000,000; Rust SOLVER_MAX_TARGET_BITS = 20;
+     * ~99.1% solve probability at 20, ~25.9% at 24), so higher difficulties
+     * would be unsolvable for legit clients and are rejected at
+     * construction.
+     */
+    public const MAX_SHA_TARGET_BITS = 20;
+
+    /** Ceiling for Argon2id target bits (browser-solvable range). */
+    public const MAX_ARGON2_TARGET_BITS = 10;
+
+    /**
      * @param string   $secretKey           HMAC secret key (min 16 bytes recommended).
      * @param PoWAlgorithm $algorithm       Proof-of-work algorithm to issue.
      * @param int      $mKib                Argon2id memory cost in KiB (0 for SHA-256).
      * @param int      $t                   Argon2id time cost.
      * @param int      $p                   Argon2id parallelism.
-     * @param int      $targetBits          Leading zero bits for SHA-256 challenges.
-     * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges.
+     * @param int      $targetBits          Leading zero bits for SHA-256 challenges (0..MAX_SHA_TARGET_BITS).
+     * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges (1..MAX_ARGON2_TARGET_BITS).
      * @param int      $ttlSecs             Challenge lifetime in seconds.
      * @param int|null $minDurationMs       Minimum solve duration (null = derive from difficulty).
      * @param int      $solverMaxHashes     Solver cap used by the widget (informational).
@@ -58,12 +70,14 @@ final class Config
         if ($mKib > 65536) {
             throw new \InvalidArgumentException('Argon2id m_kib exceeds the browser-solvable ceiling (65536)');
         }
-        if ($targetBits < 0 || $targetBits > 24) {
-            throw new \InvalidArgumentException('SHA-256 target bits must be within 0..24');
-        }
-        if ($algorithm === PoWAlgorithm::Argon2id && ($argon2TargetBits < 1 || $argon2TargetBits > 10)) {
+        if ($targetBits < 0 || $targetBits > self::MAX_SHA_TARGET_BITS) {
             throw new \InvalidArgumentException(
-                sprintf('Argon2id target bits must be within 1..10 (got %d)', $argon2TargetBits)
+                sprintf('SHA-256 target bits must be within 0..%d', self::MAX_SHA_TARGET_BITS)
+            );
+        }
+        if ($algorithm === PoWAlgorithm::Argon2id && ($argon2TargetBits < 1 || $argon2TargetBits > self::MAX_ARGON2_TARGET_BITS)) {
+            throw new \InvalidArgumentException(
+                sprintf('Argon2id target bits must be within 1..%d (got %d)', self::MAX_ARGON2_TARGET_BITS, $argon2TargetBits)
             );
         }
         if ($algorithm === PoWAlgorithm::Argon2id && $t < 3) {

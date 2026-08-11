@@ -12,6 +12,8 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -58,6 +60,15 @@ const KIWI_CHALLENGE_PREFIX: &str = "apexmail:kiwi:";
 /// used to burn unbounded server CPU/memory. The record itself is only
 /// consumed on success, so this cap is the primary cost control.
 const KIWI_MAX_VERIFY_ATTEMPTS: i64 = 20;
+
+/// Global concurrency cap for memory-hard (Argon2id) verifications.
+///
+/// Each verification re-derives the Argon2id hash with the record's m_kib
+/// (up to 64 MiB) — an attacker issuing many fresh challenges and submitting
+/// bogus counters could otherwise turn the server into an aggregate
+/// memory/CPU amplifier. Per-nonce attempt caps bound ONE challenge; this
+/// semaphore bounds ALL of them. Initialized from config on first use.
+static ARGON2_VERIFY_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 /// Atomic single-use consumption of a KiwiCaptcha challenge record.
 ///
@@ -270,6 +281,20 @@ pub async fn verify_kiwi_token(
         m_kib = record.m_kib,
         "KiwiCaptcha: calling verify_solution"
     );
+
+    // Aggregate Argon2id verification cap: bound concurrent memory-hard
+    // verifications server-wide (not just per nonce). SHA-256 verifications
+    // are cheap and not gated.
+    let argon2_permit = if record.algorithm == kiwicaptcha::PoWAlgorithm::Argon2id {
+        let semaphore = ARGON2_VERIFY_SEMAPHORE
+            .get_or_init(|| Arc::new(Semaphore::new(config.kiwi_argon2_max_concurrent as usize)))
+            .clone();
+        Some(semaphore.acquire_owned().await.map_err(|_| {
+            ApiError::Internal("CAPTCHA verification capacity exceeded".into())
+        })?)
+    } else {
+        None
+    };
 
     match kiwicaptcha::verify_solution(&mut ctx) {
         kiwicaptcha::VerifyOutcome::Valid => {

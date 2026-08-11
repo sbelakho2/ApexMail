@@ -11,6 +11,15 @@ single-use storage, SHA-256 + Argon2id proof-of-work) — the widget inlines its
 own CSS, WASM solver, and driver, so no request ever leaves your application.
 Your secret key never leaves your server.
 
+This bundle is the **only** Symfony integration of KiwiCaptcha. Earlier
+versions also bundled a Symfony layer inside `kiwicaptcha/kiwicaptcha-php`
+(the `KiwiCaptcha\Symfony` namespace); that layer has been **removed** — the
+core package is framework-neutral, and this bundle is the single source of
+truth for Symfony apps. If you previously used the bundled layer, migrate by
+requiring `bel-consulting/kiwicaptcha-symfony` and registering this bundle
+(see below); the config keys, form type, constraint, Twig function, and
+endpoint path are the same.
+
 KiwiCaptcha is anti-abuse protection, **not** a reliable human-vs-bot
 discriminator: a human never solves the challenge — their CPU does, and a
 bot's CPU can do the same work. The core value is that every
@@ -54,6 +63,22 @@ kiwi_captcha:
     # a LogicException if ArrayStorage is configured outside the test/dev
     # environment (kernel.environment or APP_ENV).
     # storage: kiwicaptcha.storage.redis    # atomic single-use via GETDEL
+
+    # ── Production hardening ──────────────────────────────────────────────
+    # Per-IP rate limit on challenge issuance (0 = disabled). Mass challenge
+    # minting is what makes aggregate verification work unbounded, so enable
+    # this in production (e.g. 10 challenges per 60 s per IP).
+    # rate_limit: 10
+    # rate_limit_window_secs: 60            # sliding window (default 60)
+    # rate_limit_cache: null                # optional PSR-6 pool service id for
+    #                                       # SHARED multi-process state (e.g. a
+    #                                       # Redis-backed Symfony Cache pool).
+    #                                       # Without it, the limiter is a
+    #                                       # per-process in-memory window.
+    # Aggregate Argon2id verification concurrency cap (default 2, per PHP
+    # process; 0 = unlimited). Each Argon2id verification allocates
+    # argon_m_kib of memory — size this to available memory.
+    # argon2_max_concurrent_verifications: 2
 ```
 
 > `KIWI_SECRET_KEY` is the same key used by the Rust implementation, so a
@@ -105,11 +130,61 @@ With a nonce, the emitted `<style>` and `<script>` tags carry `nonce="..."`;
 without one the widget still works under CSP that allows `'unsafe-inline'`,
 or where the application post-processes the HTML (as ApexMail does).
 
+**WebAssembly requires `'wasm-unsafe-eval'`** in `script-src` (CSP3) — the
+embedded WASM solver is compiled at runtime, which strict policies must
+explicitly allow: `script-src 'nonce-<nonce>' 'wasm-unsafe-eval'` plus
+`style-src 'nonce-<nonce>'`. SHA-256 mode falls back to pure JS when WASM is
+blocked; **Argon2id mode requires WASM** (no JS fallback exists for the
+memory-hard solver).
+
 ### Challenge endpoint
 
-The bundle ships `POST /kiwi-captcha/challenge` (prefix configurable), which
-issues and stores a challenge locally. The widget fetches it, solves the
-proof-of-work in the browser, and submits the token.
+The bundle ships `POST /kiwi-captcha/challenge` (prefix configurable via
+`route_prefix`), which issues and stores a challenge locally. The widget
+fetches it, solves the proof-of-work in the browser, and submits the token.
+
+**Route registration.** The route is **auto-registered**: when the bundle is
+enabled and the application has not configured `framework.router` itself, the
+extension prepends its routing resource
+(`src/Resources/config/routes.php`) as `framework.router.resource`, so the
+endpoint works out of the box on a fresh app. The path is built from the
+`route_prefix` config option by the bundle's route loader
+(`src/Routing/KiwiCaptchaRouteLoader.php`, a `routing.loader`-tagged
+`LoaderInterface` implementation) — so the configured prefix changes the
+ACTUAL route, not just the widget's requested endpoint.
+
+If your application configures `framework.router` itself (every real
+Symfony app does — e.g. the recipe's `config/routes.yaml`), the extension
+**never overrides** your router resource. Import the bundle's routes file
+manually in your routing config:
+
+```yaml
+# config/routes.yaml
+kiwi_captcha:
+    resource: '@KiwiCaptchaBundle/Resources/config/routes.php'
+```
+
+After importing (or auto-registering), the route is available at
+`path('kiwicaptcha_challenge')` and responds to `POST`.
+
+**Rate limiting.** Challenge issuance is rate-limited per client IP
+(`rate_limit` challenges per `rate_limit_window_secs` sliding window; HTTP
+429 with `{"error":{"code":"RATE_LIMITED"}}` when exceeded). By default the
+limiter keeps a per-process in-memory window (best-effort, single worker);
+for multi-worker deployments configure `rate_limit_cache` with a shared
+PSR-6 pool (e.g. a Redis-backed Symfony Cache pool). `rate_limit: 0`
+disables the limiter — the bundle defaults to disabled so existing
+deployments keep their behavior, but production should explicitly enable it.
+
+**Argon2id verification concurrency cap.** When `algorithm: argon2id`, the
+verifier is wrapped by `ThrottledVerifier` (bundle-owned, same `verify()`
+signature) enforcing `argon2_max_concurrent_verifications` (default 2)
+concurrent verifications per PHP process via an in-process semaphore
+(`src/Security/Argon2Semaphore.php`). Saturation for longer than the wait
+bound fails verification closed as a normal captcha violation (never a 500).
+Honest caveat: PHP-FPM workers share no memory, so the cap is per worker,
+not per deployment — multi-worker deployments should also limit worker
+counts and rely on the Redis-backed rate limit to bound the inflow.
 
 **Trusted proxies.** Both the challenge endpoint and the validator use
 `Request::getClientIp()` (the same source), so configure Symfony's

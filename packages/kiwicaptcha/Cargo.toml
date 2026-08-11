@@ -6,7 +6,7 @@ edition = "2021"
 authors = ["Bel Consulting OÜ <hello@bel.ee>"]
 license = "MIT"
 repository = "https://github.com/Bel-Consulting-OU/kiwicaptcha"
-keywords = ["captcha", "proof-of-work", "sha256", "argon2", "security", "privacy"]
+keywords = ["captcha", "proof-of-work", "anti-abuse", "security", "privacy"]
 categories = ["web-programming", "cryptography", "authentication"]
 
 [dependencies]

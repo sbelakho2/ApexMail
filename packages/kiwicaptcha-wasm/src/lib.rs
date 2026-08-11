@@ -19,6 +19,7 @@
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use sha2::{Digest, Sha256};
+use std::alloc::Layout;
 use wasm_bindgen::prelude::*;
 
 /// Install the panic hook that forwards Rust panics to console.error.
@@ -36,26 +37,51 @@ pub fn init_panic_hook() {
 /// cannot dead-code-eliminate it, and so the name is stable across toolchain
 /// versions.
 ///
-/// The returned pointer must be released with [`dealloc`].
+/// # Allocation contract
+///
+/// The allocation is made directly through [`std::alloc`] with the layout
+/// `Layout::from_size_align(len, 8)`. The returned pointer must be released
+/// with [`dealloc`], passing the **exact same** `len` — the deallocator
+/// rebuilds the identical layout, which is what makes
+/// [`std::alloc::dealloc`] sound. (A `Vec::with_capacity`-based allocator
+/// would be unsound here: `with_capacity` only guarantees `capacity >= len`,
+/// while `Vec::from_raw_parts` requires the exact original capacity.)
+///
+/// `len == 0` returns a dangling-but-aligned pointer (non-null, 8-byte
+/// aligned) that must never be dereferenced or passed to [`dealloc`] — no
+/// backing memory is allocated. A layout that cannot be represented
+/// (e.g. `len` beyond `isize::MAX`) panics, which is acceptable for a
+/// callers-in-process allocation this size.
+///
+/// The JS glue passes back the exact original byte length, so the contract
+/// holds across the boundary.
 #[wasm_bindgen]
 pub fn alloc(len: usize) -> *mut u8 {
-    let mut buf = Vec::with_capacity(len);
-    let ptr = buf.as_mut_ptr();
-    std::mem::forget(buf); // ownership transferred to JS; dealloc frees it
-    ptr
+    let layout = Layout::from_size_align(len, 8).expect("allocation size overflows isize::MAX");
+    if len == 0 {
+        // Dangling but 8-byte aligned and non-null; never dereferenceable and
+        // never passed to `dealloc` (the JS glue only frees real buffers).
+        return layout.align() as *mut u8;
+    }
+    unsafe { std::alloc::alloc(layout) }
 }
 
 /// Free a buffer previously returned by [`alloc`].
 ///
-/// `len` must match the allocation size exactly (it is the Vec capacity).
+/// `len` must match the allocation size **exactly** (it is the length passed
+/// to [`alloc`]); the same `Layout::from_size_align(len, 8)` is rebuilt so
+/// the deallocation is sound. Null pointers and zero-length requests are
+/// no-ops (nothing was allocated for them).
+///
 /// Safety: the caller must pass a pointer/len produced by [`alloc`] and must
 /// not use the pointer afterwards.
 #[wasm_bindgen]
 pub unsafe fn dealloc(ptr: *mut u8, len: usize) {
-    if ptr.is_null() {
+    if ptr.is_null() || len == 0 {
         return;
     }
-    drop(Vec::from_raw_parts(ptr, 0, len));
+    let layout = Layout::from_size_align(len, 8).expect("allocation size overflows isize::MAX");
+    unsafe { std::alloc::dealloc(ptr, layout) };
 }
 
 /// Search `[start_counter, start_counter + chunk_size)` for a counter whose

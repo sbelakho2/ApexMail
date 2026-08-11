@@ -1321,6 +1321,7 @@ mod tests {
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
             kiwi_enforce_telemetry: true,
+            kiwi_argon2_max_concurrent: 2,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,
             kiwi_auto_tune_max_bits: 20,

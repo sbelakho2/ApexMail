@@ -9,9 +9,9 @@
 //! difficulty, the verifier always performs exactly the work the issuer
 //! configured — the client cannot downgrade difficulty or switch modes.
 
+use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
-use argon2::{Argon2, Algorithm, Version, Params};
 
 use crate::challenge::{payload_from_record, verify_signature, ChallengeRecord, PoWAlgorithm};
 
@@ -32,7 +32,9 @@ fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], Verif
             // Reject implausible parameters up front: the verifier must never
             // run a memory-hard computation with impossible parameters, and
             // the minimum (m_kib >= 8 * p) is enforced at issuance too.
-            if record.m_kib < 8 * record.p || record.m_kib > crate::challenge::SOLVER_MAX_ARGON2_M_KIB {
+            if record.m_kib < 8 * record.p
+                || record.m_kib > crate::challenge::SOLVER_MAX_ARGON2_M_KIB
+            {
                 return Err(VerifyError::MalformedRecord);
             }
             let params = Params::new(record.m_kib, record.t, record.p, Some(32))
@@ -186,7 +188,11 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 
     // 1. Signature re-check.
     let payload = payload_from_record(ctx.record);
-    match verify_signature(&payload, signature_from_challenge(ctx.record), ctx.secret_key) {
+    match verify_signature(
+        &payload,
+        signature_from_challenge(ctx.record),
+        ctx.secret_key,
+    ) {
         Ok(true) => {}
         Ok(false) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
         Err(_) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
@@ -311,7 +317,10 @@ pub fn sha256_hex(input: &str) -> String {
 /// - `hardwareConcurrency=0` AND `deviceMemory=0` (likely headless browser).
 /// - `plugins.length=0` AND `hardwareConcurrency=0` (likely headless).
 pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool {
-    let wd = telemetry.get("wd").and_then(|v| v.as_bool()).unwrap_or(false);
+    let wd = telemetry
+        .get("wd")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if wd {
         return true;
     }
@@ -336,10 +345,7 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
 
     // 2. Solve takes >300s total (well beyond expected). Increased from 120s to allow for very slow devices.
     if duration_ms > 300_000 {
-        tracing::warn!(
-            duration_ms,
-            "KiwiCaptcha: bot suspected — solve took >300s"
-        );
+        tracing::warn!(duration_ms, "KiwiCaptcha: bot suspected — solve took >300s");
         return true;
     }
 
@@ -425,7 +431,7 @@ mod tests {
 
     fn make_record(target_bits: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 100,
             t: 1,
@@ -444,7 +450,7 @@ mod tests {
 
     fn make_argon2_record(target_bits: u32, m_kib: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Argon2id,
             m_kib,
             t: 3, // libsodium-representable (t >= 3, p == 1) — issuance rejects t < 3
@@ -464,7 +470,7 @@ mod tests {
     fn verify(record: &mut ChallengeRecord, counter: u64, duration_ms: u64) -> VerifyOutcome {
         let mut ctx = VerifyContext {
             record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms,
             now_unix: NOW_UNIX + 1,
@@ -497,7 +503,7 @@ mod tests {
     fn argon2_issuance_rejects_invalid_memory_params() {
         // m_kib < 8 * p must fail at issuance, not at verification time.
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 4,
             t: 3,
@@ -519,7 +525,7 @@ mod tests {
         // reject it so cross-language verification can never silently fail.
         for t in [0u32, 1, 2] {
             let config = ChallengeConfig {
-                secret_key: "test-key".into(),
+                secret_key: "test-key-16-bytes!".into(),
                 algorithm: PoWAlgorithm::Argon2id,
                 m_kib: 128,
                 t,
@@ -542,7 +548,7 @@ mod tests {
     #[test]
     fn argon2_issuance_rejects_libsodium_unrepresentable_p() {
         let config = ChallengeConfig {
-            secret_key: "test-key".into(),
+            secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 3,
@@ -576,7 +582,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 121, // past TTL
@@ -604,7 +610,7 @@ mod tests {
         let floor = record.min_duration_ms.max(1);
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 60_000, // client forges a 60 s solve — must NOT help
             now_unix: NOW_UNIX + 1,
@@ -631,7 +637,7 @@ mod tests {
         // Elapsed: 0 ns (immediately after issuance) — impossibly fast.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000, // forged
             now_unix: NOW_UNIX,
@@ -668,7 +674,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "WRONG-KEY",
+            secret_key: "WRONG-KEY-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -687,6 +693,34 @@ mod tests {
     }
 
     #[test]
+    fn short_secret_key_rejects_as_bad_signature() {
+        // A secret below the 16-byte minimum can never have signed a valid
+        // challenge — verification must fail closed (BadSignature), and the
+        // attempt is still accounted on the record.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "x", // 1 byte — below the hard minimum
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+        assert_eq!(record.attempts_used, 1, "attempt must still be counted");
+    }
+
+    #[test]
     fn ip_mismatch_is_rejected_at_core_level() {
         // The review's point 6: IP binding must be enforced by the core
         // verifier itself, not left to the route layer.
@@ -694,7 +728,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -718,7 +752,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -741,7 +775,7 @@ mod tests {
         let wrong = if counter == 0 { 1 } else { 0 };
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter: wrong,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -760,7 +794,7 @@ mod tests {
         // Second call — the correct counter, but the attempt budget is gone.
         let mut ctx2 = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -787,7 +821,7 @@ mod tests {
         let wrong = if counter == 0 { 1 } else { 0 };
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter: wrong,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -804,7 +838,7 @@ mod tests {
         assert_eq!(record.attempts_used, 1);
         let mut ctx2 = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -830,7 +864,7 @@ mod tests {
         // webdriver=true with enforcement → rejected.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -856,7 +890,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -881,7 +915,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -906,7 +940,7 @@ mod tests {
         let floor = record.min_duration_ms.max(1);
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: floor - 1, // below floor, client-reported
             now_unix: NOW_UNIX + 1,
@@ -925,7 +959,7 @@ mod tests {
         // Same record, client claims long duration → passes.
         let mut ctx2 = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: floor + 1000,
             now_unix: NOW_UNIX + 1,
@@ -1026,7 +1060,10 @@ mod tests {
         let t = json!({
             "wd": false, "me": 0, "ke": 30, "et": uniform_30ms
         });
-        assert!(score_telemetry(&t, 4000), "uniform 30ms discrete events must be rejected");
+        assert!(
+            score_telemetry(&t, 4000),
+            "uniform 30ms discrete events must be rejected"
+        );
     }
 
     #[test]
@@ -1037,7 +1074,10 @@ mod tests {
         let t = json!({
             "wd": false, "me": 30, "ke": 0, "et": uniform_16ms
         });
-        assert!(score_telemetry(&t, 4000), "exact 16-17ms discrete intervals must be rejected");
+        assert!(
+            score_telemetry(&t, 4000),
+            "exact 16-17ms discrete intervals must be rejected"
+        );
     }
 
     #[test]
@@ -1045,10 +1085,10 @@ mod tests {
         use serde_json::json;
         // Human click intervals vary 5-30%; none of these should reject.
         let cases: Vec<Vec<u64>> = vec![
-            (0..30).map(|i| i * 87 + (i * i % 23)).collect(),      // fast typist
-            (0..30).map(|i| i * 145 + (i * 3 % 31)).collect(),     // slow reader
-            (0..30).map(|i| i * 64 + (i * 7 % 11)).collect(),      // burst clicking
-            (0..30).map(|i| i * 203 + (i % 5) * 17).collect(),     // sparse + jitter
+            (0..30).map(|i| i * 87 + (i * i % 23)).collect(), // fast typist
+            (0..30).map(|i| i * 145 + (i * 3 % 31)).collect(), // slow reader
+            (0..30).map(|i| i * 64 + (i * 7 % 11)).collect(), // burst clicking
+            (0..30).map(|i| i * 203 + (i % 5) * 17).collect(), // sparse + jitter
         ];
         for (i, et) in cases.iter().enumerate() {
             let t = json!({ "wd": false, "me": 20, "ke": 5, "et": et });
@@ -1113,7 +1153,10 @@ mod tests {
         let huge = counter + 5_000_001;
         // Huge counter is virtually certain to NOT meet the target.
         let outcome = verify(&mut record, huge, 5000);
-        assert_eq!(outcome, VerifyOutcome::Invalid(VerifyError::InsufficientWork));
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+        );
     }
 
     #[test]
@@ -1135,7 +1178,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: 1_000_001,
@@ -1160,7 +1203,7 @@ mod tests {
         let expires_at = record.expires_at;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: expires_at, // exactly at expiry
@@ -1185,7 +1228,7 @@ mod tests {
         let expires_at = record.expires_at;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: expires_at - 1,
@@ -1251,7 +1294,7 @@ mod tests {
         let floor = record.min_duration_ms.max(1);
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1266,7 +1309,7 @@ mod tests {
         assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
         let mut ctx_fast = VerifyContext {
             record: &mut record,
-            secret_key: "test-key",
+            secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 60_000, // forged long client duration must NOT help
             now_unix: NOW_UNIX + 1,

@@ -186,6 +186,10 @@ pub struct Config {
     /// overrides the per-challenge difficulty-derived floor; 0 disables the
     /// check. Default: derived from difficulty at issuance.
     pub kiwi_min_duration_ms: Option<u64>,
+    /// Global concurrency cap for Argon2id verification (0 = unlimited).
+    /// Bounds aggregate memory-hard verification work across all nonces.
+    /// Default 2.
+    pub kiwi_argon2_max_concurrent: u32,
     /// Enforce telemetry-based bot rejection inside `verify_solution`. The
     /// telemetry is client-controlled and forgeable, so this is a
     /// defense-in-depth signal, never the security boundary. When enabled,
@@ -702,6 +706,10 @@ impl Config {
         let kiwi_min_duration_ms = env::var("KIWI_MIN_DURATION_MS")
             .ok()
             .and_then(|v| v.parse().ok());
+        let kiwi_argon2_max_concurrent = env::var("KIWI_ARGON2_MAX_CONCURRENT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
         let kiwi_enforce_telemetry = env::var("KIWI_ENFORCE_TELEMETRY")
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -892,6 +900,7 @@ impl Config {
             kiwi_argon2_difficulty_bits,
             kiwi_challenge_ttl_secs,
             kiwi_min_duration_ms,
+            kiwi_argon2_max_concurrent,
             kiwi_enforce_telemetry,
             kiwi_auto_tune,
             kiwi_auto_tune_min_bits,
@@ -1332,7 +1341,8 @@ pub(crate) mod tests {
             kiwi_argon2_difficulty_bits: 8,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
-            kiwi_enforce_telemetry: true,
+kiwi_enforce_telemetry: true,
+            kiwi_argon2_max_concurrent: 2,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,
             kiwi_auto_tune_max_bits: 20,
@@ -1475,7 +1485,8 @@ pub(crate) mod tests {
             kiwi_difficulty_bits: 20,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
-            kiwi_enforce_telemetry: true,
+kiwi_enforce_telemetry: true,
+            kiwi_argon2_max_concurrent: 2,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,
             kiwi_auto_tune_max_bits: 20,

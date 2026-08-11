@@ -38,10 +38,15 @@ final class Issuer
     }
 
     /**
-     * @throws \InvalidArgumentException when the scope contains '|'
+     * @throws \InvalidArgumentException when the scope is empty, longer than
+     *                                   128 bytes, or contains '|'
      */
     public function issue(string $scope, string $clientIp): Challenge
     {
+        $scopeLen = \strlen($scope);
+        if ($scopeLen < 1 || $scopeLen > 128) {
+            throw new \InvalidArgumentException('scope must be 1-128 bytes');
+        }
         if (\str_contains($scope, '|')) {
             throw new \InvalidArgumentException('scope must not contain "|"');
         }
@@ -79,10 +84,12 @@ final class Issuer
             prefix: $prefix,
             challenge: $challenge,
             minDurationMs: $minDurationMs,
-            // hrtime(true) is ALREADY nanoseconds (unlike the Rust equivalent
-            // as_nanos() it needs no scaling) — multiplying by 1e9 would
-            // overflow int64 within seconds of uptime.
-            issuedAtNs: (int) hrtime(true),
+            // issuedAtNs = epoch MICROseconds since Unix epoch (wall clock,
+            // hrtime(true) is monotonic and per-host so it must never be
+            // persisted to shared storage — see README "server timing").
+            // The name/JSON key stay issuedAtNs for ChallengeRecord
+            // serialization stability.
+            issuedAtNs: (int) (microtime(true) * 1_000_000),
         );
         $this->storage->store($record);
 
@@ -119,9 +126,12 @@ final class Issuer
 
     private function effectiveTargetBits(): int
     {
+        // Defensive clamp: Config already rejects out-of-range values at
+        // construction, but a hand-rolled ChallengeRecord (or a future config
+        // path) must never reach the solver with an unsolvable difficulty.
         return match ($this->config->algorithm) {
-            PoWAlgorithm::Sha256 => $this->config->targetBits,
-            PoWAlgorithm::Argon2id => min($this->config->argon2TargetBits, 10),
+            PoWAlgorithm::Sha256 => min($this->config->targetBits, Config::MAX_SHA_TARGET_BITS),
+            PoWAlgorithm::Argon2id => min($this->config->argon2TargetBits, Config::MAX_ARGON2_TARGET_BITS),
         };
     }
 

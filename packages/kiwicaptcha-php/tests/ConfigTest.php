@@ -138,16 +138,46 @@ final class ConfigTest extends TestCase
 
     public function testTargetBitsBounds(): void
     {
+        // targetBits above the browser-solvable ceiling (MAX_SHA_TARGET_BITS
+        // = 20) is rejected: the wasm solver caps at 20 bits (~99.1% solve
+        // probability at 20 vs ~25.9% at 24), so higher values would be
+        // unsolvable for legit clients.
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('0..24');
+        $this->expectExceptionMessage('0..20');
 
-        new Config(...$this->base(['targetBits' => 25]));
+        new Config(...$this->base(['targetBits' => 21]));
     }
 
-    public function testTargetBits24IsValid(): void
+    public function testTargetBitsAbove20AlwaysRejectedForSha256(): void
     {
-        $config = new Config(...$this->base(['targetBits' => 24]));
-        self::assertSame(24, $config->targetBits);
+        $rejected = 0;
+        foreach ([21, 24, 25, 100] as $bad) {
+            try {
+                new Config(...$this->base(['targetBits' => $bad]));
+                self::fail("targetBits=$bad should have been rejected");
+            } catch (\InvalidArgumentException) {
+                $rejected++;
+            }
+        }
+        self::assertSame(4, $rejected);
+    }
+
+    public function testTargetBits20IsValid(): void
+    {
+        $config = new Config(...$this->base(['targetBits' => 20]));
+        self::assertSame(20, $config->targetBits);
+    }
+
+    public function testTargetBits0IsValid(): void
+    {
+        $config = new Config(...$this->base(['targetBits' => 0]));
+        self::assertSame(0, $config->targetBits);
+    }
+
+    public function testTargetBitCeilingConstants(): void
+    {
+        self::assertSame(20, Config::MAX_SHA_TARGET_BITS);
+        self::assertSame(10, Config::MAX_ARGON2_TARGET_BITS);
     }
 
     public function testMKibCeilingEnforced(): void

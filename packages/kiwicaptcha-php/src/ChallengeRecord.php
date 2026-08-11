@@ -11,11 +11,14 @@ namespace KiwiCaptcha;
  * service can share the same Redis/DB keys if ever mixed (though the two
  * projects are designed to be fully decoupled).
  *
- * `issuedAtNs` is a server-side-only high-resolution issuance timestamp
- * (monotonic nanoseconds, NOT Unix time). It is never signed into the
- * challenge payload and never sent to the client — the verifier uses it to
- * measure elapsed solve time on the server instead of trusting the
- * client-reported duration.
+ * `issuedAtNs` is a server-side-only high-resolution issuance timestamp in
+ * WALL-CLOCK epoch microseconds (microseconds since Unix epoch, not
+ * monotonic nanoseconds: hrtime() is per-host and cannot be persisted to
+ * shared storage). The field name and JSON key stay `issuedAtNs` for
+ * serialization stability; 0 remains the legacy "unknown" marker. It is
+ * never signed into the challenge payload and never sent to the client —
+ * the verifier uses it to measure elapsed solve time on the server instead
+ * of trusting the client-reported duration.
  */
 final class ChallengeRecord
 {

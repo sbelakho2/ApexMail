@@ -1,6 +1,6 @@
 # KiwiCaptcha
 
-Privacy-preserving proof-of-work anti-abuse protection with first-party behavioral heuristics as a supplementary signal. Hybrid Rust (WASM) + optimized JS solving, no external services, no third-party requests, no third-party tracking. Developed by Bel Consulting OÜ (MIT).
+Privacy-preserving proof-of-work anti-abuse protection with first-party behavioral heuristics as a supplementary signal. Hybrid Rust (WASM) + optimized JS solving, no external services. **No third-party tracking. No third-party requests. First-party behavioral signals never leave your application.** Developed by Bel Consulting OÜ (MIT).
 
 ## What KiwiCaptcha is — and is not
 
@@ -15,9 +15,9 @@ Browser behavioral telemetry is a **supplement, not the security boundary** — 
 - **Difficulty derived per algorithm** — SHA-256 scales to 20 bits (~1M hashes); Argon2id is capped at 10 bits because every memory-hard hash is ~1000x more expensive.
 - **Server-side minimum solve duration** — minimum-duration enforcement is measured **server-side**, from challenge issuance to verification receipt (high-resolution issuance timestamp vs server receipt time). The client-reported duration is forgeable (a custom client can submit `duration_ms=5000`) and is used **only as telemetry**.
 - **HMAC-signed, IP-bound challenges** — the challenge records an HMAC hash of the issuing client IP, and verification compares the hash of the current request's IP (`VerifyContext.client_ip`). This is a **relay mitigation, not a guarantee**: IPs legitimately change behind NAT/proxies, and operators can disable the check.
-- **Single-use with bounded verification cost** — verification consumes the challenge, and the verification path includes per-nonce attempt accounting (`max_attempts`) that bounds the server-side cost of wrong candidates (critical for memory-hard Argon2id verification). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. Redis `GETDEL`).
+- **Single-use with bounded verification cost** — verification consumes the challenge, and the verification path includes per-nonce attempt accounting (`max_attempts`) that bounds the server-side cost of wrong candidates (critical for memory-hard Argon2id verification). Per-nonce attempt caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) ships both: `rate_limit` (per-IP issuance window, optionally Redis/PSR-6 backed) and `argon2_max_concurrent_verifications` (per-process semaphore). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. Redis `GETDEL`).
 - **Premium UI** — modern, responsive widget with native dark mode and zero external dependencies (no external JS, no iframes, no third-party hosts). The emitted markup takes an optional CSP nonce: with a nonce, `<style nonce>` / `<script nonce>` are emitted; without one, the widget still works under CSP policies that allow `'unsafe-inline'` or where the application post-processes the HTML (as ApexMail does).
-- **First-party behavioral telemetry** — no third-party tracking, no third-party requests: behavioral signals (input events, hardware/screen info) are collected by the widget and submitted first-party for scoring. Telemetry is a **supplementary** signal: it is client-controlled and forgeable, so it is never treated as the security boundary.
+- **First-party behavioral telemetry** — **no third-party tracking. No third-party requests. First-party behavioral signals never leave your application**: behavioral signals (input events, hardware/screen info) are collected by the widget and submitted first-party for scoring. Telemetry is a **supplementary** signal: it is client-controlled and forgeable, so it is never treated as the security boundary.
 - **Auto-tuning difficulty** — SHA-256 target bits scale with solver load; Argon2id difficulty is static (each hash is expensive).
 
 ## Protocol
@@ -63,45 +63,67 @@ kiwicaptcha = { path = "packages/kiwicaptcha" }
 ```rust
 use kiwicaptcha::{ChallengeConfig, PoWAlgorithm, issue_challenge};
 
+// (a) SHA-256 — the default choice: fast, quantum-safe, high difficulty.
 let config = ChallengeConfig {
-    secret_key: "your-hmac-secret-key".into(),
-    algorithm: PoWAlgorithm::Sha256, // or PoWAlgorithm::Argon2id
-    m_kib: 0,                        // Argon2id memory (KiB); ignored for SHA-256
-    t: 1,
-    p: 1,
-    target_bits: 20,                 // SHA-256 difficulty (~2-5s solve)
-    argon2_target_bits: 8,           // Argon2id difficulty (memory-hard)
+    secret_key: "replace-with-32-random-bytes".into(), // >= 16 bytes required
+    algorithm: PoWAlgorithm::Sha256,
+    m_kib: 0,                // Argon2id memory (KiB); ignored for SHA-256
+    t: 1,                    // time cost; irrelevant for SHA-256
+    p: 1,                    // parallelism; irrelevant for SHA-256
+    target_bits: 16,         // SHA-256 difficulty (leading zero bits)
+    argon2_target_bits: 8,   // ignored for SHA-256
     ttl_secs: 120,
-    min_duration_ms: None,           // None => derived from difficulty
-    auto_tune: false,
+    min_duration_ms: None,   // None => derived from the difficulty
+    auto_tune: false,        // scale target_bits with active solver load?
     auto_tune_min_bits: 10,
     auto_tune_max_bits: 20,
 };
 
-// Argon2id mode requires t >= 3 and p == 1 — the libsodium-representable
-// range — so cross-language (Rust/PHP) verification always works; issuance
-// validates this. SHA-256 mode has no such constraint. Example:
-//   algorithm: PoWAlgorithm::Argon2id, m_kib: 65536, t: 3, p: 1
+// (b) Argon2id — memory-hard (ASIC/GPU resistant). Issuance REJECTS
+// t < 3 or p != 1 (the libsodium-representable range, so cross-language
+// Rust/PHP verification always works) and m_kib < 8 * p.
+let argon2_config = ChallengeConfig {
+    secret_key: "replace-with-32-random-bytes".into(),
+    algorithm: PoWAlgorithm::Argon2id,
+    m_kib: 64,               // >= 8 * p; browser-solvable
+    t: 3,                    // libsodium minimum
+    p: 1,                    // libsodium requirement
+    target_bits: 8,          // unused for Argon2id (difficulty is argon2_target_bits)
+    argon2_target_bits: 8,   // Argon2id difficulty (capped at 10)
+    ttl_secs: 120,
+    min_duration_ms: None,
+    auto_tune: false,        // Argon2id difficulty is static
+    auto_tune_min_bits: 10,
+    auto_tune_max_bits: 20,
+};
 
-let issued = issue_challenge(&config, "login", &client_ip, now_unix, 0)?;
+// issue_challenge(&config, scope, client_ip, now_unix, now_ns, active_solves)
+//   scope       — 1..=128 bytes, no '|' (e.g. "login", "signup")
+//   client_ip   — hashed before storage (never stored raw)
+//   now_unix    — current Unix time in SECONDS (signed payload + TTL)
+//   now_ns      — high-resolution issuance timestamp in NANOSECONDS
+//                 (server-side minimum-duration enforcement)
+//   active_solves — current solver load (auto-tuning input)
+let issued = issue_challenge(&config, "login", &client_ip, now_unix, now_ns, active_solves)?;
 
-// Store issued.record in Redis keyed by nonce.
-// Send issued.challenge to the client.
+// Persist issued.record in Redis, keyed by nonce (kcaptcha:{nonce}).
+// Send issued.challenge to the client as JSON.
 ```
 
 ### 2. Render the Widget
 
 The inline widget fetches the challenge, solves it with the embedded
-WASM solver (JS fallback), and fills the hidden token input.
+WASM solver (pure-JS SHA-256 fallback), and fills the hidden token input.
 
 ```rust
 use kiwicaptcha::{kiwi_widget_html, kiwi_widget_html_default};
 
-// With a CSP nonce: the emitted <style> and <script> tags carry nonce="...".
+// kiwi_widget_html(endpoint, scope, csp_nonce) — with a CSP nonce the emitted
+// <style> and <script> tags carry nonce="...".
 let html = kiwi_widget_html("/api/kcaptcha/challenge", "login", Some("your-base64-nonce"));
 
-// Without a nonce: still works under CSP that allows 'unsafe-inline', or
-// where the application post-processes the HTML (as ApexMail does).
+// Without a nonce (works under CSP that allows 'unsafe-inline', or where the
+// application post-processes the HTML — as ApexMail does).
 let html_default = kiwi_widget_html_default();
 ```
 
@@ -120,28 +142,34 @@ KiwiCaptcha.render('[data-kiwi-widget]');
 ### 3. Verify the Solution
 
 ```rust
-use kiwicaptcha::{SolutionToken, VerifyContext, verify_solution, VerifyOutcome};
+use kiwicaptcha::{
+    ChallengeRecord, SolutionToken, VerifyContext, VerifyOutcome, verify_solution,
+};
 
-let solution = SolutionToken::decode(&body.kiwi_token)?;
-let record = redis.get(&format!("kcaptcha:{}", solution.nonce))?;
+let solution = SolutionToken::decode(&body.kiwi_token)?;   // nonce, counter, duration_ms, telemetry
+let mut record: ChallengeRecord = redis.get(&format!("kcaptcha:{}", solution.nonce))?;
 
-let ctx = VerifyContext {
-    record: &record,
-    secret_key: &config.secret_key,
+// record: &mut ChallengeRecord — verification performs attempt accounting on
+// the record, which the caller must persist back (on failure) or consume
+// atomically (GETDEL) on success.
+let mut ctx = VerifyContext {
+    record: &mut record,
+    secret_key: &config.secret_key, // must match issuance; >= 16 bytes
     counter: solution.counter,
     duration_ms: solution.duration_ms, // client-reported — telemetry only
     now_unix,                          // TTL check (seconds)
     now_ns,                            // high-resolution receipt time (ns) —
                                        // server-side elapsed-duration check
+    min_duration_ms: 0,                // floor is max(ctx, record.min_duration_ms);
+                                       // 0 = use only the record's floor
+    expected_scope: Some("login"),     // reject cross-scope replay
     client_ip: Some(&client_ip),       // IP binding (None disables the check)
-    min_duration_ms: 0,                // per-challenge floor comes from the record
-    expected_scope: Some("login"),
-    telemetry: &solution.telemetry,    // supplementary behavioral signal
+    telemetry: Some(&solution.telemetry), // supplementary behavioral signal
     enforce_telemetry: true,           // reject on hard bot signals
-    max_attempts: Some(20),            // per-nonce attempt cap
+    max_attempts: 10,                  // per-nonce attempt cap (0 = unlimited)
 };
 
-match verify_solution(&ctx) {
+match verify_solution(&mut ctx) {
     VerifyOutcome::Valid => {
         // Consume the challenge atomically for strict single-use under
         // concurrency (e.g. Redis GETDEL), then allow login.
@@ -155,8 +183,24 @@ match verify_solution(&ctx) {
 `kiwi_widget_html(endpoint, scope, csp_nonce)` emits `<style nonce="...">` and
 `<script nonce="...">` when a nonce is supplied; without a nonce the widget
 still works under CSP that allows `'unsafe-inline'`, or where the application
-post-processes the HTML (as ApexMail does). The Symfony bundles accept a
-`nonce` option in the Twig widget.
+post-processes the HTML (as ApexMail does). The Symfony bundle
+(`bel-consulting/kiwicaptcha-symfony`, the single Symfony integration)
+accepts a `nonce` option in the Twig widget.
+
+**WebAssembly requires `'wasm-unsafe-eval'`.** Compiling the embedded WASM
+solver is a dynamic code-execution operation, so a strict CSP3 policy must
+allow it in `script-src`:
+
+```
+script-src 'nonce-<nonce>' 'wasm-unsafe-eval';
+style-src 'nonce-<nonce>';
+```
+
+In **SHA-256 mode** the widget falls back to the pure-JS solver when WASM
+compilation is blocked, so `'wasm-unsafe-eval'` is optional there.
+**Argon2id mode REQUIRES WASM** — there is no JS fallback for the
+memory-hard solver, so a CSP that blocks WASM will leave the widget unable
+to solve Argon2id challenges.
 
 ### Argon2id cross-language parity
 

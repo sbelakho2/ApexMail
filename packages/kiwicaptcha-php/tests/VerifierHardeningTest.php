@@ -70,13 +70,14 @@ final class VerifierHardeningTest extends TestCase
 
         $verifier = new Verifier($storage);
         // Receipt 1ms before the 1000ms floor elapsed: rejected, even though
-        // the client forged duration_ms = 5000.
+        // the client forged duration_ms = 5000. issuedAtNs and nowNs are in
+        // the epoch-microsecond domain.
         $outcome = $verifier->verify(
             $token,
             Vectors::SECRET,
             'login',
             '198.51.100.77',
-            nowNs: $record->issuedAtNs + 999_000_000,
+            nowNs: $record->issuedAtNs + 999_000,
         );
 
         self::assertSame(VerifyError::TooFast, $outcome->error);
@@ -93,7 +94,7 @@ final class VerifierHardeningTest extends TestCase
             Vectors::SECRET,
             'login',
             '198.51.100.77',
-            nowNs: $record->issuedAtNs + 1_000_000_000,
+            nowNs: $record->issuedAtNs + 1_000_000,
         );
 
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
@@ -114,7 +115,86 @@ final class VerifierHardeningTest extends TestCase
             Vectors::SECRET,
             'login',
             '198.51.100.77',
-            nowNs: $record->issuedAtNs + 1_000_000,
+            nowNs: $record->issuedAtNs + 1_000,
+        );
+
+        self::assertSame(VerifyError::TooFast, $outcome->error);
+    }
+
+    public function testReceiptBeforeIssuanceWithinSkewToleranceSkipsFloor(): void
+    {
+        // The verifying host's clock is 1s BEHIND the issuing host's:
+        // elapsed would be -1s (unmeasurable). Within the 5s skew
+        // tolerance, so the floor check is skipped and the solve passes.
+        $storage = new ArrayStorage();
+        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
+
+        $verifier = new Verifier($storage);
+        $outcome = $verifier->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            '198.51.100.77',
+            nowNs: $record->issuedAtNs - 1_000_000,
+        );
+
+        self::assertTrue($outcome->isOk(), sprintf('skewed receipt must pass, got %s', $outcome->code()));
+    }
+
+    public function testSkewAtExactToleranceBoundaryPasses(): void
+    {
+        // Receipt exactly 5s before issuance sits at the SKEW_TOLERANCE_US
+        // boundary: elapsed is clamped to "unmeasurable", floor skipped.
+        $storage = new ArrayStorage();
+        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
+
+        $verifier = new Verifier($storage);
+        $outcome = $verifier->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            '198.51.100.77',
+            nowNs: $record->issuedAtNs - 5_000_000,
+        );
+
+        self::assertTrue($outcome->isOk(), sprintf('boundary skew must pass, got %s', $outcome->code()));
+    }
+
+    public function testSkewWithinToleranceDoesNotBypassProofOfWork(): void
+    {
+        // Skipping the floor under skew must not skip the PoW check: a
+        // wrong counter still fails with InsufficientWork.
+        $storage = new ArrayStorage();
+        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
+
+        $wrongToken = SolutionToken::create($record->nonce, 1, 5000, ['wd' => false])->encode();
+
+        $verifier = new Verifier($storage);
+        $outcome = $verifier->verify(
+            $wrongToken,
+            Vectors::SECRET,
+            'login',
+            '198.51.100.77',
+            nowNs: $record->issuedAtNs - 1_000_000,
+        );
+
+        self::assertSame(VerifyError::InsufficientWork, $outcome->error);
+    }
+
+    public function testSkewBeyondToleranceRejectsAsTooFast(): void
+    {
+        // Receipt 6s before issuance exceeds the 5s tolerance: physically
+        // impossible, rejected as TooFast.
+        $storage = new ArrayStorage();
+        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
+
+        $verifier = new Verifier($storage);
+        $outcome = $verifier->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            '198.51.100.77',
+            nowNs: $record->issuedAtNs - 6_000_000,
         );
 
         self::assertSame(VerifyError::TooFast, $outcome->error);
@@ -174,6 +254,72 @@ final class VerifierHardeningTest extends TestCase
         $storage->store($record);
         $outcome = $verifier->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77', enforceTelemetry: true);
         self::assertSame(VerifyError::TelemetryRejected, $outcome->error);
+    }
+
+    public function testEmptyTelemetryRejectedWhenEnforced(): void
+    {
+        // An attacker submitting {} must not bypass strict mode: a real
+        // widget always reports telemetry fields.
+        $storage = new ArrayStorage();
+        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
+
+        $emptyToken = SolutionToken::create($record->nonce, SolutionToken::decode($token)->counter, 5000, [])->encode();
+
+        $verifier = new Verifier($storage);
+        $outcome = $verifier->verify($emptyToken, Vectors::SECRET, 'login', '198.51.100.77', enforceTelemetry: true);
+        self::assertSame(VerifyError::TelemetryRejected, $outcome->error);
+    }
+
+    public function testEmptyTelemetryAllowedWhenNotEnforced(): void
+    {
+        $storage = new ArrayStorage();
+        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
+
+        $emptyToken = SolutionToken::create($record->nonce, SolutionToken::decode($token)->counter, 5000, [])->encode();
+
+        $verifier = new Verifier($storage);
+        $outcome = $verifier->verify($emptyToken, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertTrue($outcome->isOk(), sprintf('empty telemetry must pass when enforcement is off, got %s', $outcome->code()));
+    }
+
+    public function testScopeLongerThan128BytesThrows(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($this->makeConfig(0), $storage);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('1-128');
+        $issuer->issue(str_repeat('a', 200), '198.51.100.77');
+    }
+
+    public function testScope129BytesThrows(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($this->makeConfig(0), $storage);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('1-128');
+        $issuer->issue(str_repeat('a', 129), '198.51.100.77');
+    }
+
+    public function testScopeEmptyThrows(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($this->makeConfig(0), $storage);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('1-128');
+        $issuer->issue('', '198.51.100.77');
+    }
+
+    public function testScope128BytesIsAccepted(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($this->makeConfig(0), $storage);
+
+        $scope = str_repeat('a', 128);
+        $challenge = $issuer->issue($scope, '198.51.100.77');
+        self::assertSame($scope, $storage->find($challenge->nonce)?->scope);
     }
 
     public function testUniformTimingBotRejectedWhenEnforced(): void
@@ -267,13 +413,17 @@ final class VerifierHardeningTest extends TestCase
         [$record] = $this->issueAndSolve($storage, minDurationMs: 0);
 
         self::assertGreaterThan(0, $record->issuedAtNs);
-        // issuedAtNs is monotonic nanoseconds — vastly larger than Unix seconds.
-        self::assertGreaterThan(1_000_000_000_000, $record->issuedAtNs);
+        // issuedAtNs is WALL-CLOCK epoch microseconds (not per-host monotonic
+        // nanoseconds): it must be in the recent past of this host's clock.
+        $nowUs = (int) (microtime(true) * 1_000_000);
+        self::assertLessThanOrEqual($nowUs, $record->issuedAtNs, 'issuance must precede the assertion instant');
+        self::assertGreaterThan($nowUs - 5_000_000, $record->issuedAtNs, 'issuance must be within the recent past');
     }
 
     public function testIssuerNowClockOverrideDoesNotAffectIssuedAtNs(): void
     {
-        // issuedAtNs comes from hrtime, not the (injectable) unix clock.
+        // issuedAtNs comes from the wall-clock microtime(), not the
+        // (injectable) unix clock.
         $storage = new ArrayStorage();
         $issuer = new Issuer(
             $this->makeConfig(0),
@@ -284,6 +434,9 @@ final class VerifierHardeningTest extends TestCase
         $record = $storage->find($challenge->nonce);
 
         self::assertSame(1_800_000_000, $record?->issuedAt);
-        self::assertGreaterThan(1_000_000_000_000, $record?->issuedAtNs ?? 0);
+        $nowUs = (int) (microtime(true) * 1_000_000);
+        self::assertGreaterThan(0, $record?->issuedAtNs ?? 0);
+        self::assertLessThanOrEqual($nowUs, $record?->issuedAtNs ?? PHP_INT_MAX);
+        self::assertGreaterThan($nowUs - 5_000_000, $record?->issuedAtNs ?? 0);
     }
 }

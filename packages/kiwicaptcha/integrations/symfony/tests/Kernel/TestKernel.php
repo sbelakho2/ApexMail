@@ -17,8 +17,9 @@ use Symfony\Component\HttpKernel\Kernel;
  *
  * Boots FrameworkBundle + TwigBundle + KiwiCaptchaBundle with a small
  * difficulty (8 bits) so the proof-of-work is solvable in pure PHP.
+ * Non-final so prefixed-route variants can reuse the wiring.
  */
-final class TestKernel extends Kernel
+class TestKernel extends Kernel
 {
     public const SECRET = '0123456789abcdef0123456789abcdef';
 
