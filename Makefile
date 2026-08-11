@@ -51,10 +51,13 @@ SERVICE_DEPS_marketing     := apps/marketing-zola
 SERVICE_DEPS_tracking      := deploy/Dockerfile.tracking services/mail-server/crates/tracking-service
 SERVICE_DEPS_status-server := services/mail-server/crates/auth-server services/mail-server/Cargo.toml
 
-.PHONY: deploy deploy-service deploy-quick deploy-restart verify
+.PHONY: deploy deploy-service deploy-quick deploy-restart verify marketing-check-kiwi
 
 ## deploy: Full deploy — sync all code + rebuild all images + restart
 deploy:
+	@# Hard pre-flight: KiwiCaptcha must never ship in the marketing build
+	@# (audit §6). Fails fast before any sync.
+	@bash tools/check-kiwi-marketing-isolation.sh
 	@echo "==> Syncing ALL code to server (clean — stale files removed)..."
 	@for dir in $(SYNC_DIRS); do \
 		echo "  $$dir/"; \
@@ -73,6 +76,9 @@ deploy:
 ## deploy-service S=name: Partial deploy — sync only changed code + rebuild one service
 deploy-service:
 	@if [ -z "$(S)" ]; then echo "Usage: make deploy-service S=api-server"; exit 1; fi
+	@# Hard pre-flight: KiwiCaptcha must never ship in the marketing build.
+	@# Runs for every partial deploy (cheap) and explicitly for marketing.
+	@bash tools/check-kiwi-marketing-isolation.sh
 	@echo "==> Partial deploy: $(S)"
 	@echo "==> Syncing only changed code directories..."
 	@$(RSYNC) --delete \
@@ -119,3 +125,13 @@ verify:
 	@echo "Checking autoconfig..."
 	@curl -s http://autoconfig.apexmail.ee/mail/config-v1.1.xml | head -1
 	@echo "Done."
+
+## marketing-check-kiwi: Verify no KiwiCaptcha references in marketing source
+##
+## Enforces the brand-product separation: KiwiCaptcha (the proof-of-work
+## CAPTCHA package) must never appear in the ApexMail marketing site. Run
+## automatically as a pre-flight on `make deploy` / `make deploy-service`,
+## but also exposed standalone for CI and local checks.
+## See: marketing_audit.md v2 §6.
+marketing-check-kiwi:
+	@bash tools/check-kiwi-marketing-isolation.sh

@@ -99,10 +99,24 @@ pub struct ChallengeRecord {
     pub challenge: String,
     /// The minimum plausible solve time in milliseconds for the issued
     /// difficulty, computed at issuance from the algorithm and target bits.
-    /// Solutions reporting less than this are physically implausible and
-    /// rejected. An override (e.g. operator tuning) replaces the computed
-    /// value; 0 disables the check.
+    /// Solutions arriving faster than this (measured server-side from
+    /// issuance to receipt) are physically implausible and rejected. An
+    /// override (e.g. operator tuning) replaces the computed value; 0
+    /// disables the check.
     pub min_duration_ms: u64,
+    /// High-resolution (nanosecond) server-side issuance timestamp. This is
+    /// used to enforce the minimum-duration check with a SERVER-measured
+    /// elapsed time — the client-reported duration is forgeable and is only
+    /// used as telemetry. Never signed and never sent to the client; 0 means
+    /// the field is unavailable (legacy records fall back to the
+    /// client-duration check).
+    #[serde(default)]
+    pub issued_at_ns: u64,
+    /// Number of verification attempts already made against this challenge
+    /// (server-side only, incremented by `verify_solution`). Used with
+    /// `VerifyContext::max_attempts` to bound the cost of wrong candidates.
+    #[serde(default)]
+    pub attempts_used: u32,
 }
 
 /// Configuration for the challenge issuer. Mirrors the server config block but
@@ -389,11 +403,16 @@ impl Default for ChallengeCache {
 /// - `client_ip` — the client's IP address (hashed before storage).
 /// - `now_unix` — current Unix timestamp (injected for testability).
 /// - `active_solves` — current number of active solvers (for auto-tuning).
+/// Issue a new challenge. `now_unix` is the current Unix time in seconds (for
+/// the signed payload, TTL, and the client-facing challenge); `now_ns` is the
+/// high-resolution issuance timestamp in nanoseconds, used exclusively for
+/// server-side minimum-duration enforcement.
 pub fn issue_challenge(
     config: &ChallengeConfig,
     scope: &str,
     client_ip: &str,
     now_unix: u64,
+    now_ns: u64,
     active_solves: u64,
 ) -> Result<Issued, SignError> {
     if scope.contains('|') {
@@ -414,8 +433,17 @@ pub fn issue_challenge(
     let target_bits = config.effective_target_bits(active_solves);
     // Argon2id minimum memory is 8 * p KiB; reject configurations that could
     // never produce a valid hash instead of failing every verification later.
-    if algorithm == PoWAlgorithm::Argon2id && config.m_kib < 8 * config.p {
-        return Err(SignError::InvalidArgon2Params);
+    // PHP/libsodium verification additionally cannot represent t < 3 or
+    // p != 1, so those are rejected at issuance too — otherwise a challenge
+    // could be issued successfully and then always fail PHP verification
+    // (cross-language parity requirement, see README).
+    if algorithm == PoWAlgorithm::Argon2id {
+        if config.m_kib < 8 * config.p {
+            return Err(SignError::InvalidArgon2Params);
+        }
+        if config.t < 3 || config.p != 1 {
+            return Err(SignError::InvalidArgon2Params);
+        }
     }
 
     let payload = ChallengePayload {
@@ -457,6 +485,8 @@ pub fn issue_challenge(
         prefix: prefix.clone(),
         challenge: challenge.clone(),
         min_duration_ms,
+        issued_at_ns: now_ns,
+        attempts_used: 0,
     };
 
     let challenge_token = IssuedChallenge {
@@ -496,7 +526,7 @@ pub enum SignError {
     KeyTooShort,
     #[error("scope contains invalid character '|'")]
     InvalidScope,
-    #[error("Argon2id parameters are invalid (m_kib must be >= 8 * p)")]
+    #[error("Argon2id parameters are invalid (m_kib must be >= 8 * p; for PHP/libsodium cross-verification t must be >= 3 and p == 1)")]
     InvalidArgon2Params,
 }
 
@@ -532,7 +562,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 0).unwrap();
+        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 1000000000000000, 0).unwrap();
         assert_eq!(issued.challenge.m_kib, 65_536);
         assert_eq!(issued.challenge.t, 2);
         assert_eq!(issued.challenge.p, 1);
@@ -583,8 +613,8 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let a = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
-        let b = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        let a = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
+        let b = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
         assert_ne!(a.record.nonce, b.record.nonce);
     }
 
@@ -605,14 +635,14 @@ mod tests {
             auto_tune_max_bits: 24,
         };
         // Idle — should be at min.
-        let idle = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        let idle = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
         assert_eq!(idle.challenge.target_bits, 10);
         // Moderate load — roughly midway between min and the solver ceiling.
-        let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 25).unwrap();
+        let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 25).unwrap();
         assert!(mid.challenge.target_bits >= 14 && mid.challenge.target_bits <= 16);
         // Peak load — clamped to SOLVER_MAX_TARGET_BITS (not 24), because the
         // browser solver's 5M-hash cap would fail ~74% of solves at 24 bits.
-        let peak = issue_challenge(&config, "login", "1.1.1.1", 1, 50).unwrap();
+        let peak = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 50).unwrap();
         assert_eq!(peak.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
     }
 
@@ -632,7 +662,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
         assert_eq!(issued.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
         assert_eq!(issued.record.target_bits, SOLVER_MAX_TARGET_BITS);
     }
@@ -658,6 +688,7 @@ mod tests {
             "login",
             "1.1.1.1",
             1,
+            1_000_000_000,
             0,
         )
         .unwrap();
@@ -689,10 +720,10 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
         cache.put("old", "login", issued);
         std::thread::sleep(Duration::from_millis(40));
-        let issued2 = issue_challenge(&config, "signup", "1.1.1.1", 1, 0).unwrap();
+        let issued2 = issue_challenge(&config, "signup", "1.1.1.1", 1, 1000000000, 0).unwrap();
         cache.put("new", "signup", issued2);
         // The expired "old" entry must not linger after put.
         assert!(cache.get("old", "login").is_none());
@@ -715,7 +746,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
         let mut cache = ChallengeCache::new();
         cache.put("hash1", "login", issued.clone());
         let cached = cache.get("hash1", "login").unwrap();
@@ -739,7 +770,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 0).unwrap();
+        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
         let mut cache = ChallengeCache::new();
         cache.put("hash1", "login", issued);
         assert!(cache.get("hash1", "signup").is_none());

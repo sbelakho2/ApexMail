@@ -186,6 +186,12 @@ pub struct Config {
     /// overrides the per-challenge difficulty-derived floor; 0 disables the
     /// check. Default: derived from difficulty at issuance.
     pub kiwi_min_duration_ms: Option<u64>,
+    /// Enforce telemetry-based bot rejection inside `verify_solution`. The
+    /// telemetry is client-controlled and forgeable, so this is a
+    /// defense-in-depth signal, never the security boundary. When enabled,
+    /// clients that fail the heuristic (including clients that submit no
+    /// telemetry at all) are rejected with BotDetected. Default true.
+    pub kiwi_enforce_telemetry: bool,
     /// Enable auto-tuning of difficulty based on server load. Default false.
     /// Only applies to SHA-256 challenges; Argon2id difficulty is static.
     pub kiwi_auto_tune: bool,
@@ -696,6 +702,10 @@ impl Config {
         let kiwi_min_duration_ms = env::var("KIWI_MIN_DURATION_MS")
             .ok()
             .and_then(|v| v.parse().ok());
+        let kiwi_enforce_telemetry = env::var("KIWI_ENFORCE_TELEMETRY")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
         let kiwi_auto_tune = env::var("KIWI_AUTO_TUNE")
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -882,6 +892,7 @@ impl Config {
             kiwi_argon2_difficulty_bits,
             kiwi_challenge_ttl_secs,
             kiwi_min_duration_ms,
+            kiwi_enforce_telemetry,
             kiwi_auto_tune,
             kiwi_auto_tune_min_bits,
             kiwi_auto_tune_max_bits,
@@ -1321,6 +1332,7 @@ pub(crate) mod tests {
             kiwi_argon2_difficulty_bits: 8,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
+            kiwi_enforce_telemetry: true,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,
             kiwi_auto_tune_max_bits: 20,
@@ -1463,6 +1475,7 @@ pub(crate) mod tests {
             kiwi_difficulty_bits: 20,
             kiwi_challenge_ttl_secs: 120,
             kiwi_min_duration_ms: None,
+            kiwi_enforce_telemetry: true,
             kiwi_auto_tune: false,
             kiwi_auto_tune_min_bits: 10,
             kiwi_auto_tune_max_bits: 20,

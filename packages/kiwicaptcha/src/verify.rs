@@ -74,28 +74,63 @@ fn leading_zero_bits(hash: &[u8]) -> u32 {
 
 /// The context for verifying a single solution.
 pub struct VerifyContext<'a> {
-    /// The stored challenge record (looked up from Redis by nonce).
-    pub record: &'a ChallengeRecord,
+    /// The stored challenge record (looked up from storage by nonce). Passed
+    /// as `&mut` because verification performs attempt accounting on the
+    /// record's `attempts_used` counter — the caller persists the mutated
+    /// record back to storage (on failure paths) or consumes it (on success).
+    pub record: &'a mut ChallengeRecord,
     /// The HMAC secret key (to re-verify the challenge signature).
     pub secret_key: &'a str,
     /// The client's claimed counter.
     pub counter: u64,
-    /// The client's reported solve duration in milliseconds.
+    /// The client's reported solve duration in milliseconds. This value is
+    /// CLIENT-CONTROLLED and therefore forgeable — it is NOT used to enforce
+    /// the minimum duration (that is measured server-side via
+    /// `issued_at_ns`/`now_ns`); it is only fed to the telemetry scorer.
     pub duration_ms: u64,
-    /// The current Unix timestamp (for TTL check).
+    /// The current Unix timestamp in seconds (for the TTL check).
     pub now_unix: u64,
+    /// The server's receipt time in nanoseconds. Together with the record's
+    /// `issued_at_ns` this provides a server-measured elapsed time, used to
+    /// enforce the minimum solve duration. A forged client `duration_ms` can
+    /// never satisfy this check.
+    pub now_ns: u64,
     /// The minimum acceptable solve duration in milliseconds. A solve arriving
-    /// faster than the theoretical minimum is rejected as infeasible.
+    /// (per the server clock) faster than the theoretical minimum is rejected
+    /// as infeasible. The effective floor is `max(min_duration_ms,
+    /// record.min_duration_ms)`; 0 disables the check.
     pub min_duration_ms: u64,
     /// Expected auth scope. If [`Some`], the solution is rejected if the
     /// challenge was issued for a different scope (prevents cross-scope replay).
     pub expected_scope: Option<&'a str>,
+    /// The current client's IP address. When [`Some`], the challenge is
+    /// rejected if the stored `ip_hash` does not match
+    /// `hash_ip(client_ip, secret_key)` — enforcing the IP binding that was
+    /// recorded at issuance (relay-attack mitigation). When `None`, the IP
+    /// binding check is skipped (useful for tests or proxies that rotate IPs).
+    pub client_ip: Option<&'a str>,
+    /// Browser/environment telemetry gathered by the widget (client-controlled
+    /// and forgeable — treated strictly as a supplementary signal).
+    pub telemetry: Option<&'a serde_json::Value>,
+    /// When `true`, telemetry is scored and the solution is rejected with
+    /// [`VerifyError::BotDetected`] when the client appears automated
+    /// (including when no telemetry was submitted at all — a custom client
+    /// does not send telemetry). When `false`, telemetry is ignored for
+    /// enforcement (score-only logging is performed by `score_telemetry`
+    /// callers). Default off: telemetry must never be the security boundary.
+    pub enforce_telemetry: bool,
+    /// Maximum number of verification attempts against this record
+    /// (`record.attempts_used`). 0 = unlimited. Attempts are counted on every
+    /// verification call (correct or not), bounding the server-side cost of
+    /// wrong candidates — particularly memory-hard Argon2id verifications.
+    pub max_attempts: u32,
 }
 
 /// Outcome of a verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyOutcome {
-    /// The solution is valid. The caller should mark the challenge consumed.
+    /// The solution is valid. The challenge must now be consumed
+    /// (atomically, e.g. Redis GETDEL) so it can never be used twice.
     Valid,
     /// The solution is invalid; the reason explains why.
     Invalid(VerifyError),
@@ -108,8 +143,12 @@ pub enum VerifyError {
     BadSignature,
     #[error("challenge has expired")]
     Expired,
-    #[error("solution arrived faster than the theoretical minimum")]
+    #[error("solution arrived faster than the theoretical minimum (server-measured)")]
     TooFast,
+    #[error("challenge was issued to a different client IP")]
+    IpMismatch,
+    #[error("too many verification attempts against this challenge")]
+    TooManyAttempts,
     #[error("proof-of-work hash does not meet the difficulty target")]
     InsufficientWork,
     #[error("stored challenge record is malformed")]
@@ -121,11 +160,30 @@ pub enum VerifyError {
 /// Verify a solution against its stored challenge record.
 ///
 /// This performs the full server-side check:
-/// 1. Re-verify the HMAC signature (defends against forged records).
-/// 2. Check the TTL (defends against stale challenges).
-/// 3. Check the minimum duration (defends against impossibly-fast solves).
-/// 4. Re-derive the SHA-256 hash and check leading zero bits (the actual PoW).
-pub fn verify_solution(ctx: &VerifyContext<'_>) -> VerifyOutcome {
+/// 1. Attempt accounting: `record.attempts_used` is incremented; when it
+///    exceeds `max_attempts` (and `max_attempts > 0`) the solution is
+///    rejected with [`VerifyError::TooManyAttempts`]. The caller persists the
+///    mutated record on failure, or consumes it on success (single-use).
+/// 2. Re-verify the HMAC signature (defends against forged records).
+/// 3. Check the TTL (defends against stale challenges).
+/// 4. Check the scope (prevents cross-scope replay).
+/// 5. Check the IP binding (`client_ip` vs the stored `ip_hash`).
+/// 6. Check the minimum duration with the SERVER clock: elapsed = `now_ns` -
+///    `record.issued_at_ns`. The client-reported duration is forgeable and is
+///    never trusted for this check. Records without `issued_at_ns` (legacy)
+///    fall back to the client-duration check.
+/// 7. Optional telemetry scoring (when `enforce_telemetry` is set).
+/// 8. Re-derive the SHA-256/Argon2id hash and check leading zero bits (the
+///    actual PoW).
+pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
+    // 0. Attempt accounting — counted on EVERY verification call, correct or
+    //    not, so a wrong-candidate loop cannot burn unbounded server-side
+    //    computation (especially memory-hard Argon2id hashing).
+    ctx.record.attempts_used = ctx.record.attempts_used.saturating_add(1);
+    if ctx.max_attempts > 0 && ctx.record.attempts_used > ctx.max_attempts {
+        return VerifyOutcome::Invalid(VerifyError::TooManyAttempts);
+    }
+
     // 1. Signature re-check.
     let payload = payload_from_record(ctx.record);
     match verify_signature(&payload, signature_from_challenge(ctx.record), ctx.secret_key) {
@@ -147,17 +205,53 @@ pub fn verify_solution(ctx: &VerifyContext<'_>) -> VerifyOutcome {
         }
     }
 
-    // 3. Minimum duration (only enforced for non-trivial difficulties; a 0
-    //    min_duration_ms disables this check, useful in tests). The floor is
-    //    per-challenge: it was derived at issuance from the algorithm and
-    //    difficulty so it can never conflict with the solver (e.g. auto-tuned
-    //    low difficulty or a fast WASM solver both stay above their floor).
-    let floor = ctx.min_duration_ms.max(ctx.record.min_duration_ms);
-    if floor > 0 && ctx.duration_ms < floor {
-        return VerifyOutcome::Invalid(VerifyError::TooFast);
+    // 2c. IP binding: the challenge was issued to a client IP; a different
+    //     submission IP means the token was relayed. Enforced here (not just
+    //     at the route layer) so the secure behavior cannot be forgotten.
+    if let Some(client_ip) = ctx.client_ip {
+        let expected_ip_hash = crate::challenge::hash_ip(client_ip, ctx.secret_key);
+        if ctx.record.ip_hash != expected_ip_hash {
+            return VerifyOutcome::Invalid(VerifyError::IpMismatch);
+        }
     }
 
-    // 4. Re-derive and check leading zero bits.
+    // 3. Minimum duration — SERVER-MEASURED. The client-reported duration_ms
+    //    is forgeable and is deliberately not trusted for enforcement.
+    let floor = ctx.min_duration_ms.max(ctx.record.min_duration_ms);
+    if floor > 0 {
+        if ctx.record.issued_at_ns > 0 {
+            // High-resolution path: elapsed time between issuance and receipt,
+            // both observed by the server clock.
+            let elapsed_ns = ctx.now_ns.saturating_sub(ctx.record.issued_at_ns);
+            if elapsed_ns < floor.saturating_mul(1_000_000) {
+                return VerifyOutcome::Invalid(VerifyError::TooFast);
+            }
+        } else {
+            // Legacy path (records without issued_at_ns): fall back to the
+            // client-reported duration. This is weaker and only exists for
+            // backward compatibility with records issued before server-side
+            // timing existed.
+            if ctx.duration_ms < floor {
+                return VerifyOutcome::Invalid(VerifyError::TooFast);
+            }
+        }
+    }
+
+    // 4. Optional telemetry scoring. Strict mode also rejects clients that
+    //    submit NO telemetry (a custom non-browser solver does not send it).
+    if ctx.enforce_telemetry {
+        match ctx.telemetry {
+            Some(telemetry) if score_telemetry(telemetry, ctx.duration_ms) => {
+                return VerifyOutcome::Invalid(VerifyError::BotDetected);
+            }
+            Some(_) => {}
+            None => {
+                return VerifyOutcome::Invalid(VerifyError::BotDetected);
+            }
+        }
+    }
+
+    // 5. Re-derive and check leading zero bits.
     let hash = match derive_hash(ctx.record, ctx.counter) {
         Ok(h) => h,
         Err(e) => return VerifyOutcome::Invalid(e),
@@ -326,6 +420,9 @@ mod tests {
     use super::*;
     use crate::challenge::{hash_ip, issue_challenge, ChallengeConfig, PoWAlgorithm};
 
+    const NOW_UNIX: u64 = 1_000_000;
+    const NOW_NS: u64 = 1_000_000_000_000_000;
+
     fn make_record(target_bits: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
@@ -341,7 +438,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 0).unwrap();
+        let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
         issued.record
     }
 
@@ -350,7 +447,7 @@ mod tests {
             secret_key: "test-key".into(),
             algorithm: PoWAlgorithm::Argon2id,
             m_kib,
-            t: 1,
+            t: 3, // libsodium-representable (t >= 3, p == 1) — issuance rejects t < 3
             p: 1,
             target_bits,
             argon2_target_bits: target_bits,
@@ -360,35 +457,40 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 0).unwrap();
+        let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
         issued.record
     }
 
-    fn verify(record: &ChallengeRecord, counter: u64, duration_ms: u64) -> VerifyOutcome {
-        let ctx = VerifyContext {
+    fn verify(record: &mut ChallengeRecord, counter: u64, duration_ms: u64) -> VerifyOutcome {
+        let mut ctx = VerifyContext {
             record,
             secret_key: "test-key",
             counter,
             duration_ms,
-            now_unix: 1_000_001,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000, // 5 s after issuance
             min_duration_ms: 0,
             expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
         };
-        verify_solution(&ctx)
+        verify_solution(&mut ctx)
     }
 
     #[test]
     fn valid_solution_is_accepted() {
-        let record = make_record(8); // 8 bits — fast solve
+        let mut record = make_record(8); // 8 bits — fast solve
         let counter = solve_for_test(&record).expect("solver finds a counter");
-        assert_eq!(verify(&record, counter, 5000), VerifyOutcome::Valid);
+        assert_eq!(verify(&mut record, counter, 5000), VerifyOutcome::Valid);
     }
 
     #[test]
     fn argon2_solution_is_accepted() {
-        let record = make_argon2_record(4, 128); // low bits, small memory for tests
+        let mut record = make_argon2_record(4, 128); // low bits, small memory for tests
         let counter = solve_for_test(&record).expect("solver finds an argon2 counter");
-        assert_eq!(verify(&record, counter, 5000), VerifyOutcome::Valid);
+        assert_eq!(verify(&mut record, counter, 5000), VerifyOutcome::Valid);
     }
 
     #[test]
@@ -398,7 +500,7 @@ mod tests {
             secret_key: "test-key".into(),
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 4,
-            t: 1,
+            t: 3,
             p: 1,
             target_bits: 4,
             argon2_target_bits: 4,
@@ -408,56 +510,141 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
         };
-        assert!(issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 0).is_err());
+        assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err());
+    }
+
+    #[test]
+    fn argon2_issuance_rejects_libsodium_unrepresentable_t() {
+        // PHP/libsodium cannot represent Argon2id with t < 3 — issuance must
+        // reject it so cross-language verification can never silently fail.
+        for t in [0u32, 1, 2] {
+            let config = ChallengeConfig {
+                secret_key: "test-key".into(),
+                algorithm: PoWAlgorithm::Argon2id,
+                m_kib: 128,
+                t,
+                p: 1,
+                target_bits: 4,
+                argon2_target_bits: 4,
+                ttl_secs: 120,
+                min_duration_ms: None,
+                auto_tune: false,
+                auto_tune_min_bits: 8,
+                auto_tune_max_bits: 24,
+            };
+            assert!(
+                issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
+                "Argon2id t={t} must be rejected at issuance"
+            );
+        }
+    }
+
+    #[test]
+    fn argon2_issuance_rejects_libsodium_unrepresentable_p() {
+        let config = ChallengeConfig {
+            secret_key: "test-key".into(),
+            algorithm: PoWAlgorithm::Argon2id,
+            m_kib: 128,
+            t: 3,
+            p: 2,
+            target_bits: 4,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+        };
+        assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err());
     }
 
     #[test]
     fn wrong_counter_is_rejected() {
-        let record = make_record(8);
+        let mut record = make_record(8);
         // Find a valid counter, then use a different one.
         let valid = solve_for_test(&record).unwrap();
         let bad = if valid == 0 { 1 } else { 0 };
         assert_eq!(
-            verify(&record, bad, 5000),
+            verify(&mut record, bad, 5000),
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         );
     }
 
     #[test]
     fn expired_challenge_is_rejected() {
-        let record = make_record(8);
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
-        let ctx = VerifyContext {
-            record: &record,
+        let mut ctx = VerifyContext {
+            record: &mut record,
             secret_key: "test-key",
             counter,
             duration_ms: 5000,
-            now_unix: 1_000_000 + 121, // past TTL
+            now_unix: NOW_UNIX + 121, // past TTL
+            now_ns: NOW_NS,
             min_duration_ms: 0,
             expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
         };
         assert_eq!(
-            verify_solution(&ctx),
+            verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::Expired)
         );
     }
 
     #[test]
-    fn too_fast_solution_is_rejected() {
-        let record = make_record(20); // high difficulty => non-trivial floor
+    fn too_fast_solution_is_rejected_server_side() {
+        // The floor is enforced with the SERVER clock (now_ns - issued_at_ns),
+        // NOT the forgeable client duration_ms. Here the client CLAIMS a long
+        // duration but the server measures a sub-floor elapsed time.
+        let mut record = make_record(20); // high difficulty => non-trivial floor
         let counter = solve_for_test(&record).unwrap();
         let floor = record.min_duration_ms.max(1);
-        let ctx = VerifyContext {
-            record: &record,
+        let mut ctx = VerifyContext {
+            record: &mut record,
             secret_key: "test-key",
             counter,
-            duration_ms: floor - 1, // below the issued floor
-            now_unix: 1_000_001,
+            duration_ms: 60_000, // client forges a 60 s solve — must NOT help
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + floor * 1_000_000 - 1, // server measures below the floor
             min_duration_ms: 0,
             expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
         };
         assert_eq!(
-            verify_solution(&ctx),
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::TooFast)
+        );
+    }
+
+    #[test]
+    fn server_measured_duration_cannot_be_bypassed_with_forged_client_duration() {
+        // An adversarial client submits duration_ms=5000; the server measures
+        // sub-millisecond elapsed time. The client's claim must be ignored.
+        let mut record = make_record(20);
+        let counter = solve_for_test(&record).unwrap();
+        // Elapsed: 0 ns (immediately after issuance) — impossibly fast.
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000, // forged
+            now_unix: NOW_UNIX,
+            now_ns: NOW_NS, // same ns as issuance
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::TooFast)
         );
     }
@@ -477,21 +664,280 @@ mod tests {
 
     #[test]
     fn bad_secret_key_rejects() {
-        let record = make_record(8);
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
-        let ctx = VerifyContext {
-            record: &record,
+        let mut ctx = VerifyContext {
+            record: &mut record,
             secret_key: "WRONG-KEY",
             counter,
             duration_ms: 5000,
-            now_unix: 1_000_001,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
         };
         assert_eq!(
-            verify_solution(&ctx),
+            verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::BadSignature)
         );
+    }
+
+    #[test]
+    fn ip_mismatch_is_rejected_at_core_level() {
+        // The review's point 6: IP binding must be enforced by the core
+        // verifier itself, not left to the route layer.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::IpMismatch)
+        );
+    }
+
+    #[test]
+    fn ip_binding_skipped_when_client_ip_absent() {
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: None, // opt-out (rotating proxies etc.)
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+    }
+
+    #[test]
+    fn attempt_cap_counts_every_verification() {
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        // First call (even a WRONG counter) consumes the single attempt.
+        let wrong = if counter == 0 { 1 } else { 0 };
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter: wrong,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 1,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+        );
+        // Second call — the correct counter, but the attempt budget is gone.
+        let mut ctx2 = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 1,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx2),
+            VerifyOutcome::Invalid(VerifyError::TooManyAttempts)
+        );
+    }
+
+    #[test]
+    fn attempts_are_persisted_on_the_record() {
+        // The caller persists `record.attempts_used` back to storage; a fresh
+        // verification against the same stored record must observe the count.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let wrong = if counter == 0 { 1 } else { 0 };
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter: wrong,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 3,
+        };
+        verify_solution(&mut ctx); // wrong counter
+        drop(ctx);
+        assert_eq!(record.attempts_used, 1);
+        let mut ctx2 = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 3,
+        };
+        assert_eq!(verify_solution(&mut ctx2), VerifyOutcome::Valid);
+        drop(ctx2);
+        assert_eq!(record.attempts_used, 2);
+    }
+
+    #[test]
+    fn telemetry_enforced_when_requested() {
+        use serde_json::json;
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+
+        // webdriver=true with enforcement → rejected.
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: Some(&json!({"wd": true})),
+            enforce_telemetry: true,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::BotDetected)
+        );
+    }
+
+    #[test]
+    fn telemetry_enforcement_rejects_absent_telemetry() {
+        // A custom non-browser client submits no telemetry at all — in strict
+        // mode that is itself a bot signal.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: true,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::BotDetected)
+        );
+    }
+
+    #[test]
+    fn telemetry_ignored_when_not_enforced() {
+        use serde_json::json;
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: Some(&json!({"wd": true})),
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+    }
+
+    #[test]
+    fn legacy_records_without_issued_at_ns_fall_back_to_client_duration() {
+        // Records issued before server-side timing (issued_at_ns == 0) use the
+        // legacy client-duration check so old stored challenges keep working.
+        let mut record = make_record(20);
+        record.issued_at_ns = 0;
+        let counter = solve_for_test(&record).unwrap();
+        let floor = record.min_duration_ms.max(1);
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: floor - 1, // below floor, client-reported
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 10_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::TooFast)
+        );
+        // Same record, client claims long duration → passes.
+        let mut ctx2 = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key",
+            counter,
+            duration_ms: floor + 1000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 10_000_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(verify_solution(&mut ctx2), VerifyOutcome::Valid);
     }
 
     #[test]
@@ -662,11 +1108,11 @@ mod tests {
         // The solver caps at MAX_SHA_HASHES (5M); a counter beyond that is
         // either a bot or an invalid solution — it must still verify the hash
         // correctly (a huge counter is just a different preimage).
-        let record = make_record(4); // low difficulty: counter found quickly
+        let mut record = make_record(4); // low difficulty: counter found quickly
         let counter = solve_for_test(&record).unwrap();
         let huge = counter + 5_000_001;
         // Huge counter is virtually certain to NOT meet the target.
-        let outcome = verify(&record, huge, 5000);
+        let outcome = verify(&mut record, huge, 5000);
         assert_eq!(outcome, VerifyOutcome::Invalid(VerifyError::InsufficientWork));
     }
 
@@ -678,63 +1124,80 @@ mod tests {
         // modified the signed payload).
         record.challenge.push_str("00");
         assert_eq!(
-            verify(&record, counter, 5000),
+            verify(&mut record, counter, 5000),
             VerifyOutcome::Invalid(VerifyError::BadSignature)
         );
     }
 
     #[test]
     fn verify_rejects_wrong_scope() {
-        let record = make_record(8);
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
-        let ctx = VerifyContext {
-            record: &record,
+        let mut ctx = VerifyContext {
+            record: &mut record,
             secret_key: "test-key",
             counter,
             duration_ms: 5000,
             now_unix: 1_000_001,
+            now_ns: NOW_NS + 5_000_000_000,
             min_duration_ms: 0,
             expected_scope: Some("signup"),
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
         };
         assert_eq!(
-            verify_solution(&ctx),
+            verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::BadSignature)
         );
     }
 
     #[test]
     fn verify_rejects_expired_exactly_at_ttl_boundary() {
-        let record = make_record(8);
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
-        let ctx = VerifyContext {
-            record: &record,
+        let expires_at = record.expires_at;
+        let mut ctx = VerifyContext {
+            record: &mut record,
             secret_key: "test-key",
             counter,
             duration_ms: 5000,
-            now_unix: record.expires_at, // exactly at expiry
+            now_unix: expires_at, // exactly at expiry
+            now_ns: NOW_NS + 5_000_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
         };
         assert_eq!(
-            verify_solution(&ctx),
+            verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::Expired)
         );
     }
 
     #[test]
     fn verify_accepts_exactly_at_ttl_boundary_minus_one() {
-        let record = make_record(8);
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
-        let ctx = VerifyContext {
-            record: &record,
+        let expires_at = record.expires_at;
+        let mut ctx = VerifyContext {
+            record: &mut record,
             secret_key: "test-key",
             counter,
             duration_ms: 5000,
-            now_unix: record.expires_at - 1,
+            now_unix: expires_at - 1,
+            now_ns: NOW_NS + 5_000_000_000,
             min_duration_ms: 0,
             expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
         };
-        assert_eq!(verify_solution(&ctx), VerifyOutcome::Valid);
+        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
     }
 
     #[test]
@@ -755,11 +1218,11 @@ mod tests {
         // A challenge issued as Argon2id must NOT accept a SHA-256 solution
         // counter and vice versa — the algorithm is part of the contract.
         let sha_record = make_record(8);
-        let argon_record = make_argon2_record(8, 128);
+        let mut argon_record = make_argon2_record(8, 128);
         let sha_counter = solve_for_test(&sha_record).unwrap();
         // Feed the SHA counter into the Argon2 record: hashes differ.
         assert_eq!(
-            verify(&argon_record, sha_counter, 5000),
+            verify(&mut argon_record, sha_counter, 5000),
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         );
     }
@@ -775,7 +1238,7 @@ mod tests {
         let mut absurd = sane.clone();
         absurd.m_kib = crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1;
         assert_eq!(
-            verify(&absurd, counter, 5000),
+            verify(&mut absurd, counter, 5000),
             VerifyOutcome::Invalid(VerifyError::MalformedRecord)
         );
     }
@@ -783,29 +1246,40 @@ mod tests {
     #[test]
     fn verify_duration_floor_is_per_challenge() {
         // The record's own floor is authoritative when ctx.min_duration_ms is 0.
-        let record = make_record(20);
+        let mut record = make_record(20);
         let counter = solve_for_test(&record).unwrap();
-        let ctx = VerifyContext {
-            record: &record,
+        let floor = record.min_duration_ms.max(1);
+        let mut ctx = VerifyContext {
+            record: &mut record,
             secret_key: "test-key",
             counter,
-            duration_ms: record.min_duration_ms + 1,
-            now_unix: 1_000_001,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + floor * 1_000_000 + 1, // above floor
             min_duration_ms: 0,
             expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
         };
-        assert_eq!(verify_solution(&ctx), VerifyOutcome::Valid);
-        let ctx_fast = VerifyContext {
-            record: &record,
+        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+        let mut ctx_fast = VerifyContext {
+            record: &mut record,
             secret_key: "test-key",
             counter,
-            duration_ms: record.min_duration_ms - 1,
-            now_unix: 1_000_001,
+            duration_ms: 60_000, // forged long client duration must NOT help
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + floor * 1_000_000 - 1, // below floor
             min_duration_ms: 0,
             expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
         };
         assert_eq!(
-            verify_solution(&ctx_fast),
+            verify_solution(&mut ctx_fast),
             VerifyOutcome::Invalid(VerifyError::TooFast)
         );
     }
@@ -814,9 +1288,9 @@ mod tests {
     fn verify_accepts_full_difficulty_range() {
         // Every difficulty from 0 to the solver cap must issue and verify.
         for bits in [0u32, 1, 4, 8, 12, 16, 20] {
-            let record = make_record(bits);
+            let mut record = make_record(bits);
             let counter = solve_for_test(&record).expect("solver finds counter");
-            let outcome = verify(&record, counter, 5000);
+            let outcome = verify(&mut record, counter, 5000);
             assert_eq!(
                 outcome,
                 VerifyOutcome::Valid,

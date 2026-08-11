@@ -10,6 +10,12 @@ namespace KiwiCaptcha;
  * Mirrors the Rust `ChallengeRecord` fields so a PHP service and a Rust
  * service can share the same Redis/DB keys if ever mixed (though the two
  * projects are designed to be fully decoupled).
+ *
+ * `issuedAtNs` is a server-side-only high-resolution issuance timestamp
+ * (monotonic nanoseconds, NOT Unix time). It is never signed into the
+ * challenge payload and never sent to the client — the verifier uses it to
+ * measure elapsed solve time on the server instead of trusting the
+ * client-reported duration.
  */
 final class ChallengeRecord
 {
@@ -28,6 +34,7 @@ final class ChallengeRecord
         public readonly string $prefix,
         public readonly string $challenge,
         public readonly int $minDurationMs,
+        public readonly int $issuedAtNs = 0,
     ) {
     }
 
@@ -49,6 +56,7 @@ final class ChallengeRecord
             'prefix' => $this->prefix,
             'challenge' => $this->challenge,
             'min_duration_ms' => $this->minDurationMs,
+            'issued_at_ns' => $this->issuedAtNs,
         ];
     }
 
@@ -70,6 +78,7 @@ final class ChallengeRecord
             prefix: (string) $data['prefix'],
             challenge: (string) $data['challenge'],
             minDurationMs: (int) ($data['min_duration_ms'] ?? 0),
+            issuedAtNs: (int) ($data['issued_at_ns'] ?? 0),
         );
     }
 }

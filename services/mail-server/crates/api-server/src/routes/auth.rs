@@ -235,14 +235,30 @@ pub async fn verify_kiwi_token(
         ]));
     }
 
-    let ctx = kiwicaptcha::VerifyContext {
-        record: &record,
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut record_mut = record.clone();
+    let mut ctx = kiwicaptcha::VerifyContext {
+        record: &mut record_mut,
         secret_key: &config.kiwi_secret_key,
         counter: solution.counter,
         duration_ms: solution.duration_ms,
         now_unix,
+        now_ns,
         min_duration_ms,
         expected_scope: scope,
+        // IP binding is enforced inside verify_solution (intrinsic), in
+        // addition to the explicit pre-check above.
+        client_ip: Some(client_ip),
+        telemetry: Some(&solution.telemetry),
+        // Telemetry is client-controlled and forgeable — supplementary only.
+        // The per-nonce Lua INCR is the authoritative attempt cap (20); the
+        // intrinsic max_attempts is left unlimited here to keep the two
+        // mechanisms independent.
+        enforce_telemetry: config.kiwi_enforce_telemetry,
+        max_attempts: 0,
     };
 
     tracing::info!(
@@ -255,7 +271,7 @@ pub async fn verify_kiwi_token(
         "KiwiCaptcha: calling verify_solution"
     );
 
-    match kiwicaptcha::verify_solution(&ctx) {
+    match kiwicaptcha::verify_solution(&mut ctx) {
         kiwicaptcha::VerifyOutcome::Valid => {
             // Atomic single-use consumption (compare-and-delete): the record is
             // deleted only if it still holds the exact value verified above, so
@@ -3221,7 +3237,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 20,
         };
-        let issued = kiwicaptcha::issue_challenge(&kc_config, "login", "1.2.3.4", now_unix, 0)
+        let issued = kiwicaptcha::issue_challenge(&kc_config, "login", "1.2.3.4", now_unix, now_unix * 1_000_000_000, 0)
             .expect("challenge issuance succeeds");
 
         let record_json = serde_json::to_string(&issued.record).expect("record serializes");

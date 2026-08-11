@@ -219,7 +219,7 @@
         if (!result) throw new Error("Exhausted");
         var telemetry = { wd: navigator.webdriver===true, hc: navigator.hardwareConcurrency||0, dm: navigator.deviceMemory||0, me: mouseEvents, ke: keyEvents, et: eventTimings, sw: window.screen.width, sh: window.screen.height };
         tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry));
-        setStatus("Verified", "Success", "done"); setHint("Human verified locally."); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
+        setStatus("Verified", "Success", "done"); setHint("Proof-of-work verified locally."); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
       } catch (e) { fail(e.message); }
     }
     run();

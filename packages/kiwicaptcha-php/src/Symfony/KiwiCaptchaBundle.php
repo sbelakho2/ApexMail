@@ -20,7 +20,7 @@ use Symfony\Component\HttpKernel\Bundle\Bundle;
  *     algorithm: sha256                       # sha256 | argon2id
  *     difficulty_bits: 20
  *     challenge_ttl_secs: 120
- *     storage: kiwicaptcha.storage.array       # or your own service id
+ *     storage: kiwicaptcha.storage.redis       # shared storage required outside test/dev
  *     route_prefix: /kiwi-captcha
  */
 final class KiwiCaptchaBundle extends Bundle

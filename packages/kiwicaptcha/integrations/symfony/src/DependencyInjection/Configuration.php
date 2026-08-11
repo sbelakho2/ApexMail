@@ -56,7 +56,7 @@ final class Configuration implements ConfigurationInterface
                     ->min(10)
                 ->end()
                 ->scalarNode('storage')
-                    ->info('Service id implementing KiwiCaptcha\StorageInterface (defaults to an in-memory array storage; use a PSR-6 cache-backed adapter in production).')
+                    ->info('Service id implementing KiwiCaptcha\StorageInterface. Defaults to the in-memory ArrayStorage, which is only allowed in test/dev environments — in prod a shared storage (e.g. KiwiCaptcha\Storage\RedisStorage or Psr6Storage backed by a Redis PSR-6 pool) is required or the container fails to compile.')
                     ->defaultValue('kiwi_captcha.storage.array')
                 ->end()
                 ->scalarNode('route_prefix')

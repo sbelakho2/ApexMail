@@ -45,6 +45,21 @@ final class KiwiCaptchaRuntime
         return $contents;
     }
 
+    public function css(): string
+    {
+        return $this->css;
+    }
+
+    public function wasm(): string
+    {
+        return $this->wasm;
+    }
+
+    public function driver(): string
+    {
+        return $this->driver;
+    }
+
     /**
      * @param array<string, mixed> $context
      *
@@ -55,6 +70,10 @@ final class KiwiCaptchaRuntime
         return $env->render($this->template, [
             'endpoint' => $context['endpoint'] ?? rtrim($this->routePrefix, '/').'/challenge',
             'scope' => $context['scope'] ?? 'login',
+            'nonce' => $context['nonce'] ?? null,
+            // Standalone renders have no form view vars; provide working defaults.
+            'id' => $context['id'] ?? '',
+            'full_name' => $context['full_name'] ?? 'kiwi__token',
             'kiwi_css' => $this->css,
             'kiwi_wasm' => $this->wasm,
             'kiwi_driver' => $this->driver,

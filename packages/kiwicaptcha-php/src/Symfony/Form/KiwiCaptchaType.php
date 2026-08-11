@@ -11,6 +11,7 @@ use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\Form\FormError;
 use Symfony\Component\Form\FormEvent;
 use Symfony\Component\Form\FormEvents;
+use Symfony\Component\OptionsResolver\Options;
 use Symfony\Component\OptionsResolver\OptionsResolver;
 use Symfony\Component\HttpFoundation\RequestStack;
 
@@ -32,6 +33,7 @@ final class KiwiCaptchaType extends AbstractType
         private readonly Verifier $verifier,
         private readonly RequestStack $requestStack,
         private readonly string $tokenField = 'kiwi__token',
+        private readonly ?string $configuredSecretKey = null,
     ) {
     }
 
@@ -49,7 +51,12 @@ final class KiwiCaptchaType extends AbstractType
                 return;
             }
 
-            $request = $this->requestStack->getCurrentRequest();
+            if (!\is_string($options['secret_key'])) {
+                throw new \LogicException('KiwiCaptcha secret key is not configured (set kiwicaptcha.secret or pass secret_key to the form type)');
+            }
+
+            // Same IP source as the challenge endpoint: Request::getClientIp().
+            $request = $this->requestStack->getMainRequest();
             $clientIp = $request?->getClientIp();
 
             $outcome = $this->verifier->verify(
@@ -76,11 +83,13 @@ final class KiwiCaptchaType extends AbstractType
         $resolver->setDefaults([
             'scope' => 'default',
             'expected_scope' => null,
-            'secret_key' => null,
+            'secret_key' => $this->configuredSecretKey,
             'bind_ip' => true,
             'mapped' => false,
             'compound' => true,
         ]);
+        // An explicit null falls back to the secret configured in the bundle.
+        $resolver->setNormalizer('secret_key', static fn (Options $options, ?string $value): ?string => $value ?? $options['secret_key']);
         $resolver->setAllowedTypes('scope', 'string');
         $resolver->setAllowedTypes('expected_scope', ['string', 'null']);
         $resolver->setAllowedTypes('secret_key', ['string', 'null']);

@@ -1,7 +1,8 @@
 {% block kiwi_captcha_widget %}
 {%- set endpoint = endpoint|default('/kiwi-captcha/challenge') -%}
 {%- set scope = scope|default('login') -%}
-<style>
+{%- set nonce = nonce|default('') -%}
+<style{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_css|raw }}
 </style>
 <div class="kiwi-container" id="kiwicaptcha-root-{{ id }}" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}">
@@ -36,10 +37,10 @@
         </div>
     </div>
 </div>
-<script>
+<script{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_wasm|raw }}
 </script>
-<script>
+<script{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_driver|raw }}
 </script>
 {% endblock %}

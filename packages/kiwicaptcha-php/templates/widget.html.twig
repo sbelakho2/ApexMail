@@ -1,8 +1,10 @@
 {# KiwiCaptcha widget — mirrors packages/kiwicaptcha/src/widget.rs output.
    The two inline scripts (WASM solver embed + driver) and the CSS come from
    the shared assets so Rust and PHP stay byte-identical. Regenerate with
-   bin/sync-assets.sh after rebuilding the Rust wasm. #}
-<style>
+   bin/sync-assets.sh after rebuilding the Rust wasm.
+   Optional CSP nonce: {{ kiwi_captcha_widget('login', endpoint, nonce) }}
+   emits nonce="..." on the <style> and <script> tags when provided. #}
+<style{% if nonce is defined and nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_css|raw }}
 </style>
 <div class="kiwi-container" id="kiwicaptcha-root">
@@ -28,9 +30,9 @@
     <input type="hidden" name="kiwi__token" data-kiwi-token value="" />
   </div>
 </div>
-<script>
+<script{% if nonce is defined and nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_wasm|raw }}
 </script>
-<script>
+<script{% if nonce is defined and nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_driver|raw }}
 </script>

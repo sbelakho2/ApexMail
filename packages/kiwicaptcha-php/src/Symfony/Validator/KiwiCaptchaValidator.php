@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Symfony\Validator;
 
 use KiwiCaptcha\Verifier;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Validator\Constraint;
 use Symfony\Component\Validator\ConstraintValidator;
 use Symfony\Component\Validator\Exception\UnexpectedTypeException;
@@ -13,6 +14,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 {
     public function __construct(
         private readonly Verifier $verifier,
+        private readonly RequestStack $requestStack,
         private readonly ?string $configuredSecretKey = null,
     ) {
     }
@@ -52,8 +54,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
     }
 
+    /**
+     * The client IP must come from the same source that bound the challenge
+     * when it was issued (ChallengeController uses Request::getClientIp()),
+     * so both sides agree on TrustedProxies handling. Never fall back to
+     * $_SERVER['REMOTE_ADDR'], which bypasses Request::getClientIp().
+     */
     private function clientIp(): ?string
     {
-        return $_SERVER['REMOTE_ADDR'] ?? null;
+        return $this->requestStack->getMainRequest()?->getClientIp();
     }
 }

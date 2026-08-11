@@ -19,4 +19,6 @@ enum VerifyError: string
     case RecordNotFound = 'record_not_found';
     case MalformedToken = 'malformed_token';
     case UnsupportedArgon2Params = 'unsupported_argon2_params';
+    case TooManyAttempts = 'too_many_attempts';
+    case TelemetryRejected = 'telemetry_rejected';
 }

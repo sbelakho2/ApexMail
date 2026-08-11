@@ -234,10 +234,13 @@ final class ParityTest extends TestCase
     {
         // t=1 cannot be expressed by libsodium; the verifier must fail closed
         // (MalformedRecord) instead of verifying wrong bytes.
+        // NOTE: Config now rejects Argon2id t<3 at construction, so this test
+        // builds the record directly to exercise the verifier's fail-closed
+        // path against a legacy/foreign record that slipped through.
         $config = new \KiwiCaptcha\Config(
             secretKey: Vectors::SECRET,
-            algorithm: PoWAlgorithm::Argon2id,
-            mKib: 64,
+            algorithm: PoWAlgorithm::Sha256,
+            mKib: 0,
             t: 1,
             p: 1,
             targetBits: 4,
@@ -247,9 +250,34 @@ final class ParityTest extends TestCase
         );
         $storage = new ArrayStorage();
         $issuer = new Issuer($config, $storage);
+        $challenge = $issuer->issue('login', '198.51.100.77');
+
+        // Recover nonce|scope|ip_hash|issued_at from the signed payload so the
+        // forged record passes the signature check and reaches the Argon2id
+        // parameter rejection path.
+        $payload = base64_decode(explode('.', $challenge->challenge, 2)[0], true);
+        [, , $ipHash, $issuedAt] = explode('|', (string) $payload);
+
+        $record = new ChallengeRecord(
+            nonce: $challenge->nonce,
+            scope: 'login',
+            ipHash: $ipHash,
+            issuedAt: (int) $issuedAt,
+            expiresAt: (int) $issuedAt + 120,
+            algorithm: PoWAlgorithm::Argon2id,
+            mKib: 64,
+            t: 1,
+            p: 1,
+            targetBits: 4,
+            salt: $challenge->salt,
+            prefix: $challenge->prefix,
+            challenge: $challenge->challenge,
+            minDurationMs: 0,
+        );
+        $storage = new ArrayStorage();
+        $storage->store($record);
         $verifier = new Verifier($storage);
 
-        $challenge = $issuer->issue('login', '198.51.100.77');
         // Solve in PHP with the sodium-representable path — impossible for t=1,
         // so deriveHash must return null => MalformedRecord.
         $token = \KiwiCaptcha\SolutionToken::create($challenge->nonce, 1, 5000, [])->encode();

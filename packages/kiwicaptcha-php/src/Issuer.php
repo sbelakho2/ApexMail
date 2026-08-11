@@ -18,6 +18,9 @@ namespace KiwiCaptcha;
  *   prefix   = "{challenge}|{salt}|"
  *   target   = effective difficulty for the configured algorithm
  *   min_duration_ms = configured override or derived from difficulty
+ *
+ * The stored record additionally carries `issued_at_ns` (server-side
+ * high-resolution issuance time) — never signed, never sent to the client.
  */
 final class Issuer
 {
@@ -76,6 +79,10 @@ final class Issuer
             prefix: $prefix,
             challenge: $challenge,
             minDurationMs: $minDurationMs,
+            // hrtime(true) is ALREADY nanoseconds (unlike the Rust equivalent
+            // as_nanos() it needs no scaling) — multiplying by 1e9 would
+            // overflow int64 within seconds of uptime.
+            issuedAtNs: (int) hrtime(true),
         );
         $this->storage->store($record);
 

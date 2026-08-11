@@ -61,16 +61,18 @@ SVG;
     /**
      * @param string      $scope    Challenge scope.
      * @param string|null $endpoint Challenge endpoint URL (default: bundle route).
+     * @param string|null $nonce    Optional CSP nonce for the inlined <style>/<script> blocks.
      *
      * @throws \RuntimeException when an asset file is missing
      */
-    public function renderWidget(Environment $env, string $scope = 'default', ?string $endpoint = null): string
+    public function renderWidget(Environment $env, string $scope = 'default', ?string $endpoint = null, ?string $nonce = null): string
     {
         $endpoint ??= rtrim($this->routePrefix, '/').'/challenge';
 
         return $env->render($this->template, [
             'endpoint' => $endpoint,
             'scope' => $scope,
+            'nonce' => $nonce,
             'kiwi_css' => $this->css,
             'kiwi_wasm' => $this->wasm,
             'kiwi_driver' => $this->driver,

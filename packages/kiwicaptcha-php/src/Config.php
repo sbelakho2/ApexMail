@@ -9,6 +9,11 @@ namespace KiwiCaptcha;
  *
  * Mirrors the Rust crate's `ChallengeConfig` so both implementations produce
  * byte-identical challenges and verify them identically.
+ *
+ * Argon2id is validated stricter than the Rust crate: libsodium (the PHP
+ * verifier's only Argon2id implementation) cannot represent t < 3 or p != 1,
+ * so those parameter sets are rejected at construction — issuing them would
+ * produce challenges that can never verify in PHP.
  */
 final class Config
 {
@@ -39,6 +44,12 @@ final class Config
         if (\strlen($secretKey) < 16) {
             throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');
         }
+        if ($t < 1) {
+            throw new \InvalidArgumentException('Argon2id time cost t must be >= 1');
+        }
+        if ($p < 1) {
+            throw new \InvalidArgumentException('Argon2id parallelism p must be >= 1');
+        }
         if ($algorithm === PoWAlgorithm::Argon2id && $mKib < 8 * $p) {
             throw new \InvalidArgumentException(
                 sprintf('Argon2id requires m_kib >= 8 * p (got m_kib=%d, p=%d)', $mKib, $p)
@@ -49,6 +60,27 @@ final class Config
         }
         if ($targetBits < 0 || $targetBits > 24) {
             throw new \InvalidArgumentException('SHA-256 target bits must be within 0..24');
+        }
+        if ($algorithm === PoWAlgorithm::Argon2id && ($argon2TargetBits < 1 || $argon2TargetBits > 10)) {
+            throw new \InvalidArgumentException(
+                sprintf('Argon2id target bits must be within 1..10 (got %d)', $argon2TargetBits)
+            );
+        }
+        if ($algorithm === PoWAlgorithm::Argon2id && $t < 3) {
+            throw new \InvalidArgumentException(
+                sprintf(
+                    'Argon2id requires t >= 3 (got t=%d): libsodium (PHP) cannot represent t < 3, so issuance would succeed but PHP verification would always fail',
+                    $t
+                )
+            );
+        }
+        if ($algorithm === PoWAlgorithm::Argon2id && $p !== 1) {
+            throw new \InvalidArgumentException(
+                sprintf(
+                    'Argon2id requires p == 1 (got p=%d): libsodium (PHP) only supports p == 1, so issuance would succeed but PHP verification would always fail',
+                    $p
+                )
+            );
         }
     }
 }

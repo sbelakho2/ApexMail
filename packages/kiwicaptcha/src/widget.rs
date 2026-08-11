@@ -25,18 +25,31 @@ const KIWI_WASM_EMBED: &str = include_str!("../../kiwicaptcha-wasm/assets/kiwica
 /// HTML-attribute-escaped (the `&`, `"`, `'`, `<`, `>` characters) so a
 /// caller-supplied value can never break out of the attribute — the values
 /// are also validated at the protocol layer (scope must not contain `|`).
-pub fn kiwi_widget_html(endpoint: &str, scope: &str) -> String {
+///
+/// `csp_nonce` — when [`Some`], the nonce is applied to the `<style>` and both
+/// `<script>` tags (`nonce="..."`), making the widget compatible with strict
+/// Content-Security-Policy deployments (`style-src 'nonce-...'`,
+/// `script-src 'nonce-...'`). When `None`, no nonce attributes are emitted
+/// (the widget then requires a CSP that allows the inline blocks, or an
+/// application that post-processes the HTML to inject nonces — as the
+/// ApexMail api-server does).
+pub fn kiwi_widget_html(endpoint: &str, scope: &str, csp_nonce: Option<&str>) -> String {
     let svg = kiwi_mark_svg();
+    let nonce_attr = csp_nonce
+        .filter(|n| !n.is_empty())
+        .map(|n| format!(" nonce=\"{}\"", html_attr_escape(n)))
+        .unwrap_or_default();
     format!(
-        "<style>\n{css}\n</style>\n\
+        "<style{nonce}>\n{css}\n</style>\n\
         <div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"{endpoint}\" data-kiwi-scope=\"{scope}\">\n  \
         <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />\n  \
         <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\" role=\"status\" aria-live=\"polite\">\n    \
         <div class=\"kiwi-icon-wrapper\">\n      {svg}\n      <div class=\"kiwi-glow\"></div>\n    \
         </div>\n    <div class=\"kiwi-main\">\n      <div class=\"kiwi-top\">\n        <span class=\"kiwi-label\" data-kiwi-label>Security Check</span>\n        <span class=\"kiwi-badge\" data-kiwi-badge>Idle</span>\n      </div>\n      <div class=\"kiwi-track\">\n        <div class=\"kiwi-bar\" data-kiwi-bar></div>\n      </div>\n      <div class=\"kiwi-bottom\">\n        <p class=\"kiwi-info\" data-kiwi-info>Protected by KiwiCaptcha</p>\n        <span class=\"kiwi-timer\" data-kiwi-timer></span>\n      </div>\n    </div>\n  </div>\n\
         </div>\n\
-        <script>\n{wasm}\n</script>\n\
-        <script>\n{driver}\n</script>",
+        <script{nonce}>\n{wasm}\n</script>\n\
+        <script{nonce}>\n{driver}\n</script>",
+        nonce = nonce_attr,
         css = KIWI_CSS,
         svg = svg,
         endpoint = html_attr_escape(endpoint),
@@ -64,9 +77,9 @@ fn html_attr_escape(value: &str) -> String {
     out
 }
 
-/// Compatibility wrapper for default settings.
+/// Compatibility wrapper for default settings (no CSP nonce).
 pub fn kiwi_widget_html_default() -> String {
-    kiwi_widget_html("/api/kcaptcha/challenge", "login")
+    kiwi_widget_html("/api/kcaptcha/challenge", "login", None)
 }
 
 #[cfg(test)]
@@ -80,6 +93,7 @@ mod tests {
         let html = kiwi_widget_html(
             "/x\"><script>alert(1)</script>",
             "login\"><img src=x onerror=alert(2)>",
+            None,
         );
 
         assert!(html.contains("data-kiwi-endpoint=\"/x&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\""));
@@ -99,5 +113,35 @@ mod tests {
         assert!(html.contains("window.KiwiCaptcha"));
         assert!(html.contains("KIWI_WASM_B64"));
         assert!(html.contains(".kiwi-container"));
+    }
+
+    #[test]
+    fn widget_applies_csp_nonce_to_style_and_scripts() {
+        let html = kiwi_widget_html("/challenge", "login", Some("abc123XYZ"));
+        // Nonce on the style tag and BOTH script tags.
+        assert!(html.contains("<style nonce=\"abc123XYZ\">"));
+        assert!(html.contains("<script nonce=\"abc123XYZ\">"));
+        assert_eq!(html.matches("<script nonce=\"abc123XYZ\">").count(), 2);
+        // No nonce-less style/script remains.
+        assert!(!html.contains("<style>\n"));
+        assert!(!html.contains("<script>\n"));
+    }
+
+    #[test]
+    fn widget_omits_nonce_attribute_when_none() {
+        let html = kiwi_widget_html("/challenge", "login", None);
+        assert!(html.contains("<style>"));
+        assert!(!html.contains("nonce="));
+        // Empty-string nonce is treated as absent.
+        let html2 = kiwi_widget_html("/challenge", "login", Some(""));
+        assert!(!html2.contains("nonce="));
+    }
+
+    #[test]
+    fn widget_escapes_nonce_value() {
+        // A nonce derived from attacker input must not break out of the tag.
+        let html = kiwi_widget_html("/challenge", "login", Some("x\" onload=\"alert(1)"));
+        assert!(html.contains("nonce=\"x&quot; onload=&quot;alert(1)\""));
+        assert!(!html.contains("onload=\"alert(1)"));
     }
 }

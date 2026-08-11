@@ -11,14 +11,26 @@ use Psr\Cache\CacheItemPoolInterface;
 /**
  * PSR-6 backed storage (Symfony Cache, etc.).
  *
- * Single-use semantics are enforced with a delete-then-read race guarded by
- * PSR-6's atomic delete: the record is deleted first, and only if the delete
- * reports true do we read the value. PSR-6 delete is atomic per key, which
- * makes this safe for concurrent consumers on the same pool.
+ * IMPORTANT LIMITATION: PSR-6 cannot express an atomic get-and-delete, so
+ * `consume()` is NOT atomic under concurrency — two racing requests can both
+ * read the same record before either deletes it, and both verifications may
+ * pass. The pool's delete is atomic, but the read cannot be fused with it.
+ *
+ * For true atomic single-use semantics use {@see \KiwiCaptcha\Storage\RedisStorage}
+ * (Redis GETDEL), which guarantees that two concurrent consumers can never
+ * both win.
  */
 final class Psr6Storage implements StorageInterface
 {
-    private const PREFIX = 'kiwicaptcha:';
+    /**
+     * PSR-6 reserves the characters `{}()/\@:` in cache keys, so the prefix
+     * deliberately avoids the colon used by the Redis backend (Symfony Cache
+     * rejects keys such as "kiwicaptcha:nonce").
+     */
+    private const PREFIX = 'kiwicaptcha_';
+
+    /** @var array<string, int> in-memory best-effort attempt counters (not atomic) */
+    private array $attempts = [];
 
     public function __construct(private readonly CacheItemPoolInterface $pool)
     {
@@ -45,17 +57,44 @@ final class Psr6Storage implements StorageInterface
 
     public function consume(string $nonce): ?ChallengeRecord
     {
-        // PSR-6 cannot atomically read-and-delete; delete first (atomic), then
-        // read. Two concurrent consumers cannot both observe the record.
-        if (!$this->pool->deleteItem(self::PREFIX.$nonce)) {
+        // Read first, delete second. PSR-6 offers no atomic get-and-delete, so
+        // this is read-then-delete: the record is returned exactly once per
+        // stored item, but under concurrency two readers may both observe it
+        // (see the class docblock — RedisStorage is the atomic backend).
+        $item = $this->pool->getItem(self::PREFIX.$nonce);
+        if (!$item->isHit()) {
             return null;
         }
+        $data = $item->get();
 
-        return $this->find($nonce);
+        // Delete unconditionally: if the item was a hit the delete must
+        // succeed (PSR-6 pools must not fail deletes for existing items), so
+        // there is no need to branch on its result.
+        $this->pool->deleteItem(self::PREFIX.$nonce);
+
+        return \is_array($data) ? ChallengeRecord::fromArray($data) : null;
     }
 
     public function delete(string $nonce): void
     {
         $this->pool->deleteItem(self::PREFIX.$nonce);
+    }
+
+    public function attemptsUsed(string $nonce): int
+    {
+        return $this->attempts[$nonce] ?? 0;
+    }
+
+    /**
+     * Best-effort in-memory accounting. Because PSR-6 cannot atomically
+     * read-modify-write a counter, this never rejects: enforcement is left to
+     * the consume() single-use semantics, and RedisStorage provides a truly
+     * atomic attempt cap.
+     */
+    public function incrementAttempts(string $nonce, int $maxAttempts): bool
+    {
+        $this->attempts[$nonce] = ($this->attempts[$nonce] ?? 0) + 1;
+
+        return true;
     }
 }

@@ -159,6 +159,10 @@ async fn issue_challenge_handler(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
 
     let kc_config = kiwicaptcha::ChallengeConfig {
         secret_key: state.config.kiwi_secret_key.clone(),
@@ -183,7 +187,7 @@ async fn issue_challenge_handler(
         return Ok(Json(challenge_response(issued)));
     }
 
-    let issued = kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix, 0)
+    let issued = kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix, now_ns, 0)
         .map_err(|_| ApiError::Internal("failed to issue KiwiCaptcha challenge".into()))?;
 
     // Store the challenge record in Redis, keyed by nonce, with TTL.

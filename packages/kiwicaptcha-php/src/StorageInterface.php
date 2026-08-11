@@ -34,4 +34,20 @@ interface StorageInterface
      * Delete a record by nonce.
      */
     public function delete(string $nonce): void;
+
+    /**
+     * Number of verify attempts recorded so far for a nonce.
+     */
+    public function attemptsUsed(string $nonce): int;
+
+    /**
+     * Record one verify attempt for a nonce, atomically when the backend
+     * supports it (Redis). Returns false when the attempt would exceed
+     * $maxAttempts — the caller then rejects with TooManyAttempts.
+     *
+     * Implementations without atomic counters (PSR-6, in-memory) perform
+     * best-effort read-modify-write accounting and MUST document that they
+     * cannot enforce the cap under concurrency.
+     */
+    public function incrementAttempts(string $nonce, int $maxAttempts): bool;
 }
