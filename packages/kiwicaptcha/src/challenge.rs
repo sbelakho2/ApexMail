@@ -539,6 +539,17 @@ impl ChallengeCache {
         }
     }
 
+    /// Deterministically age every cached entry (tests only) — replaces
+    /// `thread::sleep`-based expiry tests, which are flaky under CI load
+    /// (a preemption longer than a tiny test TTL makes a "fresh" assertion
+    /// fail nondeterministically).
+    #[cfg(test)]
+    fn age_entries_for_test(&mut self, by: Duration) {
+        for (_, (_, ts)) in self.entries.iter_mut() {
+            *ts = ts.checked_sub(by).unwrap_or(*ts);
+        }
+    }
+
     fn cache_key(ip_hash: &str, scope: &str) -> String {
         format!("{ip_hash}|{scope}")
     }
@@ -1113,7 +1124,7 @@ mod tests {
 
     #[test]
     fn challenge_cache_prunes_stale_entries_on_get() {
-        let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_millis(20));
+        let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let issued = issue_challenge(
             &ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
@@ -1142,15 +1153,16 @@ mod tests {
         // Within the TTL the entry is served…
         assert!(cache.get("hash1", "login").is_some());
         assert_eq!(cache.len(), 1, "fresh entry must survive get");
-        // …and once stale it is removed (pruned) on access.
-        std::thread::sleep(Duration::from_millis(40));
+        // …and once stale it is removed (pruned) on access. Aging is
+        // deterministic (no sleeps): 61s > 60s TTL.
+        cache.age_entries_for_test(Duration::from_secs(61));
         assert!(cache.get("hash1", "login").is_none());
         assert_eq!(cache.len(), 0, "stale entry must be pruned by get");
     }
 
     #[test]
     fn challenge_cache_put_prunes_expired_entries() {
-        let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_millis(20));
+        let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Sha256,
@@ -1169,7 +1181,7 @@ mod tests {
         let issued =
             issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         cache.put("old", "login", issued);
-        std::thread::sleep(Duration::from_millis(40));
+        cache.age_entries_for_test(Duration::from_secs(61));
         let issued2 =
             issue_challenge(&config, "signup", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         cache.put("new", "signup", issued2);
