@@ -13,7 +13,6 @@ apexmail-rate-limiter = { path = "../rate-limiter" }
 compliance = { path = "../compliance" }
 template-renderer = { path = "../template-renderer" }
 observability-service = { path = "../observability-service" }
-ops-service = { path = "../ops-service" }
 
 rand = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }

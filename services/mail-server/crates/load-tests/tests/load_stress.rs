@@ -3,8 +3,6 @@
 use ai_service::bandits::BanditOptimizer;
 use chrono::Utc;
 use observability_service::metrics_collector::MetricsCollector;
-use ops_service::health::HealthChecker;
-use ops_service::types::{HealthCheck, ServiceStatus};
 use pattern_matcher::rules::{Rule, RuleCategory, RuleSet, Severity};
 use sales_autopilot::crm::CrmService;
 use sales_autopilot::types::{Campaign, CampaignStatus};
@@ -143,36 +141,6 @@ fn test_stress_pattern_rules() {
     // Verify no panic on large input
     let large_text = "clean ".repeat(10_000);
     let _ = ruleset.evaluate(&large_text);
-}
-
-// ---------------------------------------------------------------------------
-// 5. Stress health checker — 1 000 services
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_stress_health_checker() {
-    let checker = HealthChecker::new(100);
-
-    for i in 0..1_000 {
-        checker.record_check(HealthCheck {
-            service: format!("svc-{i}"),
-            status: if i % 10 == 0 {
-                ServiceStatus::Degraded
-            } else {
-                ServiceStatus::Operational
-            },
-            latency_ms: i as u64,
-            timestamp: chrono::Utc::now(),
-        });
-    }
-
-    let latest = checker.latest_checks();
-    assert_eq!(latest.len(), 1_000);
-
-    // Verify individual service history
-    let hist = checker.get_history("svc-0", 10);
-    assert_eq!(hist.len(), 1);
-    assert_eq!(hist[0].status, ServiceStatus::Degraded);
 }
 
 // ---------------------------------------------------------------------------

@@ -11,7 +11,6 @@ sales-autopilot = { path = "../sales-autopilot" }
 pattern-matcher = { path = "../pattern-matcher" }
 apexmail-rate-limiter = { path = "../rate-limiter" }
 observability-service = { path = "../observability-service" }
-ops-service = { path = "../ops-service" }
 devex-service = { path = "../devex-service" }
 compliance = { path = "../compliance" }
 
