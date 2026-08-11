@@ -125,4 +125,18 @@ final class ConfigurationTest extends TestCase
         self::assertSame(250, $processed['min_duration_ms']);
         self::assertFalse($processed['same_origin_only']);
     }
+
+    public function testChallengeTtlAboveProtocolCeilingIsRejectedByTree(): void
+    {
+        // The verifier declares lifetimes > MAX_TTL_SECS malformed; the
+        // config tree must refuse them at configuration time.
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['challenge_ttl_secs' => 301]);
+    }
+
+    public function testChallengeTtlAtProtocolCeilingIsAccepted(): void
+    {
+        $config = $this->process(['challenge_ttl_secs' => 300]);
+        self::assertSame(300, $config['challenge_ttl_secs']);
+    }
 }

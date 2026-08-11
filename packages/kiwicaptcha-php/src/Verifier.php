@@ -76,14 +76,14 @@ final class Verifier
      * Issuance uses the configured TTL (default 120s); anything beyond 300s
      * cannot come from a KiwiCaptcha issuer and is rejected as malformed.
      */
-    private const MAX_TTL_SECS = 300;
+    private const MAX_TTL_SECS = Config::MAX_TTL_SECS;
 
     /**
      * Ceiling for Argon2id time cost. The browser solver caps at 6; higher
      * values would be unsolvable for legit clients, so foreign records
      * outside the profile are malformed.
      */
-    private const MAX_ARGON_T = 6;
+    private const MAX_ARGON_T = Config::MAX_ARGON_T;
 
     /**
      * @var \Closure|null clock override for tests

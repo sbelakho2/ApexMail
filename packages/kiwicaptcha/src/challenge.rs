@@ -683,6 +683,14 @@ pub fn issue_challenge(
         }
     }
 
+    // Issuance must never mint a record the verifier would reject: the
+    // verifier's validate_record rejects any lifetime above MAX_TTL_SECS
+    // (300s), so a longer configured TTL is refused here, not at
+    // verification time.
+    if config.ttl_secs == 0 || config.ttl_secs > MAX_TTL_SECS {
+        return Err(SignError::InvalidTtl);
+    }
+
     // Nonce-bound IP binding tag (v2) — or empty when binding is disabled.
     let binding = match config.binding_mode {
         BindingMode::Bound => binding_tag(&nonce, client_ip, &config.secret_key)?,
@@ -779,6 +787,8 @@ pub enum SignError {
     /// never be solved by the widget.
     #[error("SHA-256 difficulty must be 1..=SOLVER_MAX_TARGET_BITS (20)")]
     InvalidDifficulty,
+    #[error("challenge TTL must be 1..=MAX_TTL_SECS (300) — the verifier rejects longer lifetimes as malformed")]
+    InvalidTtl,
 }
 
 // Minimal hex encode/decode to avoid pulling in a `hex` crate dependency —

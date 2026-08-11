@@ -42,6 +42,21 @@ final class Config
     public const MAX_ARGON2_TARGET_BITS = 10;
 
     /**
+     * Hard ceiling for a challenge's lifetime (expires_at - issued_at).
+     * The verifier rejects any stored record with a longer lifetime as
+     * malformed (it cannot have come from a KiwiCaptcha issuer), so
+     * issuance must refuse to mint one in the first place.
+     */
+    public const MAX_TTL_SECS = 300;
+
+    /**
+     * Ceiling for Argon2id time cost. The browser solver caps at 6; higher
+     * values would be unsolvable for legit clients, so issuance refuses them
+     * (the verifier declares t > 6 malformed).
+     */
+    public const MAX_ARGON_T = 6;
+
+    /**
      * @param string   $secretKey           HMAC secret key (min 16 bytes recommended).
      * @param PoWAlgorithm $algorithm       Proof-of-work algorithm to issue.
      * @param int      $mKib                Argon2id memory cost in KiB (0 for SHA-256).
@@ -96,12 +111,17 @@ final class Config
                 sprintf('Argon2id target bits must be within 1..%d (got %d)', self::MAX_ARGON2_TARGET_BITS, $argon2TargetBits)
             );
         }
-        if ($algorithm === PoWAlgorithm::Argon2id && $t < 3) {
+        if ($algorithm === PoWAlgorithm::Argon2id && ($t < 3 || $t > self::MAX_ARGON_T)) {
             throw new \InvalidArgumentException(
                 sprintf(
                     'KiwiCaptcha intentionally requires t >= 3 for its supported protocol profile (got t=%d); p == 1 reflects libsodium\'s raw Argon2id interface — issuing other parameter sets would produce challenges that can never verify in PHP',
                     $t
                 )
+            );
+        }
+        if ($ttlSecs < 1 || $ttlSecs > self::MAX_TTL_SECS) {
+            throw new \InvalidArgumentException(
+                sprintf('challenge TTL must be within 1..%d seconds (got %d) — the verifier rejects longer lifetimes as malformed', self::MAX_TTL_SECS, $ttlSecs)
             );
         }
         if ($algorithm === PoWAlgorithm::Argon2id && $p !== 1) {

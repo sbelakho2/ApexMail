@@ -718,6 +718,64 @@ mod tests {
     }
 
     #[test]
+    fn issuance_rejects_ttl_outside_protocol_range() {
+        // The verifier's validate_record rejects lifetimes > MAX_TTL_SECS
+        // (300) and TTL 0 is meaningless — issuance must refuse to mint a
+        // record it would later declare malformed.
+        let base = ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
+        };
+        for ttl in [0u64, 301, 60_000] {
+            let mut cfg = base.clone();
+            cfg.ttl_secs = ttl;
+            assert!(
+                issue_challenge(&cfg, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
+                "ttl={ttl} must be rejected at issuance"
+            );
+        }
+        let mut ok = base.clone();
+        ok.ttl_secs = 300;
+        assert!(issue_challenge(&ok, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
+    }
+
+    #[test]
+    fn issuance_rejects_argon_t_above_protocol_ceiling() {
+        // The verifier declares t > MAX_ARGON_T (6) malformed — issuance
+        // must refuse it (PHP Config already does; Rust must match).
+        let config = ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            algorithm: PoWAlgorithm::Argon2id,
+            m_kib: 128,
+            t: 7,
+            p: 1,
+            target_bits: 4,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
+        };
+        assert!(
+            issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
+            "Argon2id t=7 must be rejected at issuance"
+        );
+    }
+
+    #[test]
     fn argon2_issuance_rejects_libsodium_unrepresentable_p() {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),

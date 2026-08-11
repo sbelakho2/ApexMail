@@ -42,7 +42,8 @@
         "symfony/twig-bundle": "^6.0|^7.0",
         "symfony/yaml": "^6.0|^7.0",
         "symfony/browser-kit": "^6.0|^7.0",
-        "symfony/dom-crawler": "^6.0|^7.0"
+        "symfony/dom-crawler": "^6.0|^7.0",
+        "predis/predis": "^3.5"
     },
     "repositories": [
         {

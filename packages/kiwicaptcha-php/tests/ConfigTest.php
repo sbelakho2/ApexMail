@@ -224,4 +224,46 @@ final class ConfigTest extends TestCase
 
         new Config(...$this->base(['secretKey' => 'tooshort']));
     }
+
+    public function testTtlMustBeWithin1And300(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', ttlSecs: 301);
+    }
+
+    public function testTtlOf300IsAccepted(): void
+    {
+        $config = new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', ttlSecs: 300);
+        self::assertSame(300, $config->ttlSecs);
+    }
+
+    public function testTtlOfZeroIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', ttlSecs: 0);
+    }
+
+    public function testArgonTimeCostAboveProtocolCeilingIsRejected(): void
+    {
+        // The verifier declares t > MAX_ARGON_T (6) malformed — issuance
+        // must refuse to mint such challenges in the first place.
+        $this->expectException(\InvalidArgumentException::class);
+        new \KiwiCaptcha\Config(
+            secretKey: '0123456789abcdef0123456789abcdef',
+            algorithm: \KiwiCaptcha\PoWAlgorithm::Argon2id,
+            mKib: 64,
+            t: 7,
+        );
+    }
+
+    public function testArgonTimeCostAtProtocolCeilingIsAccepted(): void
+    {
+        $config = new \KiwiCaptcha\Config(
+            secretKey: '0123456789abcdef0123456789abcdef',
+            algorithm: \KiwiCaptcha\PoWAlgorithm::Argon2id,
+            mKib: 64,
+            t: 6,
+        );
+        self::assertSame(6, $config->t);
+    }
 }

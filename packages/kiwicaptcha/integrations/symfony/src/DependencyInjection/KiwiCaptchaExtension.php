@@ -13,6 +13,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaExtension as TwigExtension;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
+use KiwiCaptcha\BindingMode;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -119,6 +120,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // null = derive the floor from difficulty (standard mode);
             // 0 = timing heuristic off (strict mode / explicit operator choice).
             $config['min_duration_ms'],
+            // 10th arg: solver cap (informational, matches the widget).
+            5_000_000,
+            // 11th arg: binding mode. The core Issuer emits an EMPTY binding
+            // tag for BindingMode::None — verification then skips the binding
+            // check entirely (maximum privacy; relay protection off).
+            $config['binding_mode'] === 'none'
+                ? BindingMode::None
+                : BindingMode::Bound,
         ]))->setPublic(true);
         $container->setDefinition('kiwi_captcha.config', $configDef);
 
