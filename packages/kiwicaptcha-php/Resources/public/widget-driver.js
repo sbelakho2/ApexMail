@@ -1,3 +1,4 @@
+(function() {
   var encoder = new TextEncoder();
   
   // ── Global Telemetry ────────────────────────────────────────────────

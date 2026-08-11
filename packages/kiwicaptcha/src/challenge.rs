@@ -318,6 +318,15 @@ impl ChallengeCache {
         }
     }
 
+    /// A `ChallengeCache` with a custom entry lifetime (tests only).
+    #[cfg(test)]
+    fn with_ttl_for_test(ttl: Duration) -> Self {
+        ChallengeCache {
+            entries: HashMap::new(),
+            ttl,
+        }
+    }
+
     fn cache_key(ip_hash: &str, scope: &str) -> String {
         format!("{ip_hash}|{scope}")
     }
@@ -630,7 +639,7 @@ mod tests {
 
     #[test]
     fn challenge_cache_prunes_stale_entries_on_get() {
-        let mut cache = ChallengeCache::with_ttl(Duration::from_millis(20));
+        let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_millis(20));
         let issued = issue_challenge(
             &ChallengeConfig {
                 secret_key: "test-key".into(),
@@ -665,7 +674,7 @@ mod tests {
 
     #[test]
     fn challenge_cache_put_prunes_expired_entries() {
-        let mut cache = ChallengeCache::with_ttl(Duration::from_millis(20));
+        let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_millis(20));
         let config = ChallengeConfig {
             secret_key: "test-key".into(),
             algorithm: PoWAlgorithm::Sha256,
