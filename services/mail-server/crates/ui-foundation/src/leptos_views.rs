@@ -1200,7 +1200,7 @@ fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
     };
 
     format!(
-        "<div class=\"apex-auth-notice rounded-sm border px-4 py-4 {classes}\" data-intent=\"{intent}\">\
+        "<div class=\"apex-auth-notice rounded-xl border px-4 py-4 {classes}\" data-intent=\"{intent}\">\
 <p class=\"text-sm font-bold\">{title}</p>\
 <p class=\"mt-1 text-sm leading-relaxed\">{description}</p></div>",
     )
@@ -1281,7 +1281,7 @@ pub fn web_forgot_password_page(
         kiwi_html = kiwi_html,
     );
 
-    let footer_html = "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-muted-foreground\">Need help with account recovery? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>";
+    let footer_html = "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Need help with account recovery? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>";
 
     web_auth_shell(
         "Reset your password",
@@ -1338,23 +1338,23 @@ pub fn web_reset_password_page_with_state(
 {token_input}{email_input}\
 {header_notice}\
 <div class=\"space-y-2\">\
-<label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"new-password\">New password</label>\
+<label class=\"text-xs font-bold text-surface-900\" for=\"new-password\">New password</label>\
 <div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-10\" />\
-<button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"new-password\" aria-controls=\"new-password\">Show</button>\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"new-password\" aria-controls=\"new-password\">Show</button>\
 </div>\
 {password_hint}\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"confirm-password\">Confirm password</label>\
+<label class=\"text-xs font-bold text-surface-900\" for=\"confirm-password\">Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-10\" />\
-<button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"confirm-password\" aria-controls=\"confirm-password\">Show</button>\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"confirm-password\" aria-controls=\"confirm-password\">Show</button>\
 </div>\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-2 py-3 rounded-sm shadow-premium-primary/25 mt-2 transition-all disabled:cursor-not-allowed disabled:bg-surface-300 disabled:text-surface-600 disabled:shadow-premium-none\"{submit_state}><span>Reset Password</span>{arrow}</button>\
-<div class=\"text-xs text-muted-foreground text-center\">Remembered your password? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2 disabled:opacity-50 disabled:cursor-not-allowed\"{submit_state}><span>Reset Password</span>{arrow}</button>\
+<div class=\"text-center text-xs font-medium text-surface-500\">Remembered your password? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
         token_input = web_auth_hidden_input("token", token_value),
@@ -1368,7 +1368,7 @@ pub fn web_reset_password_page_with_state(
         password_hint = password_hint,
     );
 
-    let footer_html = "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-muted-foreground\">Still having trouble? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>";
+    let footer_html = "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Still having trouble? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>";
 
     web_auth_shell(
         "Set your new password",
@@ -1396,8 +1396,8 @@ pub fn web_verify_email_page_with_state(
                 "Verification complete",
                 message.unwrap_or("Email verified successfully. You can now log in."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/login\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-3 text-sm font-bold text-white shadow-premium-primary/25 transition-all hover:bg-brand-700\">Continue to sign in</a><a href=\"/pricing\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-surface-200 px-4 py-3 text-sm font-bold text-foreground transition-all hover:bg-surface-50\">Explore plans</a></div>".to_string(),
-            "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-muted-foreground\">Need help getting started? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
+            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl bg-primary text-white font-bold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"/pricing\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl border border-surface-200 text-surface-700 font-bold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
+            "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Need help getting started? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
         ),
         Some("error") => (
             "Verification link unavailable",
@@ -1407,8 +1407,8 @@ pub fn web_verify_email_page_with_state(
                 "Verification failed",
                 message.unwrap_or("Use the latest verification email or create a new account to receive a fresh link."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/signup\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-3 text-sm font-bold text-white shadow-premium-primary/25 transition-all hover:bg-brand-700\">Create a new account</a><a href=\"/login\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-surface-200 px-4 py-3 text-sm font-bold text-foreground transition-all hover:bg-surface-50\">Back to sign in</a></div>".to_string(),
-            "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-muted-foreground\">If you need a fresh verification link, <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">contact support</a>.</p></div>".to_string(),
+            "<div class=\"space-y-4\"><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl bg-primary text-white font-bold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Create a new account</span></a><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl border border-surface-200 text-surface-700 font-bold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a></div>".to_string(),
+            "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If you need a fresh verification link, <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">contact support</a>.</p></div>".to_string(),
         ),
         _ if token.is_some() => (
             "Verify your email",
@@ -1421,12 +1421,12 @@ pub fn web_verify_email_page_with_state(
             format!(
                 "<form class=\"space-y-4\" action=\"/v1/auth/verify-email\" method=\"GET\">\
 {token_input}{email_input}\
-<button type=\"submit\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-3 text-sm font-bold text-white shadow-premium-primary/25 transition-all hover:bg-brand-700\">Verify Email</button>\
-<div class=\"text-xs text-muted-foreground text-center\">Need another path in? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div></form>",
+<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl bg-primary text-white font-bold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\">Verify Email</button>\
+<div class=\"text-center text-xs font-medium text-surface-500\">Need another path in? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div></form>",
                 token_input = web_auth_hidden_input("token", token_value),
                 email_input = web_auth_hidden_input("email", email_value),
             ),
-            "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-muted-foreground\">This verification link is single-use. If it fails, open the newest email from ApexMail.</p></div>".to_string(),
+            "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">This verification link is single-use. If it fails, open the newest email from ApexMail.</p></div>".to_string(),
         ),
         _ => {
             let description = if let Some(address) = email {
@@ -1439,8 +1439,8 @@ pub fn web_verify_email_page_with_state(
                 "Verify your email",
                 "Activate your account to start sending with ApexMail.",
                 web_auth_notice("info", "Verification pending", &description),
-                "<div class=\"space-y-4\"><a href=\"/login\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-3 text-sm font-bold text-white shadow-premium-primary/25 transition-all hover:bg-brand-700\">Back to sign in</a><a href=\"/signup\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-surface-200 px-4 py-3 text-sm font-bold text-foreground transition-all hover:bg-surface-50\">Create another account</a></div>".to_string(),
-                "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-muted-foreground\">If the email does not arrive, check spam or <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">contact support</a>.</p></div>".to_string(),
+                "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl bg-primary text-white font-bold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl border border-surface-200 text-surface-700 font-bold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create another account</span></a></div>".to_string(),
+                "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If the email does not arrive, check spam or <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
             )
         }
     };
@@ -3939,7 +3939,7 @@ pub fn web_login_page(
 <a href=\"/forgot-password\" class=\"text-xs font-bold text-primary hover:text-brand-700\">Forgot password?</a>\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group\"><span>Sign In</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
 <div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
 <p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
@@ -3952,8 +3952,8 @@ pub fn web_login_page(
     );
 
     web_auth_shell(
-        "",
-        "",
+        "Welcome back",
+        "Sign in to your ApexMail account",
         &form_html,
         &web_auth_social_footer("By signing in, you agree to our"),
     )
@@ -3990,7 +3990,7 @@ pub fn control_plane_login_page(
 <label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium cursor-pointer\">Maintain session security</label>\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group\"><span>Authorize Access</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Authorize Access</span>{arrow}</button>\
 <div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
 <p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
 <input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-12 w-full rounded-xl border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" />\
@@ -4005,7 +4005,7 @@ pub fn control_plane_login_page(
         "Operator access",
         "Sign in to the ApexMail control plane",
         &form_html,
-        "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-surface-500 font-medium\">Operator console restricted to authorized administrators.</p></div>",
+        "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Operator console restricted to authorized administrators.</p></div>",
     )
 }
 
@@ -4150,9 +4150,10 @@ mod tests {
         assert!(html.contains("Forgot password?"));
         assert!(html.contains("No account? <a href=\"/signup\""));
         assert!(html.contains("Or continue with"));
-        // Minimal header: logo only, no headline on the login page
+        // Header now matches signup (title + subtitle)
         assert!(html.contains("Apex</span><span class=\"text-surface-950\">Mail</span>"));
-        assert!(!html.contains("Welcome back"));
+        assert!(html.contains("Welcome back"));
+        assert!(html.contains("Sign in to your ApexMail account"));
     }
 
     #[test]

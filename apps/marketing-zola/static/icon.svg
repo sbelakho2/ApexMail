@@ -1,6 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">ApexMail</title>
-  <desc id="desc">ApexMail icon.</desc>
-  <rect width="64" height="64" rx="14" fill="#f8fafc"/>
-  <text x="32" y="44" font-family="system-ui,-apple-system,sans-serif" font-size="40" font-weight="700" fill="#dc2626" text-anchor="middle">A</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="apex-kiwi-title apex-kiwi-desc">
+  <title id="apex-kiwi-title">ApexMail</title>
+  <desc id="apex-kiwi-desc">ApexMail brand mark — a stylized kiwi bird in profile with its characteristic long downcurved beak.</desc>
+  <!--
+    ApexMail kiwi brand mark — FAVICON / SMALL-SIZE variant.
+
+    Designed favicon-first (Paul Rand / Smashing Magazine responsive-logo
+    guidance): at 16-32px only the defining silhouette can survive, so this
+    variant strips everything except the two features that make a kiwi a
+    kiwi — the long slender downcurved beak and the pear-shaped body. No
+    eye, no legs, no fine detail. The full mark (with eye + legs) lives in
+    templates/partials/kiwi-logo.html for header/footer display at sizes
+    where the detail is legible.
+
+    Silhouette test: the beak-to-body proportion alone identifies the kiwi.
+    The bulk of the body sits low and back (ground-hugging posture); the
+    beak extends forward and down (probe posture). No tail, no wing.
+
+    Monochrome by construction (currentColor-aware). Square 64x64 viewBox
+    scales cleanly from favicon (16px) through app icon (512px). Adaptive
+    dark mode via the embedded <style>.
+
+    Independent design — shares nothing with the KiwiCaptcha package's
+    logo helpers (packages/kiwicaptcha/src/logo.rs). Enforced by
+    tools/check-kiwi-marketing-isolation.sh. See marketing_audit.md v2 §6.
+  -->
+  <style>
+    .apex-kiwi-mark { fill: #6366F1; }
+    @media (prefers-color-scheme: dark) { .apex-kiwi-mark { fill: #ffffff; } }
+  </style>
+
+  <!-- Beak: long, slender, downcurved to the lower-left. Tapers from the
+       head (right, ~x=30 y=22) to a fine probe tip (~x=5 y=40). This is the
+       single most important identifying feature of the kiwi. Drawn first
+       so the body overlaps cleanly at the head junction. -->
+  <path class="apex-kiwi-mark" d="M 30 21
+    C 22 23, 12 28, 5 38
+    C 4 39.5, 4.5 41, 6 41
+    C 9 41, 14 39.5, 20 37
+    C 25 35, 28 32, 30 30
+    Z"/>
+
+  <!-- Body: distinctly pear-shaped — narrow at the head (top, ~x=30 y=20),
+       widening to a broad rounded rump at the bottom-right (~x=52 y=54).
+       The bulk sits LOW and BACK to evoke the kiwi's ground-hugging,
+       hunched posture. No tail, no visible wing. -->
+  <path class="apex-kiwi-mark" d="M 30 18
+    C 36 16, 44 18, 48 24
+    C 53 32, 54 44, 51 51
+    C 48 57, 41 59, 34 58
+    C 27 57, 23 52, 23 45
+    C 23 37, 25 28, 28 22
+    C 28.5 20, 29 18.5, 30 18
+    Z"/>
 </svg>

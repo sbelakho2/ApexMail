@@ -1,0 +1,49 @@
+name: KiwiCaptcha Leak Check
+
+# Enforces the brand boundary: KiwiCaptcha (the standalone proof-of-work
+# CAPTCHA package at packages/kiwicaptcha*) must NEVER leak into the ApexMail
+# marketing site (apps/marketing-zola). The marketing site sells ApexMail;
+# KiwiCaptcha is a separate product with its own brand identity.
+#
+# This workflow scans marketing SOURCE (pre-build) so leaks are caught at PR
+# time. The post-build backstop lives in tools/check-forbidden-patterns.sh
+# (extended with the same kiwi tokens).
+#
+# See: marketing_audit.md v2 §6.
+
+on:
+  pull_request:
+    paths:
+      - 'apps/marketing-zola/**'
+      - 'packages/kiwicaptcha/**'
+      - 'packages/kiwicaptcha-wasm/**'
+      - 'tools/check-kiwi-marketing-isolation.sh'
+      - '.github/workflows/kiwi-leak-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/marketing-zola/**'
+      - 'packages/kiwicaptcha/**'
+      - 'packages/kiwicaptcha-wasm/**'
+      - 'tools/check-kiwi-marketing-isolation.sh'
+      - '.github/workflows/kiwi-leak-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kiwi-isolation:
+    name: Marketing free of KiwiCaptcha
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Source-tree KiwiCaptcha isolation gate
+        run: |
+          chmod +x tools/check-kiwi-marketing-isolation.sh
+          bash tools/check-kiwi-marketing-isolation.sh

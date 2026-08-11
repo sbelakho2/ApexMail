@@ -18,9 +18,12 @@ module.exports = {
         success: colorScale('success'),
         warning: colorScale('warning'),
         info: colorScale('info'),
-        danger: colorScale('brand'),
-        destructive: colorScale('brand'),
-        error: colorScale('brand'),
+        // danger/destructive/error now reference a dedicated red palette
+        // (audit 1.4) — previously they aliased `brand`, which made every
+        // "destructive" button render in the brand color.
+        danger: colorScale('danger'),
+        destructive: colorScale('danger'),
+        error: colorScale('danger'),
       },
       fontFamily: {
         sans: ['var(--font-apex)'],
@@ -32,11 +35,15 @@ module.exports = {
         md: 'var(--radius-md)',
         lg: 'var(--radius-lg)',
         xl: 'var(--radius-xl)',
+        '2xl': 'var(--radius-2xl)',
       },
       boxShadow: {
-        premium: '0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)',
-        'premium-hover': '0 20px 40px rgba(0, 0, 0, 0.12)',
-        'premium-sm': '0 4px 12px rgba(0, 0, 0, 0.05)',
+        // Multi-layer ambient-occlusion system (audit 1.2). Must stay in sync
+        // with the .shadow-premium* component classes in input.css.
+        premium: '0 20px 50px -12px rgb(0 0 0 / 0.15), 0 0 1px rgb(0 0 0 / 0.05)',
+        'premium-hover': '0 30px 60px -12px rgb(0 0 0 / 0.25), 0 0 1px rgb(0 0 0 / 0.06)',
+        'card-hover': '0 30px 60px -12px rgb(0 0 0 / 0.25), 0 0 1px rgb(0 0 0 / 0.06)',
+        'premium-sm': '0 8px 24px -8px rgb(0 0 0 / 0.10), 0 0 1px rgb(0 0 0 / 0.04)',
       },
     },
   },

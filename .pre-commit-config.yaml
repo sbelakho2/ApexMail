@@ -36,6 +36,18 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: kiwi-marketing-isolation
+        name: KiwiCaptcha/marketing isolation gate
+        description: >-
+          Enforces that KiwiCaptcha never leaks into the ApexMail marketing
+          site source (apps/marketing-zola/{content,templates,static,data} and
+          config.toml). ApexMail mascot branding is allowlisted. See
+          marketing_audit.md v2 §6.
+        entry: bash tools/check-kiwi-marketing-isolation.sh
+        language: system
+        pass_filenames: false
+        files: ^apps/marketing-zola/.*
+
       - id: cargo-audit-mail-server
         name: cargo audit (mail-server)
         entry: bash scripts/security-audit.sh

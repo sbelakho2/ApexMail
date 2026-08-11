@@ -53,7 +53,7 @@
     <div>
       <div class="mb-2 flex items-center gap-2">
         <div class="w-2 h-2 bg-brand-500"></div>
-        <h2 id="cookie-consent-heading" class="text-[10px] font-bold text-surface-950 tracking-[0.16em] md:tracking-[0.2em]">
+        <h2 id="cookie-consent-heading" class="text-xs font-bold text-surface-950 tracking-[0.16em] md:tracking-[0.05em]">
           {{- consent_heading -}}
         </h2>
       </div>
@@ -97,7 +97,7 @@
       {% endif %}
     </div>
     <div class="mt-1">
-      <a href="{{ config.extra.cookie_consent_policy_path | default(value='/cookies/') }}" data-focus-final="true" class="text-[10px] text-surface-500 underline hover:text-brand-600 transition-colors">
+      <a href="{{ config.extra.cookie_consent_policy_path | default(value='/cookies/') }}" data-focus-final="true" class="text-xs text-surface-500 underline hover:text-brand-600 transition-colors">
         {{- consent_policy_link -}}
       </a>
     </div>

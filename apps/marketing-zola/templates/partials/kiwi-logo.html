@@ -1,0 +1,88 @@
+{# ── ApexMail Kiwi Logo Lockup ────────────────────────────────────────── #}
+{#                                                                        #}
+{# The horizontal brand lockup: kiwi mark (inline SVG) + "ApexMail"       #}
+{# wordmark. Used in the header and footer. The mark uses currentColor so  #}
+{# it inherits the surrounding text color and the brand accent naturally;  #}
+{# this also makes dark-mode automatic without per-variant assets.          #}
+{#                                                                        #}
+{# Variable:                                                              #}
+{#   - mark_size: height of the kiwi mark in px (default 32). The wordmark #}
+{#     scales with it.                                                    #}
+{#                                                                        #}
+{# Design notes:                                                          #}
+{#   - The mark carried here is the FULL version (eye + legs), intended   #}
+{#     for display sizes >= 24px. The simplified favicon-only variant    #}
+{#     (beak + body, no detail) lives in static/icon.svg and is what     #}
+{#     base.html loads via <link rel="icon">. This split follows the     #}
+{#     Smashing Magazine responsive-logo guidance: design favicon-first, #}
+{#     then add detail for contexts where it survives.                    #}
+{#   - The kiwi is INDEPENDENT artwork — it shares nothing with the      #}
+{#     KiwiCaptcha package's own logo helpers. Enforced by               #}
+{#     tools/check-kiwi-marketing-isolation.sh. See marketing_audit v2 §6.#}
+{#                                                                        #}
+{# Brand clear-space rule (GitLab/Slab convention): the gap between the  #}
+{# mark and the wordmark equals the x-height of the wordmark; surrounding #}
+{# clear space is 1x the mark height. The `gap-2.5` (10px) implements the #}
+{# first at the default 32px mark size.                                   #}
+
+{% set mark_size = mark_size | default(value=32) %}
+
+<a href="/" class="flex items-center gap-2.5 group" aria-label="ApexMail home">
+  {# Kiwi mark — full variant with eye + legs. currentColor lets it inherit #}
+  {# text-brand-600 from the parent so it tracks the brand accent and dark  #}
+  {# mode without separate dark variants.                                    #}
+  <svg
+    class="apex-kiwi-mark-text text-brand-600 transition-transform duration-200 group-hover:scale-105 shrink-0"
+    width="{{ mark_size }}"
+    height="{{ mark_size }}"
+    viewBox="0 0 64 64"
+    role="img"
+    aria-hidden="true"
+    focusable="false"
+  >
+    {# Beak: long, slender, downcurved — kiwi's defining feature. #}
+    <path fill="currentColor" d="M 30 21
+      C 22 23, 12 28, 5 38
+      C 4 39.5, 4.5 41, 6 41
+      C 9 41, 14 39.5, 20 37
+      C 25 35, 28 32, 30 30
+      Z"/>
+    {# Body: pear-shaped, hunched low and back. No tail, no visible wing. #}
+    <path fill="currentColor" d="M 30 18
+      C 36 16, 44 18, 48 24
+      C 53 32, 54 44, 51 51
+      C 48 57, 41 59, 34 58
+      C 27 57, 23 52, 23 45
+      C 23 37, 25 28, 28 22
+      C 28.5 20, 29 18.5, 30 18
+      Z"/>
+    {# Eye: single small negative-space dot at the head (kiwi's eyes are #}
+    {# notably small — anatomically correct, keeps the mark clean). Knocked #}
+    {# out to the page background via the surface-50 token, which the       #}
+    {# html.dark CSS block in input.css already inverts for dark mode.      #}
+    <circle cx="33" cy="26" r="1.6" fill="rgb(var(--surface-50))"/>
+    {# Legs: two short stout strokes set far back under the body — kiwi legs #}
+    {# are thick and rearward-positioned for terrestrial support. #}
+    <path fill="currentColor" d="M 37 56
+      C 37 59, 37 61, 37 62.2
+      C 37 63, 38 63.2, 39 63.2
+      C 40 63.2, 41 63, 41 62.2
+      C 41 61, 41 59, 41 56
+      Z"/>
+    <path fill="currentColor" d="M 43 56
+      C 43 59, 43 61, 43 62.2
+      C 43 63, 44 63.2, 45 63.2
+      C 46 63.2, 47 63, 47 62.2
+      C 47 61, 47 59, 47 56
+      Z"/>
+  </svg>
+
+  {# Wordmark — "Apex" in the brand accent, "Mail" in the foreground. The #}
+  {# text-surface-950 on "Mail" is auto-inverted in dark mode by the      #}
+  {# html.dark { --surface-950: ... } override in input.css (the project's  #}
+  {# documented dark-mode mechanism — no Tailwind dark: variant needed).   #}
+  {# Font-size scales proportionally with mark_size via em (0.625 * 32 = 20px). #}
+  <span class="font-bold tracking-tighter leading-none" style="font-size: 0.625em;">
+    <span class="text-brand-600">Apex</span><span class="text-surface-950">Mail</span>
+  </span>
+</a>

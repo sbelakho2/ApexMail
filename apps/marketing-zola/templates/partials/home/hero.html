@@ -12,7 +12,7 @@
           <span class="block">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line1"] %}{{ i18n_data[l]["home"]["hero_line1"] }}{% else %}The Email API{% endif %}</span>
           <span class="block">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line2"] %}{{ i18n_data[l]["home"]["hero_line2"] }}{% else %}Built for{% endif %} <span class="block sm:inline text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}Stability.{% endif %}</span></span>
         </h1>
-        <p class="text-surface-600 mb-10 max-w-xl text-[17px] leading-[1.5]">
+        <p class="text-surface-600 mb-10 max-w-xl text-lg leading-[1.5]">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Reliable, compliance-ready email infrastructure for mission-critical applications.{% endif %}
         </p>
         <ul class="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-8 mb-10">
@@ -52,7 +52,7 @@
               <div class="w-2 h-2 bg-surface-700"></div>
               <div class="w-2 h-2 bg-surface-700"></div>
             </div>
-            <span class="ml-4 text-[10px] font-bold tracking-widest text-surface-500">api/request.ts</span>
+            <span class="ml-4 text-xs font-bold tracking-widest text-surface-500">api/request.ts</span>
           </div>
           <div class="p-6 overflow-x-auto max-w-full">
 <pre class="whitespace-pre"><code><span class="code-comment">// Server-side send example</span>
