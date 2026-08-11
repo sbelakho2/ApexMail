@@ -50,16 +50,54 @@ final class VerifierHardeningTest extends TestCase
     }
 
     /**
+     * The issuer now signs protocol v2 challenges; these tests exercise
+     * timing/telemetry/one-shot behaviour, which is version-independent, so
+     * swap the issued record for a v1-signed equivalent over the SAME
+     * nonce/salt. The prefix is rebuilt (prefix = challenge|salt|) to stay
+     * structurally consistent with the v1 challenge — the caller re-solves
+     * the proof against the returned record's prefix.
+     */
+    private function asV1Record(ChallengeRecord $record): ChallengeRecord
+    {
+        $ipHash = Issuer::hashIp('198.51.100.77', Vectors::SECRET);
+        $payload = sprintf('%s|%s|%s|%d', $record->nonce, $record->scope, $ipHash, $record->issuedAt);
+        $challenge = base64_encode($payload).'.'.Issuer::signPayload($payload, Vectors::SECRET);
+
+        return new ChallengeRecord(
+            nonce: $record->nonce,
+            scope: $record->scope,
+            bindingTag: $ipHash,
+            issuedAt: $record->issuedAt,
+            expiresAt: $record->expiresAt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $challenge.'|'.$record->salt.'|',
+            challenge: $challenge,
+            minDurationMs: $record->minDurationMs,
+            issuedAtNs: $record->issuedAtNs,
+            protocolVersion: 1,
+        );
+    }
+
+    /**
      * @return array{0: ChallengeRecord, 1: string}
      */
     private function issueAndSolve(ArrayStorage $storage, int $minDurationMs = 1000): array
     {
         $issuer = new Issuer($this->makeConfig($minDurationMs), $storage);
         $challenge = $issuer->issue('login', '198.51.100.77');
-        $counter = $this->solveSha256($challenge->prefix, $challenge->salt, $challenge->targetBits);
-        $token = SolutionToken::create($challenge->nonce, $counter, 5000, ['wd' => false, 'me' => 3, 'ke' => 1])->encode();
         $record = $storage->find($challenge->nonce);
         self::assertNotNull($record);
+        $record = $this->asV1Record($record);
+        $storage->store($record);
+        // The v1 challenge carries a different prefix, so the proof must be
+        // re-solved against the converted record's prefix.
+        $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, ['wd' => false, 'me' => 3, 'ke' => 1])->encode();
 
         return [$record, $token];
     }
@@ -201,17 +239,19 @@ final class VerifierHardeningTest extends TestCase
         self::assertSame(VerifyError::TooFast, $outcome->error);
     }
 
-    public function testLegacyRecordWithoutIssuedAtNsUsesClientDurationFallback(): void
+    public function testRecordWithoutIssuedAtNsIsMalformed(): void
     {
-        // Pre-upgrade records (issued_at_ns = 0) keep the old behaviour:
-        // the client-reported duration drives the TooFast check.
+        // The client-duration fallback is gone: a record without a
+        // server-side issued_at_ns cannot be timed and is rejected outright
+        // (MalformedRecord) instead of trusting the forgeable client
+        // duration. The malformed record is burned.
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
 
-        $legacy = new ChallengeRecord(
+        $untimed = new ChallengeRecord(
             nonce: $record->nonce,
             scope: $record->scope,
-            ipHash: $record->ipHash,
+            bindingTag: $record->ipHash(),
             issuedAt: $record->issuedAt,
             expiresAt: $record->expiresAt,
             algorithm: $record->algorithm,
@@ -224,20 +264,16 @@ final class VerifierHardeningTest extends TestCase
             challenge: $record->challenge,
             minDurationMs: 1000,
             issuedAtNs: 0,
+            protocolVersion: 1,
         );
 
         $storage = new ArrayStorage();
-        $storage->store($legacy);
+        $storage->store($untimed);
         $verifier = new Verifier($storage);
 
-        $fastToken = SolutionToken::create($record->nonce, SolutionToken::decode($token)->counter, 50, [])->encode();
-        $outcome = $verifier->verify($fastToken, Vectors::SECRET, 'login', '198.51.100.77');
-        self::assertSame(VerifyError::TooFast, $outcome->error, 'legacy fallback must reject fast client durations');
-
-        $storage->store($legacy);
-        $slowToken = SolutionToken::create($record->nonce, SolutionToken::decode($token)->counter, 2000, [])->encode();
-        $outcome = $verifier->verify($slowToken, Vectors::SECRET, 'login', '198.51.100.77');
-        self::assertTrue($outcome->isOk(), sprintf('legacy slow solve should pass, got %s', $outcome->code()));
+        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'untimed records must not fall back to client duration');
+        self::assertNull($storage->find($record->nonce), 'the untimed record must be burned');
     }
 
     public function testTelemetryRejectedOnlyWhenEnforced(): void

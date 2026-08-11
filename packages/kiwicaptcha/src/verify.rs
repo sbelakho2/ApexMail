@@ -13,7 +13,18 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
 
-use crate::challenge::{payload_from_record, verify_signature, ChallengeRecord, PoWAlgorithm};
+use crate::challenge::{
+    binding_tag, hash_ip, payload_from_record, verify_signature, verify_signature_v2,
+    ChallengeRecord, PoWAlgorithm, SOLVER_MAX_ARGON2_M_KIB, SOLVER_MAX_ARGON2_TARGET_BITS,
+    SOLVER_MAX_TARGET_BITS,
+};
+
+/// Clock-skew tolerance (microseconds) for the server-side minimum-duration
+/// check. When the issuer host's clock is AHEAD of the verifier host
+/// (`now_ns < issued_at_ns`), the apparent "elapsed" time is negative; a skew
+/// within this bound (5 s) skips the floor heuristic, a larger skew is a
+/// clock anomaly and the solution is rejected with [`VerifyError::TooFast`].
+pub const SKEW_TOLERANCE_US: u64 = 5_000_000;
 
 /// Compute the hash for the given record + counter.
 ///
@@ -155,6 +166,8 @@ pub enum VerifyError {
     TooFast,
     #[error("challenge was issued to a different client IP")]
     IpMismatch,
+    #[error("challenge was issued for a different scope")]
+    WrongScope,
     #[error("too many verification attempts against this challenge")]
     TooManyAttempts,
     #[error("proof-of-work hash does not meet the difficulty target")]
@@ -165,6 +178,65 @@ pub enum VerifyError {
     BotDetected,
 }
 
+/// Comprehensive structural validation of a stored [`ChallengeRecord`].
+///
+/// Runs as the FIRST check of [`verify_solution`] (after attempt accounting),
+/// before any hash is derived, so a malformed or attacker-crafted record can
+/// never drive an expensive verification:
+/// - `scope` non-empty, at most 128 bytes, no `|`;
+/// - `nonce` decodes as base64 to exactly 32 bytes;
+/// - `salt` decodes as base64 to exactly 16 bytes;
+/// - `expires_at > issued_at` and `expires_at - issued_at <= MAX_TTL_SECS`;
+/// - `prefix` is exactly `challenge|salt|`;
+/// - SHA-256: `target_bits` 1..=SOLVER_MAX_TARGET_BITS;
+/// - Argon2id: `target_bits` 1..=SOLVER_MAX_ARGON2_TARGET_BITS, `p == 1`,
+///   `t` 3..=MAX_ARGON_T, `m_kib` 8..=SOLVER_MAX_ARGON2_M_KIB.
+///
+/// Returns [`VerifyError::MalformedRecord`] on any violation.
+pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
+    if record.scope.is_empty() || record.scope.len() > 128 || record.scope.contains('|') {
+        return Err(VerifyError::MalformedRecord);
+    }
+    match B64.decode(&record.nonce) {
+        Ok(bytes) if bytes.len() == 32 => {}
+        _ => return Err(VerifyError::MalformedRecord),
+    }
+    match B64.decode(&record.salt) {
+        Ok(bytes) if bytes.len() == 16 => {}
+        _ => return Err(VerifyError::MalformedRecord),
+    }
+    if record.expires_at <= record.issued_at {
+        return Err(VerifyError::MalformedRecord);
+    }
+    if record.expires_at - record.issued_at > crate::challenge::MAX_TTL_SECS {
+        return Err(VerifyError::MalformedRecord);
+    }
+    if record.prefix != format!("{}|{}|", record.challenge, record.salt) {
+        return Err(VerifyError::MalformedRecord);
+    }
+    match record.algorithm {
+        PoWAlgorithm::Sha256 => {
+            if record.target_bits == 0 || record.target_bits > SOLVER_MAX_TARGET_BITS {
+                return Err(VerifyError::MalformedRecord);
+            }
+        }
+        PoWAlgorithm::Argon2id => {
+            if record.target_bits == 0 || record.target_bits > SOLVER_MAX_ARGON2_TARGET_BITS {
+                return Err(VerifyError::MalformedRecord);
+            }
+            if record.p != 1
+                || record.t < 3
+                || record.t > crate::challenge::MAX_ARGON_T
+                || record.m_kib < 8
+                || record.m_kib > SOLVER_MAX_ARGON2_M_KIB
+            {
+                return Err(VerifyError::MalformedRecord);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Verify a solution against its stored challenge record.
 ///
 /// This performs the full server-side check:
@@ -172,21 +244,25 @@ pub enum VerifyError {
 ///    exceeds `max_attempts` (and `max_attempts > 0`) the solution is
 ///    rejected with [`VerifyError::TooManyAttempts`]. The caller persists the
 ///    mutated record on failure, or consumes it on success (single-use).
-/// 2. Re-verify the HMAC signature (defends against forged records).
-/// 3. Check the TTL (defends against stale challenges).
-/// 4. Check the scope (prevents cross-scope replay).
-/// 5. Check the IP binding (`client_ip` vs the stored `ip_hash`).
-/// 6. Check the minimum duration with the SERVER clock: elapsed = `now_ns` -
-///    `record.issued_at_ns` (both epoch microseconds). This is a
-///    timing-anomaly heuristic, not a proof of human behavior: PoW is
-///    probabilistic (a valid solution can occur at counter 0) and a fast bot
-///    can wait before submitting, so the floor only rejects solves that
-///    ARRIVE faster than the theoretical minimum. The client-reported
+/// 2. Structural record validation ([`validate_record`]) — a cheap phase that
+///    runs BEFORE any hash is derived, so malformed or attacker-crafted
+///    records can never drive expensive verification work.
+/// 3. Re-verify the HMAC signature over the protocol-appropriate canonical
+///    input (v1 for `protocol_version == 1` records, v2 otherwise).
+/// 4. Check the TTL (defends against stale challenges).
+/// 5. Check the scope (prevents cross-scope replay) →
+///    [`VerifyError::WrongScope`].
+/// 6. Check the IP binding: for v2 records, recompute the nonce-bound
+///    `binding_tag` from `client_ip` + record nonce + secret and compare in
+///    constant time; for v1 records, compare the legacy `hash_ip`. An empty
+///    `binding_tag` skips the check; a `None` `client_ip` also skips it.
+/// 7. Check the minimum duration with the SERVER clock (see
+///    [`SKEW_TOLERANCE_US`] for the clock-skew policy). The client-reported
 ///    duration is forgeable and is never trusted for this check. Records
-///    without `issued_at_ns` (legacy) fall back to the client-duration
-///    check.
-/// 7. Optional telemetry scoring (when `enforce_telemetry` is set).
-/// 8. Re-derive the SHA-256/Argon2id hash and check leading zero bits (the
+///    without `issued_at_ns` are malformed (the legacy client-duration
+///    fallback was removed).
+/// 8. Optional telemetry scoring (when `enforce_telemetry` is set).
+/// 9. Re-derive the SHA-256/Argon2id hash and check leading zero bits (the
 ///    actual PoW).
 pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 0. Attempt accounting — counted on EVERY verification call, correct or
@@ -197,13 +273,23 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(VerifyError::TooManyAttempts);
     }
 
-    // 1. Signature re-check.
-    let payload = payload_from_record(ctx.record);
-    match verify_signature(
-        &payload,
-        signature_from_challenge(ctx.record),
-        ctx.secret_key,
-    ) {
+    // 0b. Cheap structural validation FIRST — before any signature work or
+    //     hash derivation (XII): a malformed record can never drive an
+    //     expensive verification.
+    if let Err(e) = validate_record(ctx.record) {
+        return VerifyOutcome::Invalid(e);
+    }
+
+    // 1. Signature re-check over the protocol-appropriate canonical input.
+    let sig = signature_from_challenge(ctx.record);
+    let sig_ok = match ctx.record.protocol_version {
+        // Legacy v1 records: `nonce|scope|ip_hash|issued_at` (the binding
+        // field carried the legacy hash_ip). Verified for the migration
+        // window (max TTL) alongside v2.
+        1 => verify_signature(&payload_from_record(ctx.record), sig, ctx.secret_key),
+        _ => verify_signature_v2(ctx.record, sig, ctx.secret_key),
+    };
+    match sig_ok {
         Ok(true) => {}
         Ok(false) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
         Err(_) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
@@ -218,17 +304,27 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     auth flow (e.g. a login challenge used on /signup).
     if let Some(expected) = ctx.expected_scope {
         if ctx.record.scope != expected {
-            return VerifyOutcome::Invalid(VerifyError::BadSignature);
+            return VerifyOutcome::Invalid(VerifyError::WrongScope);
         }
     }
 
     // 2c. IP binding: the challenge was issued to a client IP; a different
     //     submission IP means the token was relayed. Enforced here (not just
     //     at the route layer) so the secure behavior cannot be forgotten.
+    //     An empty binding_tag means binding is disabled (BindingMode::None)
+    //     and the check is skipped; a None client_ip also skips it.
     if let Some(client_ip) = ctx.client_ip {
-        let expected_ip_hash = crate::challenge::hash_ip(client_ip, ctx.secret_key);
-        if ctx.record.ip_hash != expected_ip_hash {
-            return VerifyOutcome::Invalid(VerifyError::IpMismatch);
+        if !ctx.record.binding_tag.is_empty() {
+            let expected = match ctx.record.protocol_version {
+                1 => hash_ip(client_ip, ctx.secret_key),
+                _ => match binding_tag(&ctx.record.nonce, client_ip, ctx.secret_key) {
+                    Ok(tag) => tag,
+                    Err(_) => return VerifyOutcome::Invalid(VerifyError::IpMismatch),
+                },
+            };
+            if !ct_eq(ctx.record.binding_tag.as_bytes(), expected.as_bytes()) {
+                return VerifyOutcome::Invalid(VerifyError::IpMismatch);
+            }
         }
     }
 
@@ -236,26 +332,32 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //    is forgeable and is deliberately not trusted for enforcement. The
     //    floor is a timing-anomaly heuristic: a fast bot can wait before
     //    submitting, so it only rejects solves that ARRIVE faster than the
-    //    theoretical minimum.
+    //    theoretical minimum. Records without a high-resolution issuance
+    //    timestamp are malformed — there is no legacy client-duration
+    //    fallback (XV).
     let floor = ctx.min_duration_ms.max(ctx.record.min_duration_ms);
     if floor > 0 {
-        if ctx.record.issued_at_ns > 0 {
+        if ctx.record.issued_at_ns == 0 {
+            return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
+        }
+        if ctx.now_ns >= ctx.record.issued_at_ns {
             // High-resolution path: elapsed time between issuance and receipt,
             // both observed by the server clock. Both `now_ns` and
             // `issued_at_ns` are EPOCH MICROSECONDS (the names keep the
             // historical `_ns` suffix), so the ms floor is compared in the
             // same unit: ms -> µs (× 1_000).
-            let elapsed_us = ctx.now_ns.saturating_sub(ctx.record.issued_at_ns);
+            let elapsed_us = ctx.now_ns - ctx.record.issued_at_ns;
             if elapsed_us < floor.saturating_mul(1_000) {
                 return VerifyOutcome::Invalid(VerifyError::TooFast);
             }
         } else {
-            // Legacy path (records without issued_at_ns): fall back to the
-            // client-reported duration. This is weaker and only exists for
-            // backward compatibility with records issued before server-side
-            // timing existed; the client-reported duration is never trusted
-            // on the modern path.
-            if ctx.duration_ms < floor {
+            // Issuer host ahead of verifier host: apparent elapsed time is
+            // negative. A skew within SKEW_TOLERANCE_US is a clock anomaly we
+            // tolerate (skip the floor heuristic — the negative elapsed time
+            // carries no timing signal); a larger skew means the clocks are
+            // broken and the timing guarantee is void.
+            let skew = ctx.record.issued_at_ns - ctx.now_ns;
+            if skew > SKEW_TOLERANCE_US {
                 return VerifyOutcome::Invalid(VerifyError::TooFast);
             }
         }
@@ -292,6 +394,19 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     } else {
         VerifyOutcome::Invalid(VerifyError::InsufficientWork)
     }
+}
+
+/// Constant-time byte comparison (equal-length inputs; both operands here are
+/// fixed-length hex digests).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Extract the embedded signature from the stored challenge string.
@@ -459,7 +574,10 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::challenge::{hash_ip, issue_challenge, ChallengeConfig, PoWAlgorithm, SignError};
+    use crate::challenge::{
+        binding_tag, hash_ip, issue_challenge, BindingMode, ChallengeConfig, PoWAlgorithm,
+        SignError,
+    };
 
     const NOW_UNIX: u64 = 1_000_000;
     // EPOCH MICROSECONDS (1_700_000_000_000_000 µs ≈ 2023-11-14 UTC) — the
@@ -480,6 +598,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
         issued.record
@@ -499,6 +618,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
         issued.record
@@ -552,6 +672,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err());
     }
@@ -574,6 +695,7 @@ mod tests {
                 auto_tune: false,
                 auto_tune_min_bits: 8,
                 auto_tune_max_bits: 24,
+                binding_mode: BindingMode::Bound,
             };
             assert!(
                 issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
@@ -597,6 +719,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err());
     }
@@ -618,6 +741,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         assert!(
             matches!(
@@ -653,6 +777,7 @@ mod tests {
                 auto_tune: false,
                 auto_tune_min_bits: 8,
                 auto_tune_max_bits: 24,
+                binding_mode: BindingMode::Bound,
             };
             assert!(
                 matches!(
@@ -676,6 +801,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         assert!(issue_challenge(&max_bits, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
     }
@@ -1138,18 +1264,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_records_without_issued_at_ns_fall_back_to_client_duration() {
-        // Records issued before server-side timing (issued_at_ns == 0) use the
-        // legacy client-duration check so old stored challenges keep working.
+    fn records_without_issued_at_ns_are_malformed() {
+        // Records without a high-resolution issuance timestamp (issued_at_ns
+        // == 0) are rejected as MalformedRecord — the legacy client-duration
+        // fallback was removed (XV): the floor can only be enforced with a
+        // server-measured elapsed time.
         let mut record = make_record(20);
         record.issued_at_ns = 0;
         let counter = solve_for_test(&record).unwrap();
-        let floor = record.min_duration_ms.max(1);
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             counter,
-            duration_ms: floor - 1, // below floor, client-reported
+            duration_ms: 60_000, // a forged long client duration must NOT resurrect the legacy path
             now_unix: NOW_UNIX + 1,
             now_ns: NOW_NS + 10_000_000,
             min_duration_ms: 0,
@@ -1161,16 +1288,25 @@ mod tests {
         };
         assert_eq!(
             verify_solution(&mut ctx),
-            VerifyOutcome::Invalid(VerifyError::TooFast)
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
         );
-        // Same record, client claims long duration → passes.
-        let mut ctx2 = VerifyContext {
+    }
+
+    #[test]
+    fn clock_skew_within_tolerance_skips_the_floor() {
+        // Issuer host ahead of verifier host by 1 s (within the 5 s
+        // SKEW_TOLERANCE_US): the floor heuristic is skipped and a correct
+        // PoW passes.
+        let mut record = make_record(20); // non-trivial floor
+        let counter = solve_for_test(&record).unwrap();
+        assert!(record.min_duration_ms > 0, "record floor must be positive");
+        let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             counter,
-            duration_ms: floor + 1000,
+            duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 10_000_000,
+            now_ns: NOW_NS.saturating_sub(1_000_000), // 1 s skew, issuer ahead
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -1178,7 +1314,33 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
         };
-        assert_eq!(verify_solution(&mut ctx2), VerifyOutcome::Valid);
+        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+    }
+
+    #[test]
+    fn clock_skew_beyond_tolerance_is_rejected() {
+        // Issuer host ahead by 6 s (> SKEW_TOLERANCE_US): clocks are broken —
+        // the timing guarantee is void and the solution is rejected.
+        let mut record = make_record(20);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS.saturating_sub(6_000_000), // 6 s skew
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::TooFast)
+        );
     }
 
     #[test]
@@ -1371,11 +1533,13 @@ mod tests {
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         // Tamper with the stored challenge string (simulates a client that
-        // modified the signed payload).
+        // modified the signed payload). The record is structurally malformed
+        // (prefix no longer matches challenge|salt|), so the cheap
+        // validate_record phase rejects it first.
         record.challenge.push_str("00");
         assert_eq!(
             verify(&mut record, counter, 5000),
-            VerifyOutcome::Invalid(VerifyError::BadSignature)
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
         );
     }
 
@@ -1399,7 +1563,7 @@ mod tests {
         };
         assert_eq!(
             verify_solution(&mut ctx),
-            VerifyOutcome::Invalid(VerifyError::BadSignature)
+            VerifyOutcome::Invalid(VerifyError::WrongScope)
         );
     }
 
@@ -1536,8 +1700,9 @@ mod tests {
 
     #[test]
     fn verify_accepts_full_difficulty_range() {
-        // Every difficulty from 0 to the solver cap must issue and verify.
-        for bits in [0u32, 1, 4, 8, 12, 16, 20] {
+        // Every difficulty from 1 to the solver cap must issue and verify.
+        // (0 is rejected at issuance with InvalidDifficulty.)
+        for bits in [1u32, 4, 8, 12, 16, 20] {
             let mut record = make_record(bits);
             let counter = solve_for_test(&record).expect("solver finds counter");
             let outcome = verify(&mut record, counter, 5000);
@@ -1555,6 +1720,392 @@ mod tests {
         assert_eq!(
             sha256_hex("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    // ── Round-5 audit: validate_record, binding_tag, protocol v1/v2 ─────
+
+    #[test]
+    fn validate_record_rejects_malformed_records() {
+        let mut bad_nonce = make_record(8);
+        bad_nonce.nonce = B64.encode([0u8; 4]); // decodes to 4 bytes, not 32
+        assert_eq!(
+            validate_record(&bad_nonce),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        let mut bad_salt = make_record(8);
+        bad_salt.salt = B64.encode([0u8; 4]); // decodes to 4 bytes, not 16
+        assert_eq!(
+            validate_record(&bad_salt),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        let mut bad_prefix = make_record(8);
+        bad_prefix.prefix.push('x'); // no longer exactly challenge|salt|
+        assert_eq!(
+            validate_record(&bad_prefix),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        let mut bad_ttl = make_record(8);
+        bad_ttl.expires_at = bad_ttl.issued_at + 301; // > MAX_TTL_SECS
+        assert_eq!(
+            validate_record(&bad_ttl),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        let mut bad_scope = make_record(8);
+        bad_scope.scope = "login|admin".into(); // contains the separator
+        assert_eq!(
+            validate_record(&bad_scope),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        let mut sha_zero = make_record(8);
+        sha_zero.target_bits = 0; // SHA difficulty must be 1..=20
+        assert_eq!(
+            validate_record(&sha_zero),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        let mut argon_bad_t = make_argon2_record(4, 128);
+        argon_bad_t.t = 7; // above MAX_ARGON_T
+        assert_eq!(
+            validate_record(&argon_bad_t),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        let mut argon_bad_m = make_argon2_record(4, 128);
+        argon_bad_m.m_kib = 65_537; // above the 64 MiB ceiling
+        assert_eq!(
+            validate_record(&argon_bad_m),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        let mut argon_bad_p = make_argon2_record(4, 128);
+        argon_bad_p.p = 2; // only p == 1 is libsodium-representable
+        assert_eq!(
+            validate_record(&argon_bad_p),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        // A well-formed record passes.
+        assert_eq!(validate_record(&make_record(8)), Ok(()));
+        assert_eq!(validate_record(&make_argon2_record(4, 128)), Ok(()));
+    }
+
+    #[test]
+    fn sha_zero_target_bits_rejected_at_issuance() {
+        let config = ChallengeConfig {
+            secret_key: "0123456789abcdef0123456789abcdef".into(),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 0,
+            argon2_target_bits: 8,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
+        };
+        assert!(
+            matches!(
+                issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0),
+                Err(SignError::InvalidDifficulty)
+            ),
+            "SHA target_bits 0 must be rejected at issuance with InvalidDifficulty"
+        );
+    }
+
+    #[test]
+    fn binding_tag_is_nonce_bound() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        let a = binding_tag("nonce-a", "192.168.1.5", secret).unwrap();
+        let b = binding_tag("nonce-b", "192.168.1.5", secret).unwrap();
+        assert_ne!(a, b, "same IP, different nonce → different tag");
+        let c = binding_tag("nonce-a", "192.168.1.6", secret).unwrap();
+        assert_ne!(a, c, "same nonce, different IP → different tag");
+        // Deterministic for identical inputs.
+        assert_eq!(binding_tag("nonce-a", "192.168.1.5", secret).unwrap(), a);
+        // Unknown key → rejected before hashing.
+        assert!(matches!(
+            binding_tag("n", "1.2.3.4", "short"),
+            Err(SignError::KeyTooShort)
+        ));
+    }
+
+    #[test]
+    fn binding_tag_canonicalizes_ipv4_mapped_and_parses_families() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        // IPv4-mapped IPv6 normalizes to 4-byte IPv4.
+        assert_eq!(
+            binding_tag("n", "::ffff:192.168.1.5", secret).unwrap(),
+            binding_tag("n", "192.168.1.5", secret).unwrap()
+        );
+        // A real IPv6 address is distinct from its IPv4-mapped form.
+        assert_ne!(
+            binding_tag("n", "::ffff:192.168.1.5", secret).unwrap(),
+            binding_tag("n", "2001:db8::1", secret).unwrap()
+        );
+        // Tags are 64 hex chars (32-byte HMAC-SHA256).
+        assert_eq!(binding_tag("n", "192.168.1.5", secret).unwrap().len(), 64);
+        assert_eq!(binding_tag("n", "2001:db8::1", secret).unwrap().len(), 64);
+        // Unparsable IP → InvalidIp.
+        assert!(matches!(
+            binding_tag("n", "not-an-ip", secret),
+            Err(SignError::InvalidIp)
+        ));
+    }
+
+    #[test]
+    fn empty_binding_tag_skips_binding_check() {
+        // A record with an empty binding_tag (BindingMode::None) verifies
+        // even though the submitting IP differs from the issuance IP.
+        let issued = issue_challenge(
+            &ChallengeConfig {
+                secret_key: "test-key-16-bytes!".into(),
+                algorithm: PoWAlgorithm::Sha256,
+                m_kib: 100,
+                t: 1,
+                p: 1,
+                target_bits: 8,
+                argon2_target_bits: 8,
+                ttl_secs: 120,
+                min_duration_ms: None,
+                auto_tune: false,
+                auto_tune_min_bits: 8,
+                auto_tune_max_bits: 20,
+                binding_mode: BindingMode::None,
+            },
+            "login",
+            "1.2.3.4",
+            NOW_UNIX,
+            NOW_NS,
+            0,
+        )
+        .unwrap();
+        assert!(issued.record.binding_tag.is_empty());
+        let counter = solve_for_test(&issued.record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut issued.record.clone(),
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("9.9.9.9"), // different IP — must still pass
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+    }
+
+    #[test]
+    fn v2_binding_mismatch_is_rejected() {
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::IpMismatch)
+        );
+    }
+
+    // ── Shared fixture vectors (byte-exact; PHP mirrors these) ─────────
+    // secret = "0123456789abcdef0123456789abcdef"
+    // nonce  = base64("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")  (32 ASCII bytes)
+    // salt   = base64("1234567890abcdef")  (16 ASCII bytes)
+    // scope = "login"; issued_at = 1700000000; expires_at = 1700000120;
+    // min_duration_ms = 0; Sha256: target_bits = 8, m_kib = 0, t = 1, p = 1;
+    // ip = "192.168.1.5"; protocol_version = 2 (v1 vector below).
+    const FIXTURE_SECRET: &str = "0123456789abcdef0123456789abcdef";
+    const FIXTURE_NONCE: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=";
+    const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
+    const FIXTURE_BINDING_TAG: &str =
+        "d3759cd94aaec2361adb37171aeb4a487efcb0350113e8cb68e572c5508e3331";
+    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|d3759cd94aaec2361adb37171aeb4a487efcb0350113e8cb68e572c5508e3331|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0";
+    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58ZDM3NTljZDk0YWFlYzIzNjFhZGIzNzE3MWFlYjRhNDg3ZWZjYjAzNTAxMTNlOGNiNjhlNTcyYzU1MDhlMzMzMXwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDA=.c5f24556c2c41e31ffad9bab3f6b5f53501b77731313ab406a9907bae1f205fc";
+    const FIXTURE_LEGACY_IP_HASH: &str =
+        "5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf";
+    const FIXTURE_CANONICAL_V1: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf|1700000000";
+    const FIXTURE_CHALLENGE_V1: &str = "UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWZkZDc1YTllZTc4Y2Y0ZWJhYmZmNDY4M2YzOTZiMDRlMTNkOTY5NTc4YTZlMTQ0ODNjMzhlYjc2NjhmYmFhZnwxNzAwMDAwMDAw.85a180c2c39a90cda8505b9693b43860594ec63bb33d87104cd4f0aa26b8827b";
+    const FIXTURE_NOW_NS: u64 = 1_700_000_000_000_000;
+
+    fn fixture_record(protocol_version: u8) -> ChallengeRecord {
+        let (binding, challenge) = if protocol_version == 1 {
+            (
+                FIXTURE_LEGACY_IP_HASH.to_string(),
+                FIXTURE_CHALLENGE_V1.to_string(),
+            )
+        } else {
+            (
+                FIXTURE_BINDING_TAG.to_string(),
+                FIXTURE_CHALLENGE_V2.to_string(),
+            )
+        };
+        let prefix = format!("{challenge}|{FIXTURE_SALT}|");
+        ChallengeRecord {
+            nonce: FIXTURE_NONCE.into(),
+            scope: "login".into(),
+            binding_tag: binding,
+            issued_at: 1_700_000_000,
+            expires_at: 1_700_000_120,
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            salt: FIXTURE_SALT.into(),
+            prefix,
+            challenge,
+            min_duration_ms: 0,
+            issued_at_ns: FIXTURE_NOW_NS,
+            attempts_used: 0,
+            protocol_version,
+        }
+    }
+
+    fn verify_fixture(record: &mut ChallengeRecord) -> VerifyOutcome {
+        let counter = solve_for_test(record).expect("fixture counter found");
+        let mut ctx = VerifyContext {
+            record,
+            secret_key: FIXTURE_SECRET,
+            counter,
+            duration_ms: 5000,
+            now_unix: 1_700_000_100, // before expires_at 1_700_000_120
+            now_ns: FIXTURE_NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("192.168.1.5"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        verify_solution(&mut ctx)
+    }
+
+    #[test]
+    fn binding_tag_matches_the_shared_fixture() {
+        // Locks the exact v2 binding tag from the SHARED FIXTURE VECTOR.
+        assert_eq!(
+            binding_tag(FIXTURE_NONCE, "192.168.1.5", FIXTURE_SECRET).unwrap(),
+            FIXTURE_BINDING_TAG
+        );
+        // Legacy binding (v1) is the historical hash_ip(secret||ip).
+        assert_eq!(
+            hash_ip("192.168.1.5", FIXTURE_SECRET),
+            FIXTURE_LEGACY_IP_HASH
+        );
+    }
+
+    #[test]
+    fn v2_fixture_record_verifies() {
+        let mut record = fixture_record(2);
+        assert_eq!(record.challenge, FIXTURE_CHALLENGE_V2);
+        // The challenge's base64 half is byte-exactly the v2 canonical.
+        let b64 = FIXTURE_CHALLENGE_V2.split('.').next().unwrap();
+        assert_eq!(
+            B64.decode(b64).unwrap(),
+            FIXTURE_CANONICAL_V2.as_bytes()
+        );
+        assert_eq!(
+            verify_fixture(&mut record),
+            VerifyOutcome::Valid,
+            "v2 shared fixture vector must verify with client_ip 192.168.1.5"
+        );
+    }
+
+    #[test]
+    fn v1_fixture_record_still_verifies() {
+        // protocol_version 1 + legacy canonical + legacy ip_hash binding —
+        // kept verifiable during the migration window.
+        let mut record = fixture_record(1);
+        assert_eq!(record.challenge, FIXTURE_CHALLENGE_V1);
+        let b64 = FIXTURE_CHALLENGE_V1.split('.').next().unwrap();
+        assert_eq!(
+            B64.decode(b64).unwrap(),
+            FIXTURE_CANONICAL_V1.as_bytes()
+        );
+        assert_eq!(
+            verify_fixture(&mut record),
+            VerifyOutcome::Valid,
+            "v1 shared fixture vector must still verify"
+        );
+    }
+
+    #[test]
+    fn v2_fixture_rejects_wrong_scope_with_wrong_scope_error() {
+        let mut record = fixture_record(2);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: FIXTURE_SECRET,
+            counter,
+            duration_ms: 5000,
+            now_unix: 1_700_000_100,
+            now_ns: FIXTURE_NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: Some("signup"),
+            client_ip: Some("192.168.1.5"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::WrongScope)
+        );
+    }
+
+    #[test]
+    fn legacy_v1_record_roundtrips_through_json() {
+        // Stored legacy records use the "ip_hash" JSON key — the serde alias
+        // must read them into binding_tag; protocol_version defaults to 1.
+        let json = serde_json::json!({
+            "nonce": FIXTURE_NONCE,
+            "scope": "login",
+            "ip_hash": FIXTURE_LEGACY_IP_HASH,
+            "issued_at": 1_700_000_000,
+            "expires_at": 1_700_000_120,
+            "algorithm": "sha256",
+            "m_kib": 0,
+            "t": 1,
+            "p": 1,
+            "target_bits": 8,
+            "salt": FIXTURE_SALT,
+            "prefix": format!("{}|{}|", FIXTURE_CHALLENGE_V1, FIXTURE_SALT),
+            "challenge": FIXTURE_CHALLENGE_V1,
+            "min_duration_ms": 0,
+            "issued_at_ns": FIXTURE_NOW_NS,
+        });
+        let mut decoded: ChallengeRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.binding_tag, FIXTURE_LEGACY_IP_HASH);
+        assert_eq!(decoded.protocol_version, 1);
+        assert_eq!(decoded.challenge, FIXTURE_CHALLENGE_V1);
+        assert_eq!(
+            verify_fixture(&mut decoded),
+            VerifyOutcome::Valid,
+            "v1 record read via the ip_hash alias must still verify"
         );
     }
 }

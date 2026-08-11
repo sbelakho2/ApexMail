@@ -26,6 +26,10 @@ use Symfony\Component\OptionsResolver\OptionsResolver;
  * derives its endpoint from the same prefix. 'endpoint' remains overridable
  * per form.
  *
+ * The default 'telemetry' option follows the bundle's configured telemetry
+ * mode ('off' default; forced 'off' under strict privacy mode) and is
+ * rendered as data-kiwi-telemetry on the widget container.
+ *
  * Usage:
  *   $builder->add('captcha', KiwiCaptchaType::class, [
  *       'scope' => 'login',
@@ -37,6 +41,7 @@ class KiwiCaptchaType extends AbstractType
     public function __construct(
         private readonly ?KiwiCaptchaRuntime $runtime = null,
         private readonly string $routePrefix = '/kiwi-captcha',
+        private readonly string $telemetry = 'off',
     ) {
     }
 
@@ -45,6 +50,7 @@ class KiwiCaptchaType extends AbstractType
         $view->vars['endpoint'] = $options['endpoint'];
         $view->vars['scope'] = $options['scope'];
         $view->vars['nonce'] = $options['nonce'];
+        $view->vars['telemetry'] = $options['telemetry'];
 
         // The form theme inlines the shared widget assets; provide them from
         // the bundle runtime so the rendered form markup is self-contained.
@@ -61,6 +67,9 @@ class KiwiCaptchaType extends AbstractType
             'endpoint' => rtrim($this->routePrefix, '/').'/challenge',
             'scope' => 'login',
             'nonce' => null,
+            // Telemetry mode rendered into data-kiwi-telemetry; follows the
+            // bundle config (forced 'off' under strict privacy mode).
+            'telemetry' => $this->telemetry,
             // The constraint's expected scope follows the form's scope option.
             'constraints' => static fn (Options $options): array => [
                 new KiwiCaptcha(['scope' => $options['scope']]),
@@ -72,6 +81,7 @@ class KiwiCaptchaType extends AbstractType
         $resolver->setAllowedTypes('endpoint', 'string');
         $resolver->setAllowedTypes('scope', 'string');
         $resolver->setAllowedTypes('nonce', ['string', 'null']);
+        $resolver->setAllowedValues('telemetry', ['off', 'minimal', 'full']);
     }
 
     public function getParent(): string

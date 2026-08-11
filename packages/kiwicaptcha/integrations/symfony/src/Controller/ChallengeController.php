@@ -22,24 +22,48 @@ use Symfony\Component\HttpFoundation\Response;
  * The widget fetches this endpoint, solves the proof-of-work locally in the
  * browser, and submits the token in the hidden input. Challenges are issued
  * and stored locally — no external service is involved.
+ *
+ * Every response (success, error, 422, 429, 403) is a private JSON document:
+ * Cache-Control no-store, Pragma no-cache, Referrer-Policy no-referrer and
+ * X-Content-Type-Options nosniff — challenge bytes and client identity must
+ * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
+ *
+ * Hardening order: same-origin check first (cheap, no state written), then
+ * issuance rate limiting (per-client and deployment-global), then scope
+ * validation.
  */
 final class ChallengeController
 {
     public function __construct(
         private readonly Issuer $issuer,
         private readonly ?IssuanceRateLimiter $rateLimiter = null,
+        private readonly bool $sameOriginOnly = true,
     ) {
     }
 
     public function challenge(Request $request): JsonResponse
     {
-        $clientIp = (string) ($request->getClientIp() ?? '');
-
-        if ($this->rateLimiter !== null && !$this->rateLimiter->allow($clientIp)) {
-            return new JsonResponse(
-                ['error' => ['code' => 'RATE_LIMITED', 'message' => 'Too many captcha challenges requested from this address. Try again later.']],
-                Response::HTTP_TOO_MANY_REQUESTS,
+        if ($this->sameOriginOnly && !$this->isSameOrigin($request)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'CROSS_ORIGIN_DENIED', 'message' => 'Cross-origin challenge requests are not allowed.']],
+                Response::HTTP_FORBIDDEN,
             );
+        }
+
+        $clientIp = (string) ($request->getClientIp() ?? '');
+        if ($this->rateLimiter !== null) {
+            $rate = $this->rateLimiter->check($clientIp);
+            if ($rate !== 1) {
+                $code = $rate === -1 ? 'GLOBAL_RATE_LIMITED' : 'RATE_LIMITED';
+                $message = $rate === -1
+                    ? 'The global captcha issuance limit has been reached. Try again later.'
+                    : 'Too many captcha challenges requested from this address. Try again later.';
+
+                return $this->privateJson(
+                    ['error' => ['code' => $code, 'message' => $message]],
+                    Response::HTTP_TOO_MANY_REQUESTS,
+                );
+            }
         }
 
         $payload = json_decode((string) $request->getContent(), true);
@@ -48,12 +72,55 @@ final class ChallengeController
         try {
             $challenge = $this->issuer->issue($scope, $clientIp);
         } catch (\InvalidArgumentException $e) {
-            return new JsonResponse(
+            return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
 
-        return new JsonResponse($challenge->toArray(), Response::HTTP_OK);
+        return $this->privateJson($challenge->toArray(), Response::HTTP_OK);
+    }
+
+    /**
+     * Same-origin check for the challenge endpoint.
+     *
+     * Requests WITHOUT an Origin header (same-origin navigation, curl,
+     * non-browser clients) are allowed — a browser cross-site POST always
+     * carries one. When present, the Origin must match the request's own
+     * scheme://host[:port] (constant-time compare; trailing slashes
+     * normalized). Cross-origin requests are rejected BEFORE any state is
+     * written, so they consume no rate-limit budget.
+     */
+    private function isSameOrigin(Request $request): bool
+    {
+        $origin = $request->headers->get('Origin');
+        if ($origin === null || $origin === '') {
+            return true;
+        }
+        $expected = rtrim($request->getScheme().'://'.$request->getHttpHost(), '/');
+
+        return hash_equals($expected, rtrim($origin, '/'));
+    }
+
+    /**
+     * All challenge responses share the private-document headers:
+     *   Cache-Control: no-store, private, max-age=0   (never cache, never mirror)
+     *   Pragma: no-cache                              (legacy proxies)
+     *   Referrer-Policy: no-referrer                  (no referrer leakage from
+     *                                                 an embedded widget context)
+     *   X-Content-Type-Options: nosniff               (JSON must never be
+     *                                                 re-sniffed as HTML)
+     *
+     * @param array<string, mixed> $data
+     */
+    private function privateJson(array $data, int $status = Response::HTTP_OK): JsonResponse
+    {
+        $response = new JsonResponse($data, $status);
+        $response->headers->set('Cache-Control', 'no-store, private, max-age=0');
+        $response->headers->set('Pragma', 'no-cache');
+        $response->headers->set('Referrer-Policy', 'no-referrer');
+        $response->headers->set('X-Content-Type-Options', 'nosniff');
+
+        return $response;
     }
 }

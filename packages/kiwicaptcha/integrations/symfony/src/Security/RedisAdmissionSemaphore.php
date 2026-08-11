@@ -4,106 +4,109 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
-/**
- * Redis-backed admission semaphore capping concurrent Argon2id
- * verifications ACROSS all PHP-FPM workers sharing the Redis instance.
- *
- * The in-process {@see Argon2Semaphore} bounds concurrency per worker only
- * (PHP-FPM workers share no memory); this semaphore replaces it when the
- * bundle has a Redis client (the configured storage is RedisStorage, or a
- * `redis_service` config option is set). Admission is atomic: a single Lua
- * INCR/DECR decides whether a permit is available, so N workers can never
- * exceed the cap together.
- *
- * Key: `kiwicaptcha:argon2:active:<suffix>` (one counter per deployment —
- * the suffix is derived from the RedisStorage prefix when the client comes
- * from the storage service, or defaults to a stable bundle constant).
- *
- * APPROXIMATION (documented): permits are guarded by a watchdog TTL
- * (default 60 s) instead of exact liveness. If a worker crashes (or the
- * request dies) while holding a permit, the counter is never DECRed by that
- * worker — the permit simply expires after the watchdog, slightly shrinking
- * the effective cap for up to one watchdog period. The acquire script
- * refreshes the watchdog on every INCR, so live permits never expire. This
- * is an admission bound, not a mutex: under a crash storm the cap may be
- * briefly exceeded by the number of permits that expired between the crash
- * and the next acquire, which is acceptable for memory-cost bounding.
- */
-final class RedisAdmissionSemaphore
-{
-    private const DEFAULT_KEY_SUFFIX = 'default';
+use KiwiCaptcha\VerificationAdmissionGate;
 
-    /** Watchdog TTL in seconds: leaked permits (crashed workers) auto-expire. */
-    private const WATCHDOG_TTL_SECS = 60;
+/**
+ * Redis-backed Argon2id admission gate — the audit's TOKENIZED-LEASE design.
+ *
+ * Caps concurrent Argon2id verifications ACROSS all PHP-FPM workers sharing
+ * the Redis instance. Implements the core's
+ * {@see \KiwiCaptcha\VerificationAdmissionGate}: acquire() returns an opaque
+ * lease token, release() removes exactly that token. Stale releases cannot
+ * remove a newer lease: a lease is a unique member of a sorted set, so
+ * releasing an expired/double-released token is a no-op (ZREM of an absent
+ * member) and can never touch a different token's slot.
+ *
+ * Each lease is a sorted-set member scored at its expiry (now + LEASE_MS).
+ * The acquire script prunes expired leases first (ZREMRANGEBYSCORE up to
+ * `now` — a lease whose score is in the past is dead), then admits when the
+ * live count is below the cap. A worker that crashes while holding a lease
+ * never releases it, but its lease expires after LEASE_MS and is reaped by
+ * the next acquire — no watchdog counter to drift, no DECR race.
+ *
+ * Key: `kiwicaptcha:argon2:leases:<namespace>` — one lease set per
+ * deployment; the namespace is sanitized to [A-Za-z0-9_.-] (defaults to
+ * 'default' when empty).
+ *
+ * A `maxConcurrent` <= 0 disables the cap: acquire() returns the sentinel
+ * token 'disabled' and release() no-ops — the verifier's lease lifecycle
+ * stays uniform.
+ */
+final class RedisAdmissionSemaphore implements VerificationAdmissionGate
+{
+    /** Lease lifetime in ms; expired leases are reaped by the next acquire. */
+    private const LEASE_MS = 45_000;
 
     /**
-     * Atomic admission test:
-     *   KEYS[1]  = semaphore counter key
-     *   ARGV[1]  = cap (max concurrent)
-     *   ARGV[2]  = watchdog TTL in seconds
-     * Returns 1 when the permit was granted, 0 when the cap is saturated
-     * (the INCR is rolled back, so no permit is leaked).
+     * Atomic acquire (exact audit semantics):
+     *   KEYS[1]  = lease set key
+     *   ARGV[1]  = max concurrent leases (cap)
+     *   ARGV[2]  = lease lifetime in ms (LEASE_MS)
+     *   ARGV[3]  = unique lease token
+     * Returns 1 when the lease was granted, 0 when the cap is saturated
+     * (nothing is written on rejection).
      */
     private const ACQUIRE_SCRIPT = <<<'LUA'
-local n = redis.call('INCR', KEYS[1])
-if n == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[2])
-end
-if n > tonumber(ARGV[1]) then
-    redis.call('DECR', KEYS[1])
-    return 0
-end
+local time = redis.call('TIME')
+local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
+redis.call('ZADD', KEYS[1], now + tonumber(ARGV[2]), ARGV[3])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2])*2)
 return 1
 LUA;
 
     /**
-     * Permit release. The counter is DECRed with a floor at 0: a release
-     * with no outstanding permit (e.g. after the watchdog expired the
-     * counter) removes the key so the next acquire starts clean at 1.
+     * Atomic release (exact audit semantics): removes exactly the lease
+     * token. ZREM of an absent member is a no-op, so stale releases cannot
+     * remove a newer lease.
      *
-     * KEYS[1] = semaphore counter key
+     * KEYS[1] = lease set key
+     * ARGV[1] = lease token to release
      */
     private const RELEASE_SCRIPT = <<<'LUA'
-local n = redis.call('DECR', KEYS[1])
-if n < 0 then
-    redis.call('DEL', KEYS[1])
-end
+return redis.call('ZREM', KEYS[1], ARGV[1])
 LUA;
 
     private readonly string $key;
 
     /**
-     * @param \Redis|\Predis\Client $client Redis client (phpredis or Predis —
-     *                                      the same clients RedisStorage
-     *                                      accepts; the bundle itself has no
-     *                                      hard dependency on either)
+     * @param \Redis|\Predis\Client $client       Redis client (phpredis or
+     *                                            Predis — the same clients
+     *                                            RedisStorage accepts; the
+     *                                            bundle itself has no hard
+     *                                            dependency on either)
      * @param int                   $maxConcurrent cap; <= 0 disables the cap
-     * @param string                $keySuffix      stable per-deployment
-     *                                              discriminator (e.g. the
-     *                                              storage prefix)
+     * @param string                $namespace     per-deployment discriminator
+     *                                             (sanitized to
+     *                                             [A-Za-z0-9_.-])
      */
     public function __construct(
         private readonly \Redis|\Predis\Client $client,
         private readonly int $maxConcurrent,
-        string $keySuffix = self::DEFAULT_KEY_SUFFIX,
+        string $namespace = 'default',
     ) {
-        $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $keySuffix) ?: self::DEFAULT_KEY_SUFFIX;
-        $this->key = 'kiwicaptcha:argon2:active:'.$suffix;
+        $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'default';
+        $this->key = 'kiwicaptcha:argon2:leases:'.$suffix;
     }
 
-    public function acquire(): bool
+    public function acquire(): ?string
     {
         if ($this->maxConcurrent <= 0) {
-            return true;
+            return 'disabled';
         }
-        $result = $this->eval(self::ACQUIRE_SCRIPT, [$this->key], [(string) $this->maxConcurrent, (string) self::WATCHDOG_TTL_SECS]);
+        $token = bin2hex(random_bytes(16));
+        $result = $this->eval(self::ACQUIRE_SCRIPT, [$this->key], [(string) $this->maxConcurrent, (string) self::LEASE_MS, $token]);
 
-        return $result === 1;
+        return $result === 1 ? $token : null;
     }
 
-    public function release(): void
+    public function release(string $lease): void
     {
-        $this->eval(self::RELEASE_SCRIPT, [$this->key], []);
+        if ($lease === 'disabled') {
+            return;
+        }
+        $this->eval(self::RELEASE_SCRIPT, [$this->key], [$lease]);
     }
 
     /**

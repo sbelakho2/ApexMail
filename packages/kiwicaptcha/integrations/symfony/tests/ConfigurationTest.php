@@ -83,4 +83,46 @@ final class ConfigurationTest extends TestCase
         $this->process(['argon_p' => 2]);
         $this->process(['argon_m_kib' => 1]);
     }
+
+    public function testAuditDefaultsArePrivacyFirst(): void
+    {
+        $processed = $this->process();
+
+        self::assertSame('strict', $processed['privacy_mode']);
+        self::assertSame('off', $processed['telemetry']);
+        self::assertSame('nonce_ip_hmac', $processed['binding_mode']);
+        self::assertTrue($processed['same_origin_only']);
+        self::assertSame(10, $processed['rate_limit']);
+        self::assertSame(500, $processed['rate_limit_global']);
+        self::assertSame(60, $processed['rate_limit_window_secs']);
+        self::assertSame('%kernel.project_dir%', $processed['argon2_semaphore_namespace']);
+        self::assertFalse($processed['enforce_telemetry']);
+        self::assertNull($processed['min_duration_ms']);
+    }
+
+    public function testPrivacyAndTelemetryEnumsAreValidated(): void
+    {
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['telemetry' => 'bogus']);
+    }
+
+    public function testBindingModeAcceptsBothValues(): void
+    {
+        self::assertSame('none', $this->process(['binding_mode' => 'none'])['binding_mode']);
+        self::assertSame('nonce_ip_hmac', $this->process(['binding_mode' => 'nonce_ip_hmac'])['binding_mode']);
+    }
+
+    public function testStandardPrivacyAllowsExplicitTelemetryAndTiming(): void
+    {
+        $processed = $this->process([
+            'privacy_mode' => 'standard',
+            'telemetry' => 'full',
+            'min_duration_ms' => 250,
+            'same_origin_only' => false,
+        ]);
+
+        self::assertSame('full', $processed['telemetry']);
+        self::assertSame(250, $processed['min_duration_ms']);
+        self::assertFalse($processed['same_origin_only']);
+    }
 }

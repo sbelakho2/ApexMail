@@ -4,17 +4,17 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Tests\Kernel;
 
-use BelConsulting\KiwiCaptchaBundle\Security\ThrottledVerifier;
+use BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
+use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Component\DependencyInjection\ContainerInterface;
-use KiwiCaptcha\Verifier;
 
 /**
  * The hardening config options must reach the REAL wired services: issuance
  * rate limiting enforced at the challenge endpoint (shared PSR-6 pool
- * configured) and the Argon2id verification cap wrapping the verifier.
+ * configured) and the Argon2id admission gate wired into the core Verifier.
  */
 final class HardeningWiringTest extends TestCase
 {
@@ -49,22 +49,33 @@ final class HardeningWiringTest extends TestCase
         self::assertStringContainsString('RATE_LIMITED', (string) $client->getResponse()->getContent());
     }
 
-    public function testArgon2ModeWrapsVerifierInThrottledVerifier(): void
+    public function testArgon2ModeWiresInProcessGateIntoTheVerifier(): void
     {
+        // HardenedTestKernel has argon2id + no Redis client: the extension
+        // must wire the InProcessArgonGate into the CORE verifier (the
+        // bundle's ThrottledVerifier wrapper no longer exists — the core
+        // takes the gate natively).
         $verifier = $this->container()->get('kiwi_captcha.verifier');
-        self::assertInstanceOf(ThrottledVerifier::class, $verifier);
+        self::assertInstanceOf(Verifier::class, $verifier);
+
+        $property = new \ReflectionProperty(Verifier::class, 'argonGate');
+        self::assertInstanceOf(InProcessArgonGate::class, $property->getValue($verifier));
 
         $validator = $this->container()->get(KiwiCaptchaValidator::class);
-        $property = new \ReflectionProperty(KiwiCaptchaValidator::class, 'verifier');
-        self::assertInstanceOf(ThrottledVerifier::class, $property->getValue($validator));
+        $validatorProperty = new \ReflectionProperty(KiwiCaptchaValidator::class, 'verifier');
+        self::assertInstanceOf(Verifier::class, $validatorProperty->getValue($validator));
     }
 
-    public function testSha256ModeKeepsPlainVerifier(): void
+    public function testSha256ModeKeepsPlainVerifierWithoutGate(): void
     {
         $kernel = new TestKernel('test', true);
         $kernel->boot();
         $container = $kernel->getContainer()->get('test.service_container');
 
-        self::assertInstanceOf(Verifier::class, $container->get('kiwi_captcha.verifier'));
+        $verifier = $container->get('kiwi_captcha.verifier');
+        self::assertInstanceOf(Verifier::class, $verifier);
+
+        $property = new \ReflectionProperty(Verifier::class, 'argonGate');
+        self::assertNull($property->getValue($verifier), 'sha256 mode must wire no admission gate');
     }
 }

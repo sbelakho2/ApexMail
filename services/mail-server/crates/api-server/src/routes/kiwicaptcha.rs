@@ -122,8 +122,14 @@ async fn issue_challenge_handler(
         })
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Per-IP rate limiting: prevent bots from requesting thousands of challenges.
-    let ip_rate_key = format!("apexmail:kiwi_challenge_rate:ip:{client_ip}");
+    // Per-IP rate limiting: prevent bots from requesting thousands of
+    // challenges. PRIVACY: the key is a keyed digest of the IP
+    // (kiwicaptcha::hash_ip = sha256(secret||ip) with the kiwi secret as
+    // pepper) — the raw client IP never appears in the Redis key.
+    let ip_rate_key = format!(
+        "apexmail:kiwi_challenge_rate:hmac:{}",
+        kiwicaptcha::hash_ip(&client_ip, &state.config.kiwi_secret_key)
+    );
     if let Ok(mut conn) = state.redis.get().await {
         let count: i64 = deadpool_redis::redis::Script::new(
             r#"
@@ -150,7 +156,7 @@ async fn issue_challenge_handler(
         .unwrap_or(0);
 
         if count > 0 {
-            tracing::warn!(client_ip = %client_ip, "KiwiCaptcha challenge rate limit exceeded");
+            tracing::warn!("KiwiCaptcha challenge rate limit exceeded");
             return Err(ApiError::RateLimited);
         }
     }
@@ -177,6 +183,7 @@ async fn issue_challenge_handler(
         auto_tune: state.config.kiwi_auto_tune,
         auto_tune_min_bits: state.config.kiwi_auto_tune_min_bits,
         auto_tune_max_bits: state.config.kiwi_auto_tune_max_bits,
+        binding_mode: kiwicaptcha::BindingMode::Bound,
     };
 
     // Serve repeat requests from the same client (IP hash + scope) within the

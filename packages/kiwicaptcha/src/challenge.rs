@@ -11,6 +11,7 @@
 //! is responsible for storing the record keyed by nonce.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -34,10 +35,11 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PoWAlgorithm {
-    /// Classic CPU-bound SHA-256 PoW: fast to verify, difficulty up to
-    /// [`SOLVER_MAX_TARGET_BITS`].
+    /// Classic CPU-bound SHA-256 PoW: extremely cheap server verification,
+    /// difficulty up to [`SOLVER_MAX_TARGET_BITS`].
     Sha256,
-    /// Memory-hard Argon2id PoW: ASIC/GPU resistant, difficulty capped at
+    /// Memory-hard Argon2id PoW: increases the cost of massively parallel and
+    /// specialized solving, difficulty capped at
     /// [`SOLVER_MAX_ARGON2_TARGET_BITS`] because every hash is expensive.
     Argon2id,
 }
@@ -51,21 +53,40 @@ impl PoWAlgorithm {
     }
 }
 
-/// The signed payload embedded inside a challenge string.
+/// The signed payload embedded inside a challenge string (protocol v1).
 ///
 /// This is what gets HMAC-signed and base64-encoded into
-/// [`IssuedChallenge::challenge`]. The verifier reconstructs this from the
-/// nonce + the stored [`ChallengeRecord`] and re-checks the signature.
+/// [`IssuedChallenge::challenge`] for `protocol_version == 1` records. The
+/// verifier reconstructs this from the nonce + the stored [`ChallengeRecord`]
+/// and re-checks the signature. Protocol v2 records sign the full parameter
+/// set instead (see [`ChallengeRecord`]); this struct's `ip_hash` field holds
+/// the same slot (legacy v1 name) but v2 records use `binding_tag`.
 #[derive(Debug, Clone)]
 pub struct ChallengePayload {
     /// 32 random bytes, base64-encoded. Acts as the single-use token id.
     pub nonce: String,
     /// The auth scope this challenge is valid for (e.g. "login", "signup").
     pub scope: String,
-    /// SHA-256 of the client IP (hex). Prevents relay attacks.
+    /// Legacy v1 binding value (SHA-256 of the client IP, hex) — for v2
+    /// records this slot carries the nonce-bound `binding_tag` instead.
     pub ip_hash: String,
     /// Unix timestamp (seconds) when the challenge was issued.
     pub issued_at: u64,
+}
+
+/// Whether a challenge is bound to the issuing client IP.
+///
+/// When [`BindingMode::Bound`], the record's `binding_tag` is a nonce-bound
+/// HMAC over the canonical IP bytes (no stable IP-derived identifier: the tag
+/// changes with every nonce). When [`BindingMode::None`], the record's
+/// `binding_tag` is empty and verification skips the binding check entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BindingMode {
+    /// Bind the challenge to the issuing client IP (nonce-bound HMAC tag).
+    Bound,
+    /// No binding: `binding_tag = ""`, verification skips the check.
+    None,
 }
 
 /// Server-side state persisted in Redis, keyed by `kcaptcha:{nonce}`.
@@ -77,17 +98,32 @@ pub struct ChallengePayload {
 /// # Cross-language record interchange
 ///
 /// The serde JSON of this struct is the cross-language storage schema; PHP's
-/// `ChallengeRecord::toArray()` emits identical keys (nonce, scope, ip_hash,
-/// issued_at, expires_at, algorithm 'sha256'|'argon2id', m_kib, t, p,
-/// target_bits, salt, prefix, challenge, min_duration_ms, issued_at_ns,
-/// attempts_used optional). PoWAlgorithm already serializes lowercase — keep
-/// it. Both languages write and read this exact shape, so a record persisted
-/// by PHP can be verified by Rust and vice versa.
+/// `ChallengeRecord::toArray()` emits identical keys (nonce, scope,
+/// binding_tag, issued_at, expires_at, algorithm 'sha256'|'argon2id', m_kib,
+/// t, p, target_bits, salt, prefix, challenge, min_duration_ms, issued_at_ns,
+/// attempts_used optional, protocol_version). PoWAlgorithm already serializes
+/// lowercase — keep it. Both languages write and read this exact shape, so a
+/// record persisted by PHP can be verified by Rust and vice versa.
+///
+/// # Protocol versions
+///
+/// - `protocol_version == 1` (legacy): signed with the v1 canonical input
+///   `nonce|scope|ip_hash|issued_at`; `binding_tag` carries the legacy
+///   `hash_ip` (sha256(secret||ip)) value and reads the legacy `ip_hash` JSON
+///   key via serde alias. Kept verifiable for the migration window (max TTL).
+/// - `protocol_version == 2` (current): signed with the v2 full-parameter
+///   canonical input and a nonce-bound `binding_tag`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeRecord {
     pub nonce: String,
     pub scope: String,
-    pub ip_hash: String,
+    /// Nonce-bound IP binding tag (hex HMAC over canonical IP bytes) for v2
+    /// records; legacy `hash_ip` value for v1 records. Empty when binding is
+    /// disabled (`BindingMode::None`) — verification then skips the check.
+    /// The JSON key is `binding_tag`; `ip_hash` is accepted on read for
+    /// legacy stored records.
+    #[serde(alias = "ip_hash")]
+    pub binding_tag: String,
     pub issued_at: u64,
     pub expires_at: u64,
     /// The proof-of-work algorithm this challenge was issued with. A mode
@@ -133,6 +169,16 @@ pub struct ChallengeRecord {
     /// `VerifyContext::max_attempts` to bound the cost of wrong candidates.
     #[serde(default)]
     pub attempts_used: u32,
+    /// Protocol version: 1 = legacy v1 canonical signing + legacy `ip_hash`
+    /// binding; 2 = v2 full-parameter signing + nonce-bound `binding_tag`.
+    /// New records are issued with 2; 1 is the serde default so stored
+    /// pre-v2 records keep verifying during the migration window (max TTL).
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: u8,
+}
+
+fn default_protocol_version() -> u8 {
+    1
 }
 
 /// Configuration for the challenge issuer. Mirrors the server config block but
@@ -179,6 +225,10 @@ pub struct ChallengeConfig {
     pub auto_tune_min_bits: u32,
     /// Maximum target bits when auto-tuning is under peak load.
     pub auto_tune_max_bits: u32,
+    /// Whether issued challenges are bound to the client IP
+    /// ([`BindingMode::Bound`]) or not ([`BindingMode::None`], which stores an
+    /// empty `binding_tag` and skips the binding check at verification).
+    pub binding_mode: BindingMode,
 }
 
 impl ChallengeConfig {
@@ -255,6 +305,42 @@ pub fn hash_ip(ip: &str, salt: &str) -> String {
     hex::encode(&hasher.finalize())
 }
 
+/// Compute the nonce-bound IP binding tag for a challenge.
+///
+/// `tag = hex(HMAC-SHA256(secret, "kiwicaptcha/ip-bind/v2\\0" || nonce ||
+/// "\\0" || family || canonical_ip_bytes))` where `family` is a single byte
+/// `0x04` (IPv4) or `0x06` (IPv6), and `canonical_ip_bytes` is the inet_pton
+/// byte sequence with IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) normalized
+/// to 4-byte IPv4.
+///
+/// The tag is **nonce-bound**: the same IP produces a different tag for every
+/// challenge, so the record creates no stable IP-derived identifier. An
+/// unparsable IP string is rejected with [`SignError::InvalidIp`].
+pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignError> {
+    if secret.len() < 16 {
+        return Err(SignError::KeyTooShort);
+    }
+    let addr: IpAddr = ip
+        .parse()
+        .map_err(|_| SignError::InvalidIp)?;
+    let (family, canonical_bytes) = match addr {
+        IpAddr::V4(v4) => (0x04u8, v4.octets().to_vec()),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(mapped) => (0x04u8, mapped.octets().to_vec()),
+            None => (0x06u8, v6.octets().to_vec()),
+        },
+    };
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
+    mac.update(b"kiwicaptcha/ip-bind/v2");
+    mac.update(&[0]);
+    mac.update(nonce.as_bytes());
+    mac.update(&[0]);
+    mac.update(&[family]);
+    mac.update(&canonical_bytes);
+    Ok(hex::encode(&mac.finalize().into_bytes()))
+}
+
 /// The canonical current-time value for the `now_ns` parameter: epoch
 /// MICROSECONDS (despite the historical `_ns` name).
 ///
@@ -268,9 +354,13 @@ pub fn now_epoch_micros() -> u64 {
         .unwrap_or(0)
 }
 
-/// The signed challenge string is `base64(payload_fields || "." || hmac)`.
-/// The verifier reconstructs the payload from the nonce + stored record and
-/// re-checks. We sign a canonical string so the binding is unambiguous.
+/// The signed challenge string is `base64(canonical) || "." || hex(hmac)`.
+/// The verifier reconstructs the canonical input from the nonce + stored
+/// record and re-checks. We sign a canonical string so the binding is
+/// unambiguous.
+///
+/// Protocol v1 canonical input (legacy records, `protocol_version == 1`):
+/// `nonce|scope|ip_hash|issued_at`.
 fn canonical_signing_input(payload: &ChallengePayload) -> String {
     format!(
         "{}|{}|{}|{}",
@@ -278,19 +368,51 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
     )
 }
 
-/// Sign the payload with the secret key, returning a hex HMAC tag.
+/// Protocol v2 canonical input (`protocol_version == 2`): the full parameter
+/// set so no issuance parameter can be tampered with without breaking the
+/// signature:
+/// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms`.
+fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
+    format!(
+        "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        record.nonce,
+        record.scope,
+        record.binding_tag,
+        record.issued_at,
+        record.expires_at,
+        record.algorithm.as_str(),
+        record.m_kib,
+        record.t,
+        record.p,
+        record.target_bits,
+        record.salt,
+        record.min_duration_ms
+    )
+}
+
+/// Sign a canonical input with the secret key, returning a hex HMAC tag.
 ///
 /// The secret key must be at least 16 bytes (the same minimum the PHP
 /// implementation enforces); 32 random bytes is the recommended size. Shorter
 /// keys are rejected with [`SignError::KeyTooShort`] before any hashing.
-pub fn sign_payload(payload: &ChallengePayload, secret_key: &str) -> Result<String, SignError> {
+fn sign_canonical(canonical: &str, secret_key: &str) -> Result<String, SignError> {
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
     let mut mac =
         HmacSha256::new_from_slice(secret_key.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
-    mac.update(canonical_signing_input(payload).as_bytes());
+    mac.update(canonical.as_bytes());
     Ok(hex::encode(&mac.finalize().into_bytes()))
+}
+
+/// Sign the payload with the secret key, returning a hex HMAC tag
+/// (protocol v1 canonical input; see [`ChallengePayload`]).
+///
+/// The secret key must be at least 16 bytes (the same minimum the PHP
+/// implementation enforces); 32 random bytes is the recommended size. Shorter
+/// keys are rejected with [`SignError::KeyTooShort`] before any hashing.
+pub fn sign_payload(payload: &ChallengePayload, secret_key: &str) -> Result<String, SignError> {
+    sign_canonical(&canonical_signing_input(payload), secret_key)
 }
 
 /// Verify that a signature matches the payload under the given key.
@@ -306,6 +428,25 @@ pub fn verify_signature(
     signature: &str,
     secret_key: &str,
 ) -> Result<bool, SignError> {
+    verify_canonical(&canonical_signing_input(payload), signature, secret_key)
+}
+
+/// Verify a signature over the protocol v2 canonical input of a record.
+///
+/// Same constant-time guarantee as [`verify_signature`].
+pub fn verify_signature_v2(
+    record: &ChallengeRecord,
+    signature: &str,
+    secret_key: &str,
+) -> Result<bool, SignError> {
+    verify_canonical(&canonical_signing_input_v2(record), signature, secret_key)
+}
+
+fn verify_canonical(
+    canonical: &str,
+    signature: &str,
+    secret_key: &str,
+) -> Result<bool, SignError> {
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
@@ -315,7 +456,7 @@ pub fn verify_signature(
     };
     let mut mac =
         HmacSha256::new_from_slice(secret_key.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
-    mac.update(canonical_signing_input(payload).as_bytes());
+    mac.update(canonical.as_bytes());
     Ok(mac.verify_slice(&signature_bytes).is_ok())
 }
 
@@ -349,6 +490,22 @@ pub struct ChallengeCache {
 /// can never issue a challenge the widget cannot solve.
 pub const SOLVER_MAX_TARGET_BITS: u32 = 20;
 
+/// The maximum counter value any solver may legitimately produce (the widget
+/// caps its search at 5M hashes, both WASM and the pure-JS fallback).
+/// [`crate::token::SolutionToken::decode`] rejects counters above this bound,
+/// and `verify_solution` accepts only solutions the solvers could produce.
+pub const SOLVER_MAX_HASHES: u64 = 5_000_000;
+
+/// Maximum challenge lifetime (seconds) a record may claim. Records with
+/// `expires_at - issued_at` above this are malformed (they could otherwise
+/// pin expensive server state for an unbounded window).
+pub const MAX_TTL_SECS: u64 = 300;
+
+/// Maximum Argon2id time cost a record may claim. `t` above this is
+/// rejected by `validate_record` (and at issuance) so verification never runs
+/// an unbounded-cost memory-hard computation.
+pub const MAX_ARGON_T: u32 = 6;
+
 /// Maximum difficulty for Argon2id challenges.
 ///
 /// Every Argon2id hash is memory-hard and costs tens of milliseconds in the
@@ -359,7 +516,8 @@ pub const SOLVER_MAX_ARGON2_TARGET_BITS: u32 = 10;
 
 /// Hard upper bound on Argon2id memory cost (KiB) that a browser widget can be
 /// expected to allocate. 64 MiB keeps the WASM heap (and the server's verify
-/// memory) within reason while still being memory-hard against ASICs/GPUs.
+/// memory) within reason while still being memory-hard against specialized
+/// hardware.
 pub const SOLVER_MAX_ARGON2_M_KIB: u32 = 65536;
 
 /// Expected hashes a browser solver can attempt per second (SHA-256, WASM).
@@ -486,9 +644,17 @@ pub fn issue_challenge(
     thread_rng().fill_bytes(&mut salt_bytes);
     let salt = B64.encode(salt_bytes);
 
-    let ip_hash = hash_ip(client_ip, &config.secret_key);
     let algorithm = config.algorithm;
     let target_bits = config.effective_target_bits(active_solves);
+    // SHA-256 difficulty must be 1..=SOLVER_MAX_TARGET_BITS: 0 would mint a
+    // trivially-solvable challenge and anything above the solver ceiling can
+    // never be solved by the widget. (Argon2id target bits are validated in
+    // the block below.)
+    if algorithm == PoWAlgorithm::Sha256
+        && (target_bits == 0 || target_bits > SOLVER_MAX_TARGET_BITS)
+    {
+        return Err(SignError::InvalidDifficulty);
+    }
     // Argon2id minimum memory is 8 * p KiB; reject configurations that could
     // never produce a valid hash instead of failing every verification later.
     // PHP/libsodium verification additionally cannot represent t < 3 or
@@ -496,7 +662,8 @@ pub fn issue_challenge(
     // could be issued successfully and then always fail PHP verification
     // (cross-language parity requirement, see README). Issuance must never
     // mint a record the verifier would reject: m_kib above the browser-wasm
-    // memory ceiling (SOLVER_MAX_ARGON2_M_KIB, 64 MiB) is refused, and
+    // memory ceiling (SOLVER_MAX_ARGON2_M_KIB, 64 MiB) is refused, t above
+    // MAX_ARGON_T is refused (validate_record rejects it), and
     // argon2_target_bits must be 1..=SOLVER_MAX_ARGON2_TARGET_BITS (0 is
     // silently clamped to 1 by effective_target_bits today — reject it).
     if algorithm == PoWAlgorithm::Argon2id {
@@ -506,7 +673,7 @@ pub fn issue_challenge(
         if config.m_kib > SOLVER_MAX_ARGON2_M_KIB {
             return Err(SignError::InvalidArgon2Params);
         }
-        if config.t < 3 || config.p != 1 {
+        if config.t < 3 || config.p != 1 || config.t > MAX_ARGON_T {
             return Err(SignError::InvalidArgon2Params);
         }
         if config.argon2_target_bits == 0
@@ -516,25 +683,11 @@ pub fn issue_challenge(
         }
     }
 
-    let payload = ChallengePayload {
-        nonce: nonce.clone(),
-        scope: scope.to_string(),
-        ip_hash: ip_hash.clone(),
-        issued_at: now_unix,
+    // Nonce-bound IP binding tag (v2) — or empty when binding is disabled.
+    let binding = match config.binding_mode {
+        BindingMode::Bound => binding_tag(&nonce, client_ip, &config.secret_key)?,
+        BindingMode::None => String::new(),
     };
-    let signature = sign_payload(&payload, &config.secret_key)?;
-
-    // The challenge string the client folds into the hash: it contains the
-    // signed payload so a client cannot tamper with nonce/scope/ip/issued_at
-    // without invalidating the signature.
-    let challenge = format!(
-        "{}.{}",
-        B64.encode(canonical_signing_input(&payload)),
-        signature
-    );
-
-    // The prefix binds the client's counter input to this exact challenge.
-    let prefix = format!("{challenge}|{salt}|");
 
     let expires_at = now_unix.saturating_add(config.ttl_secs);
 
@@ -544,10 +697,14 @@ pub fn issue_challenge(
         .min_duration_ms
         .unwrap_or_else(|| config.min_duration_ms_for(target_bits));
 
-    let record = ChallengeRecord {
+    // Protocol v2: sign the full-parameter canonical input so no issuance
+    // parameter (algorithm, difficulty, TTL, salt, …) can be tampered with
+    // without breaking the signature. The challenge string is
+    // `base64(canonical).hex_tag` — same structure as v1.
+    let mut record = ChallengeRecord {
         nonce: nonce.clone(),
         scope: scope.to_string(),
-        ip_hash,
+        binding_tag: binding.clone(),
         issued_at: now_unix,
         expires_at,
         algorithm,
@@ -556,12 +713,19 @@ pub fn issue_challenge(
         p: config.p,
         target_bits,
         salt: salt.clone(),
-        prefix: prefix.clone(),
-        challenge: challenge.clone(),
+        prefix: String::new(),  // computed below once the challenge is signed
+        challenge: String::new(), // computed below
         min_duration_ms,
         issued_at_ns: now_ns,
         attempts_used: 0,
+        protocol_version: 2,
     };
+    let canonical = canonical_signing_input_v2(&record);
+    let signature = sign_canonical(&canonical, &config.secret_key)?;
+    let challenge = format!("{}.{}", B64.encode(&canonical), signature);
+    record.challenge = challenge.clone();
+    // The prefix binds the client's counter input to this exact challenge.
+    record.prefix = format!("{challenge}|{salt}|");
 
     let challenge_token = IssuedChallenge {
         nonce: nonce.clone(),
@@ -572,7 +736,7 @@ pub fn issue_challenge(
         p: config.p,
         target_bits,
         ttl_secs: config.ttl_secs,
-        prefix,
+        prefix: record.prefix.clone(),
         algorithm,
         min_duration_ms,
     };
@@ -589,7 +753,7 @@ pub fn payload_from_record(record: &ChallengeRecord) -> ChallengePayload {
     ChallengePayload {
         nonce: record.nonce.clone(),
         scope: record.scope.clone(),
-        ip_hash: record.ip_hash.clone(),
+        ip_hash: record.binding_tag.clone(),
         issued_at: record.issued_at,
     }
 }
@@ -604,8 +768,17 @@ pub enum SignError {
     /// canonical payload separator).
     #[error("scope must be 1..=128 bytes and must not contain '|'")]
     InvalidScope,
-    #[error("Argon2id parameters are invalid (m_kib must be >= 8 * p and <= SOLVER_MAX_ARGON2_M_KIB; for PHP/libsodium cross-verification t must be >= 3 and p == 1; argon2_target_bits must be 1..=SOLVER_MAX_ARGON2_TARGET_BITS)")]
+    #[error("Argon2id parameters are invalid (m_kib must be >= 8 * p and <= SOLVER_MAX_ARGON2_M_KIB; for PHP/libsodium cross-verification t must be >= 3 and p == 1 and <= MAX_ARGON_T; argon2_target_bits must be 1..=SOLVER_MAX_ARGON2_TARGET_BITS)")]
     InvalidArgon2Params,
+    /// The client IP string could not be parsed as an IPv4 or IPv6 address
+    /// (raised by [`binding_tag`] when a nonce-bound binding tag is computed).
+    #[error("client IP is not a valid IPv4 or IPv6 address")]
+    InvalidIp,
+    /// SHA-256 difficulty must be 1..=[`SOLVER_MAX_TARGET_BITS`] — 0 would
+    /// mint a trivially-solvable challenge and values above the ceiling can
+    /// never be solved by the widget.
+    #[error("SHA-256 difficulty must be 1..=SOLVER_MAX_TARGET_BITS (20)")]
+    InvalidDifficulty,
 }
 
 // Minimal hex encode/decode to avoid pulling in a `hex` crate dependency —
@@ -666,6 +839,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         let issued = issue_challenge(
             &config,
@@ -692,8 +866,8 @@ mod tests {
             .starts_with(&issued.challenge.challenge));
         // Record expiry = issued + ttl.
         assert_eq!(issued.record.expires_at, 1_000_120);
-        // IP is hashed, not stored raw.
-        assert_ne!(issued.record.ip_hash, "1.2.3.4");
+        // IP is bound via a nonce-bound HMAC tag, not stored raw.
+        assert_ne!(issued.record.binding_tag, "1.2.3.4");
     }
 
     #[test]
@@ -794,6 +968,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         // Empty scope and 129-byte scope must be rejected…
         assert!(
@@ -849,6 +1024,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         let a = issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         let b = issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
@@ -870,6 +1046,7 @@ mod tests {
             auto_tune: true,
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         // Idle — should be at min.
         let idle =
@@ -899,6 +1076,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         let issued =
             issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
@@ -924,6 +1102,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
         };
         assert_eq!(config.tuned_target_bits(0), 8);
         // The solver ceiling still applies when disabled.
@@ -951,6 +1130,7 @@ mod tests {
                 auto_tune: false,
                 auto_tune_min_bits: 10,
                 auto_tune_max_bits: 24,
+                binding_mode: BindingMode::Bound,
             },
             "login",
             "1.1.1.1",
@@ -986,6 +1166,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         let issued =
             issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
@@ -1014,6 +1195,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         let issued =
             issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
@@ -1039,6 +1221,7 @@ mod tests {
             auto_tune: false,
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
         };
         let issued =
             issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();

@@ -5,34 +5,69 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
 
 /**
- * In-memory stand-in for Predis\Client used by the RedisAdmissionSemaphore
- * tests (no real Redis in CI).
+ * In-memory stand-in for Predis\Client used by the Redis-backed semaphore and
+ * rate-limiter tests (no real Redis in CI).
  *
  * Predis dispatches every command through `__call`, so this fake intercepts
- * exactly the commands the semaphore sends (eval, expire, del) and emulates
- * the Lua scripts' semantics:
+ * exactly the commands the bundle sends and emulates their semantics:
  *
- *  - ACQUIRE script: atomic INCR admission test with cap enforcement and a
- *    watchdog TTL on first increment; the INCR is rolled back on rejection.
- *  - RELEASE script: DECR with a floor at 0 (negative counts DEL the key).
+ *  - TIME: reads the configurable clock ({@see self::setTimeMs()}) so tests
+ *    can advance the "Redis server time" to exercise lease/window expiry.
+ *  - ZSET primitives: ZADD, ZREM, ZREMRANGEBYSCORE, ZCARD, PEXPIRE — used by
+ *    the tokenized-lease semaphore (sorted set of lease tokens) and the
+ *    sliding-window rate limiter (sorted sets of hit timestamps).
+ *  - EVAL: interprets the bundle's three Lua scripts by their shape:
+ *      - semaphore ACQUIRE (1 key, 3 args, TIME + prune + cap + ZADD),
+ *      - semaphore RELEASE (ZREM of one member),
+ *      - rate-limiter (2 keys, 4 args, TIME + prune both + caps + ZADD both),
+ *    mirroring the scripts' semantics exactly.
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
  * assert on the Redis commands issued.
  */
 final class FakePredisClient extends \Predis\Client
 {
-    /** @var array<string, string> */
-    public array $store = [];
+    /** @var array<string, array<string, float>> sorted sets: key => member => score */
+    public array $zsets = [];
 
-    /** @var array<string, int> */
+    /** @var array<string, int> PEXPIRE/EXPIRE deadlines in ms */
     public array $expirations = [];
 
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
 
+    private float $clockMs = 0.0;
+
     public function __construct()
     {
         // Deliberately skip the parent constructor: no connection setup.
+    }
+
+    /** @internal test hook: advance the fake Redis server clock (ms). */
+    public function setTimeMs(float $ms): void
+    {
+        $this->clockMs = $ms;
+    }
+
+    /** Current fake server time in ms (mirrors the Lua TIME read). */
+    public function timeMs(): float
+    {
+        return $this->clockMs;
+    }
+
+    /** Number of live members (leases/hits) in a sorted set. */
+    public function zcard(string $key): int
+    {
+        return \count($this->zsets[$key] ?? []);
+    }
+
+    /** Members of a sorted set ordered by score (live leases/hits). */
+    public function zmembers(string $key): array
+    {
+        $members = $this->zsets[$key] ?? [];
+        asort($members);
+
+        return array_keys($members);
     }
 
     public function __call($commandID, $arguments)
@@ -40,11 +75,89 @@ final class FakePredisClient extends \Predis\Client
         $this->calls[] = [strtoupper((string) $commandID), $arguments];
 
         return match (strtoupper((string) $commandID)) {
+            'TIME' => $this->fakeTime(),
+            'ZADD' => $this->fakeZadd($arguments),
+            'ZREM' => $this->fakeZrem($arguments),
+            'ZREMRANGEBYSCORE' => $this->fakeZremrangebyscore($arguments),
+            'ZCARD' => $this->zcard((string) $arguments[0]),
+            'PEXPIRE' => $this->fakePexpire($arguments),
+            'EXPIRE' => $this->fakePexpire($arguments),
             'DEL' => $this->fakeDel($arguments),
-            'EXPIRE' => 1,
             'EVAL' => $this->fakeEval($arguments),
             default => null,
         };
+    }
+
+    /** @return array{0: int, 1: int} [seconds, microseconds] */
+    private function fakeTime(): array
+    {
+        $sec = (int) floor($this->clockMs / 1000);
+
+        return [$sec, (int) round(($this->clockMs - $sec * 1000) * 1000)];
+    }
+
+    /** @param list<mixed> $arguments */
+    private function fakeZadd(array $arguments): int
+    {
+        $key = (string) $arguments[0];
+        $added = 0;
+        $count = \count($arguments) - 1;
+        for ($i = 1; $i < $count; $i += 2) {
+            $score = (float) $arguments[$i];
+            $member = (string) $arguments[$i + 1];
+            if (!isset($this->zsets[$key][$member])) {
+                $added++;
+            }
+            $this->zsets[$key][$member] = $score;
+        }
+
+        return $added;
+    }
+
+    /** @param list<mixed> $arguments */
+    private function fakeZrem(array $arguments): int
+    {
+        $key = (string) $arguments[0];
+        $removed = 0;
+        foreach (\array_slice($arguments, 1) as $member) {
+            if (isset($this->zsets[$key][(string) $member])) {
+                unset($this->zsets[$key][(string) $member]);
+                $removed++;
+            }
+        }
+        if (isset($this->zsets[$key]) && $this->zsets[$key] === []) {
+            unset($this->zsets[$key]);
+        }
+
+        return $removed;
+    }
+
+    /** @param list<mixed> $arguments */
+    private function fakeZremrangebyscore(array $arguments): int
+    {
+        $key = (string) $arguments[0];
+        $min = $arguments[1];
+        $max = $arguments[2];
+        $removed = 0;
+        foreach ($this->zsets[$key] ?? [] as $member => $score) {
+            if ($score >= (float) $min && $score <= (float) $max) {
+                unset($this->zsets[$key][$member]);
+                $removed++;
+            }
+        }
+        if (isset($this->zsets[$key]) && $this->zsets[$key] === []) {
+            unset($this->zsets[$key]);
+        }
+
+        return $removed;
+    }
+
+    /** @param list<mixed> $arguments */
+    private function fakePexpire(array $arguments): int
+    {
+        $this->expirations[(string) $arguments[0]] = (int) $arguments[1];
+
+        return 1;
     }
 
     /** @param list<mixed> $arguments */
@@ -52,10 +165,11 @@ final class FakePredisClient extends \Predis\Client
     {
         $removed = 0;
         foreach ($arguments as $key) {
-            if (isset($this->store[(string) $key])) {
-                unset($this->store[(string) $key]);
+            if (isset($this->zsets[(string) $key])) {
+                unset($this->zsets[(string) $key]);
                 $removed++;
             }
+            unset($this->expirations[(string) $key]);
         }
 
         return $removed;
@@ -70,39 +184,52 @@ final class FakePredisClient extends \Predis\Client
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $rest = \array_slice($keysAndArgs, $numKeys);
 
-        if (str_contains($script, "redis.call('INCR'")) {
-            // Acquire: KEYS[1] = counter key, ARGV[1] = cap, ARGV[2] = TTL.
+        if (!str_contains($script, 'ZREMRANGEBYSCORE')) {
+            // Release: return redis.call('ZREM', KEYS[1], ARGV[1]).
+            return $this->fakeZrem([$keys[0], $rest[0]]);
+        }
+
+        // TIME-based scripts: semaphore acquire (1 key) or rate limiter
+        // (2 keys). The `now` mirrors the Lua TIME read.
+        $now = $this->timeMs();
+
+        if ($numKeys === 1) {
+            // Acquire: prune expired leases, admit below the cap.
             $key = (string) $keys[0];
             $cap = (int) $rest[0];
-            $ttl = (int) ($rest[1] ?? 0);
-            $n = (int) ($this->store[$key] ?? 0) + 1;
-            $this->store[$key] = (string) $n;
-            if ($n === 1) {
-                $this->expirations[$key] = $ttl;
-            }
-            if ($n > $cap) {
-                // Roll the INCR back, as the Lua script does.
-                $this->store[$key] = (string) ($n - 1);
-
+            $leaseMs = (int) $rest[1];
+            $token = (string) $rest[2];
+            $this->fakeZremrangebyscore([$key, '-inf', (string) $now]);
+            if ($this->zcard($key) >= $cap) {
                 return 0;
             }
+            $this->fakeZadd([$key, (string) ($now + $leaseMs), $token]);
+            $this->fakePexpire([$key, (string) ($leaseMs * 2)]);
 
             return 1;
         }
 
-        if (str_contains($script, "redis.call('DECR'")) {
-            // Release: DECR with floor at 0 — a negative count DELs the key.
-            $key = (string) $keys[0];
-            $n = (int) ($this->store[$key] ?? 0) - 1;
-            if ($n < 0) {
-                unset($this->store[$key]);
-            } else {
-                $this->store[$key] = (string) $n;
-            }
-
-            return $n;
+        // Rate limiter: prune both windows, per-client cap, then global cap.
+        $clientKey = (string) $keys[0];
+        $globalKey = (string) $keys[1];
+        $clientMax = (int) $rest[0];
+        $globalMax = (int) $rest[1];
+        $windowMs = (int) $rest[2];
+        $requestId = (string) $rest[3];
+        $cutoff = $now - $windowMs;
+        $this->fakeZremrangebyscore([$clientKey, '-inf', (string) $cutoff]);
+        $this->fakeZremrangebyscore([$globalKey, '-inf', (string) $cutoff]);
+        if ($this->zcard($clientKey) >= $clientMax) {
+            return 0;
         }
+        if ($this->zcard($globalKey) >= $globalMax) {
+            return -1;
+        }
+        $this->fakeZadd([$clientKey, (string) $now, $requestId]);
+        $this->fakeZadd([$globalKey, (string) $now, $requestId]);
+        $this->fakePexpire([$clientKey, (string) ($windowMs + 1000)]);
+        $this->fakePexpire([$globalKey, (string) ($windowMs + 1000)]);
 
-        return null;
+        return 1;
     }
 }

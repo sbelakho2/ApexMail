@@ -1,6 +1,6 @@
 {
     "name": "kiwicaptcha/kiwicaptcha-php",
-    "description": "KiwiCaptcha: privacy-first proof-of-work CAPTCHA engine for PHP. Zero external services, zero tracking, pure-PHP verification. Framework-neutral core (Symfony integration via bel-consulting/kiwicaptcha-symfony).",
+    "description": "KiwiCaptcha: privacy-first, self-hosted proof-of-work anti-abuse engine for PHP. Zero third-party services or tracking; optional first-party telemetry; pure-PHP verification.",
     "type": "library",
     "license": "MIT",
     "keywords": ["captcha", "proof-of-work", "sha256", "argon2", "security", "privacy"],

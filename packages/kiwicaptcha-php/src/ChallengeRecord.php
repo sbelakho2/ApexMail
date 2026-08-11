@@ -10,9 +10,18 @@ namespace KiwiCaptcha;
  * Mirrors the Rust `ChallengeRecord` fields EXACTLY (serde key names and
  * types), so a PHP service and a Rust service can share the same Redis
  * records: the JSON keys match the Rust serde schema one-to-one
- * (`nonce`, `scope`, `ip_hash`, `issued_at`, `expires_at`, `algorithm`
+ * (`nonce`, `scope`, `binding_tag`, `issued_at`, `expires_at`, `algorithm`
  * `'sha256'|'argon2id'`, `m_kib`, `t`, `p`, `target_bits`, `salt`,
- * `prefix`, `challenge`, `min_duration_ms`, `issued_at_ns`).
+ * `prefix`, `challenge`, `min_duration_ms`, `issued_at_ns`,
+ * `protocol_version`).
+ *
+ * Protocol v2 migration: v2 records carry `binding_tag` (a nonce-bound
+ * HMAC, never a stable IP-derived identifier — see
+ * {@see Issuer::bindingTag()}) and `protocol_version` (2). `toArray()`
+ * ALSO emits the legacy `ip_hash` key with the same value for one release
+ * so old Rust readers keep loading v2 records, and `fromArray()` accepts
+ * either key. Legacy records carrying only `ip_hash` decode as
+ * `protocol_version` 1.
  *
  * `attempts_used` is emitted by {@see self::toArray()} as 0 for schema
  * symmetry with the Rust record (which has `#[serde(default)]`, so a Rust
@@ -36,7 +45,7 @@ final class ChallengeRecord
     public function __construct(
         public readonly string $nonce,
         public readonly string $scope,
-        public readonly string $ipHash,
+        public readonly string $bindingTag,
         public readonly int $issuedAt,
         public readonly int $expiresAt,
         public readonly PoWAlgorithm $algorithm,
@@ -49,7 +58,20 @@ final class ChallengeRecord
         public readonly string $challenge,
         public readonly int $minDurationMs,
         public readonly int $issuedAtNs = 0,
+        public readonly int $protocolVersion = 2,
     ) {
+    }
+
+    /**
+     * Compatibility accessor for callers of the pre-v2 `ipHash` property:
+     * the field now stores the nonce-bound binding tag
+     * ({@see Issuer::bindingTag()}). For v1 records this is exactly the
+     * legacy `hash(sha256, secret || ip)` value, so the accessor returns
+     * the same bytes callers of v1 records expect.
+     */
+    public function ipHash(): string
+    {
+        return $this->bindingTag;
     }
 
     /** @return array<string, mixed> */
@@ -58,7 +80,11 @@ final class ChallengeRecord
         return [
             'nonce' => $this->nonce,
             'scope' => $this->scope,
-            'ip_hash' => $this->ipHash,
+            // Protocol v2 primary key; `ip_hash` is ALSO emitted (one release
+            // migration window) so old Rust readers that only know the legacy
+            // key still load v2 records.
+            'binding_tag' => $this->bindingTag,
+            'ip_hash' => $this->bindingTag,
             'issued_at' => $this->issuedAt,
             'expires_at' => $this->expiresAt,
             'algorithm' => $this->algorithm->value,
@@ -71,6 +97,7 @@ final class ChallengeRecord
             'challenge' => $this->challenge,
             'min_duration_ms' => $this->minDurationMs,
             'issued_at_ns' => $this->issuedAtNs,
+            'protocol_version' => $this->protocolVersion,
             // Language-neutral symmetry with the Rust record: Rust has
             // #[serde(default)] for attempts_used, so PHP emits the field
             // explicitly to keep PHP→Rust records complete. The one-shot
@@ -84,16 +111,23 @@ final class ChallengeRecord
      *
      * Unknown and absent keys are ignored gracefully — including
      * `attempts_used`, which the Rust verifier writes and PHP's one-shot
-     * model does not use (accepted optionally, default 0).
+     * model does not use (accepted optionally, default 0). The binding
+     * field is read from `binding_tag` (v2) or the legacy `ip_hash` (v1);
+     * the protocol version defaults to 2 for records carrying
+     * `binding_tag` and to 1 for legacy records carrying `ip_hash` only.
      *
      * @param array<string, mixed> $data
      */
     public static function fromArray(array $data): self
     {
+        $protocolVersion = \array_key_exists('binding_tag', $data)
+            ? (int) ($data['protocol_version'] ?? 2)
+            : 1;
+
         return new self(
             nonce: (string) $data['nonce'],
             scope: (string) $data['scope'],
-            ipHash: (string) $data['ip_hash'],
+            bindingTag: (string) ($data['binding_tag'] ?? $data['ip_hash'] ?? ''),
             issuedAt: (int) $data['issued_at'],
             expiresAt: (int) $data['expires_at'],
             algorithm: PoWAlgorithm::from((string) $data['algorithm']),
@@ -106,6 +140,7 @@ final class ChallengeRecord
             challenge: (string) $data['challenge'],
             minDurationMs: (int) ($data['min_duration_ms'] ?? 0),
             issuedAtNs: (int) ($data['issued_at_ns'] ?? 0),
+            protocolVersion: $protocolVersion,
         );
     }
 }

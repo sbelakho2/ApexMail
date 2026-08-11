@@ -1,22 +1,6 @@
 (function() {
   var encoder = new TextEncoder();
   
-  // ── Global Telemetry ────────────────────────────────────────────────
-  var mouseEvents = 0, keyEvents = 0, eventTimings = [];
-  function recordEvent(e) {
-    if (e.type === "keydown" && e.repeat) return;
-    if (eventTimings.length < 50) eventTimings.push(Math.round(performance.now()));
-    if (e.type === "keydown") keyEvents++; else mouseEvents++;
-  }
-  if (typeof window !== "undefined" && !window.__kiwiTelemetry) {
-    window.__kiwiTelemetry = true;
-    document.addEventListener("pointerdown", recordEvent, {passive:true});
-    document.addEventListener("keydown", recordEvent, {passive:true});
-    document.addEventListener("wheel", recordEvent, {passive:true});
-    document.addEventListener("click", recordEvent, {passive:true});
-    document.addEventListener("touchstart", recordEvent, {passive:true});
-  }
-
   // ── Optimized yielding ──────────────────────────────────────────────
   var channel = new MessageChannel();
   var yieldQueue = [];
@@ -210,11 +194,74 @@
     });
   }
 
+  // ── Privacy-aware telemetry (widget-local, mode-gated) ──────────────
+  // data-kiwi-telemetry on the container OR the widget: "off" (default) |
+  // "minimal" | "full". Listeners are attached to the widget element ONLY
+  // (never document-wide) and are removed when the solve finishes or fails.
+  // No device-capability or screen-size signals are ever collected, and
+  // scrolling/touch interactions are not tracked; navigator.webdriver is only
+  // reported in "full" mode. Event timings are only recorded in "full" mode,
+  // capped at 20 entries and quantized to 250 ms buckets.
+  function telemetrySession(container, W) {
+    var mode = "off";
+    if (W) mode = W.getAttribute("data-kiwi-telemetry") || mode;
+    if (container && container !== W) mode = container.getAttribute("data-kiwi-telemetry") || mode;
+    if (mode !== "minimal" && mode !== "full") mode = "off";
+    var mouseEvents = 0, keyEvents = 0, eventTimings = [];
+    function onEvent(e) {
+      if (e.type === "keydown") {
+        if (e.repeat) return;
+        keyEvents++;
+      } else {
+        mouseEvents++;
+      }
+      if (mode === "full" && eventTimings.length < 20) {
+        eventTimings.push(Math.round(performance.now() / 250) * 250);
+      }
+    }
+    function attach() {
+      if (mode === "off") return;
+      W.addEventListener("pointerdown", onEvent, {passive:true});
+      W.addEventListener("keydown", onEvent, {passive:true});
+      W.addEventListener("click", onEvent, {passive:true});
+    }
+    function stop() {
+      if (mode === "off") return;
+      W.removeEventListener("pointerdown", onEvent);
+      W.removeEventListener("keydown", onEvent);
+      W.removeEventListener("click", onEvent);
+    }
+    function build() {
+      if (mode === "off") return {};
+      var t = { v: 2, mode: mode, me: mouseEvents, ke: keyEvents };
+      if (mode === "full") {
+        t.wd = navigator.webdriver === true;
+        t.et = eventTimings;
+      }
+      return t;
+    }
+    attach();
+    return { build: build, stop: stop };
+  }
+
+  // ── Same-origin enforcement ─────────────────────────────────────────
+  // The challenge endpoint must resolve to the page's own origin — a
+  // cross-origin endpoint would leak the scope and the solve behavior to a
+  // third party, so it is refused outright.
+  function kiwiEndpoint(raw) {
+    var url = new URL(raw, window.location.href);
+    if (url.origin !== window.location.origin) {
+      throw new Error("KiwiCaptcha refuses cross-origin challenge endpoints");
+    }
+    return url.href;
+  }
+
   function initWidget(W) {
     if (!W || W.dataset.kiwiStarted) return;
     W.dataset.kiwiStarted = "1";
     var container = W.closest(".kiwi-container") || W;
     var statusEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
+    var telemetry = telemetrySession(container, W);
     function setStatus(label, pillText, state) {
       if (statusEl) statusEl.textContent = label;
       if (pillEl) pillEl.textContent = pillText;
@@ -243,12 +290,12 @@
       tick(); clearInterval(countdownTimer);
       countdownTimer = setInterval(function() { remaining--; tick(); if (remaining <= 0) clearInterval(countdownTimer); }, 1000);
     }
-    function fail(msg) { setStatus(msg || "Failed", "Error", "failed"); setHint("Please reload to retry."); setProgress(0); if (tokenEl) tokenEl.value = ""; clearInterval(countdownTimer); }
+    function fail(msg) { setStatus(msg || "Failed", "Error", "failed"); setHint("Please reload to retry."); setProgress(0); if (tokenEl) tokenEl.value = ""; clearInterval(countdownTimer); telemetry.stop(); }
 
     async function run() {
       try {
         setStatus("Connecting\u2026", "Wait", "connecting");
-        var endpoint = W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge";
+        var endpoint = kiwiEndpoint(W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge");
         var scope = W.getAttribute("data-kiwi-scope") || container.getAttribute("data-kiwi-scope");
         if (!scope) {
           scope = "login";
@@ -256,16 +303,16 @@
           if (p.indexOf("signup")>=0||p.indexOf("register")>=0) scope="signup";
           else if (p.indexOf("forgot")>=0) scope="forgot-password";
         }
-        var resp = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({scope:scope}) });
+        var resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify({scope:scope}) });
         if (!resp.ok) throw new Error("Challenge failed");
         var data = await resp.json();
         if (data.ttlSecs) startCountdown(data.ttlSecs);
         setStatus("Verifying\u2026", "Working", "solving");
         var result = await solve(data.prefix, b64decode(data.salt), data.targetBits, data.algorithm||"sha256", data.mKib||0, data.t||1, data.p||1, setProgress);
         if (!result) throw new Error("Exhausted");
-        var telemetry = { wd: navigator.webdriver===true, hc: navigator.hardwareConcurrency||0, dm: navigator.deviceMemory||0, me: mouseEvents, ke: keyEvents, et: eventTimings, sw: window.screen.width, sh: window.screen.height };
-        tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry));
+        tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()));
         setStatus("Verified", "Success", "done"); setHint("Proof-of-work verified locally."); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
+        telemetry.stop();
       } catch (e) { fail(e.message); }
     }
     run();

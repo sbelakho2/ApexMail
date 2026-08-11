@@ -98,4 +98,68 @@ final class RouterIntegrationTest extends TestCase
         self::assertSame(200, $client->getResponse()->getStatusCode());
         self::assertNotEmpty(json_decode($client->getResponse()->getContent(), true)['nonce']);
     }
+
+    public function testEveryResponseCarriesPrivateDocumentHeaders(): void
+    {
+        // A dedicated client WITHOUT reboot so the in-memory rate-limit
+        // state survives across requests (429 path).
+        $client = new KernelBrowser(new TestKernel('test', true));
+        $client->disableReboot();
+
+        // Success path.
+        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        $response = $client->getResponse();
+        self::assertSame(200, $response->getStatusCode());
+        $this->assertPrivateDocumentHeaders($response);
+
+        // Error path (422).
+        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"bad|scope"}');
+        $this->assertPrivateDocumentHeaders($client->getResponse());
+
+        // Rate-limited path (429).
+        for ($i = 0; $i < 12; $i++) {
+            $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        }
+        $rateLimited = $client->getResponse();
+        self::assertSame(429, $rateLimited->getStatusCode());
+        $this->assertPrivateDocumentHeaders($rateLimited);
+
+        // Cross-origin path (403).
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['HTTP_ORIGIN' => 'https://evil.example'], content: '{"scope":"login"}');
+        $this->assertPrivateDocumentHeaders($client->getResponse());
+    }
+
+    public function testCrossOriginPostIsRejectedWith403(): void
+    {
+        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['HTTP_ORIGIN' => 'https://evil.example'], content: '{"scope":"login"}');
+
+        $response = self::$browser->getResponse();
+        self::assertSame(403, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('CROSS_ORIGIN_DENIED', $body['error']['code']);
+    }
+
+    public function testSameOriginPostIsAllowed(): void
+    {
+        // The request itself is served at http://localhost (KernelBrowser
+        // default): a matching Origin must be accepted.
+        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['HTTP_ORIGIN' => 'http://localhost'], content: '{"scope":"login"}');
+        self::assertSame(200, self::$browser->getResponse()->getStatusCode());
+    }
+
+    public function testOriginAbsentPostIsAllowed(): void
+    {
+        // No Origin header (curl, same-origin navigation, non-browser
+        // clients): allowed.
+        self::$browser->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        self::assertSame(200, self::$browser->getResponse()->getStatusCode());
+    }
+
+    private function assertPrivateDocumentHeaders(\Symfony\Component\HttpFoundation\Response $response): void
+    {
+        self::assertSame('max-age=0, no-store, private', $response->headers->get('Cache-Control'));
+        self::assertSame('no-cache', $response->headers->get('Pragma'));
+        self::assertSame('no-referrer', $response->headers->get('Referrer-Policy'));
+        self::assertSame('nosniff', $response->headers->get('X-Content-Type-Options'));
+    }
 }

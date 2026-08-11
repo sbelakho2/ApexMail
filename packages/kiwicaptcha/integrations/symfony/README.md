@@ -66,36 +66,100 @@ kiwi_captcha:
     # environment (kernel.environment or APP_ENV).
     # storage: kiwicaptcha.storage.redis    # atomic single-use via GETDEL
 
+    # ── Privacy posture ──────────────────────────────────────────────────
+    # privacy_mode: strict | standard (default strict). In STRICT mode the
+    # extension FORCES telemetry 'off', same_origin_only true and
+    # min_duration_ms 0 (the server-side solve-timing floor is a timing
+    # heuristic and is disabled) — operator values for those keys are
+    # overridden. In STANDARD mode the operator's choices pass through.
+    # privacy_mode: strict
+    # telemetry: off | minimal | full       # widget signal collection;
+    #                                       # forced 'off' under strict
+    # binding_mode: nonce_ip_hmac | none    # challenge IP binding; stored
+    #                                       # tag is nonce-bound, never a
+    #                                       # stable IP identifier. NOTE:
+    #                                       # 'none' is accepted by the
+    #                                       # config tree but the current
+    #                                       # kiwicaptcha-php core Issuer
+    #                                       # always emits a binding tag —
+    #                                       # full support awaits a core
+    #                                       # capability (see Limitations).
+    # same_origin_only: true                # reject cross-origin challenge
+    #                                       # POSTs with 403
+    #                                       # CROSS_ORIGIN_DENIED; forced
+    #                                       # true under strict
+    # min_duration_ms: null                 # explicit solve-timing floor in
+    #                                       # ms (null = derive from
+    #                                       # difficulty); forced 0 under
+    #                                       # strict
+    # enforce_telemetry: false              # reject bot-scored telemetry at
+    #                                       # verification time
+    #                                       # (defense-in-depth only)
+
     # ── Production hardening ──────────────────────────────────────────────
-    # Per-IP rate limit on challenge issuance (0 = disabled). Mass challenge
-    # minting is what makes aggregate verification work unbounded, so enable
-    # this in production (e.g. 10 challenges per 60 s per IP).
+    # Per-IP rate limit on challenge issuance (default 10 per window; 0 =
+    # disabled). Mass challenge minting is what makes aggregate verification
+    # work unbounded, so keep this on in production.
     # rate_limit: 10
+    # Deployment-GLOBAL rate limit (default 500 per window; 0 = disabled),
+    # enforced ATOMICALLY against Redis so ALL workers share one sliding
+    # window. Without a Redis client the global cap is not enforced (the
+    # in-memory/PSR-6 fallbacks are per-process/best-effort).
+    # rate_limit_global: 500
     # rate_limit_window_secs: 60            # sliding window (default 60)
-    # rate_limit_cache: null                # optional PSR-6 pool service id for
-    #                                       # SHARED multi-process state (e.g. a
-    #                                       # Redis-backed Symfony Cache pool).
-    #                                       # Without it, the limiter is a
-    #                                       # per-process in-memory window.
+    # rate_limit_cache: null                # optional PSR-6 pool service id
+    #                                       # used as the SHARED multi-process
+    #                                       # fallback when no Redis client
+    #                                       # exists (e.g. a Redis-backed
+    #                                       # Symfony Cache pool). Without it,
+    #                                       # the fallback is a per-process
+    #                                       # in-memory window.
     #                                       # Raw client IPs are never stored:
     #                                       # every key is a peppered HMAC of
-    #                                       # the IP (rate_limit_pepper defaults
-    #                                       # to secret_key).
+    #                                       # the IP (rate_limit_pepper
+    #                                       # defaults to secret_key).
     # Aggregate Argon2id verification concurrency cap (default 2; 0 =
     # unlimited). Each Argon2id verification allocates argon_m_kib of memory —
     # size this to available memory. With a Redis client the cap is enforced
     # across ALL PHP-FPM workers (see the Argon2 section below).
     # argon2_max_concurrent_verifications: 2
+    # argon2_semaphore_namespace: '%kernel.project_dir%'
+    #                                       # per-deployment discriminator for
+    #                                       # the Redis lease set and the
+    #                                       # global rate-limit key; two
+    #                                       # deployments sharing one Redis
+    #                                       # instance must use different
+    #                                       # namespaces
     # redis_service: null                   # optional Redis client service id
     #                                       # (\Redis or Predis\Client) for the
     #                                       # cross-worker Argon2 admission
-    #                                       # semaphore; when null, the
-    #                                       # storage's own client is reused if
-    #                                       # storage is RedisStorage
+    #                                       # gate and the atomic rate
+    #                                       # limiter; when null, the
+    #                                       # storage's own client is reused
+    #                                       # if storage is RedisStorage
 ```
 
 > `KIWI_SECRET_KEY` is the same key used by the Rust implementation, so a
 > Symfony app and a Rust service can verify each other's challenges.
+
+## Privacy modes
+
+`privacy_mode` (default **strict**) is the audit-driven privacy contract:
+
+- **strict** — the extension *forces* the privacy-sensitive options
+  regardless of what the operator wrote in the config file:
+  `telemetry: off` (the widget never collects signal fields),
+  `same_origin_only: true` (cross-origin challenge requests are rejected),
+  and `min_duration_ms: 0` (no server-side solve-timing floor — the timing
+  heuristic is off). Rate limits default to nonzero (10 per client / 500
+  global per window) so abuse mitigation stays on.
+- **standard** — the operator's explicit values for those keys are honored
+  (`telemetry: minimal|full`, `same_origin_only: false`, a positive
+  `min_duration_ms`).
+
+`binding_mode` is NOT forced under strict: IP binding is a relay mitigation,
+and the stored tag is a per-challenge, nonce-bound HMAC — never a stable
+identifier that follows the client.
 
 ## Usage
 
@@ -112,6 +176,7 @@ public function buildForm(FormBuilderInterface $builder, array $options): void
         ->add('captcha', KiwiCaptchaType::class, [
             'scope' => 'login', // optional; defaults to 'login'
             'nonce' => $cspNonce, // optional CSP nonce for the inline style/script tags
+            'telemetry' => 'off', // optional; defaults to the bundle config (strict: 'off')
         ]);
 ```
 
@@ -119,7 +184,9 @@ The type renders a hidden `kiwi__token` input; the `KiwiCaptcha` validator
 constraint (attached automatically) verifies the token **locally** on submit.
 The widget posts to `route_prefix . '/challenge'` by default — the form's
 endpoint follows the configured prefix like the standalone widget does — and
-stays overridable per form with the `endpoint` option.
+stays overridable per form with the `endpoint` option. The telemetry mode is
+rendered as `data-kiwi-telemetry` on the widget container (default `off`);
+invalid values are rejected by the options resolver.
 
 ### In a Template
 
@@ -148,10 +215,23 @@ or where the application post-processes the HTML (as ApexMail does).
 
 **WebAssembly requires `'wasm-unsafe-eval'`** in `script-src` (CSP3) — the
 embedded WASM solver is compiled at runtime, which strict policies must
-explicitly allow: `script-src 'nonce-<nonce>' 'wasm-unsafe-eval'` plus
-`style-src 'nonce-<nonce>'`. SHA-256 mode falls back to pure JS when WASM is
-blocked; **Argon2id mode requires WASM** (no JS fallback exists for the
-memory-hard solver).
+explicitly allow. SHA-256 mode falls back to pure JS when WASM is blocked;
+**Argon2id mode requires WASM** (no JS fallback exists for the memory-hard
+solver).
+
+Recommended CSP profile:
+
+```
+default-src 'self';
+script-src 'self' 'nonce-{NONCE}' 'wasm-unsafe-eval';
+style-src 'self' 'nonce-{NONCE}';
+connect-src 'self';
+object-src 'none';
+frame-src 'none';
+frame-ancestors 'none';
+base-uri 'none';
+form-action 'self'
+```
 
 ### Challenge endpoint
 
@@ -183,50 +263,90 @@ kiwi_captcha:
 After importing (or auto-registering), the route is available at
 `path('kiwicaptcha_challenge')` and responds to `POST`.
 
+**Private JSON responses.** Every response — success, error, 422, 429, 403 —
+is a private JSON document:
+
+```
+Cache-Control: no-store, private, max-age=0
+Pragma: no-cache
+Referrer-Policy: no-referrer
+X-Content-Type-Options: nosniff
+```
+
+Challenge bytes and rate-limit signals are never cached or mirrored, no
+referrer leaks from the widget context, and the JSON can never be re-sniffed
+as HTML.
+
+**Same-origin enforcement.** When `same_origin_only` is true (default, and
+forced under strict), requests whose `Origin` header is not the
+application's own origin (scheme + host, constant-time compare) are rejected
+with HTTP 403 `{"error":{"code":"CROSS_ORIGIN_DENIED"}}` **before any state
+is written** — cross-site abuse and CSRF-style challenge minting are
+stopped, and rejected requests consume no rate-limit budget. Requests
+without an `Origin` header (same-origin navigation, curl, non-browser
+clients) are allowed. The check happens before rate limiting, so an
+attacker's cross-origin traffic never pollutes the per-client window.
+
 **Rate limiting.** Challenge issuance is rate-limited per client IP
 (`rate_limit` challenges per `rate_limit_window_secs` sliding window; HTTP
-429 with `{"error":{"code":"RATE_LIMITED"}}` when exceeded). Both backends
-(shared PSR-6 pool and in-memory) use a TRUE sliding window — the state is
-the list of hit timestamps pruned on every check, so a burst straddling a
-window boundary can never double the rate. **Raw client IPs are never
-stored**: every key is a peppered HMAC of the IP
-(`hash_hmac('sha256', $ip, $pepper)` with `rate_limit_pepper`, defaulting to
-the bundle secret), in both the shared pool and the in-memory buckets. By
-default the limiter keeps a per-process in-memory window (best-effort,
-single worker); for multi-worker deployments configure `rate_limit_cache`
-with a shared PSR-6 pool (e.g. a Redis-backed Symfony Cache pool) —
-PSR-6 cannot express an atomic read-modify-write, so the shared limiter is a
-bound, not a gate. `rate_limit: 0` disables the limiter — the bundle defaults
-to disabled so existing deployments keep their behavior, but production
-should explicitly enable it.
+429 with `{"error":{"code":"RATE_LIMITED"}}` when exceeded) and
+deployment-wide (`rate_limit_global` per window across ALL clients; HTTP 429
+with the distinct `{"error":{"code":"GLOBAL_RATE_LIMITED"}}` code). Three
+backends, in priority order:
+
+- **Redis (atomic, cross-worker — the gate).** When a Redis client is
+  available (`redis_service`, or `RedisStorage` as the storage backend),
+  both windows are enforced by a single Lua script using the Redis server
+  clock (`TIME`): per-client and global ZSETs are pruned and checked
+  atomically, so all PHP-FPM workers share one consistent window and the
+  limit holds under concurrency. Keys:
+  `kiwi:rl:client:<namespace>:<hmac>` and `kiwi:rl:global:<namespace>`.
+- **PSR-6 pool (shared, best-effort).** `rate_limit_cache` — used when no
+  Redis client exists. PSR-6 cannot express an atomic read-modify-write, so
+  concurrent requests may briefly exceed the limit — a bound, not a gate.
+- **In-memory (per-process).** Single-worker fallback.
+
+All backends use a TRUE sliding window — the state is a set of hit
+timestamps pruned on every check, so a burst straddling a window boundary
+can never double the rate. **Raw client IPs are never stored**: every key is
+a peppered HMAC of the IP (`hash_hmac('sha256', $ip, $pepper)` with
+`rate_limit_pepper`, defaulting to the bundle secret), in Redis, the shared
+pool, and the in-memory buckets. `rate_limit: 0` and `rate_limit_global: 0`
+disable the respective limit; both default to nonzero (10 / 500).
 
 **Argon2id verification concurrency cap.** When `algorithm: argon2id`, the
-verifier is wrapped by `ThrottledVerifier` (bundle-owned, same `verify()`
-signature) enforcing `argon2_max_concurrent_verifications` (default 2)
-concurrent verifications. Two admission backends:
+core `KiwiCaptcha\Verifier` is constructed with a
+`KiwiCaptcha\VerificationAdmissionGate` enforcing
+`argon2_max_concurrent_verifications` (default 2) concurrent verifications.
+The gate is consulted only when the STORED record's algorithm is Argon2id
+and only after the cheap validation checks. Two gate backends:
 
-- **Redis-backed admission (cross-worker).** When the bundle has a Redis
-  client — the `redis_service` config option, or the configured storage
-  itself when it is `KiwiCaptcha\Storage\RedisStorage` (its client is
-  reused) — the cap is enforced with an atomic Lua INCR/DECR semaphore
-  (`src/Security/RedisAdmissionSemaphore.php`) on a shared counter key
-  (`kiwicaptcha:argon2:active:…`), so ALL PHP-FPM workers together can never
-  exceed the cap. Approximation, documented: permits carry a 60 s watchdog
-  TTL instead of exact liveness, so a crashed worker's permit auto-expires
-  (the effective cap may briefly shrink for up to one watchdog period after
-  a crash storm — acceptable for memory-cost bounding).
-- **In-process semaphore (per-process).** Without a Redis client the cap is
-  enforced per PHP process (`src/Security/Argon2Semaphore.php`, static,
-  polls for a slot up to 5 s). Honest caveat: PHP-FPM workers share no
-  memory, so this bounds concurrency per worker, NOT per deployment —
-  multi-worker deployments without Redis should also limit worker counts
-  and rely on the rate limit to bound the inflow; ideally, run Redis and let
-  the bundle use the cross-worker semaphore. Infrastructure-level admission
-  control (e.g. limiting concurrent PHP-FPM workers or per-instance request
-  concurrency) remains a complementary knob in every case.
+- **Redis-backed admission (cross-worker) — tokenized leases.** When the
+  bundle has a Redis client — the `redis_service` config option, or the
+  configured storage itself when it is `KiwiCaptcha\Storage\RedisStorage`
+  (its client is reused) — the cap is enforced with the audit's
+  tokenized-lease design (`src/Security/RedisAdmissionSemaphore.php`): each
+  `acquire()` mints a unique 16-byte lease token stored as a sorted-set
+  member scored at its expiry (45 s), and `release()` removes EXACTLY that
+  token. A stale release — releasing a lease that expired or was already
+  released — can never remove a newer lease (ZREM of an absent member is a
+  no-op). Expired leases (crashed workers) are reaped by the acquire script
+  before admission, so the cap self-heals with no watchdog counter to drift.
+  Key: `kiwicaptcha:argon2:leases:<namespace>` (namespace defaults to
+  `kernel.project_dir`; sanitized to `[A-Za-z0-9_.-]`).
+- **In-process gate (per-process).** Without a Redis client the cap is
+  enforced per PHP process (`src/Security/InProcessArgonGate.php`, token-set
+  based). Honest caveat: PHP-FPM workers share no memory, so this bounds
+  concurrency per worker, NOT per deployment — multi-worker deployments
+  without Redis should also limit worker counts and rely on the rate limit
+  to bound the inflow; ideally, run Redis and let the bundle use the
+  cross-worker gate. Infrastructure-level admission control (e.g. limiting
+  concurrent PHP-FPM workers or per-instance request concurrency) remains a
+  complementary knob in every case.
 
-Saturation for longer than the wait bound fails verification closed as a
-normal captcha violation (never a 500).
+Exhaustion fails verification closed as a normal captcha violation (never a
+500), and — per the core's one-shot semantics — the challenge record is NOT
+burned by a capacity refusal, so the client may retry shortly.
 
 **Trusted proxies.** Both the challenge endpoint and the validator use
 `Request::getClientIp()` (the same source), so configure Symfony's
@@ -261,14 +381,20 @@ bin/sync-assets.sh
 2. **Telemetry is client-controlled and forgeable.** Input events and
    hardware/screen signals are reported by the browser script itself; a
    custom client can omit or fake them. Treat telemetry as a supplementary
-   signal, never the security boundary.
+   signal, never the security boundary. Under strict privacy mode the widget
+   collects nothing (`telemetry: off`).
 3. **IP binding is best-effort.** IPs legitimately change behind NAT/proxies,
    so a strict binding would reject real users. Operators can disable the
-   check entirely; it is a relay mitigation, not a guarantee.
-4. **Server-side timing needs a trusted clock.** The minimum-duration floor is
-   measured by your server, so a client cannot buy its way out of it — but
-   the server clock must be correct. An attacker with fast requests still
-   pays the full PoW cost on every attempt.
+   check entirely; it is a relay mitigation, not a guarantee. `binding_mode:
+   none` is accepted by the config tree, but the current kiwicaptcha-php
+   core `Issuer` always emits a nonce-bound binding tag — issuing challenges
+   with binding fully disabled awaits a core capability
+   (`ChallengeConfig`/`Issuer` binding option); the coordinator wires it.
+   Until then, `nonce_ip_hmac` is the effective behavior.
+4. **Server-side timing is a heuristic, off by default.** The
+   minimum-duration floor is measured by your server, so a client cannot buy
+   its way out of it — but the server clock must be correct, and strict
+   privacy mode disables the floor entirely (`min_duration_ms: 0`).
 5. **The WASM solver and its JS fallback are open source.** An attacker can
    always write their own solver (or reuse the source). The value is the
    **cost** per attempt, not the impossibility of solving.

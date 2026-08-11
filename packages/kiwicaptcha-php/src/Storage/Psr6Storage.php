@@ -28,13 +28,27 @@ final class Psr6Storage implements StorageInterface
      */
     private const PREFIX = 'kiwicaptcha_';
 
+    /**
+     * PSR-6 cache key for a challenge nonce.
+     *
+     * The wire nonce is standard Base64 and may legitimately contain the
+     * reserved PSR-6 characters `/` and `+` (and is 44 chars). Conforming
+     * pools are allowed to reject such keys, so the nonce is never used
+     * directly as a cache key — it is hashed to a PSR-6-safe hex digest
+     * (3 + 60 = 63 chars).
+     */
+    private static function key(string $nonce): string
+    {
+        return self::PREFIX.substr(hash('sha256', $nonce), 0, 60);
+    }
+
     public function __construct(private readonly CacheItemPoolInterface $pool)
     {
     }
 
     public function store(ChallengeRecord $record): void
     {
-        $item = $this->pool->getItem(self::PREFIX.$record->nonce);
+        $item = $this->pool->getItem(self::key($record->nonce));
         $item->set($record->toArray());
         $item->expiresAfter(max(1, $record->expiresAt - time()));
         $this->pool->save($item);
@@ -42,7 +56,7 @@ final class Psr6Storage implements StorageInterface
 
     public function find(string $nonce): ?ChallengeRecord
     {
-        $item = $this->pool->getItem(self::PREFIX.$nonce);
+        $item = $this->pool->getItem(self::key($nonce));
         if (!$item->isHit()) {
             return null;
         }
@@ -57,7 +71,7 @@ final class Psr6Storage implements StorageInterface
         // this is read-then-delete: the record is returned exactly once per
         // stored item, but under concurrency two readers may both observe it
         // (see the class docblock — RedisStorage is the atomic backend).
-        $item = $this->pool->getItem(self::PREFIX.$nonce);
+        $item = $this->pool->getItem(self::key($nonce));
         if (!$item->isHit()) {
             return null;
         }
@@ -66,13 +80,13 @@ final class Psr6Storage implements StorageInterface
         // Delete unconditionally: if the item was a hit the delete must
         // succeed (PSR-6 pools must not fail deletes for existing items), so
         // there is no need to branch on its result.
-        $this->pool->deleteItem(self::PREFIX.$nonce);
+        $this->pool->deleteItem(self::key($nonce));
 
         return \is_array($data) ? ChallengeRecord::fromArray($data) : null;
     }
 
     public function delete(string $nonce): void
     {
-        $this->pool->deleteItem(self::PREFIX.$nonce);
+        $this->pool->deleteItem(self::key($nonce));
     }
 }

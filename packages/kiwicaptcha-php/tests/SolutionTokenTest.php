@@ -67,6 +67,37 @@ final class SolutionTokenTest extends TestCase
         self::assertSame(7, $token->counter);
     }
 
+    public function testRejectsCounterAboveSolverMaximum(): void
+    {
+        // The browser/wasm solver caps at 5,000,000 hashes; 5,000,001
+        // cannot come from a legit solve.
+        $this->expectException(DecodeError::class);
+        $this->expectExceptionMessage('counter exceeds solver maximum');
+        SolutionToken::decode(base64_encode(self::NONCE.'.5000001.100.{}'));
+    }
+
+    public function testAcceptsCounterAtSolverMaximum(): void
+    {
+        $token = SolutionToken::decode(base64_encode(self::NONCE.'.5000000.100.{}'));
+        self::assertSame(5_000_000, $token->counter);
+    }
+
+    public function testRejectsCounterLongerThanSevenDigits(): void
+    {
+        // 8 digits but numerically below the maximum — still rejected by
+        // the digit-length bound (an absurdly long string would otherwise
+        // silently clamp in the integer cast).
+        $this->expectException(DecodeError::class);
+        $this->expectExceptionMessage('counter exceeds solver maximum');
+        SolutionToken::decode(base64_encode(self::NONCE.'.00000000.100.{}'));
+    }
+
+    public function testAcceptsSevenDigitCounterWithLeadingZeros(): void
+    {
+        $token = SolutionToken::decode(base64_encode(self::NONCE.'.0000007.100.{}'));
+        self::assertSame(7, $token->counter);
+    }
+
     public function testRejectsInvalidTelemetryJson(): void
     {
         $this->expectException(DecodeError::class);

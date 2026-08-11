@@ -19,7 +19,7 @@ trait VerifyFixtureTrait
         return new ChallengeRecord(
             nonce: $vector['nonce'],
             scope: 'login',
-            ipHash: Vectors::IP_HASH,
+            bindingTag: Vectors::IP_HASH,
             issuedAt: Vectors::ISSUED_AT,
             expiresAt: Vectors::ISSUED_AT + 120,
             algorithm: PoWAlgorithm::from($vector['algorithm']),
@@ -31,6 +31,15 @@ trait VerifyFixtureTrait
             prefix: $vector['prefix'],
             challenge: $vector['challenge'],
             minDurationMs: 0,
+            // Server-side issuance timestamp (epoch microseconds). The
+            // verifier's minimum-duration check runs only when the record
+            // carries a floor; the vectors use minDurationMs 0, so the
+            // absolute value is irrelevant as long as it is > 0 (0 would be
+            // rejected as an untimed record).
+            issuedAtNs: Vectors::ISSUED_AT * 1_000_000,
+            // The fixtures are Rust-generated v1 challenges (payload
+            // nonce|scope|ip_hash|issued_at), so their records are v1.
+            protocolVersion: 1,
         );
     }
 

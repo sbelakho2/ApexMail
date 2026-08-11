@@ -21,4 +21,5 @@ enum VerifyError: string
     case UnsupportedArgon2Params = 'unsupported_argon2_params';
     case TooManyAttempts = 'too_many_attempts';
     case TelemetryRejected = 'telemetry_rejected';
+    case CapacityExceeded = 'verification capacity exceeded — try again shortly';
 }

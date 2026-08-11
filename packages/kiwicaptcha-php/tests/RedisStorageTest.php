@@ -38,7 +38,7 @@ final class RedisStorageTest extends TestCase
         return new ChallengeRecord(
             nonce: $nonce,
             scope: 'login',
-            ipHash: 'abc123',
+            bindingTag: 'abc123',
             issuedAt: 1_800_000_000,
             expiresAt: 1_800_000_120,
             algorithm: PoWAlgorithm::Sha256,
@@ -78,7 +78,7 @@ final class RedisStorageTest extends TestCase
         $record = new ChallengeRecord(
             nonce: $record->nonce,
             scope: $record->scope,
-            ipHash: $record->ipHash,
+            bindingTag: $record->ipHash(),
             issuedAt: $record->issuedAt,
             expiresAt: time() + 60,
             algorithm: $record->algorithm,
@@ -115,16 +115,22 @@ final class RedisStorageTest extends TestCase
         self::assertIsArray($data);
         // The JSON keys are the shared language-neutral schema — identical to
         // the Rust serde keys, including attempts_used (Rust: #[serde(default)])
-        // so a PHP-written record is complete for a Rust reader.
+        // so a PHP-written record is complete for a Rust reader. Protocol v2
+        // emits binding_tag (primary) plus the legacy ip_hash mirror for one
+        // release, and protocol_version.
         self::assertSame([
-            'nonce', 'scope', 'ip_hash', 'issued_at', 'expires_at', 'algorithm',
-            'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix', 'challenge',
-            'min_duration_ms', 'issued_at_ns', 'attempts_used',
+            'nonce', 'scope', 'binding_tag', 'ip_hash', 'issued_at', 'expires_at',
+            'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
+            'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
+            'attempts_used',
         ], array_keys($data));
         self::assertSame('redis-nonce-1', $data['nonce']);
         self::assertSame('sha256', $data['algorithm']);
         self::assertSame(0, $data['attempts_used']);
         self::assertSame(123_456_789, $data['issued_at_ns']);
+        self::assertSame('abc123', $data['binding_tag']);
+        self::assertSame('abc123', $data['ip_hash'], 'legacy ip_hash mirror must be emitted');
+        self::assertSame(2, $data['protocol_version']);
     }
 
     public function testReadsRecordsWrittenWithoutAttemptsUsed(): void
@@ -251,8 +257,9 @@ final class RedisStorageTest extends TestCase
                 minDurationMs: 0,
             ),
             $storage,
+            now: static fn (): int => Vectors::NOW,
         );
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
 
         $challenge = $issuer->issue('login', '198.51.100.77');
 

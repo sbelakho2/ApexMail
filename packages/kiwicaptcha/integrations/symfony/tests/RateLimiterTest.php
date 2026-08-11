@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Storage\ArrayStorage;
@@ -218,5 +219,96 @@ final class RateLimiterTest extends TestCase
         self::assertSame(429, $this->post($controller, '198.51.100.7'));
 
         self::assertSame(1, $storage->stores, 'the rate-limited request must never reach the issuer');
+    }
+
+    // ── Redis backend (atomic, cross-worker) ──────────────────────────────
+
+    private function requireRedisClient(): FakePredisClient
+    {
+        // The bundle itself does not depend on predis; the dev toolchain has
+        // it via the core package's copied vendor (path repo).
+        $nested = \dirname(__DIR__).'/vendor/kiwicaptcha/kiwicaptcha-php/vendor/autoload.php';
+        if (!\class_exists(\Predis\Client::class) && is_file($nested)) {
+            require_once $nested;
+        }
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test the Redis rate limiter');
+        }
+
+        return new FakePredisClient();
+    }
+
+    public function testRedisLimiterEnforcesPerClientCapWith429(): void
+    {
+        $client = $this->requireRedisClient();
+        $limiter = new IssuanceRateLimiter(2, 60, null, null, 'pepper', $client, 100, 'test-ns');
+        $controller = $this->controller($limiter);
+
+        self::assertSame(1, $limiter->check('198.51.100.7'));
+        self::assertSame(200, $this->post($controller, '198.51.100.7'));
+        self::assertSame(429, $this->post($controller, '198.51.100.7'), 'N+1st request within the window must be refused');
+
+        $body = json_decode((string) $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{}'))->getContent(), true);
+        self::assertSame('RATE_LIMITED', $body['error']['code']);
+    }
+
+    public function testRedisLimiterGlobalCapBlocksADifferentClient(): void
+    {
+        $client = $this->requireRedisClient();
+        // Global cap of 2 across ALL clients; per-client cap generous.
+        $limiter = new IssuanceRateLimiter(100, 60, null, null, 'pepper', $client, 2, 'test-ns');
+        $controller = $this->controller($limiter);
+
+        self::assertSame(1, $limiter->check('198.51.100.7'));
+        self::assertSame(1, $limiter->check('198.51.100.8'));
+
+        // The global window is full: a THIRD identity is blocked by the
+        // deployment-wide cap, not its own.
+        self::assertSame(-1, $limiter->check('198.51.100.9'));
+
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.9'], '{}'));
+        self::assertSame(429, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('GLOBAL_RATE_LIMITED', $body['error']['code'], 'global exhaustion must carry the distinct code');
+    }
+
+    public function testRedisLimiterWindowExpiryAllowsAgain(): void
+    {
+        $client = $this->requireRedisClient();
+        $limiter = new IssuanceRateLimiter(1, 60, null, null, 'pepper', $client, 100, 'test-ns');
+
+        self::assertSame(1, $limiter->check('198.51.100.7'));
+        self::assertSame(0, $limiter->check('198.51.100.7'));
+
+        // Advance the REDIS server clock past the window: the hit is pruned.
+        $client->setTimeMs($client->timeMs() + 61_000);
+
+        self::assertSame(1, $limiter->check('198.51.100.7'));
+        self::assertSame(0, $limiter->check('198.51.100.7'));
+    }
+
+    public function testRedisLimiterKeysArePepperedHmacsAndNamespaced(): void
+    {
+        $client = $this->requireRedisClient();
+        $pepper = 'rate-limit-pepper-for-tests';
+        $limiter = new IssuanceRateLimiter(5, 60, null, null, $pepper, $client, 5, 'deployment-x');
+        $limiter->check('198.51.100.7');
+
+        $identity = hash_hmac('sha256', '198.51.100.7', $pepper);
+        self::assertArrayHasKey('kiwi:rl:client:deployment-x:'.$identity, $client->zsets, 'the per-client ZSET must live under the namespaced HMAC key');
+        self::assertArrayHasKey('kiwi:rl:global:deployment-x', $client->zsets);
+
+        foreach (array_keys($client->zsets) as $key) {
+            self::assertStringNotContainsString('198.51.100.7', (string) $key, 'raw IPs must never appear in Redis keys');
+        }
+    }
+
+    public function testRedisLimiterDisabledClientCapStillEnforcesGlobal(): void
+    {
+        $client = $this->requireRedisClient();
+        $limiter = new IssuanceRateLimiter(0, 60, null, null, 'pepper', $client, 1, 'test-ns');
+
+        self::assertSame(1, $limiter->check('198.51.100.7'));
+        self::assertSame(-1, $limiter->check('198.51.100.8'), 'with the per-client cap off, the global cap still applies');
     }
 }

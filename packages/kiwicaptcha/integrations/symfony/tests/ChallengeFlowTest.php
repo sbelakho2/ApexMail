@@ -172,4 +172,87 @@ final class ChallengeFlowTest extends TestCase
         $outcome = $verifier->verify($token, str_repeat('a', 32), 'login', '198.51.100.7');
         self::assertSame(\KiwiCaptcha\VerifyError::BadSignature, $outcome->error);
     }
+
+    public function testCrossOriginRequestRejectedWith403(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
+
+        $response = $controller->challenge($request);
+        self::assertSame(403, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('CROSS_ORIGIN_DENIED', $body['error']['code']);
+    }
+
+    public function testSameOriginRequestIsAllowed(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'http://localhost'], '{"scope":"login"}');
+
+        self::assertSame(200, $controller->challenge($request)->getStatusCode());
+    }
+
+    public function testNoOriginHeaderIsAllowed(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+
+        self::assertSame(200, $controller->challenge($request)->getStatusCode());
+    }
+
+    public function testSameOriginCheckCanBeDisabled(): void
+    {
+        $controller = new ChallengeController($this->issuer(), null, false);
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
+
+        self::assertSame(200, $controller->challenge($request)->getStatusCode(), 'same_origin_only=false must allow cross-origin');
+    }
+
+    public function testCrossOriginRejectionDoesNotStoreAChallenge(): void
+    {
+        $storage = new class(new ArrayStorage()) implements \KiwiCaptcha\StorageInterface {
+            public int $stores = 0;
+
+            public function __construct(private readonly \KiwiCaptcha\StorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->stores++;
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $controller = new ChallengeController(new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage));
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
+
+        $controller->challenge($request);
+        self::assertSame(0, $storage->stores, 'cross-origin rejection must happen before any state is written');
+    }
+
+    public function testSuccessResponseCarriesPrivateDocumentHeaders(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+        $response = $controller->challenge(Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+
+        self::assertSame('max-age=0, no-store, private', $response->headers->get('Cache-Control'));
+        self::assertSame('no-cache', $response->headers->get('Pragma'));
+        self::assertSame('no-referrer', $response->headers->get('Referrer-Policy'));
+        self::assertSame('nosniff', $response->headers->get('X-Content-Type-Options'));
+    }
 }

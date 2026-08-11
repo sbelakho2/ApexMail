@@ -7,9 +7,9 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
+use BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
-use BelConsulting\KiwiCaptchaBundle\Security\ThrottledVerifier;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaExtension as TwigExtension;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
@@ -74,10 +74,37 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $configuration = new Configuration();
         $config = $this->processConfiguration($configuration, $configs);
 
+        // ── Privacy posture enforcement ──────────────────────────────────
+        // 'strict' (default) forces the privacy-sensitive options OFF/true:
+        //   - telemetry: 'off'      (no client signal fields at all)
+        //   - same_origin_only: true (cross-origin POSTs rejected)
+        //   - min_duration_ms: 0    (the server-side solve-timing floor is a
+        //                            timing heuristic and is disabled)
+        // binding_mode is NOT forced: IP binding is a relay mitigation and
+        // the stored tag is nonce-bound (never a stable IP identifier), so an
+        // operator may still disable it under strict. rate_limit /
+        // rate_limit_global already default to nonzero.
+        if ($config['privacy_mode'] === 'strict') {
+            $config['telemetry'] = 'off';
+            $config['same_origin_only'] = true;
+            $config['min_duration_ms'] = 0;
+        }
+
         $container->setParameter('kiwi_captcha.secret_key', $config['secret_key']);
         $container->setParameter('kiwi_captcha.route_prefix', $config['route_prefix']);
+        $container->setParameter('kiwi_captcha.privacy_mode', $config['privacy_mode']);
+        $container->setParameter('kiwi_captcha.telemetry', $config['telemetry']);
+        $container->setParameter('kiwi_captcha.binding_mode', $config['binding_mode']);
+        $container->setParameter('kiwi_captcha.same_origin_only', $config['same_origin_only']);
+        $container->setParameter('kiwi_captcha.rate_limit', $config['rate_limit']);
+        $container->setParameter('kiwi_captcha.rate_limit_global', $config['rate_limit_global']);
+        $container->setParameter('kiwi_captcha.rate_limit_window_secs', $config['rate_limit_window_secs']);
+        $container->setParameter('kiwi_captcha.argon2_semaphore_namespace', $config['argon2_semaphore_namespace']);
+        $container->setParameter('kiwi_captcha.enforce_telemetry', $config['enforce_telemetry']);
+        $container->setParameter('kiwi_captcha.min_duration_ms', $config['min_duration_ms']);
 
         $storageRef = $this->resolveStorage($config['storage'], $this->environment($container), $container);
+        $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
 
         // ── Verified core (kiwicaptcha/kiwicaptcha-php): Config, Issuer, Verifier ──
         $configDef = (new Definition(Config::class, [
@@ -89,6 +116,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['difficulty_bits'],
             $config['argon2_difficulty_bits'],
             $config['challenge_ttl_secs'],
+            // null = derive the floor from difficulty (standard mode);
+            // 0 = timing heuristic off (strict mode / explicit operator choice).
+            $config['min_duration_ms'],
         ]))->setPublic(true);
         $container->setDefinition('kiwi_captcha.config', $configDef);
 
@@ -97,41 +127,46 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $storageRef,
         ]))->setPublic(true));
 
-        // Verifier: wrapped in ThrottledVerifier for Argon2id mode so the
-        // aggregate verification concurrency cap is enforced (KiwiCaptcha\Verifier
-        // is final; the bundle-owned wrapper exposes the same verify()).
-        // Admission is enforced against Redis (across all PHP-FPM workers)
-        // when a Redis client is available — either from the 'redis_service'
-        // config option or from the RedisStorage storage definition — and
-        // falls back to the in-process semaphore (per-process only).
-        $innerVerifier = (new Definition(Verifier::class, [$storageRef]))->setPublic(true);
+        // Verifier: the core now takes the Argon2id admission gate natively
+        // (VerificationAdmissionGate — consulted only when the STORED record
+        // is Argon2id, only after the cheap checks). Admission is enforced
+        // against Redis (across all PHP-FPM workers, tokenized leases) when a
+        // Redis client is available — either from the 'redis_service' config
+        // option or from the RedisStorage storage definition — and falls back
+        // to the in-process token-set gate (per-process only).
+        $gateRef = null;
         if ($config['algorithm'] === 'argon2id' && $config['argon2_max_concurrent_verifications'] > 0) {
-            $redisClient = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
-            $semaphoreRef = null;
-            if ($redisClient !== null) {
+            if ($redisRef !== null) {
                 $container->setDefinition(
                     'kiwi_captcha.argon2_redis_semaphore',
                     (new Definition(RedisAdmissionSemaphore::class, [
-                        $redisClient,
+                        $redisRef,
                         $config['argon2_max_concurrent_verifications'],
+                        $config['argon2_semaphore_namespace'],
                     ]))->setPublic(true),
                 );
-                $semaphoreRef = new Reference('kiwi_captcha.argon2_redis_semaphore');
+                $gateRef = new Reference('kiwi_captcha.argon2_redis_semaphore');
+            } else {
+                $container->setDefinition('kiwi_captcha.argon2_inprocess_gate', (new Definition(InProcessArgonGate::class, [
+                    $config['argon2_max_concurrent_verifications'],
+                ]))->setPublic(true));
+                $gateRef = new Reference('kiwi_captcha.argon2_inprocess_gate');
             }
-            $container->setDefinition('kiwi_captcha.verifier.inner', $innerVerifier);
-            $container->setDefinition('kiwi_captcha.verifier', (new Definition(ThrottledVerifier::class, [
-                new Reference('kiwi_captcha.verifier.inner'),
-                $config['argon2_max_concurrent_verifications'],
-                $semaphoreRef,
-            ]))->setPublic(true));
-        } else {
-            $container->setDefinition('kiwi_captcha.verifier', $innerVerifier);
         }
+        $container->setDefinition('kiwi_captcha.verifier', (new Definition(Verifier::class, [
+            $storageRef,
+            $gateRef,
+        ]))->setPublic(true));
         $container->setAlias(StorageInterface::class, (string) $storageRef);
 
-        // ── Challenge endpoint controller (+ optional issuance rate limiter) ──
+        // ── Challenge endpoint controller (+ issuance rate limiter) ──
+        // The limiter is wired whenever either limit is nonzero (defaults are
+        // 10 per-client / 500 global). With a Redis client the ATOMIC
+        // sliding-window backend enforces both caps across all workers;
+        // without one it falls back to the shared PSR-6 pool (rate_limit_cache)
+        // or the in-memory window (best-effort, single worker).
         $rateLimiterRef = null;
-        if ($config['rate_limit'] > 0) {
+        if ($config['rate_limit'] > 0 || $config['rate_limit_global'] > 0) {
             $poolRef = $config['rate_limit_cache'] !== null ? new Reference($config['rate_limit_cache']) : null;
             $container->setDefinition('kiwi_captcha.rate_limiter', (new Definition(IssuanceRateLimiter::class, [
                 $config['rate_limit'],
@@ -141,12 +176,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // Pepper for the per-IP rate-limit HMAC keys: raw IPs are
                 // never stored (defaults to the bundle secret).
                 $config['rate_limit_pepper'] ?? $config['secret_key'],
+                $redisRef,
+                $config['rate_limit_global'],
+                $config['argon2_semaphore_namespace'],
             ]))->setPublic(true));
             $rateLimiterRef = new Reference('kiwi_captcha.rate_limiter');
         }
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
             $rateLimiterRef,
+            $config['same_origin_only'],
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──
@@ -157,10 +196,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // ── Form type (renders the widget through the form theme) ──
         // The route prefix is injected so the default 'endpoint' option
         // follows the ACTUAL registered route (the standalone Twig widget
-        // derives its endpoint from the same prefix).
+        // derives its endpoint from the same prefix); the telemetry mode
+        // follows the (strict-enforced) config.
         $container->setDefinition(KiwiCaptchaType::class, (new Definition(KiwiCaptchaType::class, [
             new Reference(KiwiCaptchaRuntime::class),
             '%kiwi_captcha.route_prefix%',
+            $config['telemetry'],
         ]))->addTag('form.type'));
 
         // ── Validator (local verification, no external calls) ──
@@ -168,11 +209,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             new Reference('kiwi_captcha.verifier'),
             new Reference('request_stack'),
             $config['secret_key'],
+            $config['enforce_telemetry'],
         ]))->addTag('validator.constraint_validator'));
 
         // ── Twig widget runtime + twig function (embeds the shared widget assets) ──
         $container->setDefinition(KiwiCaptchaRuntime::class, (new Definition(KiwiCaptchaRuntime::class, [
             $config['route_prefix'],
+            null,
+            KiwiCaptchaRuntime::DEFAULT_TEMPLATE,
+            $config['telemetry'],
         ]))->addTag('twig.runtime'));
         $container->setDefinition(TwigExtension::class, (new Definition(TwigExtension::class))
             ->addTag('twig.extension'));
@@ -206,14 +251,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * Find the Redis client to use for the Argon2 admission semaphore.
+     * Find the Redis client to use for the Argon2 admission gate and the
+     * atomic rate limiter.
      *
      * Priority:
      *  1. the `redis_service` config option (explicit client service id);
      *  2. the storage service when it is a KiwiCaptcha\Storage\RedisStorage
      *     definition (its first constructor argument is the client) —
      *     aliases to the storage id are followed;
-     *  3. null — the caller falls back to the in-process semaphore.
+     *  3. null — the caller falls back to the in-process gate / best-effort
+     *     rate limiting.
      */
     private function resolveRedisClient(string $storageId, ?string $redisService, ContainerBuilder $container): ?Reference
     {

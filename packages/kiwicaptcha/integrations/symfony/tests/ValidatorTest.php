@@ -51,11 +51,14 @@ final class ValidatorTest extends TestCase
         return [Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator(), $stack];
     }
 
-    private function solveToken(string $prefix, string $salt, int $targetBits, string $nonce): string
+    private function solveToken(string $prefix, string $salt, int $targetBits, string $nonce, string $algorithm = 'sha256'): string
     {
+        $saltBytes = base64_decode($salt, true);
         $counter = 0;
         do {
-            $h = hash('sha256', $prefix.$counter.base64_decode($salt, true), true);
+            $h = $algorithm === 'argon2id'
+                ? sodium_crypto_pwhash(32, $prefix.$counter, $saltBytes, 3, 64 * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13)
+                : hash('sha256', $prefix.$counter.$saltBytes, true);
             $counter++;
         } while (Verifier::leadingZeroBits($h) < $targetBits);
         --$counter;
@@ -129,27 +132,37 @@ final class ValidatorTest extends TestCase
 
     public function testArgon2CapacityExhaustionFailsClosedAsViolation(): void
     {
-        \BelConsulting\KiwiCaptchaBundle\Security\Argon2Semaphore::resetForTests();
-        \BelConsulting\KiwiCaptchaBundle\Security\Argon2Semaphore::setMaxWaitSecsForTests(0.05);
+        \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate::resetForTests();
         try {
-            $challenge = $this->issuer->issue('login', '198.51.100.7');
+            // The core gate is consulted only for Argon2id records, so the
+            // challenge itself must be argon2id for exhaustion to matter.
+            $storage = new ArrayStorage();
+            $gate = new \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate(1);
+            $issuer = new Issuer(new Config(
+                secretKey: self::SECRET,
+                algorithm: \KiwiCaptcha\PoWAlgorithm::Argon2id,
+                mKib: 64,
+                t: 3,
+                p: 1,
+                argon2TargetBits: 4,
+            ), $storage);
+            $verifier = new Verifier($storage, $gate);
+
+            $challenge = $issuer->issue('login', '198.51.100.7');
             usleep(($challenge->minDurationMs + 10) * 1000);
             $dto = new class {
                 public ?string $captcha = null;
             };
-            $dto->captcha = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+            $dto->captcha = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce, 'argon2id');
 
-            // Saturate the cap so the throttled verifier is refused.
-            self::assertTrue(\BelConsulting\KiwiCaptchaBundle\Security\Argon2Semaphore::acquire(1));
+            // Saturate the gate so the verification is refused with
+            // CapacityExceeded (surfaced as a regular captcha violation).
+            $gate->acquire();
 
             $stack = new RequestStack();
             $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
 
-            $validator = new KiwiCaptchaValidator(
-                new \BelConsulting\KiwiCaptchaBundle\Security\ThrottledVerifier($this->verifier, 1),
-                $stack,
-                self::SECRET,
-            );
+            $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET);
             $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
             $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
 
@@ -161,7 +174,7 @@ final class ValidatorTest extends TestCase
             self::assertCount(1, $violations);
             self::assertSame(KiwiCaptcha::NOT_SOLVED_ERROR, $violations[0]->getCode());
         } finally {
-            \BelConsulting\KiwiCaptchaBundle\Security\Argon2Semaphore::resetForTests();
+            \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate::resetForTests();
         }
     }
 }

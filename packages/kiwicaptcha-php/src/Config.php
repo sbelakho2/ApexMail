@@ -18,6 +18,15 @@ namespace KiwiCaptcha;
  * outside the profile are rejected at construction — issuing them would
  * produce challenges that can never verify in PHP.
  */
+enum BindingMode: string
+{
+    /** Bind challenges to a nonce-bound HMAC tag of the client IP. */
+    case Bound = 'bound';
+
+    /** No client binding at all (maximum privacy; relay protection off). */
+    case None = 'none';
+}
+
 final class Config
 {
     /**
@@ -38,7 +47,7 @@ final class Config
      * @param int      $mKib                Argon2id memory cost in KiB (0 for SHA-256).
      * @param int      $t                   Argon2id time cost.
      * @param int      $p                   Argon2id parallelism.
-     * @param int      $targetBits          Leading zero bits for SHA-256 challenges (0..MAX_SHA_TARGET_BITS).
+     * @param int      $targetBits          Leading zero bits for SHA-256 challenges (1..MAX_SHA_TARGET_BITS).
      * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges (1..MAX_ARGON2_TARGET_BITS).
      * @param int      $ttlSecs             Challenge lifetime in seconds.
      * @param int|null $minDurationMs       Minimum solve duration (null = derive from difficulty).
@@ -55,6 +64,7 @@ final class Config
         public readonly int $ttlSecs = 120,
         public readonly ?int $minDurationMs = null,
         public readonly int $solverMaxHashes = 5_000_000,
+        public readonly BindingMode $bindingMode = BindingMode::Bound,
     ) {
         if (\strlen($secretKey) < 16) {
             throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');
@@ -73,9 +83,12 @@ final class Config
         if ($mKib > 65536) {
             throw new \InvalidArgumentException('Argon2id m_kib exceeds the browser-solvable ceiling (65536)');
         }
-        if ($targetBits < 0 || $targetBits > self::MAX_SHA_TARGET_BITS) {
+        // 0 bits is rejected: it means "no work at all" and cannot be
+        // distinguished from a misconfiguration (e.g. an uninitialized
+        // integer default slipping into production).
+        if ($targetBits < 1 || $targetBits > self::MAX_SHA_TARGET_BITS) {
             throw new \InvalidArgumentException(
-                sprintf('SHA-256 target bits must be within 0..%d', self::MAX_SHA_TARGET_BITS)
+                sprintf('SHA-256 target bits must be within 1..%d', self::MAX_SHA_TARGET_BITS)
             );
         }
         if ($algorithm === PoWAlgorithm::Argon2id && ($argon2TargetBits < 1 || $argon2TargetBits > self::MAX_ARGON2_TARGET_BITS)) {

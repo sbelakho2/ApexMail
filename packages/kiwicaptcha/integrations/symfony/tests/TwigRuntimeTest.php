@@ -53,6 +53,29 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('data-kiwi-scope="login"', $html);
     }
 
+    public function testTelemetryRenderedFromRuntimeDefaultAndContext(): void
+    {
+        [$env, $runtime] = $this->runtime();
+        $html = $runtime->renderWidget($env, []);
+        self::assertStringContainsString('data-kiwi-telemetry="off"', $html, 'the runtime default telemetry must be off');
+
+        $html = $runtime->renderWidget($env, ['telemetry' => 'full']);
+        self::assertStringContainsString('data-kiwi-telemetry="full"', $html);
+
+        [$env, $runtime] = $this->runtimeWithTelemetry('minimal');
+        $html = $runtime->renderWidget($env, []);
+        self::assertStringContainsString('data-kiwi-telemetry="minimal"', $html, 'the configured telemetry mode must be the render default');
+    }
+
+    private function runtimeWithTelemetry(string $telemetry): array
+    {
+        $loader = new ArrayLoader([
+            '@KiwiCaptcha/form_div_layout.html.twig' => file_get_contents(__DIR__.'/../src/Resources/views/form_div_layout.html.twig'),
+        ]);
+
+        return [$env = new Environment($loader), new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', telemetry: $telemetry)];
+    }
+
     public function testMissingAssetThrows(): void
     {
         $this->expectException(\RuntimeException::class);

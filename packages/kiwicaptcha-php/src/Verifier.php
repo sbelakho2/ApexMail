@@ -8,30 +8,51 @@ namespace KiwiCaptcha;
  * Verifies client-submitted solutions — byte-for-byte compatible with the
  * Rust crate's `verify_solution`.
  *
- * Verification is ONE-SHOT: consume-on-verify removes the challenge record
- * BEFORE the proof is checked, so a wrong candidate burns the challenge —
- * the client must fetch and solve a fresh one. This deliberately bounds the
- * server-side cost of memory-hard verification: each submitted token can
- * cost at most one Argon2id (or SHA-256) hash, and replaying a token always
- * fails with RecordNotFound. There is no maxAttempts parameter: the
- * one-shot model IS the attempt bound.
+ * Verification is ONE-SHOT: any verification attempt burns the challenge
+ * record. The cheap checks (record structure, signature, TTL, scope,
+ * binding, server timing, telemetry) run against a PEEKED record and delete
+ * it on failure; the proof phase consumes the record before re-deriving the
+ * hash — so a wrong candidate burns the challenge and the client must fetch
+ * and solve a fresh one. This deliberately bounds the server-side cost of
+ * memory-hard verification: each submitted token can cost at most one
+ * Argon2id (or SHA-256) hash, and replaying a token always fails with
+ * RecordNotFound. There is no maxAttempts parameter: the one-shot model IS
+ * the attempt bound.
+ *
+ * STRICT single-use under concurrency requires an AtomicStorageInterface
+ * backend (e.g. Redis GETDEL): the load-and-remove is fused, so two racing
+ * requests can never both win the record. PSR-6-backed consume() is
+ * best-effort — the read and the delete cannot be fused, so racing requests
+ * may both observe the record. The TOCTOU challenge re-check in the proof
+ * phase makes a swapped record fail closed (MalformedRecord) either way.
  *
  * Check order:
- *   1. Re-check the challenge HMAC signature (constant-time compare).
- *   2. TTL: now < expires_at.
- *   3. Scope: challenge scope matches the expected flow.
- *   4. Minimum duration: measured SERVER-SIDE from the record's issued_at_ns
+ *   1. Structural validation of the stored record: scope shape, nonce/salt
+ *      sizes, TTL ceiling (MAX_TTL_SECS), prefix binding, and the
+ *      per-algorithm parameter profile.
+ *   2. Re-check the challenge HMAC signature (constant-time compare) —
+ *      protocol v1 payloads use the legacy canonical form, protocol v2 uses
+ *      the full-parameter canonical payload.
+ *   3. TTL: now < expires_at.
+ *   4. Scope: challenge scope matches the expected flow.
+ *   5. IP binding: v2 records recompute the nonce-bound binding tag; v1
+ *      records compare the legacy IP hash. An empty binding tag disables
+ *      the check; a null client IP skips it.
+ *   6. Minimum duration: measured SERVER-SIDE from the record's issued_at_ns
  *      (epoch microseconds) to the verification receipt time — the
- *      client-reported duration can no longer be forged to bypass the floor.
- *      Records without issued_at_ns (pre-upgrade) fall back to the legacy
- *      client-duration check. Host clock skew up to SKEW_TOLERANCE_US is
- *      absorbed (the floor check is skipped, the PoW check still applies);
- *      a receipt time that precedes issuance beyond the tolerance is
- *      impossible and rejected as TooFast.
- *   5. Telemetry (optional, opt-in): when enforceTelemetry is set, the
+ *      client-reported duration can no longer be forged to bypass the
+ *      floor, and records without issued_at_ns are malformed (no legacy
+ *      client-duration fallback). Host clock skew up to SKEW_TOLERANCE_US
+ *      is absorbed (the floor check is skipped, the PoW check still
+ *      applies); a receipt time that precedes issuance beyond the tolerance
+ *      is impossible and rejected as TooFast.
+ *   7. Telemetry (optional, opt-in): when enforceTelemetry is set, the
  *      client-controlled telemetry is scored and bot signals rejected.
- *   6. Re-derive the hash (SHA-256 or Argon2id per the record's algorithm)
- *      and require >= target_bits leading zero bits.
+ *   8. Argon2id admission gate (optional): when a VerificationAdmissionGate
+ *      is configured, it must grant capacity before the memory-hard hash
+ *      runs; exhaustion yields CapacityExceeded WITHOUT burning the record.
+ *   9. Consume the record, re-derive the hash (SHA-256 or Argon2id per the
+ *      record's algorithm), and require >= target_bits leading zero bits.
  */
 final class Verifier
 {
@@ -51,12 +72,46 @@ final class Verifier
     private const SKEW_TOLERANCE_US = 5_000_000;
 
     /**
+     * Hard ceiling for a stored record's lifetime (expires_at - issued_at).
+     * Issuance uses the configured TTL (default 120s); anything beyond 300s
+     * cannot come from a KiwiCaptcha issuer and is rejected as malformed.
+     */
+    private const MAX_TTL_SECS = 300;
+
+    /**
+     * Ceiling for Argon2id time cost. The browser solver caps at 6; higher
+     * values would be unsolvable for legit clients, so foreign records
+     * outside the profile are malformed.
+     */
+    private const MAX_ARGON_T = 6;
+
+    /**
      * @var \Closure|null clock override for tests
      */
     private $now;
 
-    public function __construct(private readonly StorageInterface $storage, ?\Closure $now = null)
-    {
+    private readonly ?VerificationAdmissionGate $argonGate;
+
+    public function __construct(
+        private readonly StorageInterface $storage,
+        $argonGate = null,
+        ?\Closure $now = null,
+    ) {
+        // BC shim: pre-gate callers passed the clock override positionally
+        // as the second argument. A Closure in that slot is $now, not an
+        // admission gate (the parameter is intentionally untyped so the
+        // Closure can reach this branch — the type check happens below).
+        if ($argonGate instanceof \Closure) {
+            $now = $argonGate;
+            $argonGate = null;
+        }
+        if ($argonGate !== null && !$argonGate instanceof VerificationAdmissionGate) {
+            throw new \TypeError(sprintf(
+                'Verifier::__construct(): Argument #2 ($argonGate) must be of type ?KiwiCaptcha\VerificationAdmissionGate, %s given',
+                get_debug_type($argonGate),
+            ));
+        }
+        $this->argonGate = $argonGate;
         $this->now = $now;
     }
 
@@ -76,9 +131,10 @@ final class Verifier
      *                                     enforcement is opt-in defense-in-depth
      *                                     only.
      *
-     * One-shot model: the record is consumed BEFORE any check, so a failed
+     * One-shot model: cheap-check failures delete the peeked record; the
+     * proof phase consumes it before the hash is re-derived. A failed
      * verification burns the challenge (no maxAttempts parameter — the
-     * consume-on-verify semantics ARE the attempt bound).
+     * one-shot semantics ARE the attempt bound).
      */
     public function verify(
         string $rawToken,
@@ -94,105 +150,208 @@ final class Verifier
             return VerifyOutcome::malformedToken($e->getMessage());
         }
 
-        $record = $this->storage->consume($token->nonce);
-        if ($record === null) {
+        $peek = $this->storage->find($token->nonce);
+        if ($peek === null) {
             return VerifyOutcome::invalid(VerifyError::RecordNotFound);
         }
 
-        // 1. Signature re-check: reconstruct the payload from the record and
+        if (!$this->validateRecord($peek)) {
+            $this->storage->delete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
+
+        // 2. Signature re-check: reconstruct the payload from the record and
         //    compare against the signature embedded in the challenge string.
-        $payload = sprintf(
-            '%s|%s|%s|%d',
-            $record->nonce,
-            $record->scope,
-            $record->ipHash,
-            $record->issuedAt,
-        );
-        $signature = self::signatureFromChallenge($record->challenge);
-        $expected = Issuer::signPayload($payload, $secretKey);
-        if (!self::constantTimeEquals($expected, $signature)) {
+        //    Protocol v1 uses the legacy canonical form; protocol v2 uses the
+        //    full-parameter canonical payload.
+        $expectedSignature = $peek->protocolVersion === 1
+            ? Issuer::signPayload(sprintf(
+                '%s|%s|%s|%d',
+                $peek->nonce,
+                $peek->scope,
+                $peek->ipHash(),
+                $peek->issuedAt,
+            ), $secretKey)
+            : Issuer::signPayload(Issuer::canonicalPayload(
+                $peek->nonce,
+                $peek->scope,
+                $peek->bindingTag,
+                $peek->issuedAt,
+                $peek->expiresAt,
+                $peek->algorithm,
+                $peek->mKib,
+                $peek->t,
+                $peek->p,
+                $peek->targetBits,
+                $peek->salt,
+                $peek->minDurationMs,
+            ), $secretKey);
+        if (!hash_equals($expectedSignature, self::signatureFromChallenge($peek->challenge))) {
+            $this->storage->delete($token->nonce);
+
             return VerifyOutcome::invalid(VerifyError::BadSignature);
         }
 
-        // 2. TTL.
+        // 3. TTL.
         $now = $this->now !== null ? (int) ($this->now)() : time();
-        if ($now >= $record->expiresAt) {
+        if ($now >= $peek->expiresAt) {
+            $this->storage->delete($token->nonce);
+
             return VerifyOutcome::invalid(VerifyError::Expired);
         }
 
-        // 2b. Scope validation.
-        if ($expectedScope !== null && $record->scope !== $expectedScope) {
+        // 4. Scope validation.
+        if ($expectedScope !== null && $peek->scope !== $expectedScope) {
+            $this->storage->delete($token->nonce);
+
             return VerifyOutcome::invalid(VerifyError::WrongScope);
         }
 
-        // 2c. IP binding (optional but recommended): challenge issued to one
-        //     client, submitted from another = relay attack.
-        if ($clientIp !== null) {
-            $expectedIp = Issuer::hashIp($clientIp, $secretKey);
-            if ($record->ipHash !== $expectedIp) {
+        // 5. IP binding (optional but recommended): challenge issued to one
+        //    client, submitted from another = relay attack. Protocol v2
+        //    records carry a nonce-bound binding tag (recomputed here); v1
+        //    records carry the legacy stable IP hash. Empty tag = binding
+        //    disabled; null clientIp = check skipped.
+        if ($peek->bindingTag !== '' && $clientIp !== null) {
+            $expectedTag = $peek->protocolVersion === 1
+                ? Issuer::hashIp($clientIp, $secretKey)
+                : Issuer::bindingTag($peek->nonce, $clientIp, $secretKey);
+            if (!hash_equals($expectedTag, $peek->bindingTag)) {
+                $this->storage->delete($token->nonce);
+
                 return VerifyOutcome::invalid(VerifyError::IpMismatch);
             }
         }
 
-        // 3. Minimum duration, measured on the SERVER: elapsed_us is the gap
+        // 6. Minimum duration, measured on the SERVER: elapsed_us is the gap
         //    between the record's high-resolution issuance timestamp (epoch
         //    microseconds) and the verification receipt time. The
         //    client-reported durationMs is forgeable, so it no longer drives
-        //    the TooFast check — it is kept only as telemetry input below.
-        //
-        //    Backward compatibility: records without issued_at_ns (issued by
-        //    older builds) fall back to the legacy client-duration check so
-        //    pre-upgrade stored challenges keep behaving predictably.
-        $floor = max(0, $record->minDurationMs);
-        $tooFast = false;
-        if ($record->issuedAtNs > 0) {
-            // Epoch-microsecond domain: both values are wall clock, so the
-            // elapsed delta is comparable across hosts (unlike the per-host
-            // monotonic hrtime() domain).
-            $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
-            $elapsedUs = $receiptNs - $record->issuedAtNs;
-            if ($elapsedUs < 0) {
-                if ($elapsedUs < -self::SKEW_TOLERANCE_US) {
-                    // Receipt before issuance by more than the skew bound is
-                    // physically impossible — reject as TooFast.
-                    $tooFast = true;
-                } else {
-                    // Receipt before issuance within the skew bound: the two
-                    // hosts' clocks are slightly unsynced, so the elapsed
-                    // time cannot be measured reliably. Skip the floor check
-                    // for this verification — the proof-of-work check still
-                    // applies, so no attacker advantage is gained.
-                    $tooFast = false;
-                }
-            } else {
-                $tooFast = $floor > 0 && $elapsedUs < $floor * 1_000;
-            }
-        } else {
-            $tooFast = $floor > 0 && $token->durationMs < $floor;
+        //    the TooFast check and there is no legacy fallback — a record
+        //    without issued_at_ns cannot be timed and is malformed.
+        if ($peek->issuedAtNs <= 0) {
+            $this->storage->delete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
         }
-        if ($tooFast) {
-            return VerifyOutcome::invalid(VerifyError::TooFast);
+        $floor = max(0, $peek->minDurationMs);
+        if ($floor > 0) {
+            $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
+            if ($receiptNs >= $peek->issuedAtNs) {
+                if ($receiptNs - $peek->issuedAtNs < $floor * 1_000) {
+                    $this->storage->delete($token->nonce);
+
+                    return VerifyOutcome::invalid(VerifyError::TooFast);
+                }
+            } elseif ($peek->issuedAtNs - $receiptNs > self::SKEW_TOLERANCE_US) {
+                // Receipt before issuance by more than the skew bound is
+                // physically impossible — reject as TooFast. Within the
+                // bound the two hosts' clocks are unsynced, so the elapsed
+                // time cannot be measured reliably and the floor check is
+                // skipped for this verification — the proof-of-work check
+                // still applies, so no attacker advantage is gained.
+                $this->storage->delete($token->nonce);
+
+                return VerifyOutcome::invalid(VerifyError::TooFast);
+            }
         }
 
-        // 3b. Telemetry scoring (opt-in). The telemetry is client-controlled,
-        //     so this is a defense-in-depth signal, not a hard gate — it only
-        //     runs when the caller explicitly opts in. An EMPTY telemetry
-        //     payload ({} or []) is itself a bot signal (a real widget always
-        //     reports fields): it must not bypass strict mode.
+        // 7. Telemetry scoring (opt-in). The telemetry is client-controlled,
+        //    so this is a defense-in-depth signal, not a hard gate — it only
+        //    runs when the caller explicitly opts in. An EMPTY telemetry
+        //    payload ({} or []) is itself a bot signal (a real widget always
+        //    reports fields): it must not bypass strict mode.
         if ($enforceTelemetry && (empty($token->telemetry) || Telemetry::score($token->telemetry, $token->durationMs))) {
+            $this->storage->delete($token->nonce);
+
             return VerifyOutcome::invalid(VerifyError::TelemetryRejected);
         }
 
-        // 4. Re-derive the hash and check leading zero bits.
-        $hash = $this->deriveHash($record, $token->counter);
-        if ($hash === null) {
-            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
-        }
-        if (self::leadingZeroBits($hash) < $record->targetBits) {
-            return VerifyOutcome::invalid(VerifyError::InsufficientWork);
+        // 8. Argon2id admission: the memory-hard hash is expensive, so an
+        //    optional gate bounds concurrency. Exhaustion rejects WITHOUT
+        //    consuming or deleting the record — the client can retry.
+        $lease = null;
+        if ($peek->algorithm === PoWAlgorithm::Argon2id && $this->argonGate !== null) {
+            $lease = $this->argonGate->acquire();
+            if ($lease === null) {
+                return VerifyOutcome::invalid(VerifyError::CapacityExceeded);
+            }
         }
 
-        return VerifyOutcome::valid();
+        try {
+            // 9. Consume (one-shot) and re-derive the proof.
+            $record = $this->storage->consume($token->nonce);
+            if ($record === null) {
+                return VerifyOutcome::invalid(VerifyError::RecordNotFound);
+            }
+            // TOCTOU guard: the peeked record must be the consumed record.
+            // A swapped/racing record fails closed instead of verifying
+            // against bytes that were never validated.
+            if (!hash_equals($peek->challenge, $record->challenge)) {
+                return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+            }
+
+            $hash = $this->deriveHash($record, $token->counter);
+            if ($hash === null) {
+                return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+            }
+            if (self::leadingZeroBits($hash) < $record->targetBits) {
+                return VerifyOutcome::invalid(VerifyError::InsufficientWork);
+            }
+
+            return VerifyOutcome::valid();
+        } finally {
+            if ($lease !== null) {
+                $this->argonGate?->release($lease);
+            }
+        }
+    }
+
+    /**
+     * Structural validation of a stored record BEFORE any crypto or timing
+     * work: scope shape, nonce/salt sizes, TTL ceiling, the prefix binding,
+     * and the per-algorithm parameter profile. A record failing any check
+     * is malformed — it cannot have come from a KiwiCaptcha issuer.
+     */
+    private function validateRecord(ChallengeRecord $record): bool
+    {
+        $scopeLen = \strlen($record->scope);
+        if ($scopeLen < 1 || $scopeLen > 128 || \str_contains($record->scope, '|')) {
+            return false;
+        }
+        $nonceBytes = base64_decode($record->nonce, true);
+        if ($nonceBytes === false || \strlen($nonceBytes) !== 32) {
+            return false;
+        }
+        $saltBytes = base64_decode($record->salt, true);
+        if ($saltBytes === false || \strlen($saltBytes) !== 16) {
+            return false;
+        }
+        if ($record->expiresAt <= $record->issuedAt || $record->expiresAt - $record->issuedAt > self::MAX_TTL_SECS) {
+            return false;
+        }
+        if (!hash_equals($record->challenge.'|'.$record->salt.'|', $record->prefix)) {
+            return false;
+        }
+        if ($record->algorithm === PoWAlgorithm::Argon2id) {
+            if ($record->targetBits < 1 || $record->targetBits > 10) {
+                return false;
+            }
+            if ($record->p !== 1) {
+                return false;
+            }
+            if ($record->t < 3 || $record->t > self::MAX_ARGON_T) {
+                return false;
+            }
+            if ($record->mKib < 8 || $record->mKib > 65536) {
+                return false;
+            }
+        } elseif ($record->targetBits < 1 || $record->targetBits > 20) {
+            return false;
+        }
+
+        return true;
     }
 
     /**

@@ -11,20 +11,55 @@ This package is **fully decoupled** from the ApexMail email API SDK: it implemen
 Byte-for-byte compatible with the reference implementation in
 [KiwiCaptcha (Rust)](https://github.com/bel-consulting/kiwicaptcha):
 
-- challenge = `base64(nonce|scope|ip_hash|issued_at) + "." + hex(hmac_sha256(secret, payload))`
+**Protocol v2** (current issuance, `protocol_version` 2):
+
+- canonical payload = `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms`
+- challenge = `base64(canonical_payload) + "." + hex(hmac_sha256(secret, canonical_payload))` —
+  **full-parameter signing**: every record field that shapes verification is
+  covered by the HMAC, so a tampered record can never pass
 - prefix = `challenge + "|" + salt + "|"` (salt = base64 of 16 random bytes)
-- SHA-256 mode: verify `leading_zero_bits(sha256(prefix || counter || salt)) >= target_bits`
-- Argon2id mode: verify via libsodium (`opslimit == t_cost`, `memlimit == m_kib*1024`).
-  KiwiCaptcha intentionally requires `t >= 3 && p == 1` for Argon2id mode
-  (its supported protocol profile; `p == 1` reflects libsodium's raw
-  Argon2id interface — modern libsodium itself accepts `t >= 1`). PHP
-  `Config` throws at construction, Rust issuance validates, so cross-language
+- **nonce-bound IP binding**: the record's `binding_tag` is an
+  HMAC-SHA256 of the CANONICAL IP form (4-byte IPv4 / 16-byte IPv6,
+  IPv4-mapped IPv6 normalized to IPv4) keyed by the secret AND bound to the
+  challenge nonce (`Issuer::bindingTag($nonce, $ip, $secret)`) — it is
+  unique per challenge and **never a stable IP-derived identifier** that
+  could follow the client across requests. Binding modes: `none`
+  (verification without a client IP) or `nonce_ip_hmac` (the default
+  issuance mode); an empty binding tag means binding is disabled for that
+  record.
+- SHA-256 mode: verify `leading_zero_bits(sha256(prefix || counter || salt)) >= target_bits`.
+  SHA-256 is **CPU-bound with extremely cheap server verification** (one
+  hash per attempt), so it is ideal for high-traffic endpoints.
+- Argon2id mode: verify via libsodium (`opslimit == t_cost`,
+  `memlimit == m_kib*1024`). Argon2id is **memory-hard, increasing the cost
+  of massively parallel and specialized solving** (ASIC/GPU resistance) at
+  the price of more expensive server verification. KiwiCaptcha
+  intentionally requires `t >= 3 && p == 1` for Argon2id mode (its
+  supported protocol profile; `p == 1` reflects libsodium's raw Argon2id
+  interface — modern libsodium itself accepts `t >= 1`). PHP `Config`
+  throws at construction, Rust issuance validates, so cross-language
   verification always works; SHA-256 mode has no such constraint.
-- IP binding: the challenge records an HMAC hash of the issuing client IP;
-  verification compares it against the hash of the current request IP (the
-  `$clientIp` parameter of `Verifier::verify()`). This is a relay mitigation,
-  not a guarantee — IPs change behind NAT/proxies and operators can disable
-  the check.
+- **counter bound**: the browser/WASM solver caps at 5,000,000 hashes, so
+  `SolutionToken::decode()` rejects any counter longer than 7 digits or
+  above 5,000,000 (`counter exceeds solver maximum`) — a huge counter is an
+  abuse probe, not a solution.
+- **record validation**: every field is validated on the verify path —
+  scope, TTL, binding, algorithm-specific parameter profile (Argon2id
+  `t >= 3 && p == 1`, `m_kib >= 8*1024`), and the PoW result. Malformed
+  or out-of-profile records fail closed with a distinguishable error.
+- **clock skew tolerance**: verification absorbs up to 5 s of host-clock
+  skew (`Verifier::SKEW_TOLERANCE_US`) for the server-measured
+  minimum-duration floor; a receipt time preceding issuance beyond the
+  tolerance is rejected. Hosts should be NTP-synced.
+
+**Protocol v1 migration window**: legacy challenges
+(`challenge = base64(nonce|scope|ip_hash|issued_at) + "." + hex(hmac)`,
+`protocol_version` 1) are still accepted for at most one TTL after a
+deploy — v1 records expire naturally under the normal
+`expires_at`, and issuance never produces them again. The v1
+`hash(sha256, secret || ip)` IP hash is retained as
+`Issuer::hashIp()` for this path only.
+
 - minimum solve duration: enforced **server-side**, measured from challenge
   issuance to verification receipt — a timing-anomaly heuristic, not a
   security gate (a fast bot can always wait before submitting). Server timing
@@ -47,15 +82,29 @@ Byte-for-byte compatible with the reference implementation in
   PSR-6 pools are best-effort (see [Storage](#storage)).
 - **shared language-neutral record format**: challenge records are persisted
   as JSON whose keys match the Rust crate's serde schema one-to-one
-  (`nonce`, `scope`, `ip_hash`, `issued_at`, `expires_at`, `algorithm`,
+  (`nonce`, `scope`, `binding_tag`, `issued_at`, `expires_at`, `algorithm`,
   `m_kib`, `t`, `p`, `target_bits`, `salt`, `prefix`, `challenge`,
-  `min_duration_ms`, `issued_at_ns`, `attempts_used`), and `issued_at_ns` is
-  epoch microseconds in both implementations — a PHP service and a Rust
-  service can read each other's records from the same Redis instance.
+  `min_duration_ms`, `issued_at_ns`, `protocol_version`, `attempts_used`),
+  and `issued_at_ns` is epoch microseconds in both implementations — a PHP
+  service and a Rust service can read each other's records from the same
+  Redis instance. `toArray()` additionally emits the legacy `ip_hash` key
+  (same value as `binding_tag`) for one release so old Rust readers keep
+  loading v2 records, and `fromArray()` accepts either key (records carrying
+  only `ip_hash` decode as `protocol_version` 1).
 
 The cross-language test suite (`tests/Fixtures/Vectors.php`) pins the PHP
 implementation to fixtures generated by the Rust crate, so the two can never
 drift apart.
+
+## Privacy Strict
+
+KiwiCaptcha's proof-of-work protocol itself **collects no behavioral or
+device telemetry and creates no stable client identifier**: the binding tag
+is a per-challenge HMAC bound to the nonce, and nothing in the record links
+a challenge to a previous one. The optional first-party behavioral
+telemetry (input-event timing, screen/device signals) is client-controlled,
+opt-in, and used only as a supplementary verification signal — it is never
+sent anywhere but your own server and can be disabled entirely.
 
 ## Installation
 
@@ -180,13 +229,15 @@ composer install
 vendor/bin/phpunit
 ```
 
-102 tests / 195 assertions covering cross-language parity (SHA-256 + Argon2id
-fixtures generated by the Rust crate), token codec edge cases, replay,
-tampering, expiry, IP binding, minimum duration, clock-skew tolerance,
-the one-shot consume-on-verify model, and the storage adapters (Array,
-PSR-6, Redis — including the language-neutral JSON record format). The
-Symfony integration is tested in the `bel-consulting/kiwicaptcha-symfony`
-package.
+118 tests / 243 assertions covering cross-language parity (SHA-256 + Argon2id
+fixtures generated by the Rust crate), protocol v2 (canonical payload,
+nonce-bound binding tags over the canonical IP form incl. IPv4-mapped IPv6
+normalization, `binding_tag`/`protocol_version` record schema evolution,
+counter bounds), token codec edge cases, replay, tampering, expiry, IP
+binding, minimum duration, clock-skew tolerance, the one-shot
+consume-on-verify model, and the storage adapters (Array, PSR-6, Redis —
+including the language-neutral JSON record format). The Symfony integration
+is tested in the `bel-consulting/kiwicaptcha-symfony` package.
 
 ## Limitations
 
@@ -198,8 +249,10 @@ package.
    custom client can omit or fake them. Treat telemetry as a supplementary
    signal, never the security boundary.
 3. **IP binding is best-effort.** IPs legitimately change behind NAT/proxies,
-   so a strict binding would reject real users. Operators can disable the
-   check entirely; it is a relay mitigation, not a guarantee.
+   so a strict binding would reject real users. Protocol v2's binding is
+   nonce-bound (a per-challenge HMAC, never a stable identifier) and
+   operators can disable the check entirely (verification without a client
+   IP, or an empty binding tag); it is a relay mitigation, not a guarantee.
 4. **Server-side timing needs a trusted clock — and is only a heuristic.**
    The minimum-duration floor is measured by your server, so a client cannot
    buy its way out of it — but it is a timing-anomaly heuristic, not a gate:
@@ -212,6 +265,92 @@ package.
 5. **The WASM solver and its JS fallback are open source.** An attacker can
    always write their own solver (or reuse the source). The value is the
    **cost** per attempt, not the impossibility of solving.
+
+## Deployment privacy
+
+### Recommended CSP (Privacy Strict)
+
+```http
+Content-Security-Policy:
+  default-src 'self';
+  script-src 'self' 'nonce-{NONCE}' 'wasm-unsafe-eval';
+  style-src 'self' 'nonce-{NONCE}';
+  connect-src 'self';
+  object-src 'none';
+  frame-src 'none';
+  frame-ancestors 'none';
+  base-uri 'none';
+  form-action 'self';
+```
+
+`connect-src 'self'` is the key privacy line: even if a future JavaScript
+regression tried to send data elsewhere, the browser blocks it. The widget's
+driver also refuses cross-origin challenge endpoints at runtime.
+
+### Nginx / reverse-proxy privacy
+
+The library cannot control your proxy's logs; the operator must. For the
+challenge route, disable access logging entirely; for protected POST
+endpoints use a reduced format without body, query, cookies, or auth headers:
+
+```nginx
+location = /kiwi-captcha/challenge {
+    access_log off;
+    proxy_pass http://php_backend;
+    add_header Cache-Control "no-store, private, max-age=0" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Content-Type-Options "nosniff" always;
+}
+
+log_format kiwi_privacy '$time_iso8601 $request_method $uri $status $request_time';
+
+location /login {
+    access_log /var/log/nginx/privacy.log kiwi_privacy;
+    proxy_pass http://php_backend;
+}
+```
+
+No `$remote_addr`, no `$request_body`.
+
+### Redis privacy
+
+Use a private Redis (Unix socket or private network, ACLs, TLS when crossing
+hosts, no public listener). For ephemeral challenge state prefer a dedicated
+database with persistence disabled — records already carry a short TTL and
+are atomically consumed (GETDEL). Rate-limit identifiers are peppered HMACs,
+never raw IPs; challenge records hold a nonce-bound binding tag, never a raw
+IP and never a stable IP-derived identifier.
+
+### Logging
+
+Never log tokens, nonces, binding tags, telemetry, or IPs. Log categorical
+results only (valid / expired / rate_limited / capacity_limited /
+invalid_pow / malformed). KiwiCaptcha logs no identifiers itself; the
+application must not add any.
+
+## Limitations
+
+- **Proof of computation, not proof of human.** The PoW guarantees work was
+  done, not that a human did it. It protects against mass signups,
+  credential-stuffing economics, scraping, and endpoint flooding; combine it
+  with first-party server evidence (rate/reputation, passkeys, email
+  verification) for high-value operations. Do not add fingerprinting to
+  "prove" humanity — it is forgeable and sacrifices privacy.
+- **Telemetry is forgeable.** Anything JavaScript reports can be fabricated;
+  rely on server-side abuse signals (per-account/IP-HMAC/network velocity,
+  PoW success ratios, concurrent unsolved challenges), and keep telemetry
+  off by default (Privacy Strict).
+- **IP binding is best-effort and mode-dependent.** `none` disables it
+  (purest privacy), `bound` uses a nonce-bound HMAC (no stable identifier,
+  breaks under IP churn). It is a relay mitigation, not a guarantee.
+- **Server timing is a heuristic.** PoW is probabilistic — a valid solution
+  can occur at counter 0 — and a fast bot can wait before submitting. The
+  server-measured floor only rejects solves that arrive impossibly fast; set
+  `min_duration_ms: 0` to disable it entirely. The PoW remains fully valid.
+- **The solver is open source by design.** Assume the attacker has the
+  WASM, JS, and both implementations. They still cannot predict the nonce,
+  salt, secret, or signed parameters, and must still perform the work.
+
 
 ## License
 

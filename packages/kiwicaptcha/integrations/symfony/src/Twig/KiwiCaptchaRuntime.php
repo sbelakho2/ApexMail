@@ -14,6 +14,10 @@ use Twig\Environment;
  * packages/kiwicaptcha-wasm/build.sh + bin/sync-assets.sh), so the PHP and
  * Rust implementations stay byte-identical. All assets are inlined at
  * render time — the widget makes no external requests.
+ *
+ * The telemetry mode (off/minimal/full) follows the bundle config (forced
+ * 'off' under strict privacy mode) and is rendered as data-kiwi-telemetry on
+ * the widget container; it stays overridable per render call.
  */
 final class KiwiCaptchaRuntime
 {
@@ -27,6 +31,7 @@ final class KiwiCaptchaRuntime
         private readonly string $routePrefix,
         private readonly ?string $assetDir = null,
         private readonly string $template = self::DEFAULT_TEMPLATE,
+        private readonly string $telemetry = 'off',
     ) {
         $assetDir ??= \dirname(__DIR__, 2).'/Resources/public';
         $this->css = $this->readAsset($assetDir, 'widget.css');
@@ -71,6 +76,7 @@ final class KiwiCaptchaRuntime
             'endpoint' => $context['endpoint'] ?? rtrim($this->routePrefix, '/').'/challenge',
             'scope' => $context['scope'] ?? 'login',
             'nonce' => $context['nonce'] ?? null,
+            'telemetry' => $context['telemetry'] ?? $this->telemetry,
             // Standalone renders have no form view vars; provide working defaults.
             'id' => $context['id'] ?? '',
             'full_name' => $context['full_name'] ?? 'kiwi__token',

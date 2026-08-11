@@ -115,6 +115,12 @@ impl SolutionToken {
         let counter: u64 = counter_str
             .parse()
             .map_err(|_| DecodeError::InvalidCounter)?;
+        // The counter must be within what any solver can produce: the widget
+        // caps its search at SOLVER_MAX_HASHES (5M), so a larger counter was
+        // not minted by a real solve — it is a forged or malformed token.
+        if counter > crate::challenge::SOLVER_MAX_HASHES {
+            return Err(DecodeError::InvalidCounter);
+        }
         let duration_ms: u64 = duration_str
             .parse()
             .map_err(|_| DecodeError::InvalidDuration)?;
@@ -141,7 +147,7 @@ pub enum DecodeError {
     TooLarge,
     #[error("token is malformed (expected nonce.counter.duration.telemetry)")]
     Malformed,
-    #[error("counter segment is not a valid integer")]
+    #[error("counter is invalid or exceeds the solver maximum (5_000_000)")]
     InvalidCounter,
     #[error("duration segment is not a valid integer")]
     InvalidDuration,
@@ -204,6 +210,34 @@ mod tests {
         assert!(
             !matches!(SolutionToken::decode(&boundary), Err(DecodeError::TooLarge)),
             "32 KiB token must not be rejected as TooLarge"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_counter_beyond_solver_max() {
+        let token = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: crate::challenge::SOLVER_MAX_HASHES + 1,
+            duration_ms: 2,
+            telemetry: serde_json::json!({}),
+        };
+        assert!(
+            matches!(
+                SolutionToken::decode(&token.encode()),
+                Err(DecodeError::InvalidCounter)
+            ),
+            "counter above SOLVER_MAX_HASHES must be rejected"
+        );
+        // Exactly at the solver maximum is accepted.
+        let at_max = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: crate::challenge::SOLVER_MAX_HASHES,
+            duration_ms: 2,
+            telemetry: serde_json::json!({}),
+        };
+        assert_eq!(
+            SolutionToken::decode(&at_max.encode()).unwrap().counter,
+            crate::challenge::SOLVER_MAX_HASHES
         );
     }
 

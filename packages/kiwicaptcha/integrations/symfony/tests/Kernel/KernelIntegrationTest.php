@@ -94,6 +94,7 @@ final class KernelIntegrationTest extends TestCase
         self::assertSame(2, substr_count($html, '<script nonce="n-csp-abc123">'));
         self::assertStringContainsString('data-kiwi-endpoint="/kiwi-captcha/challenge"', $html);
         self::assertStringContainsString('data-kiwi-scope="login"', $html);
+        self::assertStringContainsString('data-kiwi-telemetry="off"', $html, 'default strict privacy mode renders telemetry off');
         self::assertStringContainsString('name="captcha"', $html);
         self::assertStringContainsString('data-kiwi-token', $html);
         // The inlined assets are present in the form-rendered markup.
@@ -122,6 +123,29 @@ final class KernelIntegrationTest extends TestCase
         self::assertStringContainsString('data-kiwi-endpoint="/kiwi-captcha/challenge"', $html);
         self::assertStringContainsString('data-kiwi-scope="login"', $html);
         self::assertStringContainsString('name="kiwi__token"', $html);
+    }
+
+    public function testFormTelemetryOptionOverridesConfigDefault(): void
+    {
+        $factory = $this->container()->get('form.factory');
+        $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, [
+            'scope' => 'login',
+            'telemetry' => 'minimal',
+        ]);
+
+        $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
+        self::assertStringContainsString('data-kiwi-telemetry="minimal"', $html);
+
+        $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, [
+            'scope' => 'login',
+            'telemetry' => 'full',
+        ]);
+        $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
+        self::assertStringContainsString('data-kiwi-telemetry="full"', $html);
+
+        // Invalid telemetry values are rejected by the options resolver.
+        $this->expectException(\Symfony\Component\OptionsResolver\Exception\InvalidOptionsException::class);
+        $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['telemetry' => 'bogus']);
     }
 
     public function testChallengeControllerReturnsJsonShape(): void

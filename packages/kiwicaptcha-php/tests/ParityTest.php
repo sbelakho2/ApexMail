@@ -130,11 +130,21 @@ final class ParityTest extends TestCase
     {
         $storage = new ArrayStorage();
         $record = $this->recordFromVector(Vectors::SHA);
-        // Tamper with the challenge string (invalidates the HMAC).
+        // Tamper with the signature embedded in the challenge string (flip
+        // the first hex nibble, invalidating the HMAC). The prefix is
+        // rebuilt consistently (prefix = challenge|salt|), so the record
+        // still passes structural validation and the tampering is caught by
+        // the constant-time signature re-check.
+        $challenge = $record->challenge;
+        $pos = strrpos($challenge, '.');
+        self::assertNotFalse($pos);
+        $signature = substr($challenge, $pos + 1);
+        $flippedFirst = dechex(hexdec($signature[0]) ^ 0xf);
+        $tampered = substr($challenge, 0, $pos + 1).$flippedFirst.substr($signature, 1);
         $storage->store(new ChallengeRecord(
             nonce: $record->nonce,
             scope: $record->scope,
-            ipHash: $record->ipHash,
+            bindingTag: $record->ipHash(),
             issuedAt: $record->issuedAt,
             expiresAt: $record->expiresAt,
             algorithm: $record->algorithm,
@@ -143,9 +153,10 @@ final class ParityTest extends TestCase
             p: $record->p,
             targetBits: $record->targetBits,
             salt: $record->salt,
-            prefix: $record->prefix,
-            challenge: $record->challenge.'00',
+            prefix: $tampered.'|'.$record->salt.'|',
+            challenge: $tampered,
             minDurationMs: $record->minDurationMs,
+            protocolVersion: 1,
         ));
 
         $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
@@ -169,18 +180,16 @@ final class ParityTest extends TestCase
 
     public function testTooFastRejected(): void
     {
-        $storage = new ArrayStorage();
-        $storage->store($this->recordFromVector(Vectors::SHA));
-
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
-
-        // duration_ms below the record floor (0 here, so use a high-difficulty
-        // record instead to exercise the floor path).
+        // Server-measured timing: the record floor is 100ms and the receipt
+        // (nowNs) arrives only 50ms after the record's issuedAtNs, so the
+        // solve is rejected as TooFast — the client-reported duration_ms=50
+        // is not consulted anymore.
         $record = $this->recordFromVector(Vectors::SHA);
+        $issuedAtNs = Vectors::NOW * 1_000_000;
         $recordWithFloor = new ChallengeRecord(
             nonce: $record->nonce,
             scope: $record->scope,
-            ipHash: $record->ipHash,
+            bindingTag: $record->ipHash(),
             issuedAt: $record->issuedAt,
             expiresAt: $record->expiresAt,
             algorithm: $record->algorithm,
@@ -192,22 +201,27 @@ final class ParityTest extends TestCase
             prefix: $record->prefix,
             challenge: $record->challenge,
             minDurationMs: 100,
+            issuedAtNs: $issuedAtNs,
+            protocolVersion: 1,
         );
         $storage = new ArrayStorage();
         $storage->store($recordWithFloor);
         $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
         $token = $this->tokenFor(Vectors::SHA, durationMs: 50);
 
-        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP);
+        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issuedAtNs + 50_000);
 
         self::assertSame(VerifyError::TooFast, $outcome->error);
     }
 
     public function testFullIssueAndVerifyRoundTrip(): void
     {
+        // Full loop: issue -> canonical payload -> signature -> stored v2
+        // record -> solveable proof -> end-to-end verification through the
+        // protocol-v2 Verifier.
         $storage = new ArrayStorage();
-        $issuer = new Issuer($this->shaConfig(), $storage);
-        $verifier = new Verifier($storage);
+        $config = $this->shaConfig();
+        $issuer = new Issuer($config, $storage, now: static fn (): int => Vectors::NOW);
 
         $challenge = $issuer->issue('login', '198.51.100.77');
         self::assertSame('sha256', $challenge->algorithm->value);
@@ -215,7 +229,37 @@ final class ParityTest extends TestCase
         self::assertNotSame('', $challenge->prefix);
         self::assertStringContainsString($challenge->challenge, $challenge->prefix);
 
-        // Solve in pure PHP (8-bit difficulty — fast).
+        // The stored record is protocol v2 and carries the nonce-bound
+        // binding tag — NOT the legacy stable IP hash.
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(2, $record->protocolVersion);
+        $bindingTag = Issuer::bindingTag($challenge->nonce, '198.51.100.77', Vectors::SECRET);
+        self::assertSame($bindingTag, $record->bindingTag);
+        self::assertSame($bindingTag, $record->ipHash(), 'compat accessor must expose the binding tag');
+        self::assertNotSame(Vectors::IP_HASH, $bindingTag, 'v2 binding is nonce-bound, never a stable IP-derived identifier');
+
+        // The challenge is base64(canonical v2 payload) . "." . hex(hmac).
+        [$payloadB64, $signature] = explode('.', $challenge->challenge, 2);
+        $canonical = Issuer::canonicalPayload(
+            $challenge->nonce,
+            'login',
+            $bindingTag,
+            Vectors::NOW,
+            Vectors::NOW + $config->ttlSecs,
+            $challenge->algorithm,
+            $config->mKib,
+            $config->t,
+            $config->p,
+            $challenge->targetBits,
+            $challenge->salt,
+            $challenge->minDurationMs,
+        );
+        self::assertSame($canonical, base64_decode($payloadB64, true));
+        self::assertSame(Issuer::signPayload($canonical, Vectors::SECRET), $signature);
+
+        // Solve in pure PHP (8-bit difficulty — fast) and check the proof
+        // against the stored record's prefix.
         $counter = 0;
         $saltBytes = base64_decode($challenge->salt, true);
         do {
@@ -225,9 +269,21 @@ final class ParityTest extends TestCase
         --$counter;
 
         $token = \KiwiCaptcha\SolutionToken::create($challenge->nonce, $counter, 5000, ['wd' => false])->encode();
+        self::assertSame($counter, \KiwiCaptcha\SolutionToken::decode($token)->counter);
+        $powHash = hash('sha256', $record->prefix.$counter.$saltBytes, true);
+        self::assertGreaterThanOrEqual($challenge->targetBits, Verifier::leadingZeroBits($powHash));
 
-        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
-        self::assertTrue($outcome->isOk(), sprintf('round-trip failed: %s', $outcome->code()));
+        // End-to-end: the issued v2 record + solved token verify through the
+        // v2 verifier (receipt 1s after the record's server-side issuance).
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $outcome = $verifier->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            '198.51.100.77',
+            nowNs: $record->issuedAtNs + 1_000_000,
+        );
+        self::assertTrue($outcome->isOk(), sprintf('issue->solve->verify round trip must pass, got %s', $outcome->code()));
     }
 
     public function testArgon2WithUnrepresentableParamsFailsClosed(): void
@@ -249,21 +305,22 @@ final class ParityTest extends TestCase
             minDurationMs: 0,
         );
         $storage = new ArrayStorage();
-        $issuer = new Issuer($config, $storage);
+        $issuer = new Issuer($config, $storage, now: static fn (): int => Vectors::NOW);
         $challenge = $issuer->issue('login', '198.51.100.77');
 
-        // Recover nonce|scope|ip_hash|issued_at from the signed payload so the
-        // forged record passes the signature check and reaches the Argon2id
-        // parameter rejection path.
-        $payload = base64_decode(explode('.', $challenge->challenge, 2)[0], true);
-        [, , $ipHash, $issuedAt] = explode('|', (string) $payload);
+        // Swap in Argon2id t=1 parameters outside the verifier's protocol
+        // profile (validateRecord requires t 3..=6): the verifier must fail
+        // closed (MalformedRecord) instead of verifying wrong bytes.
+        $ipHash = Issuer::hashIp('198.51.100.77', Vectors::SECRET);
+        $v1Payload = sprintf('%s|%s|%s|%d', $challenge->nonce, 'login', $ipHash, Vectors::NOW);
+        $v1Challenge = base64_encode($v1Payload).'.'.Issuer::signPayload($v1Payload, Vectors::SECRET);
 
         $record = new ChallengeRecord(
             nonce: $challenge->nonce,
             scope: 'login',
-            ipHash: $ipHash,
-            issuedAt: (int) $issuedAt,
-            expiresAt: (int) $issuedAt + 120,
+            bindingTag: $ipHash,
+            issuedAt: Vectors::NOW,
+            expiresAt: Vectors::NOW + 120,
             algorithm: PoWAlgorithm::Argon2id,
             mKib: 64,
             t: 1,
@@ -271,12 +328,13 @@ final class ParityTest extends TestCase
             targetBits: 4,
             salt: $challenge->salt,
             prefix: $challenge->prefix,
-            challenge: $challenge->challenge,
+            challenge: $v1Challenge,
             minDurationMs: 0,
+            protocolVersion: 1,
         );
         $storage = new ArrayStorage();
         $storage->store($record);
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
 
         // Solve in PHP with the sodium-representable path — impossible for t=1,
         // so deriveHash must return null => MalformedRecord.

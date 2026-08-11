@@ -194,7 +194,9 @@ pub struct Config {
     /// telemetry is client-controlled and forgeable, so this is a
     /// defense-in-depth signal, never the security boundary. When enabled,
     /// clients that fail the heuristic (including clients that submit no
-    /// telemetry at all) are rejected with BotDetected. Default true.
+    /// telemetry at all) are rejected with BotDetected. Default false:
+    /// telemetry defaults to OFF (the widget's default mode is "off" and
+    /// enforcement must not reject every user whose page ships no telemetry).
     pub kiwi_enforce_telemetry: bool,
     /// Enable auto-tuning of difficulty based on server load. Default false.
     /// Only applies to SHA-256 challenges; Argon2id difficulty is static.
@@ -713,7 +715,7 @@ impl Config {
         let kiwi_enforce_telemetry = env::var("KIWI_ENFORCE_TELEMETRY")
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
+            .unwrap_or(false);
         let kiwi_auto_tune = env::var("KIWI_AUTO_TUNE")
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

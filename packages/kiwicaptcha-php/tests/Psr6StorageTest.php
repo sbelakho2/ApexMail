@@ -24,7 +24,7 @@ final class Psr6StorageTest extends TestCase
         return new ChallengeRecord(
             nonce: $nonce,
             scope: 'login',
-            ipHash: 'abc123',
+            bindingTag: 'abc123',
             issuedAt: 1_800_000_000,
             expiresAt: 1_800_000_120,
             algorithm: PoWAlgorithm::Sha256,
@@ -139,5 +139,38 @@ final class Psr6StorageTest extends TestCase
 
         self::assertNotNull($loaded);
         self::assertSame($record->issuedAtNs, $loaded->issuedAtNs);
+    }
+
+    public function testNonceContainingForwardSlashRoundTrips(): void
+    {
+        // base64 of bytes containing 0xFB.. yields '/' — a PSR-6-reserved
+        // character that strict pools reject in keys. The hashed cache key
+        // must make such nonces work.
+        $nonce = base64_encode(hex2bin('fbffefc0d0e0f0a0b0c0d0e0f0010203'));
+        self::assertStringContainsString('/', $nonce, 'fixture must actually contain /');
+
+        $pool = $this->makePool();
+        $storage = new Psr6Storage($pool);
+        $record = $this->makeRecord($nonce);
+        $storage->store($record);
+
+        self::assertNotNull($storage->find($nonce));
+        $consumed = $storage->consume($nonce);
+        self::assertNotNull($consumed);
+        self::assertNull($storage->find($nonce));
+    }
+
+    public function testNonceContainingPlusRoundTrips(): void
+    {
+        $nonce = base64_encode(hex2bin('fbfedec0d0e0f0a0b0c0d0e0f0010203'));
+        self::assertStringContainsString('+', $nonce, 'fixture must actually contain +');
+
+        $pool = $this->makePool();
+        $storage = new Psr6Storage($pool);
+        $record = $this->makeRecord($nonce);
+        $storage->store($record);
+
+        self::assertNotNull($storage->find($nonce));
+        self::assertNotNull($storage->consume($nonce));
     }
 }

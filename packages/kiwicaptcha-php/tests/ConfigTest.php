@@ -143,7 +143,7 @@ final class ConfigTest extends TestCase
         // probability at 20 vs ~25.9% at 24), so higher values would be
         // unsolvable for legit clients.
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('0..20');
+        $this->expectExceptionMessage('1..20');
 
         new Config(...$this->base(['targetBits' => 21]));
     }
@@ -168,10 +168,21 @@ final class ConfigTest extends TestCase
         self::assertSame(20, $config->targetBits);
     }
 
-    public function testTargetBits0IsValid(): void
+    public function testTargetBits0IsRejected(): void
     {
-        $config = new Config(...$this->base(['targetBits' => 0]));
-        self::assertSame(0, $config->targetBits);
+        // 0 bits means "no work at all" — indistinguishable from an
+        // uninitialized misconfiguration, so it is rejected since protocol
+        // v2 (the valid range is 1..MAX_SHA_TARGET_BITS).
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('1..20');
+
+        new Config(...$this->base(['targetBits' => 0]));
+    }
+
+    public function testTargetBits1IsValid(): void
+    {
+        $config = new Config(...$this->base(['targetBits' => 1]));
+        self::assertSame(1, $config->targetBits);
     }
 
     public function testTargetBitCeilingConstants(): void

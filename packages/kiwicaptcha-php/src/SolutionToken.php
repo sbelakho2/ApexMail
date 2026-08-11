@@ -22,6 +22,15 @@ final class SolutionToken
     }
 
     /**
+     * The browser/wasm solver caps at 5,000,000 hashes (Rust
+     * SOLVER_MAX_TARGET_BITS / MAX_SHA_HASHES), so a counter above it cannot
+     * come from a legit solve. 5,000,000 is 7 digits — the length bound
+     * rejects absurdly long digit strings before the (PHP_INT_MAX-clamped)
+     * integer cast could hide them.
+     */
+    private const MAX_SOLVER_COUNTER = 5_000_000;
+
+    /**
      * @param array<string, mixed> $telemetry
      */
     public static function create(string $nonce, int $counter, int $durationMs, array $telemetry): self
@@ -81,6 +90,11 @@ final class SolutionToken
         // rejects empty/"+1"/"1.5". ctype_digit mirrors that exactly.
         if ($counterStr === '' || !ctype_digit($counterStr)) {
             throw DecodeError::invalidCounter();
+        }
+        // Counter bound: the solver caps at 5,000,000 hashes, so larger
+        // values are abuse probes, not solutions.
+        if (\strlen($counterStr) > 7 || (int) $counterStr > self::MAX_SOLVER_COUNTER) {
+            throw DecodeError::counterExceedsSolverMaximum();
         }
         $counter = (int) $counterStr;
 

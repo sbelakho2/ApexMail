@@ -119,17 +119,14 @@ pub async fn verify_kiwi_token(
         ApiError::Validation(vec!["CAPTCHA verification token is required".into()])
     })?;
 
-    tracing::info!(token_len = raw.len(), "KiwiCaptcha: decoding token");
-
     let solution = kiwicaptcha::SolutionToken::decode(raw).map_err(|e| {
-        tracing::warn!(error = %e, token_len = raw.len(), "KiwiCaptcha: token decode failed");
+        tracing::warn!(error = %e, "KiwiCaptcha: token decode failed");
         ApiError::Validation(vec![
             "CAPTCHA verification failed — please refresh and try again".into(),
         ])
     })?;
 
     tracing::info!(
-        nonce = %solution.nonce,
         counter = solution.counter,
         duration_ms = solution.duration_ms,
         "KiwiCaptcha: token decoded"
@@ -144,43 +141,31 @@ pub async fn verify_kiwi_token(
     let record: kiwicaptcha::ChallengeRecord = stored
         .as_deref()
         .ok_or_else(|| {
-            tracing::warn!(nonce = %solution.nonce, key = %key, "KiwiCaptcha: challenge not found in Redis");
+            tracing::warn!("KiwiCaptcha: challenge not found in Redis");
             ApiError::Validation(vec![
                 "CAPTCHA challenge expired or not found — please refresh and try again".into(),
             ])
         })
         .and_then(|s| {
             serde_json::from_str(s).map_err(|e| {
-                tracing::warn!(error = %e, nonce = %solution.nonce, "KiwiCaptcha: challenge record decode failed");
+                tracing::warn!(error = %e, "KiwiCaptcha: challenge record decode failed");
                 ApiError::Internal("CAPTCHA state corrupted".into())
             })
         })?;
 
     tracing::info!(
-        nonce = %solution.nonce,
         scope = %record.scope,
         expires_at = record.expires_at,
-        ip_hash = %record.ip_hash,
         algorithm = record.algorithm.as_str(),
         m_kib = record.m_kib,
         target_bits = record.target_bits,
         "KiwiCaptcha: challenge record found"
     );
 
-    // IP binding: the challenge was issued to this IP. A mismatch means a
-    // relay attack (token minted elsewhere, submitted from here).
-    let expected_ip_hash = kiwicaptcha::hash_ip(client_ip, &config.kiwi_secret_key);
-    if record.ip_hash != expected_ip_hash {
-        tracing::warn!(
-            expected = %record.ip_hash,
-            actual = %expected_ip_hash,
-            client_ip = %client_ip,
-            "KiwiCaptcha: IP mismatch — challenge was issued to a different client"
-        );
-        return Err(ApiError::Validation(vec![
-            "CAPTCHA verification failed — please try again".into(),
-        ]));
-    }
+    // IP binding is enforced inside verify_solution (intrinsic) against the
+    // record's nonce-bound binding_tag (protocol v2) or legacy hash (v1) —
+    // no pre-check here (privacy: the raw client IP never reaches the logs,
+    // and the pre-check was redundant with the intrinsic enforcement).
 
     // Per-nonce attempt cap: each challenge may only be tried a bounded number
     // of times before it is burned. This bounds the server-side cost of a
@@ -213,9 +198,8 @@ pub async fn verify_kiwi_token(
         .unwrap_or(0);
         if attempts > 0 {
             tracing::warn!(
-                nonce = %solution.nonce,
                 attempts,
-                "KiwiCaptcha: verify attempt cap exceeded for nonce"
+                "KiwiCaptcha: verify attempt cap exceeded"
             );
             return Err(ApiError::Validation(vec![
                 "CAPTCHA verification failed — please refresh and try again".into(),
@@ -234,10 +218,10 @@ pub async fn verify_kiwi_token(
     // enforced by the verify module against that floor.
     let min_duration_ms: u64 = 0; // floor comes from record.min_duration_ms
 
-    // Telemetry scoring: detect headless/automated clients.
+    // Telemetry scoring: detect headless/automated clients. The telemetry
+    // payload itself is deliberately not logged (privacy).
     if kiwicaptcha::score_telemetry(&solution.telemetry, solution.duration_ms) {
         tracing::warn!(
-            telemetry = ?solution.telemetry,
             duration_ms = solution.duration_ms,
             "KiwiCaptcha bot detected via telemetry"
         );
@@ -260,8 +244,7 @@ pub async fn verify_kiwi_token(
         now_ns,
         min_duration_ms,
         expected_scope: scope,
-        // IP binding is enforced inside verify_solution (intrinsic), in
-        // addition to the explicit pre-check above.
+        // IP binding is enforced inside verify_solution (intrinsic).
         client_ip: Some(client_ip),
         telemetry: Some(&solution.telemetry),
         // Telemetry is client-controlled and forgeable — supplementary only.
@@ -310,11 +293,7 @@ pub async fn verify_kiwi_token(
                 tracing::info!(duration_ms = solution.duration_ms, counter = solution.counter, "KiwiCaptcha: VERIFIED");
                 Ok(())
             } else {
-                tracing::warn!(
-                    nonce = %solution.nonce,
-                    key = %key,
-                    "KiwiCaptcha: challenge already consumed or expired — replay rejected"
-                );
+                tracing::warn!("KiwiCaptcha: challenge already consumed or expired — replay rejected");
                 Err(ApiError::Validation(vec![
                     "CAPTCHA challenge already used — please refresh and try again".into(),
                 ]))
@@ -3258,9 +3237,10 @@ mod tests {
             argon2_target_bits: config.kiwi_argon2_difficulty_bits,
             ttl_secs: config.kiwi_challenge_ttl_secs,
             min_duration_ms: config.kiwi_min_duration_ms,
-            auto_tune: false,
-            auto_tune_min_bits: 8,
-            auto_tune_max_bits: 20,
+            auto_tune: config.kiwi_auto_tune,
+            auto_tune_min_bits: config.kiwi_auto_tune_min_bits,
+            auto_tune_max_bits: config.kiwi_auto_tune_max_bits,
+            binding_mode: kiwicaptcha::BindingMode::Bound,
         };
         let issued = kiwicaptcha::issue_challenge(&kc_config, "login", "1.2.3.4", now_unix, now_unix * 1_000_000_000, 0)
             .expect("challenge issuance succeeds");
