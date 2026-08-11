@@ -61,8 +61,20 @@ final class Psr6Storage implements StorageInterface
             return null;
         }
         $data = $item->get();
+        if (!\is_array($data)) {
+            return null;
+        }
 
-        return \is_array($data) ? ChallengeRecord::fromArray($data) : null;
+        try {
+            return ChallengeRecord::fromArray($data);
+        } catch (\Throwable) {
+            // Corrupt/foreign stored data (e.g. an unknown algorithm value)
+            // must never surface as an exception — treat it as absent and
+            // clean up the poisoned key.
+            $this->pool->deleteItem(self::key($nonce));
+
+            return null;
+        }
     }
 
     public function consume(string $nonce): ?ChallengeRecord
@@ -82,7 +94,16 @@ final class Psr6Storage implements StorageInterface
         // there is no need to branch on its result.
         $this->pool->deleteItem(self::key($nonce));
 
-        return \is_array($data) ? ChallengeRecord::fromArray($data) : null;
+        if (!\is_array($data)) {
+            return null;
+        }
+
+        try {
+            return ChallengeRecord::fromArray($data);
+        } catch (\Throwable) {
+            // Corrupt data: already deleted above; never propagate.
+            return null;
+        }
     }
 
     public function delete(string $nonce): void

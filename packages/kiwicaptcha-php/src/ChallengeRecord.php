@@ -124,20 +124,25 @@ final class ChallengeRecord
             ? (int) ($data['protocol_version'] ?? 2)
             : 1;
 
+        // All reads are null-safe: corrupt/foreign stored data must never
+        // raise warnings or exceptions here — unknown algorithm VALUES still
+        // throw from PoWAlgorithm::from() (the storages catch that and treat
+        // the record as absent), and structurally incomplete data degrades
+        // into a record that the verifier's validateRecord() rejects.
         return new self(
-            nonce: (string) $data['nonce'],
-            scope: (string) $data['scope'],
+            nonce: (string) ($data['nonce'] ?? ''),
+            scope: (string) ($data['scope'] ?? ''),
             bindingTag: (string) ($data['binding_tag'] ?? $data['ip_hash'] ?? ''),
-            issuedAt: (int) $data['issued_at'],
-            expiresAt: (int) $data['expires_at'],
-            algorithm: PoWAlgorithm::from((string) $data['algorithm']),
+            issuedAt: (int) ($data['issued_at'] ?? 0),
+            expiresAt: (int) ($data['expires_at'] ?? 0),
+            algorithm: PoWAlgorithm::from((string) ($data['algorithm'] ?? '')),
             mKib: (int) ($data['m_kib'] ?? 0),
             t: (int) ($data['t'] ?? 1),
             p: (int) ($data['p'] ?? 1),
-            targetBits: (int) $data['target_bits'],
-            salt: (string) $data['salt'],
-            prefix: (string) $data['prefix'],
-            challenge: (string) $data['challenge'],
+            targetBits: (int) ($data['target_bits'] ?? 0),
+            salt: (string) ($data['salt'] ?? ''),
+            prefix: (string) ($data['prefix'] ?? ''),
+            challenge: (string) ($data['challenge'] ?? ''),
             minDurationMs: (int) ($data['min_duration_ms'] ?? 0),
             issuedAtNs: (int) ($data['issued_at_ns'] ?? 0),
             protocolVersion: $protocolVersion,

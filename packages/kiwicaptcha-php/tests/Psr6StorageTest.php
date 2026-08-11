@@ -173,4 +173,45 @@ final class Psr6StorageTest extends TestCase
         self::assertNotNull($storage->find($nonce));
         self::assertNotNull($storage->consume($nonce));
     }
+
+    public function testCorruptRecordWithUnknownAlgorithmIsTreatedAsAbsent(): void
+    {
+        $pool = $this->makePool();
+        $storage = new Psr6Storage($pool);
+        $nonce = 'corrupt-nonce-1';
+
+        $item = $pool->getItem('kiwicaptcha_' . substr(hash('sha256', $nonce), 0, 60));
+        $item->set([
+            'nonce' => $nonce,
+            'scope' => 'login',
+            'binding_tag' => '',
+            'issued_at' => 1_800_000_000,
+            'expires_at' => 1_800_000_120,
+            'algorithm' => 'md5', // unknown algorithm value
+            'target_bits' => 8,
+            'salt' => base64_encode('1234567890abcdef'),
+            'prefix' => 'x',
+            'challenge' => 'y',
+        ]);
+        $pool->save($item);
+
+        // Must NOT throw — corrupt data is treated as absent and cleaned up.
+        self::assertNull($storage->find($nonce));
+        self::assertNull($storage->consume($nonce));
+        self::assertFalse($pool->hasItem('kiwicaptcha_' . substr(hash('sha256', $nonce), 0, 60)), 'poisoned key must be cleaned up');
+    }
+
+    public function testTruncatedJsonRecordIsTreatedAsAbsent(): void
+    {
+        $pool = $this->makePool();
+        $storage = new Psr6Storage($pool);
+        $nonce = 'truncated-nonce-1';
+
+        $item = $pool->getItem('kiwicaptcha_' . substr(hash('sha256', $nonce), 0, 60));
+        $item->set(['nonce' => $nonce]); // structurally incomplete record
+        $pool->save($item);
+
+        self::assertNull($storage->find($nonce));
+        self::assertNull($storage->consume($nonce));
+    }
 }
