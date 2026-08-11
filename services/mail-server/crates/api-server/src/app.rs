@@ -664,10 +664,9 @@ fn browser_csp_header_with_analytics(nonce: &str, analytics_img_src: Option<&str
 ///   WebAssembly compilation/instantiation while `eval`/`new Function` remain
 ///   blocked (a nonce alone is not enough: wasm compilation is gated by the
 ///   eval-related directives, not by script nonces).
-/// - `'unsafe-inline'` on `style-src`: the widget sets the progress-bar width
-///   via `element.style.width` and positions decorative sparkles with inline
-///   custom properties. Style injection is not a code-execution vector
-///   (no CSS expressions in modern engines); scripts remain fully locked.
+/// The widget is fully CSP3-compliant: it sets no inline styles (progress
+/// is driven by a data-progress attribute with stylesheet rules), so
+/// `style-src` stays strict.
 fn browser_csp_header_with_sources(
     nonce: &str,
     analytics_img_src: Option<&str>,
@@ -680,7 +679,7 @@ fn browser_csp_header_with_sources(
         .unwrap_or_default();
 
     HeaderValue::from_str(&format!(
-        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'unsafe-inline' 'nonce-{nonce}'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; frame-src 'none'; object-src 'none'"
+        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; frame-src 'none'; object-src 'none'"
     ))
     .expect("browser CSP should be valid")
 }
@@ -1779,7 +1778,7 @@ mod tests {
             .to_string();
         assert!(verify_csp.contains("script-src 'self' 'nonce-"));
         assert!(verify_csp.contains("'wasm-unsafe-eval'"));
-        assert!(verify_csp.contains("style-src 'self' 'unsafe-inline' 'nonce-"));
+        assert!(verify_csp.contains("style-src 'self' 'nonce-"));
         let verify_body = response_body_string(verify_response).await;
         assert!(verify_body.contains("Verify your email"));
         assert!(verify_body.contains("Back to sign in"));
@@ -1859,7 +1858,7 @@ mod tests {
 
         assert!(csp.contains("connect-src 'self';"));
         assert!(csp.contains("script-src 'self' 'nonce-test-nonce' 'wasm-unsafe-eval'"));
-        assert!(csp.contains("style-src 'self' 'unsafe-inline' 'nonce-test-nonce'"));
+        assert!(csp.contains("style-src 'self' 'nonce-test-nonce'"));
         assert!(csp.contains("frame-src 'none'"));
         // No external hosts leaked into the CSP.
         assert!(!csp.contains("captcha.apexmail"));
