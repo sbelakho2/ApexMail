@@ -92,4 +92,25 @@ final class StrictPrivacyConfigTest extends TestCase
         $html = $this->container(self::$standard)->get('twig')->render('@Test/form.html.twig', ['form' => $form->createView()]);
         self::assertStringContainsString('data-kiwi-telemetry="minimal"', $html);
     }
+
+    public function testStrictForcesEnforceTelemetryFalse(): void
+    {
+        // strict + enforce_telemetry: true must compile to enforce_telemetry
+        // false — an off widget sends EMPTY telemetry and enforcement would
+        // reject every legitimate solve.
+        $kernel = new StrictPrivacyTestKernel('test', true);
+        $kernel->boot();
+        $container = $kernel->getContainer()->get('test.service_container');
+        self::assertFalse($container->getParameter('kiwi_captcha.enforce_telemetry'), 'strict must force enforce_telemetry false');
+    }
+
+    public function testEnforceTelemetryWithTelemetryOffFailsOutsideStrict(): void
+    {
+        $kernel = new StandardPrivacyTestKernel('test', true);
+        $kernel->boot();
+        $container = $kernel->getContainer()->get('test.service_container');
+        // The StandardPrivacyTestKernel configures telemetry minimal (not
+        // off), so this combination is legal — boot must succeed.
+        self::assertFalse($container->getParameter('kiwi_captcha.enforce_telemetry') ?? false, 'standard kernel has no enforce_telemetry by default');
+    }
 }

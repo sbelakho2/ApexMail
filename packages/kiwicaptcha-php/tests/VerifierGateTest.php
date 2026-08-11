@@ -641,6 +641,47 @@ final class VerifierGateTest extends TestCase
         self::assertSame(VerifyError::Expired, $outcome->error, 'a positional Closure must drive the TTL clock');
     }
 
+    public function testBoundRecordWithoutClientIpFailsClosed(): void
+    {
+        // A non-empty binding tag means the challenge IS bound — omitting
+        // the client IP must fail with MissingClientIp, not silently skip
+        // the check (the caller must provide the IP it passed to issuance).
+        $storage = new ArrayStorage();
+        $secret = '0123456789abcdef0123456789abcdef';
+        $issuer = new Issuer(new \KiwiCaptcha\Config(secretKey: $secret, targetBits: 8), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertNotSame('', $record->bindingTag, 'fixture must be a bound challenge');
+
+        $counter = 0;
+        do {
+            $h = hash('sha256', $challenge->prefix.$counter.base64_decode($challenge->salt, true), true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($h) < $challenge->targetBits);
+        --$counter;
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+
+        $outcome = (new Verifier($storage))->verify($token, $secret, 'login', null, $record->issuedAtNs + 1_000_000);
+        self::assertSame(VerifyError::MissingClientIp->value, $outcome->code());
+
+        // BindingMode::None records (empty tag) still verify without an IP.
+        $storage2 = new ArrayStorage();
+        $issuer2 = new Issuer(new \KiwiCaptcha\Config(secretKey: $secret, targetBits: 8, bindingMode: \KiwiCaptcha\BindingMode::None), $storage2);
+        $ch2 = $issuer2->issue('login', '198.51.100.7');
+        $rec2 = $storage2->find($ch2->nonce);
+        self::assertSame('', $rec2->bindingTag);
+        $c2 = 0;
+        do {
+            $h2 = hash('sha256', $ch2->prefix.$c2.base64_decode($ch2->salt, true), true);
+            $c2++;
+        } while (Verifier::leadingZeroBits($h2) < $ch2->targetBits);
+        --$c2;
+        $t2 = SolutionToken::create($ch2->nonce, $c2, 5000, [])->encode();
+        $o2 = (new Verifier($storage2))->verify($t2, $secret, 'login', null, $rec2->issuedAtNs + 1_000_000);
+        self::assertTrue($o2->isOk(), sprintf('unbound record must verify without an IP, got %s', $o2->code()));
+    }
+
     public function testProtocolVersion3IsMalformed(): void
     {
         // Only protocol versions 1 (legacy migration) and 2 (current) exist

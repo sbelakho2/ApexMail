@@ -35,6 +35,7 @@ final class StrictPrivacyTestKernel extends TestKernel
                 'telemetry' => 'full',
                 'same_origin_only' => false,
                 'min_duration_ms' => 500,
+                'enforce_telemetry' => true, // must be FORCED false by strict
             ]);
         });
     }
