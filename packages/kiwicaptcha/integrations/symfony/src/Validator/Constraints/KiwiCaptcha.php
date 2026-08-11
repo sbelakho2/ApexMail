@@ -33,20 +33,15 @@ class KiwiCaptcha extends Constraint
     /** Expected challenge scope (null = accept any scope). */
     public ?string $scope = null;
 
-    /** Bind the challenge to the client IP (recommended). */
-    public bool $bindIp = true;
-
     public function __construct(
         mixed $options = null,
         ?string $scope = null,
-        ?bool $bindIp = null,
         ?string $message = null,
         ?array $groups = null,
         mixed $payload = null,
     ) {
         parent::__construct($options, $groups, $payload);
         $this->scope = $scope ?? $this->scope;
-        $this->bindIp = $bindIp ?? $this->bindIp;
         $this->message = $message ?? $this->message;
     }
 

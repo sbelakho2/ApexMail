@@ -13,6 +13,7 @@ enum VerifyError: string
     case Expired = 'expired';
     case WrongScope = 'wrong_scope';
     case IpMismatch = 'ip_mismatch';
+    case MissingClientIp = 'missing_client_ip';
     case TooFast = 'too_fast';
     case InsufficientWork = 'insufficient_work';
     case MalformedRecord = 'malformed_record';

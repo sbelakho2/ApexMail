@@ -30,6 +30,9 @@ final class SolutionToken
      */
     private const MAX_SOLVER_COUNTER = 5_000_000;
 
+    /** Hard ceiling for the client-reported duration (telemetry only): 1 hour. */
+    public const MAX_DURATION_MS = 3_600_000;
+
     /**
      * @param array<string, mixed> $telemetry
      */
@@ -45,7 +48,10 @@ final class SolutionToken
             $this->nonce,
             $this->counter,
             $this->durationMs,
-            (string) json_encode($this->telemetry, JSON_UNESCAPED_SLASHES)
+            // The telemetry segment must ALWAYS be a JSON object (decode
+            // requires it): the (object) cast makes an empty array encode as
+            // {} and an assoc array as {"k":v,...} — never [].
+            (string) json_encode((object) $this->telemetry, JSON_UNESCAPED_SLASHES)
         );
 
         return base64_encode($plain);
@@ -91,9 +97,10 @@ final class SolutionToken
         if ($counterStr === '' || !ctype_digit($counterStr)) {
             throw DecodeError::invalidCounter();
         }
-        // Counter bound: the solver caps at 5,000,000 hashes, so larger
-        // values are abuse probes, not solutions.
-        if (\strlen($counterStr) > 7 || (int) $counterStr > self::MAX_SOLVER_COUNTER) {
+        // Counter bound: the JS solver searches counter < MAX_SHA_HASHES
+        // (5,000,000 attempts), so the largest counter it can ever produce is
+        // 4,999,999 — anything >= 5,000,000 was not minted by a real solve.
+        if (\strlen($counterStr) > 7 || (int) $counterStr >= self::MAX_SOLVER_COUNTER) {
             throw DecodeError::counterExceedsSolverMaximum();
         }
         $counter = (int) $counterStr;
@@ -101,13 +108,22 @@ final class SolutionToken
         if ($durationStr === '' || !ctype_digit($durationStr)) {
             throw DecodeError::invalidDuration();
         }
+        // Duration is client telemetry only, but the wire protocol still
+        // bounds it (0 .. 3_600_000 ms = 1 hour) so both implementations
+        // accept exactly the same language.
+        if ((int) $durationStr > self::MAX_DURATION_MS) {
+            throw DecodeError::invalidDuration();
+        }
         $durationMs = (int) $durationStr;
 
-        $telemetry = json_decode($telemetryStr, true);
-        if (!\is_array($telemetry)) {
+        // Telemetry must be a JSON OBJECT in both implementations ({} for an
+        // off widget, {v,mode,me,ke,...} otherwise). json_decode OBJECT mode
+        // distinguishes {} from []/"x"/123/null — array mode cannot.
+        $telemetry = json_decode($telemetryStr, false);
+        if (!\is_object($telemetry)) {
             throw DecodeError::malformed();
         }
 
-        return new self($nonce, $counter, $durationMs, $telemetry);
+        return new self($nonce, $counter, $durationMs, (array) $telemetry);
     }
 }

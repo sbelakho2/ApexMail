@@ -320,9 +320,7 @@ pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignEr
     if secret.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
-    let addr: IpAddr = ip
-        .parse()
-        .map_err(|_| SignError::InvalidIp)?;
+    let addr: IpAddr = ip.parse().map_err(|_| SignError::InvalidIp)?;
     let (family, canonical_bytes) = match addr {
         IpAddr::V4(v4) => (0x04u8, v4.octets().to_vec()),
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
@@ -442,11 +440,7 @@ pub fn verify_signature_v2(
     verify_canonical(&canonical_signing_input_v2(record), signature, secret_key)
 }
 
-fn verify_canonical(
-    canonical: &str,
-    signature: &str,
-    secret_key: &str,
-) -> Result<bool, SignError> {
+fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Result<bool, SignError> {
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
@@ -721,7 +715,7 @@ pub fn issue_challenge(
         p: config.p,
         target_bits,
         salt: salt.clone(),
-        prefix: String::new(),  // computed below once the challenge is signed
+        prefix: String::new(),    // computed below once the challenge is signed
         challenge: String::new(), // computed below
         min_duration_ms,
         issued_at_ns: now_ns,
@@ -805,7 +799,7 @@ mod hex {
     /// Decode a hex string (lower- or upper-case) into bytes, or `None` if it
     /// has an odd length or contains a non-hex character.
     pub fn decode(s: &str) -> Option<Vec<u8>> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return None;
         }
         let mut out = Vec::with_capacity(s.len() / 2);
@@ -940,14 +934,8 @@ mod tests {
         let sig = sign_payload(&payload, "this-is-a-16-byte-key").unwrap();
         assert!(verify_signature(&payload, &sig, "this-is-a-16-byte-key").unwrap());
         // …and an undecodable "signature" must be a mismatch, never an error.
-        assert_eq!(
-            verify_signature(&payload, "not-hex!", "this-is-a-16-byte-key").unwrap(),
-            false
-        );
-        assert_eq!(
-            verify_signature(&payload, "abc", "this-is-a-16-byte-key").unwrap(),
-            false
-        );
+        assert!(!verify_signature(&payload, "not-hex!", "this-is-a-16-byte-key").unwrap());
+        assert!(!verify_signature(&payload, "abc", "this-is-a-16-byte-key").unwrap());
     }
 
     #[test]

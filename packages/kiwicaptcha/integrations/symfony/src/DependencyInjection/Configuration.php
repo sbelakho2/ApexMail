@@ -55,10 +55,22 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue(500)
                     ->min(0)
                 ->end()
+                ->integerNode('rate_limit_rotation_secs')
+                    ->info('HMAC rate-limit identity rotation period in seconds (default 3600; 0 disables rotation). The rate-limit key is HMAC(pepper, "kiwi-rate-v2|epoch|ip"): the same IP yields a DIFFERENT keyed pseudonym in every epoch, so Redis snapshots cannot correlate one source across time periods. The previous-epoch key is still checked so the sliding window stays exact across a rotation boundary. Linkability within one epoch is unavoidable for rate limiting.')
+                    ->defaultValue(3600)
+                    ->min(0)
+                    ->max(86400)
+                ->end()
                 ->integerNode('rate_limit_window_secs')
                     ->info('Sliding-window size (seconds) for the issuance rate limits (per-client and global).')
                     ->defaultValue(60)
                     ->min(1)
+                ->end()
+                ->integerNode('argon2_lease_ms')
+                    ->info('Tokenized Redis lease lifetime in ms (default 45000). Must exceed the maximum verification request runtime (e.g. PHP request_terminate_timeout) by a safety margin — otherwise a lease can expire while its Argon2 hash is still running and another worker may enter.')
+                    ->defaultValue(45000)
+                    ->min(1000)
+                    ->max(300000)
                 ->end()
                 ->scalarNode('argon2_semaphore_namespace')
                     ->info("Per-deployment discriminator for the Redis-backed Argon2 admission leases and the Redis global rate-limit key (defaults to kernel.project_dir). Two deployments sharing one Redis instance must use different namespaces so their lease sets and global windows do not compete. Sanitized to [A-Za-z0-9_.-] before being embedded in a key.")
@@ -86,9 +98,13 @@ final class Configuration implements ConfigurationInterface
                     // profile rules (t >= 3, p == 1, m_kib >= 8 * p) are
                     // enforced by KiwiCaptcha\Config when the extension builds
                     // it, so this tree must not duplicate those protocol
-                    // constraints (see the difficulty_bits comment).
+                    // constraints (see the difficulty_bits comment). The
+                    // protocol CEILING (MAX_ARGON_T = 6) is shared from the
+                    // core: t above it is declared malformed by the verifier,
+                    // so the tree refuses it at configuration time.
                     ->defaultValue(3)
                     ->min(1)
+                    ->max(Config::MAX_ARGON_T)
                 ->end()
                 ->integerNode('argon_p')
                     ->defaultValue(1)

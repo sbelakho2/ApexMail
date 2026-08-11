@@ -174,13 +174,32 @@ final class Psr6StorageTest extends TestCase
         self::assertNotNull($storage->consume($nonce));
     }
 
+    public function testPsr6KeyLengthNeverExceeds64Characters(): void
+    {
+        // PSR-6 only REQUIRES support for keys up to 64 characters; longer
+        // keys are optional. Base64 nonces may contain '/', '+', and are 44
+        // chars — the hashed 'kc_' + 60-hex key must stay within 64.
+        $key = new \ReflectionMethod(Psr6Storage::class, 'key');
+
+        foreach ([
+            base64_encode(random_bytes(32)),              // may contain / +
+            'wcUWq2z/nJ+T0m7VlNqnUq6PBv+J0x3Rq9yKxZ4Yw2c=', // guaranteed / and +
+            str_repeat('a', 44),
+            'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=', // shared fixture nonce
+        ] as $nonce) {
+            $k = (string) $key->invoke(null, $nonce);
+            self::assertLessThanOrEqual(64, strlen($k), "key for nonce $nonce exceeds 64 chars");
+            self::assertMatchesRegularExpression('/^[A-Za-z0-9_.]+$/', $k, 'key must be PSR-6-safe');
+        }
+    }
+
     public function testCorruptRecordWithUnknownAlgorithmIsTreatedAsAbsent(): void
     {
         $pool = $this->makePool();
         $storage = new Psr6Storage($pool);
         $nonce = 'corrupt-nonce-1';
 
-        $item = $pool->getItem('kiwicaptcha_' . substr(hash('sha256', $nonce), 0, 60));
+        $item = $pool->getItem('kc_' . substr(hash('sha256', $nonce), 0, 60));
         $item->set([
             'nonce' => $nonce,
             'scope' => 'login',
@@ -198,7 +217,7 @@ final class Psr6StorageTest extends TestCase
         // Must NOT throw — corrupt data is treated as absent and cleaned up.
         self::assertNull($storage->find($nonce));
         self::assertNull($storage->consume($nonce));
-        self::assertFalse($pool->hasItem('kiwicaptcha_' . substr(hash('sha256', $nonce), 0, 60)), 'poisoned key must be cleaned up');
+        self::assertFalse($pool->hasItem('kc_' . substr(hash('sha256', $nonce), 0, 60)), 'poisoned key must be cleaned up');
     }
 
     public function testTruncatedJsonRecordIsTreatedAsAbsent(): void
@@ -207,7 +226,7 @@ final class Psr6StorageTest extends TestCase
         $storage = new Psr6Storage($pool);
         $nonce = 'truncated-nonce-1';
 
-        $item = $pool->getItem('kiwicaptcha_' . substr(hash('sha256', $nonce), 0, 60));
+        $item = $pool->getItem('kc_' . substr(hash('sha256', $nonce), 0, 60));
         $item->set(['nonce' => $nonce]); // structurally incomplete record
         $pool->save($item);
 

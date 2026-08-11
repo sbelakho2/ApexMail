@@ -78,6 +78,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // ── Privacy posture enforcement ──────────────────────────────────
         // 'strict' (default) forces the privacy-sensitive options OFF/true:
         //   - telemetry: 'off'      (no client signal fields at all)
+        //   - enforce_telemetry: false (an off widget sends EMPTY telemetry;
+        //                            enforcing it would reject every user)
         //   - same_origin_only: true (cross-origin POSTs rejected)
         //   - min_duration_ms: 0    (the server-side solve-timing floor is a
         //                            timing heuristic and is disabled)
@@ -87,8 +89,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // rate_limit_global already default to nonzero.
         if ($config['privacy_mode'] === 'strict') {
             $config['telemetry'] = 'off';
+            $config['enforce_telemetry'] = false;
             $config['same_origin_only'] = true;
             $config['min_duration_ms'] = 0;
+        } elseif ($config['enforce_telemetry'] && $config['telemetry'] === 'off') {
+            // Impossible combination outside strict mode: enforcement rejects
+            // clients whose telemetry is EMPTY (which is exactly what an off
+            // widget sends), so every legitimate solve would fail. Refuse the
+            // configuration instead of accepting a production trap.
+            throw new \InvalidArgumentException(
+                'kiwi_captcha.enforce_telemetry cannot be true while telemetry is "off": '.
+                'an off widget sends empty telemetry and enforcement rejects it. '.
+                'Set telemetry to "minimal"/"full", or disable enforcement.'
+            );
         }
 
         $container->setParameter('kiwi_captcha.secret_key', $config['secret_key']);
@@ -122,13 +135,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['min_duration_ms'],
             // 10th arg: solver cap (informational, matches the widget).
             5_000_000,
-            // 11th arg: binding mode. The core Issuer emits an EMPTY binding
-            // tag for BindingMode::None — verification then skips the binding
-            // check entirely (maximum privacy; relay protection off).
-            $config['binding_mode'] === 'none'
+        ]))
+            ->setArgument('$bindingMode', $config['binding_mode'] === 'none'
                 ? BindingMode::None
-                : BindingMode::Bound,
-        ]))->setPublic(true);
+                : BindingMode::Bound)
+            ->setPublic(true);
         $container->setDefinition('kiwi_captcha.config', $configDef);
 
         $container->setDefinition('kiwi_captcha.issuer', (new Definition(Issuer::class, [
@@ -143,8 +154,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // Redis client is available — either from the 'redis_service' config
         // option or from the RedisStorage storage definition — and falls back
         // to the in-process token-set gate (per-process only).
+        // The gate is created whenever the concurrency cap is > 0 —
+        // REGARDLESS of the locally configured issuance algorithm. The core
+        // verifier consults the gate based on the STORED record's algorithm,
+        // and the project supports Rust/PHP interoperable records in shared
+        // storage: a Symfony service issuing SHA challenges may still receive
+        // a solution for an Argon record written by a Rust service. There is
+        // no cost for SHA verifications — the gate is never consulted unless
+        // the record actually says Argon2id.
         $gateRef = null;
-        if ($config['algorithm'] === 'argon2id' && $config['argon2_max_concurrent_verifications'] > 0) {
+        if ($config['argon2_max_concurrent_verifications'] > 0) {
             if ($redisRef !== null) {
                 $container->setDefinition(
                     'kiwi_captcha.argon2_redis_semaphore',
@@ -152,6 +171,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $redisRef,
                         $config['argon2_max_concurrent_verifications'],
                         $config['argon2_semaphore_namespace'],
+                        $config['argon2_lease_ms'],
                     ]))->setPublic(true),
                 );
                 $gateRef = new Reference('kiwi_captcha.argon2_redis_semaphore');
@@ -188,6 +208,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $redisRef,
                 $config['rate_limit_global'],
                 $config['argon2_semaphore_namespace'],
+                $config['rate_limit_rotation_secs'],
             ]))->setPublic(true));
             $rateLimiterRef = new Reference('kiwi_captcha.rate_limiter');
         }

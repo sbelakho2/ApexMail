@@ -72,6 +72,34 @@ redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
 return 1
 LUA;
 
+    /**
+     * Epoch-rotated variant of LIMIT_SCRIPT (4 keys): KEYS[1..2] = client
+     * ZSETs (previous epoch, current epoch), KEYS[3..4] = global ZSETs
+     * (previous, current). The identity is HMAC(secret, "kiwi-rate-v2|epoch|
+     * canonical-ip"), so the same IP produces a DIFFERENT keyed pseudonym in
+     * every epoch — an observer of old Redis snapshots cannot correlate one
+     * IP across time periods. Checking the previous-epoch key keeps the
+     * sliding window exact across a rotation boundary.
+     */
+    private const LIMIT_SCRIPT_ROTATED = <<<'LUA'
+local time = redis.call('TIME')
+local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
+local cutoff = now - tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
+redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', cutoff)
+redis.call('ZREMRANGEBYSCORE', KEYS[4], '-inf', cutoff)
+if redis.call('ZCARD', KEYS[1]) + redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[1]) then return 0 end
+if redis.call('ZCARD', KEYS[3]) + redis.call('ZCARD', KEYS[4]) >= tonumber(ARGV[2]) then return -1 end
+redis.call('ZADD', KEYS[2], now, ARGV[4])
+redis.call('ZADD', KEYS[4], now, ARGV[4])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 1000)
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
+redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[3]) + 1000)
+redis.call('PEXPIRE', KEYS[4], tonumber(ARGV[3]) + 1000)
+return 1
+LUA;
+
     /** @var array<string, list<float>> sliding-window hit timestamps, per process */
     private array $hits = [];
 
@@ -98,6 +126,7 @@ LUA;
         private readonly \Redis|\Predis\Client|null $redis = null,
         private readonly int $globalMax = 0,
         string $namespace = '',
+        private readonly int $rateLimitRotationSecs = 0,
     ) {
         $this->namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: '';
     }
@@ -126,6 +155,28 @@ LUA;
         // the other unidentifiable clients instead (conservative, shared
         // budget). The IP itself is never used as a key — only the HMAC.
         $identity = $clientIp === '' ? 'unknown' : $clientIp;
+
+        if ($this->rateLimitRotationSecs > 0) {
+            // Epoch-rotated pseudonym: HMAC(pepper, "kiwi-rate-v2|epoch|
+            // canonical-ip"). The current AND previous epoch identities are
+            // both checked so the sliding window stays exact across a
+            // rotation boundary; new hits are written to the current epoch
+            // only. The same IP therefore yields different keys in different
+            // epochs — no correlation across time periods from Redis keys.
+            $now = $this->now();
+            $epoch = (int) floor($now / $this->rateLimitRotationSecs);
+            $identityCur = $this->epochIdentity($identity, $epoch);
+            $identityPrev = $this->epochIdentity($identity, $epoch - 1);
+
+            if ($this->redis !== null) {
+                return $this->checkRedisRotated($identityPrev, $identityCur);
+            }
+
+            return $this->maxChallenges > 0
+                ? (int) ($this->pool !== null ? $this->allowSharedTwoEpoch($identityPrev, $identityCur) : $this->allowLocalTwoEpoch($identityPrev, $identityCur))
+                : 1;
+        }
+
         $key = hash_hmac('sha256', $identity, $this->pepper);
 
         if ($this->redis !== null) {
@@ -135,6 +186,92 @@ LUA;
         return $this->maxChallenges > 0
             ? (int) ($this->pool !== null ? $this->allowShared($key) : $this->allowLocal($key))
             : 1;
+    }
+
+    private function epochIdentity(string $identity, int $epoch): string
+    {
+        return hash_hmac('sha256', 'kiwi-rate-v2|'.$epoch.'|'.$identity, $this->pepper);
+    }
+
+    private function checkRedisRotated(string $identityPrev, string $identityCur): int
+    {
+        $clientPrev = 'kiwi:rl:client:'.$this->namespace.':'.$identityPrev;
+        $clientCur = 'kiwi:rl:client:'.$this->namespace.':'.$identityCur;
+        $globalPrev = 'kiwi:rl:global:'.$this->namespace.':'.$identityPrev;
+        $globalCur = 'kiwi:rl:global:'.$this->namespace.':'.$identityCur;
+        $windowMs = $this->windowSecs * 1000;
+        $requestId = bin2hex(random_bytes(16));
+        $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;
+        $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
+
+        $result = $this->eval(self::LIMIT_SCRIPT_ROTATED, [$clientPrev, $clientCur, $globalPrev, $globalCur], [
+            (string) $clientMax,
+            (string) $globalMax,
+            (string) $windowMs,
+            $requestId,
+        ]);
+
+        return (int) $result;
+    }
+
+    /**
+     * @param list<float> $a
+     * @param list<float> $b
+     *
+     * @return list<float>
+     */
+    private function pruneTwo(array $a, array $b, float $now): array
+    {
+        $cutoff = $now - $this->windowSecs;
+
+        return array_values(array_filter(array_merge($a, $b), static fn (float $ts): bool => $ts >= $cutoff));
+    }
+
+    private function allowLocalTwoEpoch(string $identityPrev, string $identityCur): bool
+    {
+        $now = $this->now();
+        $hits = $this->pruneTwo($this->hits[$identityPrev] ?? [], $this->hits[$identityCur] ?? [], $now);
+        if (\count($hits) >= $this->maxChallenges) {
+            $windowSecs = $this->windowSecs;
+            $this->hits[$identityPrev] = array_values(array_filter($this->hits[$identityPrev] ?? [], static fn (float $ts): bool => $ts >= $now - $windowSecs));
+            $this->hits[$identityCur] = array_values(array_filter($this->hits[$identityCur] ?? [], static fn (float $ts): bool => $ts >= $now - $windowSecs));
+
+            return false;
+        }
+        $this->hits[$identityCur][] = $now;
+
+        return true;
+    }
+
+    private function allowSharedTwoEpoch(string $identityPrev, string $identityCur): bool
+    {
+        $now = $this->now();
+        $cacheKeyPrev = self::CACHE_KEY_PREFIX.$identityPrev;
+        $cacheKeyCur = self::CACHE_KEY_PREFIX.$identityCur;
+
+        $itemPrev = $this->pool->getItem($cacheKeyPrev);
+        $itemCur = $this->pool->getItem($cacheKeyCur);
+        $hits = $this->pruneTwo(
+            \is_array($itemPrev->isHit() ? $itemPrev->get() : null) ? $this->timestamps($itemPrev->get()) : [],
+            \is_array($itemCur->isHit() ? $itemCur->get() : null) ? $this->timestamps($itemCur->get()) : [],
+            $now,
+        );
+
+        if (\count($hits) >= $this->maxChallenges) {
+            $itemPrev->set(['t' => []]);
+            $itemPrev->expiresAfter($this->windowSecs + 1);
+            $this->pool->save($itemPrev);
+            $itemCur->set(['t' => []]);
+            $itemCur->expiresAfter($this->windowSecs + 1);
+            $this->pool->save($itemCur);
+
+            return false;
+        }
+        $itemCur->set(['t' => array_merge($this->timestamps(\is_array($itemCur->get()) ? $itemCur->get() : []), [$now])]);
+        $itemCur->expiresAfter($this->windowSecs + 1);
+        $this->pool->save($itemCur);
+
+        return true;
     }
 
     private function checkRedis(string $identity): int

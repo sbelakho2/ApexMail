@@ -208,12 +208,18 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::WrongScope);
         }
 
-        // 5. IP binding (optional but recommended): challenge issued to one
-        //    client, submitted from another = relay attack. Protocol v2
-        //    records carry a nonce-bound binding tag (recomputed here); v1
-        //    records carry the legacy stable IP hash. Empty tag = binding
-        //    disabled; null clientIp = check skipped.
-        if ($peek->bindingTag !== '' && $clientIp !== null) {
+        // 5. IP binding. The stored record is AUTHORITATIVE: an empty
+        //    binding tag means binding is disabled (BindingMode::None);
+        //    a NON-EMPTY tag means the challenge IS bound, so a missing
+        //    client IP fails closed (MissingClientIp) instead of silently
+        //    skipping the check — the caller must provide the IP it would
+        //    have passed to issuance. Protocol v2 records carry a nonce-bound
+        //    binding tag (recomputed here); v1 records carry the legacy
+        //    stable IP hash.
+        if ($peek->bindingTag !== '') {
+            if ($clientIp === null) {
+                return VerifyOutcome::invalid(VerifyError::MissingClientIp);
+            }
             $expectedTag = $peek->protocolVersion === 1
                 ? Issuer::hashIp($clientIp, $secretKey)
                 : Issuer::bindingTag($peek->nonce, $clientIp, $secretKey);
@@ -316,6 +322,12 @@ final class Verifier
      */
     private function validateRecord(ChallengeRecord $record): bool
     {
+        // Protocol version is part of the wire contract: only 1 (legacy,
+        // migration window) and 2 (current) exist. Anything else is a
+        // corrupt/foreign record.
+        if ($record->protocolVersion !== 1 && $record->protocolVersion !== 2) {
+            return false;
+        }
         $scopeLen = \strlen($record->scope);
         if ($scopeLen < 1 || $scopeLen > 128 || \str_contains($record->scope, '|')) {
             return false;

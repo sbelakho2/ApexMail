@@ -125,8 +125,11 @@ pub struct VerifyContext<'a> {
     /// The current client's IP address. When [`Some`], the challenge is
     /// rejected if the stored `ip_hash` does not match
     /// `hash_ip(client_ip, secret_key)` — enforcing the IP binding that was
-    /// recorded at issuance (relay-attack mitigation). When `None`, the IP
-    /// binding check is skipped (useful for tests or proxies that rotate IPs).
+    /// recorded at issuance (relay-attack mitigation). When `None` and the
+    /// record's binding tag is NON-EMPTY, the solution is rejected with
+    /// [`VerifyError::MissingClientIp`] — a bound challenge requires its IP.
+    /// Only records with an empty binding tag (`BindingMode::None`) verify
+    /// without an IP.
     pub client_ip: Option<&'a str>,
     /// Browser/environment telemetry gathered by the widget (client-controlled
     /// and forgeable — treated strictly as a supplementary signal).
@@ -166,6 +169,8 @@ pub enum VerifyError {
     TooFast,
     #[error("challenge was issued to a different client IP")]
     IpMismatch,
+    #[error("challenge is IP-bound but no client IP was supplied")]
+    MissingClientIp,
     #[error("submitted counter exceeds the solver maximum")]
     CounterTooLarge,
     #[error("challenge was issued for a different scope")]
@@ -196,6 +201,12 @@ pub enum VerifyError {
 ///
 /// Returns [`VerifyError::MalformedRecord`] on any violation.
 pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
+    // Protocol version is part of the wire contract: only 1 (legacy,
+    // migration window) and 2 (current) exist — anything else is a
+    // corrupt/foreign record.
+    if record.protocol_version != 1 && record.protocol_version != 2 {
+        return Err(VerifyError::MalformedRecord);
+    }
     if record.scope.is_empty() || record.scope.len() > 128 || record.scope.contains('|') {
         return Err(VerifyError::MalformedRecord);
     }
@@ -322,18 +333,23 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     at the route layer) so the secure behavior cannot be forgotten.
     //     An empty binding_tag means binding is disabled (BindingMode::None)
     //     and the check is skipped; a None client_ip also skips it.
-    if let Some(client_ip) = ctx.client_ip {
-        if !ctx.record.binding_tag.is_empty() {
-            let expected = match ctx.record.protocol_version {
-                1 => hash_ip(client_ip, ctx.secret_key),
-                _ => match binding_tag(&ctx.record.nonce, client_ip, ctx.secret_key) {
-                    Ok(tag) => tag,
-                    Err(_) => return VerifyOutcome::Invalid(VerifyError::IpMismatch),
-                },
-            };
-            if !ct_eq(ctx.record.binding_tag.as_bytes(), expected.as_bytes()) {
-                return VerifyOutcome::Invalid(VerifyError::IpMismatch);
-            }
+    // The stored record is AUTHORITATIVE: an empty binding tag means binding
+    // is disabled (BindingMode::None); a NON-EMPTY tag means the challenge IS
+    // bound, so a missing client IP fails closed (MissingClientIp) instead of
+    // silently skipping the check.
+    if !ctx.record.binding_tag.is_empty() {
+        let Some(client_ip) = ctx.client_ip else {
+            return VerifyOutcome::Invalid(VerifyError::MissingClientIp);
+        };
+        let expected = match ctx.record.protocol_version {
+            1 => hash_ip(client_ip, ctx.secret_key),
+            _ => match binding_tag(&ctx.record.nonce, client_ip, ctx.secret_key) {
+                Ok(tag) => tag,
+                Err(_) => return VerifyOutcome::Invalid(VerifyError::IpMismatch),
+            },
+        };
+        if !ct_eq(ctx.record.binding_tag.as_bytes(), expected.as_bytes()) {
+            return VerifyOutcome::Invalid(VerifyError::IpMismatch);
         }
     }
 
@@ -878,6 +894,20 @@ mod tests {
     }
 
     #[test]
+    fn protocol_version_three_is_malformed() {
+        // Only protocol versions 1 (legacy migration) and 2 (current) exist
+        // in the wire contract — anything else is a corrupt/foreign record.
+        let mut record = make_record(8);
+        record.protocol_version = 3;
+        let counter = solve_for_test(&record).unwrap();
+        let outcome = verify(&mut record, counter, 5000);
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+    }
+
+    #[test]
     fn wrong_counter_is_rejected() {
         let mut record = make_record(8);
         // Find a valid counter, then use a different one.
@@ -1060,7 +1090,10 @@ mod tests {
     }
 
     #[test]
-    fn ip_binding_skipped_when_client_ip_absent() {
+    fn bound_record_without_client_ip_fails_closed() {
+        // A non-empty binding tag means the challenge IS bound — omitting
+        // the client IP must fail with MissingClientIp, not silently skip
+        // the check (the caller must provide the IP it passed to issuance).
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
@@ -1072,12 +1105,52 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
-            client_ip: None, // opt-out (rotating proxies etc.)
+            client_ip: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
         };
-        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::MissingClientIp)
+        );
+
+        // A record with an EMPTY binding tag (BindingMode::None) still
+        // verifies without an IP — binding is genuinely disabled. Issued
+        // properly so the v2 signature (which covers the tag) stays valid.
+        let config = ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+            binding_mode: BindingMode::None,
+        };
+        let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
+        let mut unbound = issued.record;
+        let counter2 = solve_for_test(&unbound).unwrap();
+        let mut ctx2 = VerifyContext {
+            record: &mut unbound,
+            secret_key: "test-key-16-bytes!",
+            counter: counter2,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+        };
+        assert_eq!(verify_solution(&mut ctx2), VerifyOutcome::Valid);
     }
 
     #[test]
@@ -1147,8 +1220,8 @@ mod tests {
             max_attempts: 3,
         };
         verify_solution(&mut ctx); // wrong counter
-        drop(ctx);
-        assert_eq!(record.attempts_used, 1);
+        let attempts = record.attempts_used;
+        assert_eq!(attempts, 1);
         let mut ctx2 = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
@@ -1164,7 +1237,6 @@ mod tests {
             max_attempts: 3,
         };
         assert_eq!(verify_solution(&mut ctx2), VerifyOutcome::Valid);
-        drop(ctx2);
         assert_eq!(record.attempts_used, 2);
     }
 
@@ -1600,7 +1672,10 @@ mod tests {
         // the hash outcome itself is probabilistic and irrelevant here).
         let mut record2 = make_record(4);
         let outcome = verify(&mut record2, crate::challenge::SOLVER_MAX_HASHES, 5000);
-        assert_ne!(outcome, VerifyOutcome::Invalid(VerifyError::CounterTooLarge));
+        assert_ne!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::CounterTooLarge)
+        );
     }
 
     #[test]
@@ -1825,10 +1900,7 @@ mod tests {
 
         let mut bad_ttl = make_record(8);
         bad_ttl.expires_at = bad_ttl.issued_at + 301; // > MAX_TTL_SECS
-        assert_eq!(
-            validate_record(&bad_ttl),
-            Err(VerifyError::MalformedRecord)
-        );
+        assert_eq!(validate_record(&bad_ttl), Err(VerifyError::MalformedRecord));
 
         let mut bad_scope = make_record(8);
         bad_scope.scope = "login|admin".into(); // contains the separator
@@ -2099,10 +2171,7 @@ mod tests {
         assert_eq!(record.challenge, FIXTURE_CHALLENGE_V2);
         // The challenge's base64 half is byte-exactly the v2 canonical.
         let b64 = FIXTURE_CHALLENGE_V2.split('.').next().unwrap();
-        assert_eq!(
-            B64.decode(b64).unwrap(),
-            FIXTURE_CANONICAL_V2.as_bytes()
-        );
+        assert_eq!(B64.decode(b64).unwrap(), FIXTURE_CANONICAL_V2.as_bytes());
         assert_eq!(
             verify_fixture(&mut record),
             VerifyOutcome::Valid,
@@ -2117,10 +2186,7 @@ mod tests {
         let mut record = fixture_record(1);
         assert_eq!(record.challenge, FIXTURE_CHALLENGE_V1);
         let b64 = FIXTURE_CHALLENGE_V1.split('.').next().unwrap();
-        assert_eq!(
-            B64.decode(b64).unwrap(),
-            FIXTURE_CANONICAL_V1.as_bytes()
-        );
+        assert_eq!(B64.decode(b64).unwrap(), FIXTURE_CANONICAL_V1.as_bytes());
         assert_eq!(
             verify_fixture(&mut record),
             VerifyOutcome::Valid,

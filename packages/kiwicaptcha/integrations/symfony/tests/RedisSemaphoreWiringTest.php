@@ -105,8 +105,13 @@ final class RedisSemaphoreWiringTest extends TestCase
         self::assertEquals(new Reference('kiwi_captcha.argon2_inprocess_gate'), $verifier->getArgument(1));
     }
 
-    public function testSha256ModeWiresNoGate(): void
+    public function testSha256ModeStillWiresRedisGateWhenCapConfigured(): void
     {
+        // The gate is created whenever the cap is > 0, regardless of the
+        // locally configured issuance algorithm — a SHA-issuing service may
+        // verify Argon records written by another service (cross-language
+        // shared storage), and the verifier consults the gate based on the
+        // STORED record. The Redis semaphore must therefore be wired.
         $container = $this->load([
             'redis_service' => 'my.redis.client',
         ], static function (ContainerBuilder $c): void {
@@ -115,7 +120,22 @@ final class RedisSemaphoreWiringTest extends TestCase
 
         $verifier = $container->getDefinition('kiwi_captcha.verifier');
         self::assertSame(Verifier::class, $verifier->getClass());
-        self::assertNull($verifier->getArgument(1), 'sha256 mode must wire a null gate');
+        self::assertNotNull($verifier->getArgument(1), 'sha256 mode with a cap must wire the Redis gate');
+        self::assertTrue($container->hasDefinition('kiwi_captcha.argon2_redis_semaphore'));
+    }
+
+    public function testSha256ModeWithZeroCapWiresNoGate(): void
+    {
+        // Cap 0 = admission disabled — no gate at all, regardless of algorithm.
+        $container = $this->load([
+            'redis_service' => 'my.redis.client',
+            'argon2_max_concurrent_verifications' => 0,
+        ], static function (ContainerBuilder $c): void {
+            $c->register('my.redis.client', \Redis::class);
+        });
+
+        $verifier = $container->getDefinition('kiwi_captcha.verifier');
+        self::assertNull($verifier->getArgument(1));
         self::assertFalse($container->hasDefinition('kiwi_captcha.argon2_redis_semaphore'));
         self::assertFalse($container->hasDefinition('kiwi_captcha.argon2_inprocess_gate'));
     }

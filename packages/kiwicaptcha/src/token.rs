@@ -55,6 +55,9 @@ pub struct IssuedChallenge {
 /// The client-submitted solution, decoded from the `kiwi__token` hidden input.
 ///
 /// The wire format is `base64(nonce || "." || counter || "." || duration_ms || "." || telemetry_json)`.
+/// Hard ceiling for the client-reported duration (telemetry only): 1 hour.
+pub const MAX_DURATION_MS: u64 = 3_600_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolutionToken {
     /// The nonce from the original challenge (base64, 32 bytes).
@@ -115,17 +118,30 @@ impl SolutionToken {
         let counter: u64 = counter_str
             .parse()
             .map_err(|_| DecodeError::InvalidCounter)?;
-        // The counter must be within what any solver can produce: the widget
-        // caps its search at SOLVER_MAX_HASHES (5M), so a larger counter was
-        // not minted by a real solve — it is a forged or malformed token.
-        if counter > crate::challenge::SOLVER_MAX_HASHES {
+        // The counter must be within what any solver can produce: the JS
+        // solver searches counter < SOLVER_MAX_HASHES (5,000,000 attempts),
+        // so the largest legitimate counter is 4,999,999 — anything >= 5M
+        // was not minted by a real solve (matches PHP exactly).
+        if counter >= crate::challenge::SOLVER_MAX_HASHES {
             return Err(DecodeError::InvalidCounter);
         }
         let duration_ms: u64 = duration_str
             .parse()
             .map_err(|_| DecodeError::InvalidDuration)?;
+        // The client-reported duration is telemetry only, but the wire
+        // protocol bounds it (0 .. 3_600_000 ms = 1 hour) so both
+        // implementations accept exactly the same language.
+        if duration_ms > MAX_DURATION_MS {
+            return Err(DecodeError::InvalidDuration);
+        }
         let telemetry: serde_json::Value =
             serde_json::from_str(telemetry_str).map_err(|_| DecodeError::Malformed)?;
+        // Telemetry must be a JSON OBJECT in both implementations ({} for an
+        // off widget, {v,mode,me,ke,...} otherwise) — arrays, strings,
+        // numbers, booleans and null are not part of the wire language.
+        if !telemetry.is_object() {
+            return Err(DecodeError::Malformed);
+        }
 
         Ok(Self {
             nonce: nonce.to_string(),
@@ -214,31 +230,91 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_counter_beyond_solver_max() {
+    fn decode_rejects_counter_at_and_beyond_solver_max() {
+        // The JS solver searches counter < SOLVER_MAX_HASHES (5,000,000
+        // attempts), so the largest legitimate counter is 4,999,999 — the
+        // cap value itself is never minted by a real solve (off-by-one
+        // parity with PHP).
+        for counter in [
+            crate::challenge::SOLVER_MAX_HASHES,
+            crate::challenge::SOLVER_MAX_HASHES + 1,
+        ] {
+            let token = SolutionToken {
+                nonce: VALID_NONCE.to_string(),
+                counter,
+                duration_ms: 2,
+                telemetry: serde_json::json!({}),
+            };
+            assert!(
+                matches!(
+                    SolutionToken::decode(&token.encode()),
+                    Err(DecodeError::InvalidCounter)
+                ),
+                "counter {counter} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_accepts_counter_just_below_solver_max() {
         let token = SolutionToken {
             nonce: VALID_NONCE.to_string(),
-            counter: crate::challenge::SOLVER_MAX_HASHES + 1,
+            counter: crate::challenge::SOLVER_MAX_HASHES - 1,
             duration_ms: 2,
+            telemetry: serde_json::json!({}),
+        };
+        assert!(SolutionToken::decode(&token.encode()).is_ok());
+    }
+
+    #[test]
+    fn decode_rejects_non_object_telemetry() {
+        // Wire parity with PHP: telemetry must be a JSON object — arrays,
+        // strings, numbers, booleans and null are not part of the language.
+        for bad in [
+            serde_json::json!([]),
+            serde_json::json!("hello"),
+            serde_json::json!(123),
+            serde_json::json!(true),
+            serde_json::Value::Null,
+        ] {
+            let token = SolutionToken {
+                nonce: VALID_NONCE.to_string(),
+                counter: 1,
+                duration_ms: 2,
+                telemetry: bad,
+            };
+            assert!(
+                matches!(
+                    SolutionToken::decode(&token.encode()),
+                    Err(DecodeError::Malformed)
+                ),
+                "non-object telemetry must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_rejects_duration_beyond_protocol_bound() {
+        let token = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 1,
+            duration_ms: MAX_DURATION_MS + 1,
             telemetry: serde_json::json!({}),
         };
         assert!(
             matches!(
                 SolutionToken::decode(&token.encode()),
-                Err(DecodeError::InvalidCounter)
+                Err(DecodeError::InvalidDuration)
             ),
-            "counter above SOLVER_MAX_HASHES must be rejected"
+            "duration above MAX_DURATION_MS must be rejected"
         );
-        // Exactly at the solver maximum is accepted.
-        let at_max = SolutionToken {
+        let ok = SolutionToken {
             nonce: VALID_NONCE.to_string(),
-            counter: crate::challenge::SOLVER_MAX_HASHES,
-            duration_ms: 2,
+            counter: 1,
+            duration_ms: MAX_DURATION_MS,
             telemetry: serde_json::json!({}),
         };
-        assert_eq!(
-            SolutionToken::decode(&at_max.encode()).unwrap().counter,
-            crate::challenge::SOLVER_MAX_HASHES
-        );
+        assert!(SolutionToken::decode(&ok.encode()).is_ok());
     }
 
     #[test]

@@ -26,7 +26,7 @@ final class Psr6Storage implements StorageInterface
      * deliberately avoids the colon used by the Redis backend (Symfony Cache
      * rejects keys such as "kiwicaptcha:nonce").
      */
-    private const PREFIX = 'kiwicaptcha_';
+    private const PREFIX = 'kc_';
 
     /**
      * PSR-6 cache key for a challenge nonce.
@@ -34,8 +34,11 @@ final class Psr6Storage implements StorageInterface
      * The wire nonce is standard Base64 and may legitimately contain the
      * reserved PSR-6 characters `/` and `+` (and is 44 chars). Conforming
      * pools are allowed to reject such keys, so the nonce is never used
-     * directly as a cache key — it is hashed to a PSR-6-safe hex digest
-     * (3 + 60 = 63 chars).
+     * directly as a cache key — it is hashed to a PSR-6-safe hex digest.
+     *
+     * Key length: 3 (prefix) + 60 (hex digest) = 63 characters — within the
+     * 64-character maximum that PSR-6 only REQUIRES implementations to
+     * support, so every conforming pool accepts it.
      */
     private static function key(string $nonce): string
     {

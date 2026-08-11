@@ -46,10 +46,12 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             throw new UnexpectedTypeException($value, 'string');
         }
 
-        $clientIp = null;
-        if ($constraint->bindIp && $this->requestStack->getMainRequest() !== null) {
-            $clientIp = $this->requestStack->getMainRequest()->getClientIp();
-        }
+        // The issued record is authoritative: a non-empty binding tag means
+        // the challenge IS bound, so always pass the request IP (a bound
+        // record with a missing IP fails closed with MissingClientIp inside
+        // the verifier). Records issued with BindingMode::None carry an
+        // empty tag and verify regardless.
+        $clientIp = $this->requestStack->getMainRequest()?->getClientIp();
 
         // CapacityExceeded (Argon2id admission saturated) surfaces as a
         // regular failed verification — fail closed as a captcha violation.

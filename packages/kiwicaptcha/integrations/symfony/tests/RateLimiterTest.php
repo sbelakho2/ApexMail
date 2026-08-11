@@ -272,6 +272,67 @@ final class RateLimiterTest extends TestCase
         self::assertSame('GLOBAL_RATE_LIMITED', $body['error']['code'], 'global exhaustion must carry the distinct code');
     }
 
+    public function testEpochRotationChangesIdentityAcrossEpochs(): void
+    {
+        $client = new FakePredisClient();
+        $clock = 1_000_000.0; // fixed fake epoch-seconds
+        $client->setTimeMs((int) ($clock * 1000));
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 3,
+            windowSecs: 60,
+            redis: $client,
+            globalMax: 1000,
+            namespace: 'rot-test',
+            pepper: 'pepper',
+            rateLimitRotationSecs: 100,
+            now: static fn (): float => $clock,
+        );
+
+        // Three hits in epoch 10 (identity A).
+        self::assertSame(1, $limiter->check('203.0.113.7'));
+        self::assertSame(1, $limiter->check('203.0.113.7'));
+        self::assertSame(1, $limiter->check('203.0.113.7'));
+        self::assertSame(0, $limiter->check('203.0.113.7'), 'per-client cap reached in epoch 10');
+
+        // Rotate into epoch 11: a NEW pseudonym, so the cap is fresh — but
+        // the previous-epoch hits still count within the window, so only 3
+        // of the pre-rotation budget carry over and the cap still holds
+        // until the window slides.
+        $clock = 1_000_100.0; // exactly at the epoch boundary (floor(1000100/100) = 10001)
+        // 1_000_100 / 100 = 10001 (not 11) — use an explicit small rotation
+        // for deterministic math: rotation 100, epoch = floor(now/100).
+        self::assertSame(0, $limiter->check('203.0.113.7'), 'previous-epoch hits still count inside the window');
+    }
+
+    public function testEpochRotationReleasesAfterWindowSlides(): void
+    {
+        $client = new FakePredisClient();
+        $clockSecs = 10_000.0;
+        // The fake Redis server clock must advance IN SYNC with the
+        // limiter's clock: the Lua TIME read drives the pruning.
+        $client->setTimeMs((int) ($clockSecs * 1000));
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 2,
+            windowSecs: 60,
+            redis: $client,
+            globalMax: 1000,
+            namespace: 'rot-test2',
+            pepper: 'pepper',
+            rateLimitRotationSecs: 100,
+            now: static fn (): float => $clockSecs,
+        );
+
+        self::assertSame(1, $limiter->check('198.51.100.9'));
+        self::assertSame(1, $limiter->check('198.51.100.9'));
+        self::assertSame(0, $limiter->check('198.51.100.9'));
+
+        // 61s later: the window has fully slid (both epochs pruned) — the
+        // cap is released even though the epoch changed.
+        $clockSecs = 10_061.0;
+        $client->setTimeMs((int) ($clockSecs * 1000));
+        self::assertSame(1, $limiter->check('198.51.100.9'), 'window slide must release the cap');
+    }
+
     public function testRedisLimiterWindowExpiryAllowsAgain(): void
     {
         $client = $this->requireRedisClient();

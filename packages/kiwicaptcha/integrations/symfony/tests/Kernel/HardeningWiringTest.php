@@ -66,8 +66,14 @@ final class HardeningWiringTest extends TestCase
         self::assertInstanceOf(Verifier::class, $validatorProperty->getValue($validator));
     }
 
-    public function testSha256ModeKeepsPlainVerifierWithoutGate(): void
+    public function testSha256ModeStillWiresGateWhenCapConfigured(): void
     {
+        // The gate is created whenever the cap is > 0 — REGARDLESS of the
+        // locally configured issuance algorithm: the verifier consults it
+        // based on the STORED record, and a SHA-issuing service may receive
+        // solutions for Argon records written by another (e.g. Rust) service
+        // sharing the storage. No cost for SHA verifications: the gate is
+        // only consulted when the record says Argon2id.
         $kernel = new TestKernel('test', true);
         $kernel->boot();
         $container = $kernel->getContainer()->get('test.service_container');
@@ -76,6 +82,6 @@ final class HardeningWiringTest extends TestCase
         self::assertInstanceOf(Verifier::class, $verifier);
 
         $property = new \ReflectionProperty(Verifier::class, 'argonGate');
-        self::assertNull($property->getValue($verifier), 'sha256 mode must wire no admission gate');
+        self::assertInstanceOf(InProcessArgonGate::class, $property->getValue($verifier), 'sha256 mode with a cap must still wire the admission gate');
     }
 }

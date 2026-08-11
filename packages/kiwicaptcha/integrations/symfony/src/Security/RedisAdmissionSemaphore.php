@@ -34,8 +34,8 @@ use KiwiCaptcha\VerificationAdmissionGate;
  */
 final class RedisAdmissionSemaphore implements VerificationAdmissionGate
 {
-    /** Lease lifetime in ms; expired leases are reaped by the next acquire. */
-    private const LEASE_MS = 45_000;
+    /** Default lease lifetime in ms; expired leases are reaped by the next acquire. */
+    private const DEFAULT_LEASE_MS = 45_000;
 
     /**
      * Atomic acquire (exact audit semantics):
@@ -85,7 +85,11 @@ LUA;
         private readonly \Redis|\Predis\Client $client,
         private readonly int $maxConcurrent,
         string $namespace = 'default',
+        private readonly int $leaseMs = self::DEFAULT_LEASE_MS,
     ) {
+        if ($leaseMs < 1_000) {
+            throw new \InvalidArgumentException('leaseMs must be >= 1000');
+        }
         $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'default';
         $this->key = 'kiwicaptcha:argon2:leases:'.$suffix;
     }
@@ -96,7 +100,7 @@ LUA;
             return 'disabled';
         }
         $token = bin2hex(random_bytes(16));
-        $result = $this->eval(self::ACQUIRE_SCRIPT, [$this->key], [(string) $this->maxConcurrent, (string) self::LEASE_MS, $token]);
+        $result = $this->eval(self::ACQUIRE_SCRIPT, [$this->key], [(string) $this->maxConcurrent, (string) $this->leaseMs, $token]);
 
         return $result === 1 ? $token : null;
     }

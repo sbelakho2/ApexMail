@@ -30,6 +30,21 @@ boundary.
 
 Copyright (c) 2026 Bel Consulting OÜ · MIT License
 
+## Privacy guarantees
+
+**No third-party tracking or runtime services. Privacy Strict collects no
+behavioral, device, hardware, or screen telemetry. Raw IP addresses are not
+persisted; short-lived keyed pseudonyms are used only where required for
+abuse prevention.**
+
+Concretely, KiwiCaptcha stores no raw IP and no stable IP-derived identifier:
+the challenge record holds a nonce-bound binding tag (unique per challenge)
+and the rate limiter keys are peppered HMACs of the IP — rotated per epoch
+(`rate_limit_rotation_secs`, default 3600), so the same IP yields a
+DIFFERENT keyed pseudonym in every epoch and Redis snapshots cannot
+correlate one source across time periods. Linkability within one epoch is
+unavoidable for rate limiting.
+
 ## Installation
 
 1. Require the bundle (from this repository, or once published to Packagist):
@@ -330,7 +345,13 @@ and only after the cheap validation checks. Two gate backends:
   member scored at its expiry (45 s), and `release()` removes EXACTLY that
   token. A stale release — releasing a lease that expired or was already
   released — can never remove a newer lease (ZREM of an absent member is a
-  no-op). Expired leases (crashed workers) are reaped by the acquire script
+  no-op). Expired leases (crashed workers) are reaped by the acquire script.
+  For the cap to be an absolute operational invariant, the maximum
+  verification request runtime must stay BELOW the lease lifetime
+  (`argon2_lease_ms`, default 45000 ms) — otherwise a lease can expire while
+  its Argon2 hash is still running and another worker may enter. Example:
+  PHP `request_terminate_timeout = 30s` with the default 45 s lease (plus a
+  safety margin).
   before admission, so the cap self-heals with no watchdog counter to drift.
   Key: `kiwicaptcha:argon2:leases:<namespace>` (namespace defaults to
   `kernel.project_dir`; sanitized to `[A-Za-z0-9_.-]`).

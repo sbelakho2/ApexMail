@@ -209,25 +209,60 @@ final class FakePredisClient extends \Predis\Client
             return 1;
         }
 
-        // Rate limiter: prune both windows, per-client cap, then global cap.
-        $clientKey = (string) $keys[0];
-        $globalKey = (string) $keys[1];
+        // Rate limiter (2 keys): prune both windows, per-client cap, then
+        // global cap.
+        if ($numKeys === 2) {
+            $clientKey = (string) $keys[0];
+            $globalKey = (string) $keys[1];
+            $clientMax = (int) $rest[0];
+            $globalMax = (int) $rest[1];
+            $windowMs = (int) $rest[2];
+            $requestId = (string) $rest[3];
+            $cutoff = $now - $windowMs;
+            $this->fakeZremrangebyscore([$clientKey, '-inf', (string) $cutoff]);
+            $this->fakeZremrangebyscore([$globalKey, '-inf', (string) $cutoff]);
+            if ($this->zcard($clientKey) >= $clientMax) {
+                return 0;
+            }
+            if ($this->zcard($globalKey) >= $globalMax) {
+                return -1;
+            }
+            $this->fakeZadd([$clientKey, (string) $now, $requestId]);
+            $this->fakeZadd([$globalKey, (string) $now, $requestId]);
+            $this->fakePexpire([$clientKey, (string) ($windowMs + 1000)]);
+            $this->fakePexpire([$globalKey, (string) ($windowMs + 1000)]);
+
+            return 1;
+        }
+
+        // Epoch-rotated limiter (4 keys): clientPrev, clientCur,
+        // globalPrev, globalCur. Both epochs are pruned and summed; new
+        // hits go to the CURRENT epoch keys only.
+        $clientPrev = (string) $keys[0];
+        $clientCur = (string) $keys[1];
+        $globalPrev = (string) $keys[2];
+        $globalCur = (string) $keys[3];
         $clientMax = (int) $rest[0];
         $globalMax = (int) $rest[1];
         $windowMs = (int) $rest[2];
         $requestId = (string) $rest[3];
         $cutoff = $now - $windowMs;
-        $this->fakeZremrangebyscore([$clientKey, '-inf', (string) $cutoff]);
-        $this->fakeZremrangebyscore([$globalKey, '-inf', (string) $cutoff]);
-        if ($this->zcard($clientKey) >= $clientMax) {
+        foreach ([$clientPrev, $clientCur, $globalPrev, $globalCur] as $k) {
+            $this->fakeZremrangebyscore([$k, '-inf', (string) $cutoff]);
+        }
+        if ($this->zcard($clientPrev) + $this->zcard($clientCur) >= $clientMax) {
             return 0;
         }
-        if ($this->zcard($globalKey) >= $globalMax) {
+        if ($this->zcard($globalPrev) + $this->zcard($globalCur) >= $globalMax) {
             return -1;
         }
-        $this->fakeZadd([$clientKey, (string) $now, $requestId]);
-        $this->fakeZadd([$globalKey, (string) $now, $requestId]);
-        $this->fakePexpire([$clientKey, (string) ($windowMs + 1000)]);
+        $this->fakeZadd([$clientCur, (string) $now, $requestId]);
+        $this->fakeZadd([$globalCur, (string) $now, $requestId]);
+        foreach ([$clientPrev, $clientCur, $globalPrev, $globalCur] as $k) {
+            $this->fakePexpire([$k, (string) ($windowMs + 1000)]);
+        }
+
+        return 1;
         $this->fakePexpire([$globalKey, (string) ($windowMs + 1000)]);
 
         return 1;

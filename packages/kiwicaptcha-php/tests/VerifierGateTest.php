@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -638,5 +639,43 @@ final class VerifierGateTest extends TestCase
         $outcome = $verifier->verify($this->tokenFor($record->nonce, 0), Vectors::SECRET, 'login', self::CLIENT_IP);
 
         self::assertSame(VerifyError::Expired, $outcome->error, 'a positional Closure must drive the TTL clock');
+    }
+
+    public function testProtocolVersion3IsMalformed(): void
+    {
+        // Only protocol versions 1 (legacy migration) and 2 (current) exist
+        // in the wire contract — anything else is a corrupt/foreign record.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        $storage->store(new \KiwiCaptcha\ChallengeRecord(
+            nonce: $record->nonce,
+            scope: $record->scope,
+            bindingTag: $record->bindingTag,
+            issuedAt: $record->issuedAt,
+            expiresAt: $record->expiresAt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $record->prefix,
+            challenge: $record->challenge,
+            minDurationMs: $record->minDurationMs,
+            issuedAtNs: $record->issuedAtNs,
+            protocolVersion: 3,
+        ));
+        $counter = 0;
+        do {
+            $h = hash('sha256', $challenge->prefix . $counter . base64_decode($challenge->salt, true), true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($h) < $challenge->targetBits);
+        --$counter;
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+        $outcome = (new Verifier($storage))->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', $record->issuedAtNs + 1_000_000);
+        self::assertSame(VerifyError::MalformedRecord->value, $outcome->code());
     }
 }

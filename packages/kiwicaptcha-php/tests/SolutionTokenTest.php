@@ -76,10 +76,19 @@ final class SolutionTokenTest extends TestCase
         SolutionToken::decode(base64_encode(self::NONCE.'.5000001.100.{}'));
     }
 
-    public function testAcceptsCounterAtSolverMaximum(): void
+    public function testRejectsCounterAtSolverMaximum(): void
     {
-        $token = SolutionToken::decode(base64_encode(self::NONCE.'.5000000.100.{}'));
-        self::assertSame(5_000_000, $token->counter);
+        // The JS solver searches counter < 5,000,000 (5M attempts), so the
+        // largest legitimate counter is 4,999,999 — exactly 5,000,000 was
+        // never minted by a real solve (off-by-one parity with Rust).
+        $this->expectException(DecodeError::class);
+        SolutionToken::decode(base64_encode(self::NONCE.'.5000000.100.{}'));
+    }
+
+    public function testAcceptsCounterJustBelowSolverMaximum(): void
+    {
+        $token = SolutionToken::decode(base64_encode(self::NONCE.'.4999999.100.{}'));
+        self::assertSame(4_999_999, $token->counter);
     }
 
     public function testRejectsCounterLongerThanSevenDigits(): void
@@ -102,6 +111,32 @@ final class SolutionTokenTest extends TestCase
     {
         $this->expectException(DecodeError::class);
         SolutionToken::decode(base64_encode(self::NONCE.'.1.100.{not-json'));
+    }
+
+    public function testRejectsNonObjectTelemetry(): void
+    {
+        // Wire parity with Rust: telemetry must be a JSON OBJECT.
+        $rejected = 0;
+        foreach (['[]', '"hello"', '123', 'true', 'null'] as $bad) {
+            try {
+                SolutionToken::decode(base64_encode(self::NONCE.'.1.100.'.$bad));
+            } catch (DecodeError) {
+                ++$rejected;
+            }
+        }
+        self::assertSame(5, $rejected, 'all five non-object telemetry payloads must be rejected');
+    }
+
+    public function testRejectsDurationBeyondProtocolBound(): void
+    {
+        $this->expectException(DecodeError::class);
+        SolutionToken::decode(base64_encode(self::NONCE.'.1.3600001.{}'));
+    }
+
+    public function testAcceptsDurationAtProtocolBound(): void
+    {
+        $token = SolutionToken::decode(base64_encode(self::NONCE.'.1.3600000.{}'));
+        self::assertSame(3_600_000, $token->durationMs);
     }
 
     public function testRejectsTokenLongerThan32Kb(): void
