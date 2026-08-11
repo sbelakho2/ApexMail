@@ -59,7 +59,7 @@ deploy:
 	@for dir in $(SYNC_DIRS); do \
 		echo "  $$dir/"; \
 		$(RSYNC) --delete \
-			--exclude='target' --exclude='node_modules' --exclude='public' \
+			--exclude='target' --exclude='node_modules' --exclude='public' --exclude='vendor' \
 			--exclude='ssl' \
 			$(RSYNC_SSH) ./$$dir/ $(SERVER_HOST):/opt/apexmail/$$dir/; \
 	done
@@ -76,7 +76,7 @@ deploy-service:
 	@echo "==> Partial deploy: $(S)"
 	@echo "==> Syncing only changed code directories..."
 	@$(RSYNC) --delete \
-		--exclude='target' --exclude='node_modules' --exclude='public' \
+		--exclude='target' --exclude='node_modules' --exclude='public' --exclude='vendor' \
 		$(RSYNC_SSH) \
 		./services/mail-server/ \
 		$(SERVER_HOST):/opt/apexmail/services/mail-server/
@@ -84,7 +84,7 @@ deploy-service:
 		./packages/kiwicaptcha/ \
 		$(SERVER_HOST):/opt/apexmail/packages/kiwicaptcha/
 	@$(RSYNC) --delete \
-		--exclude='target' --exclude='node_modules' --exclude='public' \
+		--exclude='target' --exclude='node_modules' --exclude='public' --exclude='vendor' \
 		$(RSYNC_SSH) \
 		./apps/marketing-zola/ \
 		$(SERVER_HOST):/opt/apexmail/apps/marketing-zola/
