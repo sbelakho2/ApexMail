@@ -184,7 +184,8 @@
   function initWidget(W) {
     if (!W || W.dataset.kiwiStarted) return;
     W.dataset.kiwiStarted = "1";
-    var statusEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]");
+    var container = W.closest(".kiwi-container") || W;
+    var statusEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]");
     function setStatus(label, pillText, state) { if (statusEl) statusEl.textContent = label; if (pillEl) pillEl.textContent = pillText; if (W) W.setAttribute("data-state", state); }
     function setHint(text) { if (hintEl) hintEl.textContent = text; }
     function setProgress(pct) { if (fillEl) fillEl.setAttribute("data-progress", String(Math.max(0, Math.min(100, pct)))); }
@@ -201,12 +202,8 @@
     async function run() {
       try {
         setStatus("Connecting\u2026", "Wait", "connecting");
-        // The challenge endpoint and scope are configurable per widget via
-        // data-kiwi-endpoint / data-kiwi-scope (required for standalone
-        // backends like the PHP/Symfony SDK); defaults match the ApexMail
-        // api-server routes and pathname-derived scope.
-        var endpoint = W.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge";
-        var scope = W.getAttribute("data-kiwi-scope");
+        var endpoint = W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge";
+        var scope = W.getAttribute("data-kiwi-scope") || container.getAttribute("data-kiwi-scope");
         if (!scope) {
           scope = "login";
           var p = window.location.pathname.toLowerCase();

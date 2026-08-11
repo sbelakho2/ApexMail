@@ -1,0 +1,51 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BelConsulting\KiwiCaptchaBundle\Validator\Constraints;
+
+use KiwiCaptcha\Verifier;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\Validator\Constraint;
+use Symfony\Component\Validator\ConstraintValidator;
+use Symfony\Component\Validator\Exception\UnexpectedTypeException;
+
+final class KiwiCaptchaValidator extends ConstraintValidator
+{
+    public function __construct(
+        private readonly Verifier $verifier,
+        private readonly RequestStack $requestStack,
+        private readonly string $secretKey,
+    ) {
+    }
+
+    public function validate(mixed $value, Constraint $constraint): void
+    {
+        if (!$constraint instanceof KiwiCaptcha) {
+            throw new UnexpectedTypeException($constraint, KiwiCaptcha::class);
+        }
+        if ($value === null || $value === '') {
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::NOT_SOLVED_ERROR)
+                ->addViolation();
+
+            return;
+        }
+        if (!\is_string($value)) {
+            throw new UnexpectedTypeException($value, 'string');
+        }
+
+        $clientIp = null;
+        if ($constraint->bindIp && $this->requestStack->getMainRequest() !== null) {
+            $clientIp = $this->requestStack->getMainRequest()->getClientIp();
+        }
+
+        $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp);
+
+        if (!$outcome->isOk()) {
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::NOT_SOLVED_ERROR)
+                ->addViolation();
+        }
+    }
+}

@@ -1,86 +1,86 @@
           /* No external font fetches — the zero-third-party design keeps CSP strict.
      System font stack below. */
   .kiwi-container {
-    --kiwi-primary: #f43f5e;
-    --kiwi-primary-rgb: 244, 63, 94;
-    --kiwi-success: #10b981;
+    --kiwi-primary: #dd524c;
+    --kiwi-primary-rgb: 221, 82, 76;
+    --kiwi-success: #059669;
     --kiwi-bg: #ffffff;
-    --kiwi-text: #0f172a;
-    --kiwi-text-muted: #64748b;
-    --kiwi-border: #e2e8f0;
-    --kiwi-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02);
-    --kiwi-radius: 20px;
+    --kiwi-text: #1a1a1a;
+    --kiwi-text-muted: #6b7280;
+    --kiwi-border: #e5e7eb;
+    --kiwi-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --kiwi-radius: 12px;
     
     display: inline-flex;
     align-items: center;
     width: 100%;
-    max-width: 440px;
-    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    max-width: 100%;
+    font-family: Inter, system-ui, -apple-system, sans-serif;
     position: relative;
     box-sizing: border-box;
   }
   @media (prefers-color-scheme: dark) {
     .kiwi-container {
-      --kiwi-bg: #1e293b;
-      --kiwi-text: #f8fafc;
-      --kiwi-text-muted: #94a3b8;
-      --kiwi-border: #334155;
-      --kiwi-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.1);
+      --kiwi-bg: #111111;
+      --kiwi-text: #f9fafb;
+      --kiwi-text-muted: #9ca3af;
+      --kiwi-border: #262626;
+      --kiwi-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.5);
     }
   }
   .kiwi-widget {
     display: flex;
     align-items: center;
-    gap: 16px;
-    padding: 14px 18px;
+    gap: 12px;
+    padding: 12px 16px;
     background: var(--kiwi-bg);
     border: 1px solid var(--kiwi-border);
     border-radius: var(--kiwi-radius);
     color: var(--kiwi-text);
     box-shadow: var(--kiwi-shadow);
-    transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: all 0.3s ease;
     width: 100%;
     position: relative;
     overflow: hidden;
     cursor: default;
     user-select: none;
   }
-  .kiwi-widget:hover { transform: translateY(-2px); box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); border-color: var(--kiwi-primary); }
+  .kiwi-widget:hover { border-color: var(--kiwi-primary); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.05); }
   
   .kiwi-icon-wrapper {
     flex-shrink: 0;
-    width: 52px;
-    height: 52px;
-    border-radius: 14px;
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(var(--kiwi-primary-rgb), 0.08);
+    background: rgba(var(--kiwi-primary-rgb), 0.05);
     color: var(--kiwi-primary);
-    transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
   }
-  .kiwi-widget[data-state="solving"] .kiwi-icon-wrapper { animation: kiwi-float 2s infinite ease-in-out; }
+  .kiwi-widget[data-state="solving"] .kiwi-icon-wrapper { animation: kiwi-pulse 2s infinite ease-in-out; }
   .kiwi-widget[data-state="done"] .kiwi-icon-wrapper {
     background: var(--kiwi-success) !important;
     color: #ffffff !important;
-    transform: rotate(360deg) scale(1.1);
+    transform: scale(1.05);
   }
-  @keyframes kiwi-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  @keyframes kiwi-pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(0.95); opacity: 0.8; } }
   
   .kiwi-main { flex: 1; min-width: 0; }
-  .kiwi-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-  .kiwi-label { font-size: 15px; font-weight: 700; color: var(--kiwi-text); letter-spacing: -0.02em; }
+  .kiwi-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .kiwi-label { font-size: 14px; font-weight: 600; color: var(--kiwi-text); letter-spacing: -0.01em; }
   .kiwi-badge {
     font-size: 9px;
-    font-weight: 800;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
-    padding: 2px 8px;
-    border-radius: 6px;
+    letter-spacing: 0.05em;
+    padding: 2px 6px;
+    border-radius: 4px;
     background: var(--kiwi-border);
     color: var(--kiwi-text-muted);
-    transition: all 0.4s ease;
+    transition: all 0.3s ease;
   }
   .kiwi-widget[data-state="solving"] .kiwi-badge { background: rgba(var(--kiwi-primary-rgb), 0.15) !important; color: var(--kiwi-primary) !important; }
   .kiwi-widget[data-state="done"] .kiwi-badge { background: rgba(16, 185, 129, 0.15) !important; color: var(--kiwi-success) !important; }
@@ -119,3 +119,4 @@
     pointer-events: none;
   }
   .kiwi-widget[data-state="done"] .kiwi-glow { animation: kiwi-shine 1s ease-in-out forwards; }
+  @keyframes kiwi-shine { 0% { left: -100%; } 100% { left: 150%; } }

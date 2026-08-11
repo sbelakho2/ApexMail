@@ -32,4 +32,4 @@ pub use token::{DecodeError, IssuedChallenge, SolutionToken};
 pub use verify::{
     score_telemetry, solve_for_test, verify_solution, VerifyContext, VerifyError, VerifyOutcome,
 };
-pub use widget::kiwi_widget_html;
+pub use widget::{kiwi_widget_html, kiwi_widget_html_default};

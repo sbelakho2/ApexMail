@@ -1,0 +1,45 @@
+{% block kiwi_captcha_widget %}
+{%- set endpoint = endpoint|default('/kiwi-captcha/challenge') -%}
+{%- set scope = scope|default('login') -%}
+<style>
+{{ kiwi_css|raw }}
+</style>
+<div class="kiwi-container" id="kiwicaptcha-root-{{ id }}" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}">
+    <input type="hidden" name="{{ full_name }}" value="" data-kiwi-token />
+    <div class="kiwi-widget" data-kiwi-widget data-state="idle" role="status" aria-live="polite">
+        <div class="kiwi-icon-wrapper">
+            <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M26 19c0 5.5-4 10-10 10S7 24.5 7 19c0-6 3-11 7-12 2-0.5 4-0.5 6 0 4 1 6 6 6 12z" fill="currentColor"/>
+                <path d="M12.5 8.5c-.8-1.5-1-3.5-.5-5.5.5-2 2-3.5 4-4 2-.5 4 .5 5 2.5.2 1 .5 2 .5 3.5" fill="currentColor"/>
+                <path d="M10 7c-4 1-8 3-8.5 3.5-.3.3-.3.8 0 1 1 0.5 8 2.5 9.5 2.5" fill="currentColor"/>
+                <path d="M14 29v2m6-2v2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                <circle cx="16.5" cy="4.5" r="1" fill="white"/>
+                <circle cx="17" cy="4" r="0.6" fill="currentColor">
+                    <animate attributeName="opacity" values="1;1;0;1;1" keyTimes="0;0.95;0.97;0.99;1" dur="5s" repeatCount="indefinite" />
+                </circle>
+                <path d="M19 14c1.5 0 2.5 1 2.5 2s-1 2-2.5 2-2.5-1-2.5-2 1-2 2.5-2z" fill="white" opacity="0.2"/>
+            </svg>
+            <div class="kiwi-glow"></div>
+        </div>
+        <div class="kiwi-main">
+            <div class="kiwi-top">
+                <span class="kiwi-label" data-kiwi-label>Security Check</span>
+                <span class="kiwi-badge" data-kiwi-badge>Idle</span>
+            </div>
+            <div class="kiwi-track">
+                <div class="kiwi-bar" data-kiwi-bar></div>
+            </div>
+            <div class="kiwi-bottom">
+                <p class="kiwi-info" data-kiwi-info>Protected by KiwiCaptcha</p>
+                <span class="kiwi-timer" data-kiwi-timer></span>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+{{ kiwi_wasm|raw }}
+</script>
+<script>
+{{ kiwi_driver|raw }}
+</script>
+{% endblock %}

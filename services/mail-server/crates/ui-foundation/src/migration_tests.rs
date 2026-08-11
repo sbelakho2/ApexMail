@@ -631,7 +631,7 @@ fn migration_pixel_parity_self_check() {
 #[test]
 fn migration_pixel_parity_detects_adversarial_mutations() {
     let cases = [
-        ("web", "/login", "Welcome back", "Welcome later"),
+        ("web", "/login", "ApexMail", "ApexXMail"),
         ("control-plane", "/dashboard", "Dashboard", "DashboardX"),
         ("marketing", "/pricing", "Start Free", "Start Paid"),
     ];

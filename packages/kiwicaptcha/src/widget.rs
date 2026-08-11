@@ -20,15 +20,84 @@ const KIWI_CSS: &str = include_str!("../../kiwicaptcha-wasm/assets/widget.css");
 const KIWI_WASM_EMBED: &str = include_str!("../../kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js");
 
 /// Render the premium KiwiCaptcha widget HTML block.
-pub fn kiwi_widget_html() -> String {
+///
+/// `endpoint` and `scope` are inserted into HTML attributes and are therefore
+/// HTML-attribute-escaped (the `&`, `"`, `'`, `<`, `>` characters) so a
+/// caller-supplied value can never break out of the attribute — the values
+/// are also validated at the protocol layer (scope must not contain `|`).
+pub fn kiwi_widget_html(endpoint: &str, scope: &str) -> String {
     let svg = kiwi_mark_svg();
-    let container_html = format!(
-        "<style>\n{css}\n</style>\n<div class=\"kiwi-container\" id=\"kiwicaptcha-root\">\n  <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\" role=\"status\" aria-live=\"polite\">\n    <div class=\"kiwi-icon-wrapper\">\n      {svg}\n      <div class=\"kiwi-glow\"></div>\n    </div>\n    <div class=\"kiwi-main\">\n      <div class=\"kiwi-top\">\n        <span class=\"kiwi-label\" data-kiwi-label>Security Check</span>\n        <span class=\"kiwi-badge\" data-kiwi-badge>Idle</span>\n      </div>\n      <div class=\"kiwi-track\">\n        <div class=\"kiwi-bar\" data-kiwi-bar></div>\n      </div>\n      <div class=\"kiwi-bottom\">\n        <p class=\"kiwi-info\" data-kiwi-info>Protected by KiwiCaptcha</p>\n        <span class=\"kiwi-timer\" data-kiwi-timer></span>\n      </div>\n    </div>\n    <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />\n  </div>\n</div>\n",
+    format!(
+        "<style>\n{css}\n</style>\n\
+        <div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"{endpoint}\" data-kiwi-scope=\"{scope}\">\n  \
+        <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />\n  \
+        <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\" role=\"status\" aria-live=\"polite\">\n    \
+        <div class=\"kiwi-icon-wrapper\">\n      {svg}\n      <div class=\"kiwi-glow\"></div>\n    \
+        </div>\n    <div class=\"kiwi-main\">\n      <div class=\"kiwi-top\">\n        <span class=\"kiwi-label\" data-kiwi-label>Security Check</span>\n        <span class=\"kiwi-badge\" data-kiwi-badge>Idle</span>\n      </div>\n      <div class=\"kiwi-track\">\n        <div class=\"kiwi-bar\" data-kiwi-bar></div>\n      </div>\n      <div class=\"kiwi-bottom\">\n        <p class=\"kiwi-info\" data-kiwi-info>Protected by KiwiCaptcha</p>\n        <span class=\"kiwi-timer\" data-kiwi-timer></span>\n      </div>\n    </div>\n  </div>\n\
+        </div>\n\
+        <script>\n{wasm}\n</script>\n\
+        <script>\n{driver}\n</script>",
         css = KIWI_CSS,
         svg = svg,
-    );
-    format!(
-        "{container_html}<script>\n{}\n</script>\n<script>\n{}\n</script>",
-        KIWI_WASM_EMBED, KIWI_DRIVER_JS
+        endpoint = html_attr_escape(endpoint),
+        scope = html_attr_escape(scope),
+        wasm = KIWI_WASM_EMBED,
+        driver = KIWI_DRIVER_JS,
     )
+}
+
+/// Escape a value for safe interpolation inside a double-quoted HTML
+/// attribute. Handles the five characters that terminate or alter an
+/// attribute value.
+fn html_attr_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Compatibility wrapper for default settings.
+pub fn kiwi_widget_html_default() -> String {
+    kiwi_widget_html("/api/kcaptcha/challenge", "login")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widget_escapes_endpoint_and_scope_attributes() {
+        // XSS: a caller-supplied scope/endpoint containing quotes or markup
+        // must never break out of the data-* attribute.
+        let html = kiwi_widget_html(
+            "/x\"><script>alert(1)</script>",
+            "login\"><img src=x onerror=alert(2)>",
+        );
+
+        assert!(html.contains("data-kiwi-endpoint=\"/x&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\""));
+        assert!(html.contains("data-kiwi-scope=\"login&quot;&gt;&lt;img src=x onerror=alert(2)&gt;\""));
+        // No raw attacker markup survives.
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(!html.contains("<img src=x"));
+    }
+
+    #[test]
+    fn widget_contains_all_required_elements() {
+        let html = kiwi_widget_html_default();
+        assert!(html.contains("data-kiwi-widget"));
+        assert!(html.contains("data-kiwi-token"));
+        assert!(html.contains("data-kiwi-endpoint=\"/api/kcaptcha/challenge\""));
+        assert!(html.contains("data-kiwi-scope=\"login\""));
+        assert!(html.contains("window.KiwiCaptcha"));
+        assert!(html.contains("KIWI_WASM_B64"));
+        assert!(html.contains(".kiwi-container"));
+    }
 }

@@ -976,37 +976,53 @@ fn web_auth_github_icon() -> &'static str {
 
 fn web_auth_social_footer(agreement_prefix: &str) -> String {
     format!(
-        "<div class=\"px-10 pb-10 bg-white\">\
-<div class=\"relative mb-8\">\
+        "<div class=\"px-8 pb-8 bg-white\">\
+<div class=\"relative mb-6\">\
 <div class=\"absolute inset-0 flex items-center\"><div class=\"w-full border-t border-surface-200/60\"></div></div>\
 <div class=\"relative flex justify-center text-[10px] uppercase font-bold tracking-[0.2em]\"><span class=\"bg-white px-4 text-surface-400\">Or continue with</span></div>\
 </div>\
-<div class=\"grid grid-cols-1 sm:grid-cols-2 gap-3\">\
+<div class=\"flex flex-col gap-3\">\
 <button type=\"button\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-xl border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{google}<span class=\"text-sm font-semibold text-surface-950\">Google</span></button>\
 <button type=\"button\" aria-label=\"Continue with GitHub\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-xl border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{github}<span class=\"text-sm font-semibold text-surface-950\">GitHub</span></button>\
 </div>\
-<p class=\"mt-8 text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">{agreement_prefix} <a href=\"/legal/terms\" class=\"text-primary font-bold hover:underline\">Terms of Service</a> and <a href=\"/legal/privacy\" class=\"text-primary font-bold hover:underline\">Privacy Policy</a>.</p></div>",
+<p class=\"mt-6 text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">{agreement_prefix} <a href=\"/legal/terms\" class=\"text-primary font-bold hover:underline\">Terms of Service</a> and <a href=\"/legal/privacy\" class=\"text-primary font-bold hover:underline\">Privacy Policy</a>.</p></div>",
         google = web_auth_google_icon(),
         github = web_auth_github_icon(),
     )
 }
 
+fn web_auth_logo() -> String {
+    "<span class=\"text-2xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>".to_string()
+}
+
 fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &str) -> String {
+    let logo = web_auth_logo();
+    let header = if title.is_empty() && subtitle.is_empty() {
+        format!("<div class=\"p-8 pb-0\"><a href=\"/\" class=\"inline-block mb-6 group transition-all hover:opacity-80\">{logo}</a></div>")
+    } else {
+        format!(
+            "<div class=\"p-8 pb-0\">\
+            <a href=\"/\" class=\"inline-block mb-6 group transition-all hover:opacity-80\">{logo}</a>\
+            <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1>\
+            <p class=\"text-surface-500 mt-2 text-sm font-medium\">{subtitle}</p>\
+            </div>",
+            logo = logo,
+            title = html_escape(title),
+            subtitle = html_escape(subtitle),
+        )
+    };
     format!(
-        "<main class=\"min-h-screen bg-[#fafafa] relative flex items-center justify-center p-6\">\
-<div class=\"absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid\"></div>\
-<div class=\"relative z-10 w-full max-w-[420px]\">\
-<div class=\"text-center mb-10\">\
-<a href=\"/\" class=\"inline-block mb-6 group transition-all hover:opacity-80\">\
-<span class=\"text-3xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
-</a>\
-<h1 class=\"text-3xl font-bold text-surface-950 tracking-tight\">{title}</h1>\
-<p class=\"text-surface-500 mt-3 font-medium\">{subtitle}</p>\
-</div>\
-<div class=\"bg-white rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-surface-200/60 overflow-hidden\">\
-{form_html}{footer_html}\
-</div>\
-</div>{auth_form_script}</main>",
+        "<main class=\"min-h-screen bg-[#f8f9fa] relative flex items-center justify-center p-6\">\
+        <div class=\"absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid\"></div>\
+        <div class=\"relative z-10 w-full max-w-[400px]\">\
+        <div class=\"bg-white rounded-2xl shadow-premium border border-surface-200/60 overflow-hidden\">\
+        {header}\
+        {form_html}{footer_html}\
+        </div>\
+        </div>{auth_form_script}</main>",
+        header = header,
+        form_html = form_html,
+        footer_html = footer_html,
         auth_form_script = web_auth_form_script(),
     )
 }
@@ -1195,38 +1211,38 @@ pub fn web_signup_page(
     csrf_token: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let kiwi_html = kiwicaptcha::kiwi_widget_html();
+    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let password_hint = password_requirements_hint();
     let form_html = format!(
-        "<form class=\"p-10 space-y-5\" action=\"/v1/auth/signup\" method=\"POST\">\
+        "<form class=\"p-8 space-y-6\" action=\"/v1/auth/signup\" method=\"POST\">\
 {csrf}\
 <div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
 <div class=\"space-y-2\">\
-<label class=\"text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950\" for=\"signup-name\">Full name</label>\
-<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
+<label class=\"text-xs font-bold text-surface-900\" for=\"signup-name\">Full name</label>\
+<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950\" for=\"signup-company\">Company</label>\
-<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
+<label class=\"text-xs font-bold text-surface-900\" for=\"signup-company\">Company</label>\
+<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950\" for=\"signup-email\">Email Address</label>\
-<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"name@company.com\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
+<label class=\"text-xs font-bold text-surface-900\" for=\"signup-email\">Email</label>\
+<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950\" for=\"signup-password\">Password</label>\
+<label class=\"text-xs font-bold text-surface-900\" for=\"signup-password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-12\" />\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
 <button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"signup-password\" aria-controls=\"signup-password\">Show</button>\
 </div>\
 {password_hint}\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-[0.1em] flex items-center justify-center gap-3 py-4 rounded-xl shadow-[0_4px_12px_rgba(221,82,76,0.15)] transition-all active:scale-[0.99] group mt-2\"><span>Create Account</span>{arrow}</button>\
-<div class=\"text-[11px] text-surface-500 text-center font-medium\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Create Account</span>{arrow}</button>\
+<div class=\"text-center text-xs font-medium text-surface-500\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
 </form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
@@ -1248,17 +1264,17 @@ pub fn web_forgot_password_page(
     csrf_token: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let kiwi_html = kiwicaptcha::kiwi_widget_html();
+    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let form_html = format!(
-        "<form class=\"p-8 space-y-5\" action=\"/v1/auth/forgot-password\" method=\"POST\">\
+        "<form class=\"p-8 space-y-6\" action=\"/v1/auth/forgot-password\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
-<label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"reset-email\">Email</label>\
-<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"name@company.com\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
+<label class=\"text-xs font-bold text-surface-900\" for=\"reset-email\">Email</label>\
+<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-tight flex items-center justify-center gap-3 py-4 rounded-sm shadow-premium transition-all mt-2\"><span>Send Reset Link</span>{arrow}</button>\
-<div class=\"text-xs text-muted-foreground text-center\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
+<div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
@@ -1314,7 +1330,7 @@ pub fn web_reset_password_page_with_state(
     };
 
     let csrf = csrf_hidden_input(csrf_token);
-    let kiwi_html = kiwicaptcha::kiwi_widget_html();
+    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let password_hint = password_requirements_hint();
     let form_html = format!(
         "<form class=\"p-8 space-y-5\" action=\"/v1/auth/reset-password\" method=\"POST\" autocomplete=\"off\">\
@@ -3898,40 +3914,35 @@ pub fn web_login_page(
     csrf_token: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let kiwi_html = kiwicaptcha::kiwi_widget_html();
+    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let form_html = format!(
-        "<form class=\"p-10 space-y-6\" action=\"/v1/auth/login\" method=\"POST\">\
+        "<form class=\"p-8 space-y-6\" action=\"/v1/auth/login\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
-<label class=\"text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950\" for=\"login-email\">Email Address</label>\
-<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"name@company.com\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
+<label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Email</label>\
+<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950\" for=\"password\">Password</label>\
-<a href=\"/forgot-password\" class=\"text-[11px] font-bold text-primary hover:text-brand-700 uppercase tracking-[0.1em]\">Forgot password?</a>\
+<label class=\"text-xs font-bold text-surface-900\" for=\"password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"••••••••\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-12\" />\
+<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
 <button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"password\" aria-controls=\"password\">Show</button>\
 </div>\
-<p class=\"hidden text-xs text-warning-700 font-bold uppercase tracking-tight\" role=\"status\" aria-live=\"polite\" data-capslock-warning=\"true\">Caps Lock is on</p>\
 </div>\
-<div class=\"flex items-center gap-3 py-1\">\
-<div class=\"relative flex items-center\">\
+<div class=\"flex items-center justify-between py-1\">\
+<div class=\"flex items-center gap-2\">\
 <input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary transition-all cursor-pointer\" />\
+<label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium cursor-pointer\">Keep me signed in</label>\
 </div>\
-<label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium cursor-pointer\">Keep me signed in for 30 days</label>\
+<a href=\"/forgot-password\" class=\"text-xs font-bold text-primary hover:text-brand-700\">Forgot password?</a>\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-[0.1em] flex items-center justify-center gap-3 py-4 rounded-xl shadow-[0_4px_12px_rgba(221,82,76,0.15)] transition-all active:scale-[0.99] group\"><span>Sign In</span>{arrow}</button>\
-<div class=\"text-[10px] text-surface-400 font-bold uppercase tracking-[0.2em] flex items-center justify-center gap-2\" role=\"status\" aria-live=\"polite\">\
-<span class=\"inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse\" aria-hidden=\"true\"></span>\
-<span>Security Check Active</span></div>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group\"><span>Sign In</span>{arrow}</button>\
+<div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
 <div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
 <p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
-<p class=\"text-[10px] text-surface-400 font-medium leading-relaxed mt-1\">Check your spam folder if you haven't received the code.</p>\
-<label class=\"sr-only\" for=\"mfaCode\">MFA code</label>\
 <input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-12 w-full rounded-xl border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" />\
 </div>\
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
@@ -3941,8 +3952,8 @@ pub fn web_login_page(
     );
 
     web_auth_shell(
-        "Welcome back",
-        "Enter your credentials to access the console",
+        "",
+        "",
         &form_html,
         &web_auth_social_footer("By signing in, you agree to our"),
     )
@@ -3957,33 +3968,31 @@ pub fn control_plane_login_page(
     csrf_token: &str,
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
-    let kiwi_html = kiwicaptcha::kiwi_widget_html();
+    let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let form_html = format!(
-        "<form class=\"p-10 space-y-6\" action=\"/api/auth/login\" method=\"POST\">\
+        "<form class=\"p-8 space-y-6\" action=\"/api/auth/login\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
-<label class=\"text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950\" for=\"login-email\">Operator Identity</label>\
-<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950\" />\
+<label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Operator Identity</label>\
+<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950\" for=\"login-password\">Access Password</label>\
+<label class=\"text-xs font-bold text-surface-900\" for=\"login-password\">Access Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"••••••••\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-12\" />\
+<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
 <button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"login-password\" aria-controls=\"login-password\">Show</button>\
 </div>\
 </div>\
-<div class=\"flex items-center gap-3 py-1\">\
-<input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary cursor-pointer\" />\
+<div class=\"flex items-center gap-2 py-1\">\
+<input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary transition-all cursor-pointer\" />\
 <label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium cursor-pointer\">Maintain session security</label>\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold uppercase tracking-[0.1em] flex items-center justify-center gap-3 py-4 rounded-xl shadow-[0_4px_12px_rgba(221,82,76,0.15)] transition-all active:scale-[0.99] group\"><span>Authorize Access</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group\"><span>Authorize Access</span>{arrow}</button>\
 <div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
 <p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
-<p class=\"text-[10px] text-surface-400 font-medium leading-relaxed mt-1\">Check your spam folder if you haven't received the code.</p>\
-<label class=\"sr-only\" for=\"mfaCode\">MFA code</label>\
 <input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-12 w-full rounded-xl border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" />\
 </div>\
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
@@ -3996,7 +4005,7 @@ pub fn control_plane_login_page(
         "Operator access",
         "Sign in to the ApexMail control plane",
         &form_html,
-        "<div class=\"px-10 pb-10\"><p class=\"text-center text-xs text-surface-500 font-medium\">Operator console restricted to authorized administrators.</p></div>",
+        "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-surface-500 font-medium\">Operator console restricted to authorized administrators.</p></div>",
     )
 }
 
@@ -4139,9 +4148,11 @@ mod tests {
         assert!(html.contains("text-surface-400 hover:text-surface-950"));
         // Form structure
         assert!(html.contains("Forgot password?"));
-        assert!(html.contains("Welcome back"));
-        assert!(html.contains("Security Check Active"));
+        assert!(html.contains("No account? <a href=\"/signup\""));
         assert!(html.contains("Or continue with"));
+        // Minimal header: logo only, no headline on the login page
+        assert!(html.contains("Apex</span><span class=\"text-surface-950\">Mail</span>"));
+        assert!(!html.contains("Welcome back"));
     }
 
     #[test]
@@ -4158,7 +4169,7 @@ mod tests {
         assert!(html.contains("rounded-lg px-2 py-1"));
         assert!(html.contains("text-surface-400 hover:text-surface-950"));
         // CP login now shares the two-column web auth shell
-        assert!(html.contains("max-w-[420px]"));
+        assert!(html.contains("max-w-[400px]"));
         assert!(html.contains("Operator access"));
     }
 
@@ -4200,6 +4211,29 @@ mod tests {
         }
     }
 
+    /// Regression guard: a dynamic title/subtitle (e.g. derived from a query
+    /// parameter by a future caller) must never inject HTML into the rendered
+    /// auth pages.
+    #[test]
+    fn web_auth_shell_escapes_title_and_subtitle() {
+        let html = web_auth_shell(
+            "<script>alert(1)</script>",
+            "hi\" onmouseover=\"alert(2)",
+            "",
+            "",
+        );
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("onmouseover=\"alert"));
+    }
+
+    #[test]
+    fn web_auth_shell_empty_title_skips_header() {
+        let html = web_auth_shell("", "", "<form></form>", "");
+        assert!(!html.contains("<h1"));
+        assert!(html.contains("Apex</span><span class=\"text-surface-950\">Mail</span>"));
+    }
+
     // ─── Marketing page parity ──────────────────────────────
 
     #[test]
@@ -4230,7 +4264,7 @@ mod tests {
         assert!(html.contains("id=\"signup-name\""));
         assert!(html.contains("id=\"signup-email\""));
         assert!(html.contains("id=\"signup-password\""));
-        assert!(html.contains("bg-surface-50/30 text-surface-950 pr-12"));
+        assert!(html.contains("bg-[#f8f9fa] text-surface-950 pr-12"));
         assert!(!html.contains("bg-white/90 text-foreground pr-12"));
         assert!(html.contains("rounded-lg px-2 py-1"));
         assert!(html.contains("text-surface-400 hover:text-surface-950"));

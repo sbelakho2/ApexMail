@@ -1,7 +1,7 @@
 use crate::icons::{render_icon, IconRenderOptions};
 
 /// Escape HTML special characters to prevent XSS in rendered shell output.
-fn html_escape(s: &str) -> String {
+pub fn html_escape(s: &str) -> String {
     let mut escaped = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

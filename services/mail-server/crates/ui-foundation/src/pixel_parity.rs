@@ -803,7 +803,7 @@ mod tests {
             "rounded-xl",
             "rounded-2xl",
             "border",
-            "text-3xl",
+            "text-2xl",
             "font-bold",
             "bg-primary",
         ];
