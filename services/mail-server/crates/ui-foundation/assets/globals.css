@@ -6017,3 +6017,8 @@ a {
     background-color: rgb(17 24 39 / var(--tw-bg-opacity, 1));
   }
 }
+/* Decorative dot grid on auth surfaces (CSP3-safe: no inline styles). */
+.ui-dot-grid {
+  background-image: radial-gradient(#000 1px, transparent 1px);
+  background-size: 20px 20px;
+}

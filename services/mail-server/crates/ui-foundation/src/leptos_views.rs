@@ -994,7 +994,7 @@ fn web_auth_social_footer(agreement_prefix: &str) -> String {
 fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &str) -> String {
     format!(
         "<main class=\"min-h-screen bg-[#fafafa] relative flex items-center justify-center p-6\">\
-<div class=\"absolute inset-0 z-0 opacity-[0.03] pointer-events-none\" style=\"background-image: radial-gradient(#000 1px, transparent 1px); background-size: 20px 20px;\"></div>\
+<div class=\"absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid\"></div>\
 <div class=\"relative z-10 w-full max-w-[420px]\">\
 <div class=\"text-center mb-10\">\
 <a href=\"/\" class=\"inline-block mb-6 group transition-all hover:opacity-80\">\

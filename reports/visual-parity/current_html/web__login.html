@@ -1,5 +1,6 @@
-<!DOCTYPE html><html lang="en" class="__variable_712c26 __variable_60443c"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexMail</title><meta name="description" content="Modern email infrastructure for developers"><script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();</script><link rel="stylesheet" href="/assets/globals.css"></head><body class="font-apex antialiased text-[16px] leading-[1.55]"><a href="#app-main" class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950">Skip to content</a><main id="app-main" class="min-h-screen bg-background"><main class="min-h-screen bg-[#fafafa] relative flex items-center justify-center p-6"><div class="absolute inset-0 z-0 opacity-[0.03] pointer-events-none" style="background-image: radial-gradient(#000 1px, transparent 1px); background-size: 20px 20px;"></div><div class="relative z-10 w-full max-w-[420px]"><div class="text-center mb-10"><a href="/" class="inline-block mb-6 group transition-all hover:opacity-80"><span class="text-3xl font-bold tracking-tighter"><span class="text-primary">Apex</span><span class="text-surface-950">Mail</span></span></a><h1 class="text-3xl font-bold text-surface-950 tracking-tight">Welcome back</h1><p class="text-surface-500 mt-3 font-medium">Enter your credentials to access the console</p></div><div class="bg-white rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-surface-200/60 overflow-hidden"><form class="p-10 space-y-6" action="/v1/auth/login" method="POST"><input type="hidden" name="_csrf" value="" /><div class="space-y-2"><label class="text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950" for="login-email">Email Address</label><input id="login-email" name="email" type="email" required autocomplete="username" placeholder="name@company.com" class="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950" /></div><div class="space-y-2"><div class="flex items-center justify-between"><label class="text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950" for="password">Password</label><a href="/forgot-password" class="text-[11px] font-bold text-primary hover:text-brand-700 uppercase tracking-[0.1em]">Forgot password?</a></div><div class="relative"><input id="password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••" class="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-12" /><button type="button" class="absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors" aria-label="Show password" aria-pressed="false" data-password-toggle="password" aria-controls="password">Show</button></div><p class="hidden text-xs text-warning-700 font-bold uppercase tracking-tight" role="status" aria-live="polite" data-capslock-warning="true">Caps Lock is on</p></div><div class="flex items-center gap-3 py-1"><div class="relative flex items-center"><input id="rememberMe" name="rememberMe" type="checkbox" checked class="h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary transition-all cursor-pointer" /></div><label for="rememberMe" class="text-xs text-surface-500 font-medium cursor-pointer">Keep me signed in for 30 days</label></div><style>
-          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+<!DOCTYPE html><html lang="en" class="__variable_712c26 __variable_60443c"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexMail</title><meta name="description" content="Modern email infrastructure for developers"><script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();</script><link rel="stylesheet" href="/assets/globals.css"></head><body class="font-apex antialiased text-[16px] leading-[1.55]"><a href="#app-main" class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950">Skip to content</a><main id="app-main" class="min-h-screen bg-background"><main class="min-h-screen bg-[#fafafa] relative flex items-center justify-center p-6"><div class="absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid"></div><div class="relative z-10 w-full max-w-[420px]"><div class="text-center mb-10"><a href="/" class="inline-block mb-6 group transition-all hover:opacity-80"><span class="text-3xl font-bold tracking-tighter"><span class="text-primary">Apex</span><span class="text-surface-950">Mail</span></span></a><h1 class="text-3xl font-bold text-surface-950 tracking-tight">Welcome back</h1><p class="text-surface-500 mt-3 font-medium">Enter your credentials to access the console</p></div><div class="bg-white rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-surface-200/60 overflow-hidden"><form class="p-10 space-y-6" action="/v1/auth/login" method="POST"><input type="hidden" name="_csrf" value="" /><div class="space-y-2"><label class="text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950" for="login-email">Email Address</label><input id="login-email" name="email" type="email" required autocomplete="username" placeholder="name@company.com" class="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-surface-50/30 text-sm font-medium text-surface-950" /></div><div class="space-y-2"><div class="flex items-center justify-between"><label class="text-[11px] font-bold uppercase tracking-[0.1em] text-surface-950" for="password">Password</label><a href="/forgot-password" class="text-[11px] font-bold text-primary hover:text-brand-700 uppercase tracking-[0.1em]">Forgot password?</a></div><div class="relative"><input id="password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••" class="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950 pr-12" /><button type="button" class="absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors" aria-label="Show password" aria-pressed="false" data-password-toggle="password" aria-controls="password">Show</button></div><p class="hidden text-xs text-warning-700 font-bold uppercase tracking-tight" role="status" aria-live="polite" data-capslock-warning="true">Caps Lock is on</p></div><div class="flex items-center gap-3 py-1"><div class="relative flex items-center"><input id="rememberMe" name="rememberMe" type="checkbox" checked class="h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary transition-all cursor-pointer" /></div><label for="rememberMe" class="text-xs text-surface-500 font-medium cursor-pointer">Keep me signed in for 30 days</label></div><style>
+          /* No external font fetches — the zero-third-party design keeps CSP strict.
+     System font stack below. */
   .kiwi-container {
     --kiwi-primary: #f43f5e;
     --kiwi-primary-rgb: 244, 63, 94;
@@ -15,7 +16,7 @@
     align-items: center;
     width: 100%;
     max-width: 440px;
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     position: relative;
     box-sizing: border-box;
   }
@@ -92,6 +93,18 @@
     transition: width 0.6s cubic-bezier(0.65, 0, 0.35, 1);
     width: 0%;
   }
+  /* Progress driven by data-progress attribute (CSP3-safe: no inline styles).
+     11 discrete steps from 0% to 100%. */
+  .kiwi-bar[data-progress="10"] { width: 10%; }
+  .kiwi-bar[data-progress="20"] { width: 20%; }
+  .kiwi-bar[data-progress="30"] { width: 30%; }
+  .kiwi-bar[data-progress="40"] { width: 40%; }
+  .kiwi-bar[data-progress="50"] { width: 50%; }
+  .kiwi-bar[data-progress="60"] { width: 60%; }
+  .kiwi-bar[data-progress="70"] { width: 70%; }
+  .kiwi-bar[data-progress="80"] { width: 80%; }
+  .kiwi-bar[data-progress="90"] { width: 90%; }
+  .kiwi-bar[data-progress="100"] { width: 100%; }
   .kiwi-widget[data-state="done"] .kiwi-bar { background: var(--kiwi-success); }
   
   .kiwi-bottom { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
@@ -460,6 +473,7 @@ async function __wbg_init(module_or_path) {
 
 </script>
 <script>
+(function() {
   var encoder = new TextEncoder();
   
   // ── Global Telemetry ────────────────────────────────────────────────
@@ -587,13 +601,23 @@ async function __wbg_init(module_or_path) {
       // chunks, eliminating malloc/free churn on every 50k-hash iteration
       // (the hottest loop in the SHA-256 solver).
       var pp = 0, sp = 0;
+      // wasm is usable when the solver AND an allocator export exist. The
+      // wasm-opt pipeline exports alloc/dealloc (stable names); wasm-bindgen's
+      // generated __wbindgen_malloc may be dead-code-eliminated, so it is not
+      // a reliable capability signal.
+      function wasmUsable() {
+        return !!(w && w.solve_sha256_chunk && (w.alloc || w.__wbindgen_malloc));
+      }
+      function wasmAllocatorPresent() {
+        return !!(w && (w.alloc || w.__wbindgen_malloc) && (w.dealloc || w.__wbindgen_free));
+      }
       function ensureBuffers() {
-        if (w && w.__wbindgen_malloc && pp === 0) {
+        if (wasmAllocatorPresent() && pp === 0) {
           pp = wasmAlloc(w, prefixBytes); sp = wasmAlloc(w, saltBytes);
         }
       }
       if (algorithm === "argon2id") {
-        if (!w || !w.solve_argon2_chunk || !w.__wbindgen_malloc || m_kib < 8 * p) { resolve(null); return; }
+        if (!w || !w.solve_argon2_chunk || !wasmAllocatorPresent() || m_kib < 8 * p) { resolve(null); return; }
         var argMax = Math.min(MAX_SHA_HASHES, Math.max(1024, expectedHashes * 8)), CHUNK = 16;
         ensureBuffers();
         function argon2Chunk() {
@@ -607,17 +631,18 @@ async function __wbg_init(module_or_path) {
         }
         fastYield(argon2Chunk); return;
       }
-      var CHUNK = w && w.solve_sha256_chunk ? 50000 : 8000;
+      var useWasm = wasmUsable();
+      var CHUNK = useWasm ? 50000 : 8000;
       function chunk() {
-        if (w && w.solve_sha256_chunk && w.__wbindgen_malloc) {
+        if (useWasm) {
           try {
             ensureBuffers();
             var res = w.solve_sha256_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, counter, CHUNK);
             if (res !== -1) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); resolve({ counter: res, duration: Math.round(performance.now() - solveStart) }); return; }
             counter += CHUNK;
-          } catch (e) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); console.error("KiwiCaptcha: WASM solve failed", e); w = null; }
+          } catch (e) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); console.error("KiwiCaptcha: WASM solve failed, falling back to JS", e); useWasm = false; }
         }
-        if (!w) {
+        if (!useWasm) {
           var end = Math.min(counter + CHUNK, MAX_SHA_HASHES);
           for (; counter < end; counter++) if (leadingZeros(deriveHash(prefixBytes, counter, saltBytes)) >= targetBits) {
             resolve({ counter: counter, duration: Math.round(performance.now() - solveStart) }); return;
@@ -637,7 +662,7 @@ async function __wbg_init(module_or_path) {
     var statusEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]");
     function setStatus(label, pillText, state) { if (statusEl) statusEl.textContent = label; if (pillEl) pillEl.textContent = pillText; if (W) W.setAttribute("data-state", state); }
     function setHint(text) { if (hintEl) hintEl.textContent = text; }
-    function setProgress(pct) { if (fillEl) fillEl.style.width = Math.max(0, Math.min(100, pct)) + "%"; }
+    function setProgress(pct) { if (fillEl) fillEl.setAttribute("data-progress", String(Math.max(0, Math.min(100, pct)))); }
     
     var countdownTimer = null;
     function startCountdown(ttlSecs) {
