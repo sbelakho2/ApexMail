@@ -20,6 +20,12 @@ use Symfony\Component\OptionsResolver\OptionsResolver;
  * (container + hidden token input + inlined CSS/WASM/driver); the
  * KiwiCaptchaValidator constraint verifies the token locally on submit.
  *
+ * The default 'endpoint' option is derived from the bundle's configured
+ * `route_prefix` (rtrim($prefix, '/').'/challenge'), so the form posts to
+ * the ACTUAL route — mirroring the standalone Twig widget, which already
+ * derives its endpoint from the same prefix. 'endpoint' remains overridable
+ * per form.
+ *
  * Usage:
  *   $builder->add('captcha', KiwiCaptchaType::class, [
  *       'scope' => 'login',
@@ -28,8 +34,10 @@ use Symfony\Component\OptionsResolver\OptionsResolver;
  */
 class KiwiCaptchaType extends AbstractType
 {
-    public function __construct(private readonly ?KiwiCaptchaRuntime $runtime = null)
-    {
+    public function __construct(
+        private readonly ?KiwiCaptchaRuntime $runtime = null,
+        private readonly string $routePrefix = '/kiwi-captcha',
+    ) {
     }
 
     public function buildView(FormView $view, FormInterface $form, array $options): void
@@ -48,7 +56,9 @@ class KiwiCaptchaType extends AbstractType
     public function configureOptions(OptionsResolver $resolver): void
     {
         $resolver->setDefaults([
-            'endpoint' => '/kiwi-captcha/challenge',
+            // The bundle's route prefix is injected by the extension; the
+            // form endpoint follows the ACTUAL registered route.
+            'endpoint' => rtrim($this->routePrefix, '/').'/challenge',
             'scope' => 'login',
             'nonce' => null,
             // The constraint's expected scope follows the form's scope option.

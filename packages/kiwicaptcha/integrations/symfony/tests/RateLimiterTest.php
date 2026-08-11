@@ -105,6 +105,73 @@ final class RateLimiterTest extends TestCase
         self::assertTrue($first->allow('198.51.100.8'), 'other IPs are independent');
     }
 
+    public function testRawIpIsNeverUsedAsAKey(): void
+    {
+        $pool = new ArrayAdapter();
+        $pepper = 'rate-limit-pepper-for-tests';
+        $limiter = new IssuanceRateLimiter(1, 60, $pool, null, $pepper);
+        $limiter->allow('198.51.100.7');
+
+        // The shared cache key is the peppered HMAC of the IP (hex digest) —
+        // never the IP itself.
+        $expectedKey = 'kiwi_rate_'.hash_hmac('sha256', '198.51.100.7', $pepper);
+        self::assertTrue($pool->getItem($expectedKey)->isHit(), 'the state must live under the HMAC key');
+
+        foreach (array_keys($pool->getValues()) as $key) {
+            self::assertMatchesRegularExpression(
+                '/^kiwi_rate_[0-9a-f]{64}$/',
+                (string) $key,
+                'rate-limit keys must be 64-hex HMAC digests of the client IP',
+            );
+            self::assertStringNotContainsString('198.51.100.7', (string) $key, 'raw IPs must never appear in stored keys');
+        }
+    }
+
+    public function testInMemoryWindowIsSlidingNotFixed(): void
+    {
+        $now = 1_000.0;
+        $limiter = new IssuanceRateLimiter(2, 60, null, static function () use (&$now): float {
+            return $now;
+        });
+        $ip = '198.51.100.7';
+
+        self::assertTrue($limiter->allow($ip), 'hit at t0');
+        $now = 1_059.0; // t0 + window - ε
+        self::assertTrue($limiter->allow($ip), 'hit at t0 + 59s');
+        $now = 1_059.5;
+        self::assertFalse($limiter->allow($ip), 't0 and t0+59s count TOGETHER: window is full');
+        $now = 1_061.0; // t0 + window + ε
+        self::assertTrue($limiter->allow($ip), 'the t0 hit has slid out of the window');
+        $now = 1_061.5;
+        self::assertFalse(
+            $limiter->allow($ip),
+            'sliding window: the two remaining hits (t0+59, t0+61) still fill the cap — a fixed [window_start, hits] bucket would have allowed this',
+        );
+    }
+
+    public function testSharedWindowIsSlidingNotFixed(): void
+    {
+        // The PSR-6 path must implement a true sliding window too (the old
+        // [window_start, hits] fixed bucket allowed boundary bursts to double
+        // the rate).
+        $pool = new ArrayAdapter();
+        $now = 1_000.0;
+        $limiter = new IssuanceRateLimiter(2, 60, $pool, static function () use (&$now): float {
+            return $now;
+        });
+        $ip = '198.51.100.7';
+
+        self::assertTrue($limiter->allow($ip), 'hit at t0');
+        $now = 1_059.0;
+        self::assertTrue($limiter->allow($ip), 'hit at t0 + 59s');
+        $now = 1_059.5;
+        self::assertFalse($limiter->allow($ip), 't0 and t0+59s count TOGETHER');
+        $now = 1_061.0;
+        self::assertTrue($limiter->allow($ip), 't0 has slid out');
+        $now = 1_061.5;
+        self::assertFalse($limiter->allow($ip), 'sliding window fills the cap; a fixed window would have allowed this');
+    }
+
     public function testDisabledLimiterNeverRejects(): void
     {
         $controller = $this->controller(null);
@@ -142,16 +209,6 @@ final class RateLimiterTest extends TestCase
             public function delete(string $nonce): void
             {
                 $this->inner->delete($nonce);
-            }
-
-            public function attemptsUsed(string $nonce): int
-            {
-                return $this->inner->attemptsUsed($nonce);
-            }
-
-            public function incrementAttempts(string $nonce, int $maxAttempts): bool
-            {
-                return $this->inner->incrementAttempts($nonce, $maxAttempts);
             }
         };
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);

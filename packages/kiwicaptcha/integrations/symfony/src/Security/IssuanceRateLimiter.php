@@ -14,16 +14,25 @@ use Psr\Cache\CacheItemPoolInterface;
  * verification work (each challenge costs the server an HMAC re-check and,
  * for Argon2id, a memory-hard hash on every submit attempt).
  *
- * Two backends, both best-effort by design:
+ * PRIVACY: raw client IPs are never stored. Every key (both the shared
+ * PSR-6 key and the in-memory bucket key) is a peppered HMAC of the IP —
+ * `hash_hmac('sha256', $clientIp, $pepper)` — where the pepper defaults to
+ * the bundle secret key (`rate_limit_pepper` overrides it). The same HMAC is
+ * used by both backends so a shared pool and a local bucket agree on the
+ * same identity.
  *
- *  - PSR-6 pool (`rate_limit_cache` config option): shared across processes
- *    (e.g. a Redis-backed Symfony Cache pool). PSR-6 cannot express an atomic
- *    read-modify-write counter, so concurrent requests may briefly exceed the
- *    limit — a bound, not a gate.
- *  - In-memory sliding window (default): no shared state, single-process only
- *    (PHP-FPM workers share no memory). Documented as best-effort; production
- *    multi-worker deployments should configure a shared PSR-6 pool or rate
- *    limit at the platform level.
+ * True sliding window (both backends): the state is the list of hit
+ * timestamps (JSON `{"t": [ts, ...]}` in the shared pool), pruned to
+ * `[now - window, now]` on every check, and the hit count is the number of
+ * timestamps inside the window. There is no fixed [window_start, hits]
+ * bucket, so a burst straddling a window boundary can never double the
+ * allowed rate. Cost: the timestamp list grows with the allowed rate —
+ * `rate_limit` entries per window — which is small for sane limits; each
+ * check rewrites the pruned list.
+ *
+ * Both backends are best-effort by design: a PSR-6 pool cannot express an
+ * atomic read-modify-write, so concurrent requests may briefly exceed the
+ * limit — a bound, not a gate (documented in the README).
  */
 final class IssuanceRateLimiter
 {
@@ -33,15 +42,17 @@ final class IssuanceRateLimiter
     private array $hits = [];
 
     /**
-     * @param int         $maxChallenges 0 disables the limiter
-     * @param int         $windowSecs    sliding-window size in seconds
-     * @param \Closure|null $now           epoch-seconds clock override for tests
+     * @param int          $maxChallenges 0 disables the limiter
+     * @param int          $windowSecs    sliding-window size in seconds
+     * @param CacheItemPoolInterface|null $pool shared multi-process state
+     * @param \Closure|null $now          epoch-seconds clock override for tests
      */
     public function __construct(
         private readonly int $maxChallenges,
         private readonly int $windowSecs,
         private readonly ?CacheItemPoolInterface $pool = null,
         private readonly ?\Closure $now = null,
+        private readonly string $pepper = 'kiwicaptcha-rate-limit',
     ) {
     }
 
@@ -52,56 +63,87 @@ final class IssuanceRateLimiter
         }
         // An unknown client IP must never bypass the limit: bucket it with
         // the other unidentifiable clients instead (conservative, shared
-        // budget).
-        $key = $clientIp === '' ? 'unknown' : $clientIp;
+        // budget). The IP itself is never used as a key — only the HMAC.
+        $identity = $clientIp === '' ? 'unknown' : $clientIp;
+        $key = hash_hmac('sha256', $identity, $this->pepper);
 
         return $this->pool !== null ? $this->allowShared($key) : $this->allowLocal($key);
     }
 
-    private function allowLocal(string $clientIp): bool
+    private function allowLocal(string $key): bool
     {
         $now = $this->now();
-        $hits = $this->hits[$clientIp] ?? [];
+        $hits = $this->hits[$key] ?? [];
 
-        // Prune expired timestamps (sliding window).
-        $cutoff = $now - $this->windowSecs;
-        $hits = array_values(array_filter($hits, static fn (float $ts): bool => $ts >= $cutoff));
+        $hits = $this->prune($hits, $now);
 
         if (\count($hits) >= $this->maxChallenges) {
-            $this->hits[$clientIp] = $hits;
+            $this->hits[$key] = $hits;
 
             return false;
         }
         $hits[] = $now;
-        $this->hits[$clientIp] = $hits;
+        $this->hits[$key] = $hits;
 
         return true;
     }
 
-    private function allowShared(string $clientIp): bool
+    private function allowShared(string $key): bool
     {
-        // PSR-6 reserves `{}()/\@:` in keys; IPv6 literals contain ':'.
-        $key = self::CACHE_KEY_PREFIX.preg_replace('/[^A-Za-z0-9_.]/', '_', $clientIp);
+        $cacheKey = self::CACHE_KEY_PREFIX.$key;
 
-        $item = $this->pool->getItem($key);
+        $item = $this->pool->getItem($cacheKey);
         $state = $item->isHit() ? $item->get() : null;
-        $windowStart = \is_array($state) ? (float) ($state['window_start'] ?? 0.0) : 0.0;
-        $hits = \is_array($state) ? (int) ($state['hits'] ?? 0) : 0;
+        $hits = \is_array($state) ? $this->timestamps($state) : [];
 
         $now = $this->now();
-        if ($now - $windowStart > $this->windowSecs) {
-            $hits = 0;
-            $windowStart = $now;
-        }
-        if ($hits >= $this->maxChallenges) {
+        $hits = $this->prune($hits, $now);
+
+        if (\count($hits) >= $this->maxChallenges) {
+            $item->set(['t' => $hits]);
+            $item->expiresAfter($this->windowSecs + 1);
+            $this->pool->save($item);
+
             return false;
         }
+        $hits[] = $now;
 
-        $item->set(['hits' => $hits + 1, 'window_start' => $windowStart]);
+        $item->set(['t' => $hits]);
         $item->expiresAfter($this->windowSecs + 1);
         $this->pool->save($item);
 
         return true;
+    }
+
+    /**
+     * @param array<string, mixed> $state
+     *
+     * @return list<float>
+     */
+    private function timestamps(array $state): array
+    {
+        $raw = $state['t'] ?? [];
+        if (!\is_array($raw)) {
+            return [];
+        }
+        $ts = [];
+        foreach ($raw as $v) {
+            $ts[] = (float) $v;
+        }
+
+        return $ts;
+    }
+
+    /**
+     * @param list<float> $hits
+     *
+     * @return list<float>
+     */
+    private function prune(array $hits, float $now): array
+    {
+        $cutoff = $now - $this->windowSecs;
+
+        return array_values(array_filter($hits, static fn (float $ts): bool => $ts >= $cutoff));
     }
 
     private function now(): float

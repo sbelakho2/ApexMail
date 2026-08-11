@@ -7,18 +7,29 @@ namespace KiwiCaptcha;
 /**
  * Server-side challenge state, persisted by the storage backend.
  *
- * Mirrors the Rust `ChallengeRecord` fields so a PHP service and a Rust
- * service can share the same Redis/DB keys if ever mixed (though the two
- * projects are designed to be fully decoupled).
+ * Mirrors the Rust `ChallengeRecord` fields EXACTLY (serde key names and
+ * types), so a PHP service and a Rust service can share the same Redis
+ * records: the JSON keys match the Rust serde schema one-to-one
+ * (`nonce`, `scope`, `ip_hash`, `issued_at`, `expires_at`, `algorithm`
+ * `'sha256'|'argon2id'`, `m_kib`, `t`, `p`, `target_bits`, `salt`,
+ * `prefix`, `challenge`, `min_duration_ms`, `issued_at_ns`).
+ *
+ * `attempts_used` is emitted by {@see self::toArray()} as 0 for schema
+ * symmetry with the Rust record (which has `#[serde(default)]`, so a Rust
+ * reader accepts an absent field). PHP's one-shot model never increments
+ * it — {@see self::fromArray()} accepts and ignores any value so records
+ * written by the Rust verifier still load.
  *
  * `issuedAtNs` is a server-side-only high-resolution issuance timestamp in
  * WALL-CLOCK epoch microseconds (microseconds since Unix epoch, not
  * monotonic nanoseconds: hrtime() is per-host and cannot be persisted to
- * shared storage). The field name and JSON key stay `issuedAtNs` for
- * serialization stability; 0 remains the legacy "unknown" marker. It is
- * never signed into the challenge payload and never sent to the client —
- * the verifier uses it to measure elapsed solve time on the server instead
- * of trusting the client-reported duration.
+ * shared storage). The unit is IDENTICAL in the Rust crate (also being
+ * moved to epoch microseconds in parallel), so records are interoperable.
+ * The field name and JSON key stay `issuedAtNs` for serialization
+ * stability; 0 remains the legacy "unknown" marker. It is never signed
+ * into the challenge payload and never sent to the client — the verifier
+ * uses it to measure elapsed solve time on the server instead of trusting
+ * the client-reported duration.
  */
 final class ChallengeRecord
 {
@@ -60,10 +71,23 @@ final class ChallengeRecord
             'challenge' => $this->challenge,
             'min_duration_ms' => $this->minDurationMs,
             'issued_at_ns' => $this->issuedAtNs,
+            // Language-neutral symmetry with the Rust record: Rust has
+            // #[serde(default)] for attempts_used, so PHP emits the field
+            // explicitly to keep PHP→Rust records complete. The one-shot
+            // model never increments it.
+            'attempts_used' => 0,
         ];
     }
 
-    /** @param array<string, mixed> $data */
+    /**
+     * Rebuild a record from persisted (JSON-decoded) data.
+     *
+     * Unknown and absent keys are ignored gracefully — including
+     * `attempts_used`, which the Rust verifier writes and PHP's one-shot
+     * model does not use (accepted optionally, default 0).
+     *
+     * @param array<string, mixed> $data
+     */
     public static function fromArray(array $data): self
     {
         return new self(

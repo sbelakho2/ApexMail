@@ -13,10 +13,6 @@ namespace KiwiCaptcha\Tests\Fixtures;
  * semantics:
  *
  *  - GETDEL script: return-and-delete (atomic single-use).
- *  - INCR script: existence-aware per-key counter — the challenge key
- *    (KEYS[1]) must exist, else -1 (no record, no key created); the attempt
- *    key (KEYS[2]) is INCR'd with cap enforcement and TTL on first
- *    increment; the counter is left incremented when the cap is exceeded.
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
  * assert on the Redis commands issued (Lua usage, EX expiration, etc.).
@@ -85,7 +81,6 @@ final class FakePredisClient extends \Predis\Client
         $numKeys = (int) $arguments[1];
         $keysAndArgs = \array_slice($arguments, 2);
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
-        $rest = \array_slice($keysAndArgs, $numKeys);
 
         if (str_contains($script, 'GETDEL')) {
             $key = (string) $keys[0];
@@ -96,30 +91,6 @@ final class FakePredisClient extends \Predis\Client
             unset($this->store[$key]);
 
             return $value;
-        }
-
-        if (str_contains($script, "redis.call('INCR'")) {
-            // Emulates the existence-aware INCR script: KEYS[1] = challenge
-            // key, KEYS[2] = attempt counter key.
-            $challengeKey = (string) $keys[0];
-            $attemptKey = (string) $keys[1];
-            if (!isset($this->store[$challengeKey])) {
-                return -1;
-            }
-            $max = (int) $rest[0];
-            $ttl = (int) ($rest[1] ?? 0);
-            $next = (int) ($this->store[$attemptKey] ?? 0) + 1;
-            $this->store[$attemptKey] = (string) $next;
-            if ($next > $max) {
-                // Mirrors the Lua script: the counter is left incremented
-                // (no DECR) and the cap rejection is signalled.
-                return 1;
-            }
-            if ($next === 1) {
-                $this->expirations[$attemptKey] = $ttl;
-            }
-
-            return 0;
         }
 
         return null;

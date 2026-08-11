@@ -43,9 +43,11 @@ pub fn kiwi_widget_html(endpoint: &str, scope: &str, csp_nonce: Option<&str>) ->
         "<style{nonce}>\n{css}\n</style>\n\
         <div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"{endpoint}\" data-kiwi-scope=\"{scope}\">\n  \
         <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />\n  \
-        <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\" role=\"status\" aria-live=\"polite\">\n    \
+        <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\"\n       \
+        role=\"checkbox\" aria-checked=\"false\" aria-live=\"polite\"\n       \
+        aria-label=\"KiwiCaptcha security check\" tabindex=\"0\">\n    \
         <div class=\"kiwi-icon-wrapper\">\n      {svg}\n      <div class=\"kiwi-glow\"></div>\n    \
-        </div>\n    <div class=\"kiwi-main\">\n      <div class=\"kiwi-top\">\n        <span class=\"kiwi-label\" data-kiwi-label>Security Check</span>\n        <span class=\"kiwi-badge\" data-kiwi-badge>Idle</span>\n      </div>\n      <div class=\"kiwi-track\">\n        <div class=\"kiwi-bar\" data-kiwi-bar></div>\n      </div>\n      <div class=\"kiwi-bottom\">\n        <p class=\"kiwi-info\" data-kiwi-info>Protected by KiwiCaptcha</p>\n        <span class=\"kiwi-timer\" data-kiwi-timer></span>\n      </div>\n    </div>\n  </div>\n\
+        </div>\n    <div class=\"kiwi-main\">\n      <div class=\"kiwi-top\">\n        <span class=\"kiwi-label\" data-kiwi-label>Security Check</span>\n        <span class=\"kiwi-badge\" data-kiwi-badge>Idle</span>\n      </div>\n      <div class=\"kiwi-track\" role=\"progressbar\" aria-valuemin=\"0\" aria-valuemax=\"100\" aria-valuenow=\"0\">\n        <div class=\"kiwi-bar\" data-kiwi-bar></div>\n      </div>\n      <div class=\"kiwi-bottom\">\n        <p class=\"kiwi-info\" data-kiwi-info>Protected by KiwiCaptcha</p>\n        <span class=\"kiwi-timer\" data-kiwi-timer></span>\n      </div>\n    </div>\n  </div>\n\
         </div>\n\
         <script{nonce}>\n{wasm}\n</script>\n\
         <script{nonce}>\n{driver}\n</script>",

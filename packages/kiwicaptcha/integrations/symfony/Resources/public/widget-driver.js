@@ -25,8 +25,10 @@
 
   // ── WASM solver ──────────────────────────────────────────────────────
   var wasm = null;
+  var wasmDisabled = false; // set permanently when WASM memory allocation fails
   var wasmLoader = (typeof window !== "undefined" && window.__kiwiCaptchaWasm) ? window.__kiwiCaptchaWasm : null;
   async function initWasm() {
+    if (wasmDisabled) return null;
     if (wasm) return wasm;
     if (!wasmLoader) return null;
     try { wasm = await wasmLoader.load(); if (wasm.init_panic_hook) wasm.init_panic_hook(); return wasm; }
@@ -35,7 +37,9 @@
   // Copy bytes into wasm memory (explicit alloc/free — the raw-pointer ABI
   // avoids wasm-bindgen's Vec/slice glue entirely). Uses the crate's own
   // `alloc`/`dealloc` exports (stable names, never DCE'd by wasm-opt) and
-  // falls back to wasm-bindgen's generated symbols when present.
+  // falls back to wasm-bindgen's generated symbols when present. The Rust
+  // `alloc` returns null (0) on allocation failure — callers MUST check for
+  // it and fall back to the pure-JS solver path.
   function wasmAlloc(w, bytes) {
     var ptr = 0;
     if (w.alloc) {
@@ -45,6 +49,7 @@
     } else {
       return 0;
     }
+    if (ptr === 0 || ptr === null) return 0; // allocation failed
     new Uint8Array(w.memory.buffer).set(bytes, ptr);
     return ptr;
   }
@@ -131,20 +136,39 @@
       // generated __wbindgen_malloc may be dead-code-eliminated, so it is not
       // a reliable capability signal.
       function wasmUsable() {
-        return !!(w && w.solve_sha256_chunk && (w.alloc || w.__wbindgen_malloc));
+        return !wasmDisabled && !!(w && w.solve_sha256_chunk && (w.alloc || w.__wbindgen_malloc));
       }
       function wasmAllocatorPresent() {
         return !!(w && (w.alloc || w.__wbindgen_malloc) && (w.dealloc || w.__wbindgen_free));
       }
+      // An allocation failure (Rust `alloc` returns null) disables WASM
+      // PERMANENTLY: a memory-exhausted wasm module can never be trusted to
+      // allocate again, so every later solve must use the pure-JS fallback.
+      function disableWasm() {
+        wasmDisabled = true;
+        wasm = null;
+        wasmFree(w, pp, prefixBytes.length);
+        wasmFree(w, sp, saltBytes.length);
+        pp = 0;
+        sp = 0;
+      }
       function ensureBuffers() {
-        if (wasmAllocatorPresent() && pp === 0) {
-          pp = wasmAlloc(w, prefixBytes); sp = wasmAlloc(w, saltBytes);
+        if (pp === 0) {
+          pp = wasmAlloc(w, prefixBytes);
+          if (pp === 0) { disableWasm(); return false; }
         }
+        if (sp === 0) {
+          sp = wasmAlloc(w, saltBytes);
+          if (sp === 0) { disableWasm(); return false; }
+        }
+        return true;
       }
       if (algorithm === "argon2id") {
         if (!w || !w.solve_argon2_chunk || !wasmAllocatorPresent() || m_kib < 8 * p) { resolve(null); return; }
         var argMax = Math.min(MAX_SHA_HASHES, Math.max(1024, expectedHashes * 8)), CHUNK = 16;
-        ensureBuffers();
+        // No pure-JS Argon2id fallback exists: an allocation failure means the
+        // challenge cannot be solved (wasm is disabled permanently).
+        if (!ensureBuffers()) { resolve(null); return; }
         function argon2Chunk() {
           try {
             var res = w.solve_argon2_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, m_kib, t, p, counter, CHUNK);
@@ -161,10 +185,15 @@
       function chunk() {
         if (useWasm) {
           try {
-            ensureBuffers();
-            var res = w.solve_sha256_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, counter, CHUNK);
-            if (res !== -1) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); resolve({ counter: res, duration: Math.round(performance.now() - solveStart) }); return; }
-            counter += CHUNK;
+            if (ensureBuffers()) {
+              var res = w.solve_sha256_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, counter, CHUNK);
+              if (res !== -1) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); resolve({ counter: res, duration: Math.round(performance.now() - solveStart) }); return; }
+              counter += CHUNK;
+            } else {
+              // Allocation failed: wasm is disabled permanently — fall back to JS.
+              console.warn("KiwiCaptcha: WASM allocation failed, disabling WASM and falling back to JS");
+              useWasm = false;
+            }
           } catch (e) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); console.error("KiwiCaptcha: WASM solve failed, falling back to JS", e); useWasm = false; }
         }
         if (!useWasm) {
@@ -185,10 +214,27 @@
     if (!W || W.dataset.kiwiStarted) return;
     W.dataset.kiwiStarted = "1";
     var container = W.closest(".kiwi-container") || W;
-    var statusEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]");
-    function setStatus(label, pillText, state) { if (statusEl) statusEl.textContent = label; if (pillEl) pillEl.textContent = pillText; if (W) W.setAttribute("data-state", state); }
+    var statusEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
+    function setStatus(label, pillText, state) {
+      if (statusEl) statusEl.textContent = label;
+      if (pillEl) pillEl.textContent = pillText;
+      if (W) {
+        W.setAttribute("data-state", state);
+        /* Sync ARIA checkbox state for screen readers (industry standard). */
+        if (state === "done") { W.setAttribute("aria-checked", "true"); W.setAttribute("role", "checkbox"); }
+        else { W.setAttribute("aria-checked", "false"); }
+        /* Errors get assertive announcement (role=alert); everything else polite. */
+        if (state === "failed") { W.setAttribute("role", "alert"); W.setAttribute("aria-live", "assertive"); }
+        else { W.setAttribute("role", "checkbox"); W.setAttribute("aria-live", "polite"); }
+      }
+    }
     function setHint(text) { if (hintEl) hintEl.textContent = text; }
-    function setProgress(pct) { if (fillEl) fillEl.setAttribute("data-progress", String(Math.max(0, Math.min(100, pct)))); }
+    function setProgress(pct) {
+      var clamped = Math.max(0, Math.min(100, pct));
+      if (fillEl) fillEl.setAttribute("data-progress", String(clamped));
+      /* Sync aria-valuenow on the progressbar role (WCAG 4.1.2). */
+      if (trackEl) trackEl.setAttribute("aria-valuenow", String(clamped));
+    }
     
     var countdownTimer = null;
     function startCountdown(ttlSecs) {

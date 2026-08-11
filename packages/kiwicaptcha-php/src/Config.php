@@ -10,9 +10,12 @@ namespace KiwiCaptcha;
  * Mirrors the Rust crate's `ChallengeConfig` so both implementations produce
  * byte-identical challenges and verify them identically.
  *
- * Argon2id is validated stricter than the Rust crate: libsodium (the PHP
- * verifier's only Argon2id implementation) cannot represent t < 3 or p != 1,
- * so those parameter sets are rejected at construction — issuing them would
+ * Argon2id parameter sets are validated against KiwiCaptcha's intentional
+ * protocol profile: `t >= 3 && p == 1` (modern libsodium can represent
+ * t >= 1 with OPSLIMIT_MIN=1, so the t >= 3 rule is NOT a libsodium
+ * limitation — it is the profile KiwiCaptcha issues and verifies, with
+ * p == 1 reflecting libsodium's raw Argon2id interface). Parameter sets
+ * outside the profile are rejected at construction — issuing them would
  * produce challenges that can never verify in PHP.
  */
 final class Config
@@ -83,7 +86,7 @@ final class Config
         if ($algorithm === PoWAlgorithm::Argon2id && $t < 3) {
             throw new \InvalidArgumentException(
                 sprintf(
-                    'Argon2id requires t >= 3 (got t=%d): libsodium (PHP) cannot represent t < 3, so issuance would succeed but PHP verification would always fail',
+                    'KiwiCaptcha intentionally requires t >= 3 for its supported protocol profile (got t=%d); p == 1 reflects libsodium\'s raw Argon2id interface — issuing other parameter sets would produce challenges that can never verify in PHP',
                     $t
                 )
             );

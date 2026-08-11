@@ -47,23 +47,31 @@ pub fn init_panic_hook() {
 /// would be unsound here: `with_capacity` only guarantees `capacity >= len`,
 /// while `Vec::from_raw_parts` requires the exact original capacity.)
 ///
-/// `len == 0` returns a dangling-but-aligned pointer (non-null, 8-byte
-/// aligned) that must never be dereferenced or passed to [`dealloc`] — no
-/// backing memory is allocated. A layout that cannot be represented
-/// (e.g. `len` beyond `isize::MAX`) panics, which is acceptable for a
-/// callers-in-process allocation this size.
+/// Returns **null on allocation failure** (when `std::alloc::alloc` returns
+/// null, i.e. the linear memory is exhausted, or when the layout cannot be
+/// represented, e.g. `len` beyond `isize::MAX`); callers must check for null
+/// and fall back to the pure-JS solver path. `len == 0` returns a
+/// dangling-but-aligned pointer (non-null, 8-byte aligned) that must never be
+/// dereferenced or passed to [`dealloc`] — no backing memory is allocated.
 ///
 /// The JS glue passes back the exact original byte length, so the contract
 /// holds across the boundary.
 #[wasm_bindgen]
 pub fn alloc(len: usize) -> *mut u8 {
-    let layout = Layout::from_size_align(len, 8).expect("allocation size overflows isize::MAX");
+    let layout = match Layout::from_size_align(len, 8) {
+        Ok(l) => l,
+        Err(_) => return std::ptr::null_mut(),
+    };
     if len == 0 {
         // Dangling but 8-byte aligned and non-null; never dereferenceable and
         // never passed to `dealloc` (the JS glue only frees real buffers).
         return layout.align() as *mut u8;
     }
-    unsafe { std::alloc::alloc(layout) }
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    ptr
 }
 
 /// Free a buffer previously returned by [`alloc`].

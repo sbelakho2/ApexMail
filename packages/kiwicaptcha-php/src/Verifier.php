@@ -8,12 +8,15 @@ namespace KiwiCaptcha;
  * Verifies client-submitted solutions — byte-for-byte compatible with the
  * Rust crate's `verify_solution`.
  *
+ * Verification is ONE-SHOT: consume-on-verify removes the challenge record
+ * BEFORE the proof is checked, so a wrong candidate burns the challenge —
+ * the client must fetch and solve a fresh one. This deliberately bounds the
+ * server-side cost of memory-hard verification: each submitted token can
+ * cost at most one Argon2id (or SHA-256) hash, and replaying a token always
+ * fails with RecordNotFound. There is no maxAttempts parameter: the
+ * one-shot model IS the attempt bound.
+ *
  * Check order:
- *   0. Attempt cap (optional): an atomic per-nonce attempt counter is
- *      incremented BEFORE the record is consumed; exceeding the cap fails
- *      with TooManyAttempts. Backends without atomic counters (PSR-6,
- *      in-memory) only track attempts — consume()'s single-use semantics are
- *      the actual gate.
  *   1. Re-check the challenge HMAC signature (constant-time compare).
  *   2. TTL: now < expires_at.
  *   3. Scope: challenge scope matches the expected flow.
@@ -72,10 +75,10 @@ final class Verifier
      *                                     Telemetry is client-controlled, so
      *                                     enforcement is opt-in defense-in-depth
      *                                     only.
-     * @param int|null    $maxAttempts     when set, an atomic per-nonce attempt
-     *                                     counter is enforced before the record
-     *                                     is consumed; exceeded caps fail with
-     *                                     TooManyAttempts
+     *
+     * One-shot model: the record is consumed BEFORE any check, so a failed
+     * verification burns the challenge (no maxAttempts parameter — the
+     * consume-on-verify semantics ARE the attempt bound).
      */
     public function verify(
         string $rawToken,
@@ -84,19 +87,11 @@ final class Verifier
         ?string $clientIp = null,
         ?int $nowNs = null,
         bool $enforceTelemetry = false,
-        ?int $maxAttempts = null,
     ): VerifyOutcome {
         try {
             $token = SolutionToken::decode($rawToken);
         } catch (DecodeError $e) {
             return VerifyOutcome::malformedToken($e->getMessage());
-        }
-
-        // 0. Attempt cap (checked BEFORE consume so the counter is
-        //    incremented even for tokens whose records are already gone —
-        //    replay floods still count).
-        if ($maxAttempts !== null && !$this->storage->incrementAttempts($token->nonce, $maxAttempts)) {
-            return VerifyOutcome::invalid(VerifyError::TooManyAttempts);
         }
 
         $record = $this->storage->consume($token->nonce);
@@ -208,8 +203,8 @@ final class Verifier
      *           m_cost=m_kib KiB, t_cost=t, p_cost=p, output=32 bytes)
      *
      * Returns null when the record is malformed or the algorithm cannot be
-     * computed (e.g. Argon2id parameters outside libsodium's representable
-     * range — t < 3 or p != 1).
+     * computed (e.g. Argon2id parameters outside KiwiCaptcha's protocol
+     * profile — t < 3 or p != 1).
      */
     private function deriveHash(ChallengeRecord $record, int $counter): ?string
     {
@@ -227,10 +222,11 @@ final class Verifier
 
     private function argon2id(string $password, string $saltBytes, ChallengeRecord $record): ?string
     {
-        // libsodium maps opslimit == t_cost and memlimit == bytes, but only
-        // supports p == 1 and t >= 3 (opslimit minimum). Parameters outside
-        // this range cannot be reproduced by libsodium, so fail closed with a
-        // distinguishable error instead of silently verifying wrong bytes.
+        // KiwiCaptcha's protocol profile is p == 1 && t >= 3 (t >= 3 is
+        // intentional, not a libsodium limit — libsodium accepts t >= 1).
+        // Parameters outside the profile cannot be reproduced by the
+        // libsodium-backed verifier, so fail closed with a distinguishable
+        // error instead of silently verifying wrong bytes.
         if ($record->p !== 1 || $record->t < 3) {
             return null;
         }

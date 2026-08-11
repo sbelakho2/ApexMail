@@ -118,14 +118,12 @@ final class Psr6StorageTest extends TestCase
         self::assertSame(0, $record?->issuedAtNs);
     }
 
-    public function testAttemptsAreTrackedBestEffort(): void
+    public function testPsr6StorageIsNotAtomic(): void
     {
-        $storage = new Psr6Storage($this->makePool());
-
-        self::assertSame(0, $storage->attemptsUsed('nonce-1'));
-        self::assertTrue($storage->incrementAttempts('nonce-1', 3));
-        self::assertTrue($storage->incrementAttempts('nonce-1', 3));
-        self::assertSame(2, $storage->attemptsUsed('nonce-1'));
+        // PSR-6 cannot fuse read and delete, so Psr6Storage is best-effort
+        // single-use — it must NOT claim AtomicStorageInterface (only
+        // RedisStorage's GETDEL backend does).
+        self::assertNotInstanceOf(\KiwiCaptcha\AtomicStorageInterface::class, new Psr6Storage($this->makePool()));
     }
 
     public function testIssuedAtNsSurvivesRoundTrip(): void

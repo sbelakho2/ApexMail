@@ -58,7 +58,9 @@ kiwi_captcha:
     argon_t: 3                              # Argon2id requires t >= 3 and p == 1
     argon_p: 1
     challenge_ttl_secs: 120
-    route_prefix: /kiwi-captcha             # challenge endpoint prefix
+    route_prefix: /kiwi-captcha             # challenge endpoint prefix; the form
+                                            # widget and standalone widget both
+                                            # derive their endpoint from it
     # Production requires a shared storage (Redis). The bundle fails fast with
     # a LogicException if ArrayStorage is configured outside the test/dev
     # environment (kernel.environment or APP_ENV).
@@ -75,10 +77,21 @@ kiwi_captcha:
     #                                       # Redis-backed Symfony Cache pool).
     #                                       # Without it, the limiter is a
     #                                       # per-process in-memory window.
-    # Aggregate Argon2id verification concurrency cap (default 2, per PHP
-    # process; 0 = unlimited). Each Argon2id verification allocates
-    # argon_m_kib of memory — size this to available memory.
+    #                                       # Raw client IPs are never stored:
+    #                                       # every key is a peppered HMAC of
+    #                                       # the IP (rate_limit_pepper defaults
+    #                                       # to secret_key).
+    # Aggregate Argon2id verification concurrency cap (default 2; 0 =
+    # unlimited). Each Argon2id verification allocates argon_m_kib of memory —
+    # size this to available memory. With a Redis client the cap is enforced
+    # across ALL PHP-FPM workers (see the Argon2 section below).
     # argon2_max_concurrent_verifications: 2
+    # redis_service: null                   # optional Redis client service id
+    #                                       # (\Redis or Predis\Client) for the
+    #                                       # cross-worker Argon2 admission
+    #                                       # semaphore; when null, the
+    #                                       # storage's own client is reused if
+    #                                       # storage is RedisStorage
 ```
 
 > `KIWI_SECRET_KEY` is the same key used by the Rust implementation, so a
@@ -104,6 +117,9 @@ public function buildForm(FormBuilderInterface $builder, array $options): void
 
 The type renders a hidden `kiwi__token` input; the `KiwiCaptcha` validator
 constraint (attached automatically) verifies the token **locally** on submit.
+The widget posts to `route_prefix . '/challenge'` by default — the form's
+endpoint follows the configured prefix like the standalone widget does — and
+stays overridable per form with the `endpoint` option.
 
 ### In a Template
 
@@ -169,22 +185,48 @@ After importing (or auto-registering), the route is available at
 
 **Rate limiting.** Challenge issuance is rate-limited per client IP
 (`rate_limit` challenges per `rate_limit_window_secs` sliding window; HTTP
-429 with `{"error":{"code":"RATE_LIMITED"}}` when exceeded). By default the
-limiter keeps a per-process in-memory window (best-effort, single worker);
-for multi-worker deployments configure `rate_limit_cache` with a shared
-PSR-6 pool (e.g. a Redis-backed Symfony Cache pool). `rate_limit: 0`
-disables the limiter — the bundle defaults to disabled so existing
-deployments keep their behavior, but production should explicitly enable it.
+429 with `{"error":{"code":"RATE_LIMITED"}}` when exceeded). Both backends
+(shared PSR-6 pool and in-memory) use a TRUE sliding window — the state is
+the list of hit timestamps pruned on every check, so a burst straddling a
+window boundary can never double the rate. **Raw client IPs are never
+stored**: every key is a peppered HMAC of the IP
+(`hash_hmac('sha256', $ip, $pepper)` with `rate_limit_pepper`, defaulting to
+the bundle secret), in both the shared pool and the in-memory buckets. By
+default the limiter keeps a per-process in-memory window (best-effort,
+single worker); for multi-worker deployments configure `rate_limit_cache`
+with a shared PSR-6 pool (e.g. a Redis-backed Symfony Cache pool) —
+PSR-6 cannot express an atomic read-modify-write, so the shared limiter is a
+bound, not a gate. `rate_limit: 0` disables the limiter — the bundle defaults
+to disabled so existing deployments keep their behavior, but production
+should explicitly enable it.
 
 **Argon2id verification concurrency cap.** When `algorithm: argon2id`, the
 verifier is wrapped by `ThrottledVerifier` (bundle-owned, same `verify()`
 signature) enforcing `argon2_max_concurrent_verifications` (default 2)
-concurrent verifications per PHP process via an in-process semaphore
-(`src/Security/Argon2Semaphore.php`). Saturation for longer than the wait
-bound fails verification closed as a normal captcha violation (never a 500).
-Honest caveat: PHP-FPM workers share no memory, so the cap is per worker,
-not per deployment — multi-worker deployments should also limit worker
-counts and rely on the Redis-backed rate limit to bound the inflow.
+concurrent verifications. Two admission backends:
+
+- **Redis-backed admission (cross-worker).** When the bundle has a Redis
+  client — the `redis_service` config option, or the configured storage
+  itself when it is `KiwiCaptcha\Storage\RedisStorage` (its client is
+  reused) — the cap is enforced with an atomic Lua INCR/DECR semaphore
+  (`src/Security/RedisAdmissionSemaphore.php`) on a shared counter key
+  (`kiwicaptcha:argon2:active:…`), so ALL PHP-FPM workers together can never
+  exceed the cap. Approximation, documented: permits carry a 60 s watchdog
+  TTL instead of exact liveness, so a crashed worker's permit auto-expires
+  (the effective cap may briefly shrink for up to one watchdog period after
+  a crash storm — acceptable for memory-cost bounding).
+- **In-process semaphore (per-process).** Without a Redis client the cap is
+  enforced per PHP process (`src/Security/Argon2Semaphore.php`, static,
+  polls for a slot up to 5 s). Honest caveat: PHP-FPM workers share no
+  memory, so this bounds concurrency per worker, NOT per deployment —
+  multi-worker deployments without Redis should also limit worker counts
+  and rely on the rate limit to bound the inflow; ideally, run Redis and let
+  the bundle use the cross-worker semaphore. Infrastructure-level admission
+  control (e.g. limiting concurrent PHP-FPM workers or per-instance request
+  concurrency) remains a complementary knob in every case.
+
+Saturation for longer than the wait bound fails verification closed as a
+normal captcha violation (never a 500).
 
 **Trusted proxies.** Both the challenge endpoint and the validator use
 `Request::getClientIp()` (the same source), so configure Symfony's

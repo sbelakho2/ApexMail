@@ -19,11 +19,12 @@
  * would be unsound here: `with_capacity` only guarantees `capacity >= len`,
  * while `Vec::from_raw_parts` requires the exact original capacity.)
  *
- * `len == 0` returns a dangling-but-aligned pointer (non-null, 8-byte
- * aligned) that must never be dereferenced or passed to [`dealloc`] — no
- * backing memory is allocated. A layout that cannot be represented
- * (e.g. `len` beyond `isize::MAX`) panics, which is acceptable for a
- * callers-in-process allocation this size.
+ * Returns **null on allocation failure** (when `std::alloc::alloc` returns
+ * null, i.e. the linear memory is exhausted, or when the layout cannot be
+ * represented, e.g. `len` beyond `isize::MAX`); callers must check for null
+ * and fall back to the pure-JS solver path. `len == 0` returns a
+ * dangling-but-aligned pointer (non-null, 8-byte aligned) that must never be
+ * dereferenced or passed to [`dealloc`] — no backing memory is allocated.
  *
  * The JS glue passes back the exact original byte length, so the contract
  * holds across the boundary.

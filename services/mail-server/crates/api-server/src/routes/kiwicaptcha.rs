@@ -161,7 +161,7 @@ async fn issue_challenge_handler(
         .unwrap_or(0);
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
+        .map(|d| d.as_micros() as u64) // epoch MICROseconds — kiwicaptcha's issued_at_ns/now_ns unit
         .unwrap_or(0);
 
     let kc_config = kiwicaptcha::ChallengeConfig {

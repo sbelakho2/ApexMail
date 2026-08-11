@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Tests;
 
+use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -100,6 +101,54 @@ final class RedisStorageTest extends TestCase
         self::assertSame('EX', $setCalls[0][1][2] ?? null, 'store must set the key expiration');
     }
 
+    public function testStoreWritesLanguageNeutralJson(): void
+    {
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+
+        $storage->store($this->makeRecord());
+
+        $raw = $client->store['kiwicaptcha:redis-nonce-1'];
+        self::assertNotSame('a:', substr((string) $raw, 0, 2), 'records must NOT be PHP-serialized');
+
+        $data = json_decode((string) $raw, true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($data);
+        // The JSON keys are the shared language-neutral schema — identical to
+        // the Rust serde keys, including attempts_used (Rust: #[serde(default)])
+        // so a PHP-written record is complete for a Rust reader.
+        self::assertSame([
+            'nonce', 'scope', 'ip_hash', 'issued_at', 'expires_at', 'algorithm',
+            'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix', 'challenge',
+            'min_duration_ms', 'issued_at_ns', 'attempts_used',
+        ], array_keys($data));
+        self::assertSame('redis-nonce-1', $data['nonce']);
+        self::assertSame('sha256', $data['algorithm']);
+        self::assertSame(0, $data['attempts_used']);
+        self::assertSame(123_456_789, $data['issued_at_ns']);
+    }
+
+    public function testReadsRecordsWrittenWithoutAttemptsUsed(): void
+    {
+        // A Rust-written record may omit attempts_used (serde default) — the
+        // PHP reader must accept it and default to 0.
+        $client = $this->requirePredis();
+        $data = $this->makeRecord('rust-rec')->toArray();
+        unset($data['attempts_used']);
+        $client->store['kiwicaptcha:rust-rec'] = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+
+        $record = (new RedisStorage($client))->find('rust-rec');
+
+        self::assertNotNull($record);
+        self::assertSame('rust-rec', $record->nonce);
+    }
+
+    public function testRedisStorageImplementsAtomicStorageInterface(): void
+    {
+        $storage = new RedisStorage($this->requirePredis());
+
+        self::assertInstanceOf(AtomicStorageInterface::class, $storage);
+    }
+
     public function testConsumeIsAtomicSingleUse(): void
     {
         $client = $this->requirePredis();
@@ -161,7 +210,7 @@ final class RedisStorageTest extends TestCase
     public function testCorruptedValueIsHandledGracefully(): void
     {
         $client = $this->requirePredis();
-        $client->store['kiwicaptcha:corrupt'] = 'not-php-serialize!!{';
+        $client->store['kiwicaptcha:corrupt'] = '{not valid json!!';
         $storage = new RedisStorage($client);
 
         self::assertNull($storage->find('corrupt'));
@@ -169,90 +218,24 @@ final class RedisStorageTest extends TestCase
         self::assertNull($storage->find('corrupt'));
     }
 
-    public function testIncrementAttemptsEnforcesCapAtomically(): void
+    public function testLegacySerializedValueIsHandledGracefully(): void
     {
+        // Records written by PHP builds before the JSON interchange change:
+        // serialize() output is not JSON, so it must decode to null (the
+        // challenge is treated as missing) rather than crashing the verify
+        // path.
         $client = $this->requirePredis();
-        $storage = new RedisStorage($client);
-        // The challenge record must exist for the counter to be created.
-        $storage->store($this->makeRecord('n1'));
-
-        self::assertTrue($storage->incrementAttempts('n1', 2));
-        self::assertSame(1, $storage->attemptsUsed('n1'));
-        self::assertTrue($storage->incrementAttempts('n1', 2));
-        self::assertSame(2, $storage->attemptsUsed('n1'));
-        // Third attempt must be rejected; the counter is left incremented
-        // (the Lua script no longer DECRs on overflow).
-        self::assertFalse($storage->incrementAttempts('n1', 2));
-        self::assertSame(3, $storage->attemptsUsed('n1'));
-    }
-
-    public function testAttemptCounterIsPerNonce(): void
-    {
-        $client = $this->requirePredis();
-        $storage = new RedisStorage($client);
-        $storage->store($this->makeRecord('a'));
-        $storage->store($this->makeRecord('b'));
-
-        self::assertTrue($storage->incrementAttempts('a', 5));
-        self::assertTrue($storage->incrementAttempts('b', 5));
-
-        self::assertSame(1, $storage->attemptsUsed('a'));
-        self::assertSame(1, $storage->attemptsUsed('b'));
-    }
-
-    public function testIncrementAttemptsOnMissingChallengeDoesNotCreateKeys(): void
-    {
-        $client = $this->requirePredis();
+        $client->store['kiwicaptcha:legacy'] = serialize(['nonce' => 'legacy']);
         $storage = new RedisStorage($client);
 
-        // No challenge record for 'ghost': the Lua script must return -1
-        // without touching any key. The method treats that as "not blocked"
-        // so the verifier proceeds to consume(), which returns null →
-        // RecordNotFound (the same outcome as before, minus the key litter).
-        self::assertTrue($storage->incrementAttempts('ghost', 3));
-        self::assertSame(0, $storage->attemptsUsed('ghost'), 'no counter may be created for a fake nonce');
-        self::assertNull($storage->consume('ghost'));
-
-        // Assert via the fake's key set: NO keys exist for the fake nonce.
-        self::assertArrayNotHasKey('kiwicaptcha:ghost', $client->store);
-        self::assertArrayNotHasKey('kiwicaptcha:ghost:attempts', $client->store);
-        self::assertArrayNotHasKey('kiwicaptcha:ghost:attempts', $client->expirations);
-
-        // End-to-end: verify() with a fake nonce and maxAttempts fails with
-        // RecordNotFound, not TooManyAttempts.
-        $fakeToken = \KiwiCaptcha\SolutionToken::create(
-            base64_encode(str_repeat('x', 32)),
-            1,
-            100,
-            ['wd' => false],
-        )->encode();
-        $outcome = (new Verifier($storage))->verify($fakeToken, Vectors::SECRET, null, null, maxAttempts: 3);
-        self::assertSame(VerifyError::RecordNotFound, $outcome->error);
+        self::assertNull($storage->find('legacy'));
     }
 
-    public function testIncrementAttemptsUsesLuaWithCapAndTtl(): void
+    public function testOneShotVerifyRemovesRecordEvenWithWrongCounter(): void
     {
-        $client = $this->requirePredis();
-        $storage = new RedisStorage($client);
-        $storage->store($this->makeRecord('n1'));
-
-        $storage->incrementAttempts('n1', 3);
-
-        $evals = array_filter($client->calls, fn ($c) => $c[0] === 'EVAL');
-        self::assertNotEmpty($evals);
-        $eval = array_values($evals)[0][1];
-        self::assertStringContainsString("redis.call('EXISTS'", (string) $eval[0]);
-        self::assertStringContainsString("redis.call('INCR'", (string) $eval[0]);
-        // Two KEYS: challenge key + attempt counter key.
-        self::assertSame(2, (int) $eval[1]);
-        self::assertSame('kiwicaptcha:n1', $eval[2]);
-        self::assertSame('kiwicaptcha:n1:attempts', $eval[3]);
-        self::assertSame('3', $eval[4]);
-        self::assertGreaterThanOrEqual(1, $client->expirations['kiwicaptcha:n1:attempts']);
-    }
-
-    public function testFullVerifyRoundTripWithAtomicAttemptCap(): void
-    {
+        // One-shot model: the record is consumed BEFORE the proof is checked.
+        // A wrong counter burns the challenge (InsufficientWork), and the
+        // subsequent correct token finds no record.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $issuer = new Issuer(
@@ -272,6 +255,11 @@ final class RedisStorageTest extends TestCase
         $verifier = new Verifier($storage);
 
         $challenge = $issuer->issue('login', '198.51.100.77');
+
+        $wrong = \KiwiCaptcha\SolutionToken::create($challenge->nonce, 1, 5000, [])->encode();
+        $outcome = $verifier->verify($wrong, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::InsufficientWork, $outcome->error);
+
         $counter = 0;
         $saltBytes = base64_decode($challenge->salt, true);
         do {
@@ -280,17 +268,8 @@ final class RedisStorageTest extends TestCase
         } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
         --$counter;
 
-        $token = \KiwiCaptcha\SolutionToken::create($challenge->nonce, $counter, 5000, ['wd' => false])->encode();
-
-        $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', maxAttempts: 1);
-        self::assertTrue($first->isOk(), sprintf('first verify failed: %s', $first->code()));
-
-        // The record is consumed by the first verify, so the second attempt
-        // fails the Lua EXISTS gate (-1 = no challenge record): no counter
-        // key is created for the replay, and consume() yields
-        // RecordNotFound.
-        $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', maxAttempts: 1);
-        self::assertSame(VerifyError::RecordNotFound, $second->error);
-        self::assertSame(1, $storage->attemptsUsed($challenge->nonce));
+        $good = \KiwiCaptcha\SolutionToken::create($challenge->nonce, $counter, 5000, ['wd' => false])->encode();
+        $second = $verifier->verify($good, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::RecordNotFound, $second->error, 'wrong-counter verify must have consumed the record');
     }
 }

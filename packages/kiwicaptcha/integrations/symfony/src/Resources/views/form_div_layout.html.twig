@@ -7,7 +7,9 @@
 </style>
 <div class="kiwi-container" id="kiwicaptcha-root-{{ id }}" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}">
     <input type="hidden" name="{{ full_name }}" value="" data-kiwi-token />
-    <div class="kiwi-widget" data-kiwi-widget data-state="idle" role="status" aria-live="polite">
+    <div class="kiwi-widget" data-kiwi-widget data-state="idle"
+         role="checkbox" aria-checked="false" aria-live="polite"
+         aria-label="KiwiCaptcha security check" tabindex="0">
         <div class="kiwi-icon-wrapper">
             <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M26 19c0 5.5-4 10-10 10S7 24.5 7 19c0-6 3-11 7-12 2-0.5 4-0.5 6 0 4 1 6 6 6 12z" fill="currentColor"/>
@@ -27,7 +29,7 @@
                 <span class="kiwi-label" data-kiwi-label>Security Check</span>
                 <span class="kiwi-badge" data-kiwi-badge>Idle</span>
             </div>
-            <div class="kiwi-track">
+            <div class="kiwi-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
                 <div class="kiwi-bar" data-kiwi-bar></div>
             </div>
             <div class="kiwi-bottom">

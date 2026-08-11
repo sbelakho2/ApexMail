@@ -7,9 +7,12 @@ namespace KiwiCaptcha;
 /**
  * Persistence for issued challenges.
  *
- * Implementations MUST be consistent with the atomic single-use semantics:
- * once `consume()` returns true the record is gone, so replaying a token
- * yields no record and verification fails.
+ * `consume()` returns the record and removes it, enforcing single-use
+ * semantics per stored item. Implementations MAY be non-atomic under
+ * concurrency: two racing requests can both read the same record before
+ * either removes it. Implementations that guarantee STRICT single-use
+ * (a second call MUST return null even under concurrency) implement
+ * {@see AtomicStorageInterface}.
  */
 interface StorageInterface
 {
@@ -25,8 +28,11 @@ interface StorageInterface
     public function find(string $nonce): ?ChallengeRecord;
 
     /**
-     * Atomically load-and-delete a record. Returns the record only if it
-     * existed; a second call for the same nonce MUST return null.
+     * Load-and-remove a record: returns the record only if it existed and
+     * removes it from the store, so replaying a token yields no record and
+     * verification fails. Best-effort single-use — MAY be non-atomic under
+     * concurrency; implementations that guarantee atomic single-use
+     * implement {@see AtomicStorageInterface}.
      */
     public function consume(string $nonce): ?ChallengeRecord;
 
@@ -34,20 +40,4 @@ interface StorageInterface
      * Delete a record by nonce.
      */
     public function delete(string $nonce): void;
-
-    /**
-     * Number of verify attempts recorded so far for a nonce.
-     */
-    public function attemptsUsed(string $nonce): int;
-
-    /**
-     * Record one verify attempt for a nonce, atomically when the backend
-     * supports it (Redis). Returns false when the attempt would exceed
-     * $maxAttempts — the caller then rejects with TooManyAttempts.
-     *
-     * Implementations without atomic counters (PSR-6, in-memory) perform
-     * best-effort read-modify-write accounting and MUST document that they
-     * cannot enforce the cap under concurrency.
-     */
-    public function incrementAttempts(string $nonce, int $maxAttempts): bool;
 }

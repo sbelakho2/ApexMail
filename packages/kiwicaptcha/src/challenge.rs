@@ -73,6 +73,16 @@ pub struct ChallengePayload {
 /// Stored alongside (but separately from) the signed challenge string sent to
 /// the client. The verifier reads this to check TTL, IP binding, and to mark
 /// the challenge consumed (single-use).
+///
+/// # Cross-language record interchange
+///
+/// The serde JSON of this struct is the cross-language storage schema; PHP's
+/// `ChallengeRecord::toArray()` emits identical keys (nonce, scope, ip_hash,
+/// issued_at, expires_at, algorithm 'sha256'|'argon2id', m_kib, t, p,
+/// target_bits, salt, prefix, challenge, min_duration_ms, issued_at_ns,
+/// attempts_used optional). PoWAlgorithm already serializes lowercase — keep
+/// it. Both languages write and read this exact shape, so a record persisted
+/// by PHP can be verified by Rust and vice versa.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeRecord {
     pub nonce: String,
@@ -99,17 +109,23 @@ pub struct ChallengeRecord {
     pub challenge: String,
     /// The minimum plausible solve time in milliseconds for the issued
     /// difficulty, computed at issuance from the algorithm and target bits.
-    /// Solutions arriving faster than this (measured server-side from
-    /// issuance to receipt) are physically implausible and rejected. An
-    /// override (e.g. operator tuning) replaces the computed value; 0
-    /// disables the check.
+    /// The floor is a timing-anomaly heuristic, not a proof of human
+    /// behavior: proof-of-work is probabilistic (a valid solution can occur
+    /// at counter 0) and a fast bot can wait before submitting, so the floor
+    /// only rejects solves that ARRIVE faster than the theoretical minimum
+    /// (measured server-side from issuance to receipt). An override (e.g.
+    /// operator tuning) replaces the computed value; 0 disables the check.
     pub min_duration_ms: u64,
-    /// High-resolution (nanosecond) server-side issuance timestamp. This is
-    /// used to enforce the minimum-duration check with a SERVER-measured
-    /// elapsed time — the client-reported duration is forgeable and is only
-    /// used as telemetry. Never signed and never sent to the client; 0 means
-    /// the field is unavailable (legacy records fall back to the
-    /// client-duration check).
+    /// High-resolution (epoch microseconds, not nanoseconds) server-side
+    /// issuance timestamp — `SystemTime::now().duration_since(UNIX_EPOCH)
+    /// .as_micros()`. This is used to enforce the minimum-duration check with
+    /// a SERVER-measured elapsed time — the client-reported duration is
+    /// forgeable and is only used as telemetry. Never signed and never sent
+    /// to the client; 0 means the field is unavailable (legacy records fall
+    /// back to the client-duration check). The name keeps the historical
+    /// `_ns` suffix for backward compatibility with stored records; the UNIT
+    /// is microseconds and is shared with PHP (`ChallengeRecord` JSON
+    /// interchange).
     #[serde(default)]
     pub issued_at_ns: u64,
     /// Number of verification attempts already made against this challenge
@@ -131,7 +147,8 @@ pub struct ChallengeConfig {
     /// memory-hard parameters below are ignored and `target_bits` is used.
     pub algorithm: PoWAlgorithm,
     /// Memory cost in KiB for Argon2id challenges (ignored for SHA-256).
-    /// Must satisfy `m_kib >= 8 * p` (Argon2 minimum) and be browser-solvable.
+    /// Must satisfy `8 * p <= m_kib <= SOLVER_MAX_ARGON2_M_KIB` (Argon2
+    /// minimum; the browser-wasm memory ceiling) and be browser-solvable.
     pub m_kib: u32,
     /// Time cost for Argon2id challenges.
     pub t: u32,
@@ -142,8 +159,11 @@ pub struct ChallengeConfig {
     /// `argon2_target_bits` (see below) because every Argon2 hash is ~1000x
     /// more expensive than SHA-256.
     pub target_bits: u32,
-    /// Difficulty (leading zero bits) for Argon2id challenges. Clamped to
-    /// [`SOLVER_MAX_ARGON2_TARGET_BITS`] so the widget can always finish.
+    /// Difficulty (leading zero bits) for Argon2id challenges. Must be
+    /// 1..=[`SOLVER_MAX_ARGON2_TARGET_BITS`] — 0 and values above the ceiling
+    /// are rejected at issuance (the value is also defensively clamped in
+    /// [`ChallengeConfig::effective_target_bits`] so the widget can always
+    /// finish).
     pub argon2_target_bits: u32,
     /// Challenge lifetime in seconds.
     pub ttl_secs: u64,
@@ -163,13 +183,19 @@ pub struct ChallengeConfig {
 
 impl ChallengeConfig {
     /// Compute the adjusted SHA-256 target bits based on current active solver
-    /// count. When `auto_tune` is disabled, returns the static `target_bits`.
-    /// Otherwise linearly interpolates between `auto_tune_min_bits` (0 active)
-    /// and `auto_tune_max_bits` (50+ active solvers).
+    /// count. When `auto_tune` is disabled, auto-tune bounds have NO effect —
+    /// only the solver ceiling applies (`target_bits` capped at
+    /// [`SOLVER_MAX_TARGET_BITS`]); a configured `target_bits` below the
+    /// tuning bounds stays as-is. Otherwise linearly interpolates between
+    /// `auto_tune_min_bits` (0 active) and `auto_tune_max_bits` (50+ active
+    /// solvers).
     ///
     /// The result is clamped to [`SOLVER_MAX_TARGET_BITS`] so the issued
     /// difficulty always stays within what the browser solver can finish.
     pub fn tuned_target_bits(&self, active_solves: u64) -> u32 {
+        if !self.auto_tune {
+            return self.target_bits.min(SOLVER_MAX_TARGET_BITS);
+        }
         // Both bounds are clamped to the solver ceiling; the upper bound is
         // re-raised to at least the lower bound so the interpolation range
         // never inverts under misconfiguration.
@@ -178,9 +204,6 @@ impl ChallengeConfig {
             .auto_tune_max_bits
             .min(SOLVER_MAX_TARGET_BITS)
             .max(min_bits);
-        if !self.auto_tune {
-            return self.target_bits.clamp(min_bits, max_bits);
-        }
         let load = (active_solves as f64 / 50.0).min(1.0);
         let range = max_bits.saturating_sub(min_bits) as f64;
         let adjusted = min_bits as f64 + load * range;
@@ -197,8 +220,10 @@ impl ChallengeConfig {
 
     /// Derive the minimum plausible solve time (ms) for the issued difficulty.
     ///
-    /// The floor is set so it only rejects solutions that arrive faster than
-    /// any real device could compute the work:
+    /// The floor is a timing-anomaly heuristic: PoW is probabilistic (a valid
+    /// solution can occur at counter 0) and a fast bot can wait before
+    /// submitting, so the floor only rejects solves that ARRIVE faster than
+    /// the theoretical minimum, as measured by the server clock:
     /// - SHA-256: assumes up to 5e9 hashes/sec (beyond any browser; catches
     ///   hardware-accelerated/precomputed solves) with an absolute 5 ms floor.
     /// - Argon2id: assumes up to 5e5 hashes/sec (memory-hard; the wasm solver
@@ -228,6 +253,19 @@ pub fn hash_ip(ip: &str, salt: &str) -> String {
     hasher.update(salt.as_bytes());
     hasher.update(ip.as_bytes());
     hex::encode(&hasher.finalize())
+}
+
+/// The canonical current-time value for the `now_ns` parameter: epoch
+/// MICROSECONDS (despite the historical `_ns` name).
+///
+/// This is the unit Rust and PHP share in the `issued_at_ns` record field,
+/// so both sides must feed it the same way:
+/// `SystemTime::now().duration_since(UNIX_EPOCH).as_micros()`.
+pub fn now_epoch_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 /// The signed challenge string is `base64(payload_fields || "." || hmac)`.
@@ -413,8 +451,10 @@ impl Default for ChallengeCache {
 /// - `now_unix` — current Unix timestamp in seconds (injected for
 ///   testability); used for the signed payload, TTL, and the client-facing
 ///   challenge.
-/// - `now_ns` — high-resolution issuance timestamp in nanoseconds, used
-///   exclusively for server-side minimum-duration enforcement.
+/// - `now_ns` — high-resolution issuance timestamp in EPOCH MICROSECONDS
+///   (see [`now_epoch_micros`]; the field name keeps the historical `_ns`
+///   suffix but the unit is microseconds, shared with PHP), used exclusively
+///   for server-side minimum-duration enforcement.
 /// - `active_solves` — current number of active solvers (for auto-tuning).
 ///
 /// # Deployment note (aggregate DoS)
@@ -454,12 +494,24 @@ pub fn issue_challenge(
     // PHP/libsodium verification additionally cannot represent t < 3 or
     // p != 1, so those are rejected at issuance too — otherwise a challenge
     // could be issued successfully and then always fail PHP verification
-    // (cross-language parity requirement, see README).
+    // (cross-language parity requirement, see README). Issuance must never
+    // mint a record the verifier would reject: m_kib above the browser-wasm
+    // memory ceiling (SOLVER_MAX_ARGON2_M_KIB, 64 MiB) is refused, and
+    // argon2_target_bits must be 1..=SOLVER_MAX_ARGON2_TARGET_BITS (0 is
+    // silently clamped to 1 by effective_target_bits today — reject it).
     if algorithm == PoWAlgorithm::Argon2id {
         if config.m_kib < 8 * config.p {
             return Err(SignError::InvalidArgon2Params);
         }
+        if config.m_kib > SOLVER_MAX_ARGON2_M_KIB {
+            return Err(SignError::InvalidArgon2Params);
+        }
         if config.t < 3 || config.p != 1 {
+            return Err(SignError::InvalidArgon2Params);
+        }
+        if config.argon2_target_bits == 0
+            || config.argon2_target_bits > SOLVER_MAX_ARGON2_TARGET_BITS
+        {
             return Err(SignError::InvalidArgon2Params);
         }
     }
@@ -552,7 +604,7 @@ pub enum SignError {
     /// canonical payload separator).
     #[error("scope must be 1..=128 bytes and must not contain '|'")]
     InvalidScope,
-    #[error("Argon2id parameters are invalid (m_kib must be >= 8 * p; for PHP/libsodium cross-verification t must be >= 3 and p == 1)")]
+    #[error("Argon2id parameters are invalid (m_kib must be >= 8 * p and <= SOLVER_MAX_ARGON2_M_KIB; for PHP/libsodium cross-verification t must be >= 3 and p == 1; argon2_target_bits must be 1..=SOLVER_MAX_ARGON2_TARGET_BITS)")]
     InvalidArgon2Params,
 }
 
@@ -595,6 +647,10 @@ mod hex {
 mod tests {
     use super::*;
 
+    // Test "now_ns" values are epoch MICROSECONDS (1_700_000_000_000_000 µs
+    // ≈ 2023-11-14 UTC) — the unit the crate shares with PHP, see
+    // [`now_epoch_micros`].
+
     #[test]
     fn issued_challenge_has_correct_difficulty() {
         let config = ChallengeConfig {
@@ -611,8 +667,15 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued =
-            issue_challenge(&config, "login", "1.2.3.4", 1_000_000, 1000000000000000, 0).unwrap();
+        let issued = issue_challenge(
+            &config,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+        )
+        .unwrap();
         assert_eq!(issued.challenge.m_kib, 65_536);
         assert_eq!(issued.challenge.t, 2);
         assert_eq!(issued.challenge.p, 1);
@@ -735,7 +798,7 @@ mod tests {
         // Empty scope and 129-byte scope must be rejected…
         assert!(
             matches!(
-                issue_challenge(&config, "", "1.2.3.4", 1, 1_000_000_000, 0),
+                issue_challenge(&config, "", "1.2.3.4", 1, 1_700_000_000_000_000, 0),
                 Err(SignError::InvalidScope)
             ),
             "empty scope must be rejected"
@@ -743,16 +806,32 @@ mod tests {
         let long_scope = "s".repeat(129);
         assert!(
             matches!(
-                issue_challenge(&config, &long_scope, "1.2.3.4", 1, 1_000_000_000, 0),
+                issue_challenge(&config, &long_scope, "1.2.3.4", 1, 1_700_000_000_000_000, 0),
                 Err(SignError::InvalidScope)
             ),
             "129-byte scope must be rejected"
         );
         // …while the 128-byte boundary is accepted.
         let boundary_scope = "s".repeat(128);
-        assert!(issue_challenge(&config, &boundary_scope, "1.2.3.4", 1, 1_000_000_000, 0).is_ok());
+        assert!(issue_challenge(
+            &config,
+            &boundary_scope,
+            "1.2.3.4",
+            1,
+            1_700_000_000_000_000,
+            0
+        )
+        .is_ok());
         // The '|' separator is still rejected within the allowed length.
-        assert!(issue_challenge(&config, "login|admin", "1.2.3.4", 1, 1_000_000_000, 0).is_err());
+        assert!(issue_challenge(
+            &config,
+            "login|admin",
+            "1.2.3.4",
+            1,
+            1_700_000_000_000_000,
+            0
+        )
+        .is_err());
     }
 
     #[test]
@@ -771,8 +850,8 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let a = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
-        let b = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
+        let a = issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
+        let b = issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         assert_ne!(a.record.nonce, b.record.nonce);
     }
 
@@ -793,7 +872,8 @@ mod tests {
             auto_tune_max_bits: 24,
         };
         // Idle — should be at min.
-        let idle = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
+        let idle =
+            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         assert_eq!(idle.challenge.target_bits, 10);
         // Moderate load — roughly midway between min and the solver ceiling.
         let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 25).unwrap();
@@ -820,9 +900,38 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
+        let issued =
+            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         assert_eq!(issued.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
         assert_eq!(issued.record.target_bits, SOLVER_MAX_TARGET_BITS);
+    }
+
+    #[test]
+    fn auto_tune_disabled_ignores_tuning_bounds() {
+        // With auto_tune off, the tuning bounds must have NO effect: only the
+        // solver ceiling caps target_bits. A target_bits below the tuning min
+        // stays as-is (previously it was clamped UP to auto_tune_min_bits).
+        let config = ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 65_536,
+            t: 2,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
+            ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 20,
+        };
+        assert_eq!(config.tuned_target_bits(0), 8);
+        // The solver ceiling still applies when disabled.
+        let high = ChallengeConfig {
+            target_bits: 24,
+            ..config
+        };
+        assert_eq!(high.tuned_target_bits(0), SOLVER_MAX_TARGET_BITS);
     }
 
     #[test]
@@ -878,10 +987,12 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
+        let issued =
+            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         cache.put("old", "login", issued);
         std::thread::sleep(Duration::from_millis(40));
-        let issued2 = issue_challenge(&config, "signup", "1.1.1.1", 1, 1000000000, 0).unwrap();
+        let issued2 =
+            issue_challenge(&config, "signup", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         cache.put("new", "signup", issued2);
         // The expired "old" entry must not linger after put.
         assert!(cache.get("old", "login").is_none());
@@ -904,7 +1015,8 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
+        let issued =
+            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         let mut cache = ChallengeCache::new();
         cache.put("hash1", "login", issued.clone());
         let cached = cache.get("hash1", "login").unwrap();
@@ -928,7 +1040,8 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
         };
-        let issued = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 0).unwrap();
+        let issued =
+            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         let mut cache = ChallengeCache::new();
         cache.put("hash1", "login", issued);
         assert!(cache.get("hash1", "signup").is_none());

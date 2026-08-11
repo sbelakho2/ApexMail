@@ -92,15 +92,21 @@ pub struct VerifyContext<'a> {
     pub duration_ms: u64,
     /// The current Unix timestamp in seconds (for the TTL check).
     pub now_unix: u64,
-    /// The server's receipt time in nanoseconds. Together with the record's
-    /// `issued_at_ns` this provides a server-measured elapsed time, used to
-    /// enforce the minimum solve duration. A forged client `duration_ms` can
-    /// never satisfy this check.
+    /// The server's receipt time in EPOCH MICROSECONDS — the same unit as the
+    /// record's `issued_at_ns` (the field names keep the historical `_ns`
+    /// suffix; the unit is microseconds, shared with PHP). Together they
+    /// provide a server-measured elapsed time, used to enforce the minimum
+    /// solve duration. A forged client `duration_ms` can never satisfy this
+    /// check.
     pub now_ns: u64,
-    /// The minimum acceptable solve duration in milliseconds. A solve arriving
-    /// (per the server clock) faster than the theoretical minimum is rejected
-    /// as infeasible. The effective floor is `max(min_duration_ms,
-    /// record.min_duration_ms)`; 0 disables the check.
+    /// The minimum acceptable solve duration in milliseconds. The floor is a
+    /// timing-anomaly heuristic: PoW is probabilistic (a valid solution can
+    /// occur at counter 0) and a fast bot can wait before submitting, so the
+    /// floor only rejects solves that ARRIVE (per the server clock) faster
+    /// than the theoretical minimum — a heuristic, never a proof of human
+    /// behavior, and the client-reported duration is never trusted. The
+    /// effective floor is `max(min_duration_ms, record.min_duration_ms)`;
+    /// 0 disables the check.
     pub min_duration_ms: u64,
     /// Expected auth scope. If [`Some`], the solution is rejected if the
     /// challenge was issued for a different scope (prevents cross-scope replay).
@@ -171,9 +177,14 @@ pub enum VerifyError {
 /// 4. Check the scope (prevents cross-scope replay).
 /// 5. Check the IP binding (`client_ip` vs the stored `ip_hash`).
 /// 6. Check the minimum duration with the SERVER clock: elapsed = `now_ns` -
-///    `record.issued_at_ns`. The client-reported duration is forgeable and is
-///    never trusted for this check. Records without `issued_at_ns` (legacy)
-///    fall back to the client-duration check.
+///    `record.issued_at_ns` (both epoch microseconds). This is a
+///    timing-anomaly heuristic, not a proof of human behavior: PoW is
+///    probabilistic (a valid solution can occur at counter 0) and a fast bot
+///    can wait before submitting, so the floor only rejects solves that
+///    ARRIVE faster than the theoretical minimum. The client-reported
+///    duration is forgeable and is never trusted for this check. Records
+///    without `issued_at_ns` (legacy) fall back to the client-duration
+///    check.
 /// 7. Optional telemetry scoring (when `enforce_telemetry` is set).
 /// 8. Re-derive the SHA-256/Argon2id hash and check leading zero bits (the
 ///    actual PoW).
@@ -222,21 +233,28 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     }
 
     // 3. Minimum duration — SERVER-MEASURED. The client-reported duration_ms
-    //    is forgeable and is deliberately not trusted for enforcement.
+    //    is forgeable and is deliberately not trusted for enforcement. The
+    //    floor is a timing-anomaly heuristic: a fast bot can wait before
+    //    submitting, so it only rejects solves that ARRIVE faster than the
+    //    theoretical minimum.
     let floor = ctx.min_duration_ms.max(ctx.record.min_duration_ms);
     if floor > 0 {
         if ctx.record.issued_at_ns > 0 {
             // High-resolution path: elapsed time between issuance and receipt,
-            // both observed by the server clock.
-            let elapsed_ns = ctx.now_ns.saturating_sub(ctx.record.issued_at_ns);
-            if elapsed_ns < floor.saturating_mul(1_000_000) {
+            // both observed by the server clock. Both `now_ns` and
+            // `issued_at_ns` are EPOCH MICROSECONDS (the names keep the
+            // historical `_ns` suffix), so the ms floor is compared in the
+            // same unit: ms -> µs (× 1_000).
+            let elapsed_us = ctx.now_ns.saturating_sub(ctx.record.issued_at_ns);
+            if elapsed_us < floor.saturating_mul(1_000) {
                 return VerifyOutcome::Invalid(VerifyError::TooFast);
             }
         } else {
             // Legacy path (records without issued_at_ns): fall back to the
             // client-reported duration. This is weaker and only exists for
             // backward compatibility with records issued before server-side
-            // timing existed.
+            // timing existed; the client-reported duration is never trusted
+            // on the modern path.
             if ctx.duration_ms < floor {
                 return VerifyOutcome::Invalid(VerifyError::TooFast);
             }
@@ -244,10 +262,16 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     }
 
     // 4. Optional telemetry scoring. Strict mode also rejects clients that
-    //    submit NO telemetry (a custom non-browser solver does not send it).
+    //    submit NO telemetry (a custom non-browser solver does not send it)
+    //    or an EMPTY telemetry payload (the PHP widget emits `{}` when no
+    //    telemetry was collected).
     if ctx.enforce_telemetry {
         match ctx.telemetry {
-            Some(telemetry) if score_telemetry(telemetry, ctx.duration_ms) => {
+            Some(telemetry)
+                if telemetry.is_null()
+                    || telemetry_is_empty(telemetry)
+                    || score_telemetry(telemetry, ctx.duration_ms) =>
+            {
                 return VerifyOutcome::Invalid(VerifyError::BotDetected);
             }
             Some(_) => {}
@@ -303,6 +327,17 @@ pub fn sha256_hex(input: &str) -> String {
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     result.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// True when a telemetry payload carries no signal at all: the empty object
+/// the PHP widget emits for no telemetry, an empty array, or JSON `null`.
+/// Non-object values (e.g. a number or string) are NOT treated as empty —
+/// they are malformed rather than absent, and the scorer handles them.
+fn telemetry_is_empty(telemetry: &serde_json::Value) -> bool {
+    telemetry
+        .as_object()
+        .map(|o| o.is_empty())
+        .unwrap_or_else(|| telemetry.as_array().map(|a| a.is_empty()).unwrap_or(false))
 }
 
 /// Score telemetry data for bot detection. Returns `true` if the client
@@ -424,10 +459,12 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::challenge::{hash_ip, issue_challenge, ChallengeConfig, PoWAlgorithm};
+    use crate::challenge::{hash_ip, issue_challenge, ChallengeConfig, PoWAlgorithm, SignError};
 
     const NOW_UNIX: u64 = 1_000_000;
-    const NOW_NS: u64 = 1_000_000_000_000_000;
+    // EPOCH MICROSECONDS (1_700_000_000_000_000 µs ≈ 2023-11-14 UTC) — the
+    // unit shared with PHP; field names keep the historical `_ns` suffix.
+    const NOW_NS: u64 = 1_700_000_000_000_000;
 
     fn make_record(target_bits: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
@@ -474,7 +511,7 @@ mod tests {
             counter,
             duration_ms,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000, // 5 s after issuance
+            now_ns: NOW_NS + 5_000_000, // 5 s after issuance
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -565,6 +602,85 @@ mod tests {
     }
 
     #[test]
+    fn argon2_issuance_rejects_memory_above_solver_ceiling() {
+        // The verifier already rejects records above SOLVER_MAX_ARGON2_M_KIB
+        // (64 MiB — the wasm heap ceiling); issuance must never mint one.
+        let config = ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            algorithm: PoWAlgorithm::Argon2id,
+            m_kib: crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1,
+            t: 3,
+            p: 1,
+            target_bits: 4,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+        };
+        assert!(
+            matches!(
+                issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0),
+                Err(SignError::InvalidArgon2Params)
+            ),
+            "m_kib above the 64 MiB ceiling must be rejected at issuance"
+        );
+        // The ceiling itself is accepted.
+        let at_ceiling = ChallengeConfig {
+            m_kib: crate::challenge::SOLVER_MAX_ARGON2_M_KIB,
+            ..config
+        };
+        assert!(issue_challenge(&at_ceiling, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
+    }
+
+    #[test]
+    fn argon2_issuance_validates_target_bits_range() {
+        // argon2_target_bits must be 1..=SOLVER_MAX_ARGON2_TARGET_BITS: 0
+        // would silently clamp to a degenerate difficulty and 11 exceeds the
+        // solver ceiling — both must fail at issuance.
+        for bits in [0u32, 11] {
+            let config = ChallengeConfig {
+                secret_key: "test-key-16-bytes!".into(),
+                algorithm: PoWAlgorithm::Argon2id,
+                m_kib: 128,
+                t: 3,
+                p: 1,
+                target_bits: 4,
+                argon2_target_bits: bits,
+                ttl_secs: 120,
+                min_duration_ms: None,
+                auto_tune: false,
+                auto_tune_min_bits: 8,
+                auto_tune_max_bits: 24,
+            };
+            assert!(
+                matches!(
+                    issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0),
+                    Err(SignError::InvalidArgon2Params)
+                ),
+                "argon2_target_bits={bits} must be rejected at issuance"
+            );
+        }
+        // The maximum is accepted.
+        let max_bits = ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            algorithm: PoWAlgorithm::Argon2id,
+            m_kib: 128,
+            t: 3,
+            p: 1,
+            target_bits: 4,
+            argon2_target_bits: crate::challenge::SOLVER_MAX_ARGON2_TARGET_BITS,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+        };
+        assert!(issue_challenge(&max_bits, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
+    }
+
+    #[test]
     fn wrong_counter_is_rejected() {
         let mut record = make_record(8);
         // Find a valid counter, then use a different one.
@@ -614,7 +730,7 @@ mod tests {
             counter,
             duration_ms: 60_000, // client forges a 60 s solve — must NOT help
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + floor * 1_000_000 - 1, // server measures below the floor
+            now_ns: NOW_NS + floor * 1_000 - 1, // server measures below the floor
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -634,14 +750,14 @@ mod tests {
         // sub-millisecond elapsed time. The client's claim must be ignored.
         let mut record = make_record(20);
         let counter = solve_for_test(&record).unwrap();
-        // Elapsed: 0 ns (immediately after issuance) — impossibly fast.
+        // Elapsed: 0 µs (immediately after issuance) — impossibly fast.
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000, // forged
             now_unix: NOW_UNIX,
-            now_ns: NOW_NS, // same ns as issuance
+            now_ns: NOW_NS, // same µs as issuance
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -678,7 +794,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -705,7 +821,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -732,7 +848,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
@@ -756,7 +872,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: None, // opt-out (rotating proxies etc.)
@@ -779,7 +895,7 @@ mod tests {
             counter: wrong,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -798,7 +914,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -825,7 +941,7 @@ mod tests {
             counter: wrong,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -842,7 +958,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -868,7 +984,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -894,7 +1010,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -909,6 +1025,97 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_enforcement_rejects_empty_object() {
+        // The PHP widget emits `{}` when no telemetry was collected — in
+        // strict mode an empty payload is the same as no payload: a bot
+        // signal. (Previously `{}` slipped through because score_telemetry
+        // scored it as benign.)
+        use serde_json::json;
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: Some(&json!({})),
+            enforce_telemetry: true,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::BotDetected)
+        );
+        // An empty array is equally empty.
+        let mut ctx_array = VerifyContext {
+            telemetry: Some(&json!([])),
+            ..ctx
+        };
+        assert_eq!(
+            verify_solution(&mut ctx_array),
+            VerifyOutcome::Invalid(VerifyError::BotDetected)
+        );
+    }
+
+    #[test]
+    fn telemetry_enforcement_rejects_null() {
+        // JSON null carries no telemetry signal — treated like an empty
+        // payload in strict mode.
+        use serde_json::json;
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: Some(&json!(null)),
+            enforce_telemetry: true,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::BotDetected)
+        );
+    }
+
+    #[test]
+    fn telemetry_enforcement_accepts_benign_telemetry() {
+        // A non-empty, non-webdriver payload passes strict mode: the empty-
+        // payload check must not reject real widget telemetry.
+        use serde_json::json;
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: Some(&json!({
+                "wd": false, "hc": 8, "dm": 8, "me": 5, "ke": 2, "et": []
+            })),
+            enforce_telemetry: true,
+            max_attempts: 0,
+        };
+        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+    }
+
+    #[test]
     fn telemetry_ignored_when_not_enforced() {
         use serde_json::json;
         let mut record = make_record(8);
@@ -919,7 +1126,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -944,7 +1151,7 @@ mod tests {
             counter,
             duration_ms: floor - 1, // below floor, client-reported
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 10_000_000_000,
+            now_ns: NOW_NS + 10_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -963,7 +1170,7 @@ mod tests {
             counter,
             duration_ms: floor + 1000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + 10_000_000_000,
+            now_ns: NOW_NS + 10_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -1182,7 +1389,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: 1_000_001,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: Some("signup"),
             client_ip: Some("1.2.3.4"),
@@ -1207,7 +1414,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: expires_at, // exactly at expiry
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -1232,7 +1439,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: expires_at - 1,
-            now_ns: NOW_NS + 5_000_000_000,
+            now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -1298,7 +1505,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + floor * 1_000_000 + 1, // above floor
+            now_ns: NOW_NS + floor * 1_000 + 1, // above floor
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -1313,7 +1520,7 @@ mod tests {
             counter,
             duration_ms: 60_000, // forged long client duration must NOT help
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + floor * 1_000_000 - 1, // below floor
+            now_ns: NOW_NS + floor * 1_000 - 1, // below floor
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),

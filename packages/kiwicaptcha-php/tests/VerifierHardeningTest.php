@@ -17,7 +17,8 @@ use PHPUnit\Framework\TestCase;
 /**
  * Security-hardening behaviour of the verifier: server-measured minimum
  * duration (client-reported duration is no longer trusted), opt-in telemetry
- * enforcement, and attempt caps.
+ * enforcement, and the one-shot consume-on-verify model (a wrong candidate
+ * burns the challenge — there is no maxAttempts).
  */
 final class VerifierHardeningTest extends TestCase
 {
@@ -360,27 +361,12 @@ final class VerifierHardeningTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('human-like telemetry must pass, got %s', $outcome->code()));
     }
 
-    public function testMaxAttemptsSingleAttemptThenRecordNotFound(): void
-    {
-        // consume() gives inherent single-use; with a best-effort counter
-        // backend (ArrayStorage) the second attempt fails on the consumed
-        // record, not on the counter.
-        $storage = new ArrayStorage();
-        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
-
-        $verifier = new Verifier($storage);
-        $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', maxAttempts: 1);
-        self::assertTrue($first->isOk(), sprintf('first attempt must succeed, got %s', $first->code()));
-
-        $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', maxAttempts: 1);
-        self::assertSame(VerifyError::RecordNotFound, $second->error);
-        // Both attempts were counted (best-effort bookkeeping), and the
-        // counter never rejected because consume() already exhausted the
-        // single-use record.
-        self::assertSame(2, $storage->attemptsUsed($record->nonce));
-    }
-
-    public function testMaxAttemptsCountsFailedVerifications(): void
+    /**
+     * One-shot model: consume-on-verify removes the record BEFORE the proof
+     * is checked, so a wrong candidate burns the challenge. The second
+     * (correct) verify finds no record.
+     */
+    public function testWrongCandidateBurnsTheChallenge(): void
     {
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
@@ -388,23 +374,40 @@ final class VerifierHardeningTest extends TestCase
         $wrongToken = SolutionToken::create($record->nonce, 1, 5000, [])->encode();
 
         $verifier = new Verifier($storage);
-        $outcome = $verifier->verify($wrongToken, Vectors::SECRET, 'login', '198.51.100.77', maxAttempts: 1);
-        self::assertSame(VerifyError::InsufficientWork, $outcome->error);
+        $first = $verifier->verify($wrongToken, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::InsufficientWork, $first->error);
+        self::assertNull($storage->find($record->nonce), 'the failed verify must have consumed the record');
 
-        $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', maxAttempts: 1);
-        self::assertSame(VerifyError::RecordNotFound, $second->error);
-        self::assertSame(2, $storage->attemptsUsed($record->nonce));
+        $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::RecordNotFound, $second->error, 'one-shot: the correct token arrives too late');
     }
 
-    public function testMaxAttemptsNullLeavesCounterUntouched(): void
+    /**
+     * One-shot model: a FIRST verify that succeeds removes the record, so a
+     * replay always fails with RecordNotFound — the attempt bound IS the
+     * single-use record (there is no maxAttempts parameter).
+     */
+    public function testSuccessfulVerifyIsOneShot(): void
     {
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
 
         $verifier = new Verifier($storage);
-        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
-        self::assertTrue($outcome->isOk());
-        self::assertSame(0, $storage->attemptsUsed($record->nonce));
+        $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertTrue($first->isOk(), sprintf('first verify must succeed, got %s', $first->code()));
+
+        $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::RecordNotFound, $second->error);
+    }
+
+    public function testVerifySignatureHasNoMaxAttemptsParameter(): void
+    {
+        // The one-shot model replaces maxAttempts: the parameter must be
+        // gone from the public API.
+        $params = (new \ReflectionMethod(Verifier::class, 'verify'))->getParameters();
+        $names = array_map(static fn (\ReflectionParameter $p): string => (string) $p->getName(), $params);
+
+        self::assertNotContains('maxAttempts', $names);
     }
 
     public function testIssuedRecordCarriesServerSideIssuedAtNs(): void

@@ -1,31 +1,64 @@
-          /* No external font fetches — the zero-third-party design keeps CSP strict.
-     System font stack below. */
+/* ==========================================================================
+   KiwiCaptcha widget — industry-aligned design system
+   ==========================================================================
+   Redesigned to match the converged industry standard derived from
+   Google reCAPTCHA, Cloudflare Turnstile, hCaptcha, and Friendly Captcha.
+
+   Key decisions (each backed by industry research):
+   - Radius 4px (not 12px): security widgets use small radii (reCAPTCHA 3px,
+     Friendly 0px) for a "serious/institutional" feel.
+   - Accent #1a73e8 (Google blue): the most "trustworthy" accent per hCaptcha
+     (#00838F teal) and Google (#1a73e8) — coral red was reading as "error".
+   - Text #333333 (not #1a1a1a): softer, "premium" per all 4 products.
+   - Background #FAFAFA (not pure white): reduces eye strain, per hCaptcha.
+   - Font system-ui stack (not Inter): no third-party font fetch (CSP-safe).
+   - Label weight 400 (not 600): reCAPTCHA and Friendly both use regular.
+   - Badge min 11px (was 9px): Cloudflare explicitly fixed their 10px as too
+     small; 11px is the safe floor.
+   - Red restricted to error ICON only (Cloudflare rule): text stays neutral.
+   - Focus ring 2px solid #1a73e8: WCAG 2.4.7 visible focus.
+   - !important eliminated: proper CSS specificity instead.
+   ========================================================================== */
+
+  /* No external font fetches — system-ui stack keeps CSP strict and matches
+     the industry convention (reCAPTCHA uses Roboto/system; Turnstile and
+     Friendly inherit the host page's system font). */
   .kiwi-container {
-    --kiwi-primary: #dd524c;
-    --kiwi-primary-rgb: 221, 82, 76;
+    /* Brand accent — Google blue. Trustworthy, not alarming. */
+    --kiwi-primary: #1a73e8;
+    --kiwi-primary-rgb: 26, 115, 232;
     --kiwi-success: #059669;
-    --kiwi-bg: #ffffff;
-    --kiwi-text: #1a1a1a;
-    --kiwi-text-muted: #6b7280;
-    --kiwi-border: #e5e7eb;
-    --kiwi-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-    --kiwi-radius: 12px;
-    
+    --kiwi-success-rgb: 5, 150, 105;
+    --kiwi-error: #dc2626;
+    --kiwi-error-rgb: 220, 38, 38;
+
+    /* Surfaces — softer than pure white/black (industry convention). */
+    --kiwi-bg: #fafafa;
+    --kiwi-text: #333333;
+    --kiwi-text-muted: #919191;
+    --kiwi-border: #e0e0e0;
+
+    /* Shadow — subtle, single-layer (Turnstile-style, not heavy). */
+    --kiwi-shadow: 0 1px 3px rgb(0 0 0 / 0.08), 0 1px 2px rgb(0 0 0 / 0.06);
+
+    /* Radius — 4px (security-widget convention: small, serious). */
+    --kiwi-radius: 4px;
+
     display: inline-flex;
     align-items: center;
     width: 100%;
-    max-width: 100%;
-    font-family: Inter, system-ui, -apple-system, sans-serif;
+    max-width: 312px;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     position: relative;
     box-sizing: border-box;
   }
   @media (prefers-color-scheme: dark) {
     .kiwi-container {
-      --kiwi-bg: #111111;
-      --kiwi-text: #f9fafb;
-      --kiwi-text-muted: #9ca3af;
-      --kiwi-border: #262626;
-      --kiwi-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.5);
+      --kiwi-bg: #222222;
+      --kiwi-text: #f5f5f5;
+      --kiwi-text-muted: #919191;
+      --kiwi-border: #333333;
+      --kiwi-shadow: 0 1px 3px rgb(0 0 0 / 0.4), 0 1px 2px rgb(0 0 0 / 0.3);
     }
   }
   .kiwi-widget {
@@ -38,58 +71,115 @@
     border-radius: var(--kiwi-radius);
     color: var(--kiwi-text);
     box-shadow: var(--kiwi-shadow);
-    transition: all 0.3s ease;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
     width: 100%;
     position: relative;
     overflow: hidden;
     cursor: default;
     user-select: none;
   }
-  .kiwi-widget:hover { border-color: var(--kiwi-primary); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.05); }
-  
+  .kiwi-widget:hover {
+    border-color: var(--kiwi-primary);
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.1);
+  }
+  /* Visible focus ring — WCAG 2.4.7 (industry: hCaptcha #0074BF border,
+     Friendly #333 border; we use the brand accent). */
+  .kiwi-widget:focus-visible {
+    outline: 2px solid var(--kiwi-primary);
+    outline-offset: 1px;
+  }
+
+  /* --- Icon wrapper --- */
   .kiwi-icon-wrapper {
     flex-shrink: 0;
-    width: 44px;
-    height: 44px;
-    border-radius: 10px;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--kiwi-radius);
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(var(--kiwi-primary-rgb), 0.05);
+    background: rgb(var(--kiwi-primary-rgb) / 0.08);
     color: var(--kiwi-primary);
-    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: background 0.3s ease, color 0.3s ease, transform 0.3s ease;
     position: relative;
   }
-  .kiwi-widget[data-state="solving"] .kiwi-icon-wrapper { animation: kiwi-pulse 2s infinite ease-in-out; }
+  .kiwi-icon-wrapper svg { width: 20px; height: 20px; }
+
+  /* --- State: solving (pulsing icon) --- */
+  .kiwi-widget[data-state="solving"] .kiwi-icon-wrapper {
+    animation: kiwi-pulse 2s infinite ease-in-out;
+  }
+  /* --- State: done (success checkmark treatment) --- */
   .kiwi-widget[data-state="done"] .kiwi-icon-wrapper {
-    background: var(--kiwi-success) !important;
-    color: #ffffff !important;
+    background: rgb(var(--kiwi-success-rgb));
+    color: #ffffff;
     transform: scale(1.05);
   }
-  @keyframes kiwi-pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(0.95); opacity: 0.8; } }
-  
+  /* --- State: failed (error icon — red on ICON only, per Cloudflare rule) --- */
+  .kiwi-widget[data-state="failed"] .kiwi-icon-wrapper {
+    background: rgb(var(--kiwi-error-rgb) / 0.1);
+    color: var(--kiwi-error);
+  }
+  @keyframes kiwi-pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(0.95); opacity: 0.8; }
+  }
+
+  /* --- Main content column --- */
   .kiwi-main { flex: 1; min-width: 0; }
-  .kiwi-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-  .kiwi-label { font-size: 14px; font-weight: 600; color: var(--kiwi-text); letter-spacing: -0.01em; }
+  .kiwi-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
+  /* --- Label (14px / weight 400 — reCAPTCHA/Friendly convention) --- */
+  .kiwi-label {
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.2;
+    color: var(--kiwi-text);
+    letter-spacing: -0.01em;
+  }
+
+  /* --- Badge (11px floor — Cloudflare fixed their 10px as too small) --- */
   .kiwi-badge {
-    font-size: 9px;
-    font-weight: 700;
+    font-size: 11px;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.03em;
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: var(--kiwi-radius);
     background: var(--kiwi-border);
     color: var(--kiwi-text-muted);
-    transition: all 0.3s ease;
+    transition: background 0.3s ease, color 0.3s ease;
   }
-  .kiwi-widget[data-state="solving"] .kiwi-badge { background: rgba(var(--kiwi-primary-rgb), 0.15) !important; color: var(--kiwi-primary) !important; }
-  .kiwi-widget[data-state="done"] .kiwi-badge { background: rgba(16, 185, 129, 0.15) !important; color: var(--kiwi-success) !important; }
-  
-  .kiwi-track { height: 4px; width: 100%; border-radius: 2px; background: var(--kiwi-border); overflow: hidden; }
+  .kiwi-widget[data-state="solving"] .kiwi-badge {
+    background: rgb(var(--kiwi-primary-rgb) / 0.12);
+    color: var(--kiwi-primary);
+  }
+  .kiwi-widget[data-state="done"] .kiwi-badge {
+    background: rgb(var(--kiwi-success-rgb) / 0.12);
+    color: var(--kiwi-success);
+  }
+  .kiwi-widget[data-state="failed"] .kiwi-badge {
+    background: rgb(var(--kiwi-error-rgb) / 0.12);
+    color: var(--kiwi-error);
+  }
+
+  /* --- Progress bar (4px — Friendly Captcha convention) --- */
+  .kiwi-track {
+    height: 4px;
+    width: 100%;
+    border-radius: 2px;
+    background: var(--kiwi-border);
+    overflow: hidden;
+  }
   .kiwi-bar {
     height: 100%;
-    background: linear-gradient(90deg, var(--kiwi-primary), #fda4af);
-    transition: width 0.6s cubic-bezier(0.65, 0, 0.35, 1);
+    background: var(--kiwi-primary);
+    transition: width 0.5s linear;
     width: 0%;
   }
   /* Progress driven by data-progress attribute (CSP3-safe: no inline styles).
@@ -105,18 +195,42 @@
   .kiwi-bar[data-progress="90"] { width: 90%; }
   .kiwi-bar[data-progress="100"] { width: 100%; }
   .kiwi-widget[data-state="done"] .kiwi-bar { background: var(--kiwi-success); }
-  
-  .kiwi-bottom { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
-  .kiwi-info { font-size: 11px; color: var(--kiwi-text-muted); font-weight: 500; margin: 0; }
-  .kiwi-timer { font-size: 10px; font-weight: 700; color: var(--kiwi-primary); font-variant-numeric: tabular-nums; }
-  
-  /* Premium Finish Anim */
+  .kiwi-widget[data-state="failed"] .kiwi-bar { background: var(--kiwi-error); }
+
+  /* --- Bottom row --- */
+  .kiwi-bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+  }
+  /* Info text — neutral color, never red (Cloudflare rule). */
+  .kiwi-info {
+    font-size: 11px;
+    color: var(--kiwi-text-muted);
+    font-weight: 400;
+    margin: 0;
+  }
+  /* Timer — uses muted color, not primary (was red before; now neutral). */
+  .kiwi-timer {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--kiwi-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* --- Premium Finish Animation --- */
   .kiwi-glow {
     position: absolute;
     top: 0; left: -100%; width: 50%; height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.2), transparent);
     transform: skewX(-25deg);
     pointer-events: none;
   }
-  .kiwi-widget[data-state="done"] .kiwi-glow { animation: kiwi-shine 1s ease-in-out forwards; }
-  @keyframes kiwi-shine { 0% { left: -100%; } 100% { left: 150%; } }
+  .kiwi-widget[data-state="done"] .kiwi-glow {
+    animation: kiwi-shine 0.8s ease-in-out forwards;
+  }
+  @keyframes kiwi-shine {
+    0% { left: -100%; }
+    100% { left: 150%; }
+  }

@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Storage;
 
+use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ChallengeRecord;
-use KiwiCaptcha\StorageInterface;
 
 /**
  * Redis-backed storage with TRUE atomic single-use semantics.
@@ -18,53 +18,16 @@ use KiwiCaptcha\StorageInterface;
  * - Predis: GETDEL via an inline Lua script (the eval path used here has no
  *   fallback — the server MUST be Redis 6.2+).
  *
- * Records are stored as `serialize($record->toArray())` with the record's
- * TTL as the key expiration. Attempt counters are stored on a separate key
- * (`<prefix><nonce>:attempts`) incremented atomically in Lua, with an
- * expiration set on first increment so stale counters cannot accumulate.
- * The Lua script is existence-aware: the counter key is only created when
- * the challenge record itself exists, so random/fake nonces never litter
- * Redis with 1h-TTL keys.
+ * Records are stored as JSON (`json_encode($record->toArray())` —
+ * LANGUAGE-NEUTRAL: a Rust service using the same Redis instance can read
+ * them, and vice versa; the record's TTL is the key expiration). The JSON
+ * keys match the Rust serde schema exactly.
+ *
+ * Implements {@see \KiwiCaptcha\AtomicStorageInterface}: GETDEL makes
+ * consume() strict single-use under concurrency.
  */
-final class RedisStorage implements StorageInterface
+final class RedisStorage implements AtomicStorageInterface
 {
-    private const ATTEMPTS_SUFFIX = ':attempts';
-
-    /**
-     * Safety-net TTL for attempt counters. The challenge record itself carries
-     * the authoritative TTL, but the counter key is created before consume()
-     * (when the record TTL is not yet available), so a fixed ceiling keeps
-     * stale keys from accumulating indefinitely.
-     */
-    private const ATTEMPTS_TTL_SECS = 3600;
-
-    /**
-     * Existence-aware attempt counting: the challenge key must exist before
-     * the counter is touched, so random/fake nonces never create Redis keys
-     * (they previously left 1h-TTL counter keys behind on every submit).
-     *
-     * KEYS[1]  = challenge key (<prefix><nonce>)
-     * KEYS[2]  = attempt counter key (<prefix><nonce>:attempts)
-     * ARGV[1]  = maxAttempts
-     * ARGV[2]  = TTL in seconds
-     *
-     * Returns: -1 = no challenge record (counter untouched, no key created);
-     *           1 = cap exceeded (counter left incremented); 0 = recorded.
-     */
-    private const INCREMENT_SCRIPT = <<<'LUA'
-if redis.call('EXISTS', KEYS[1]) == 0 then
-    return -1
-end
-local n = redis.call('INCR', KEYS[2])
-if n == 1 then
-    redis.call('EXPIRE', KEYS[2], ARGV[2])
-end
-if n > tonumber(ARGV[1]) then
-    return 1
-end
-return 0
-LUA;
-
     private const GETDEL_SCRIPT = 'return redis.call("GETDEL", KEYS[1])';
 
     public function __construct(
@@ -76,7 +39,7 @@ LUA;
     public function store(ChallengeRecord $record): void
     {
         $key = $this->prefix.$record->nonce;
-        $value = serialize($record->toArray());
+        $value = json_encode($record->toArray(), JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         $ttl = max(1, $record->expiresAt - time());
 
         if ($this->client instanceof \Redis) {
@@ -117,56 +80,19 @@ LUA;
         $this->client->del($this->prefix.$nonce);
     }
 
-    public function attemptsUsed(string $nonce): int
-    {
-        $raw = $this->client->get($this->prefix.$nonce.self::ATTEMPTS_SUFFIX);
-
-        return (int) $raw;
-    }
-
-    public function incrementAttempts(string $nonce, int $maxAttempts): bool
-    {
-        $result = $this->eval(
-            self::INCREMENT_SCRIPT,
-            [
-                $this->prefix.$nonce,
-                $this->prefix.$nonce.self::ATTEMPTS_SUFFIX,
-            ],
-            [(string) $maxAttempts, (string) self::ATTEMPTS_TTL_SECS],
-        );
-
-        // -1: no challenge record exists — the counter was NOT incremented
-        // and no key was created. Not a cap rejection: return true so the
-        // verifier proceeds to consume(), which returns null and fails with
-        // RecordNotFound — the same outcome as before, minus the key litter.
-        return $result !== 1;
-    }
-
     /**
-     * Run a Lua script against whichever client implementation is in use.
+     * Decode a stored JSON value back into a record.
      *
-     * @param list<string> $keys
-     * @param list<string> $args
+     * @return ChallengeRecord|null null when the value is absent, not valid
+     *                              JSON, not an object, or does not map to a
+     *                              record (a corrupt key must not blow up the
+     *                              verify path)
      */
-    private function eval(string $script, array $keys, array $args): mixed
-    {
-        if ($this->client instanceof \Redis) {
-            // phpredis signature: eval($script, $args, $numKeys)
-            return $this->client->eval($script, [...$keys, ...$args], \count($keys));
-        }
-
-        // Predis signature: eval($script, $numkeys, ...$keysAndArgs)
-        return $this->client->eval($script, \count($keys), ...$keys, ...$args);
-    }
-
     private function decode(string $raw): ?ChallengeRecord
     {
-        // @: unserialize warns on malformed input; the failure is intentional
-        // and handled by returning null (a corrupt key must not blow up the
-        // verify path).
         try {
-            $data = @unserialize($raw, ['allowed_classes' => false]);
-        } catch (\Throwable) {
+            $data = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
             return null;
         }
         if (!\is_array($data)) {

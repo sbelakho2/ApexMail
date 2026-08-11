@@ -15,10 +15,9 @@ use Psr\Cache\CacheItemPoolInterface;
  * `consume()` is NOT atomic under concurrency — two racing requests can both
  * read the same record before either deletes it, and both verifications may
  * pass. The pool's delete is atomic, but the read cannot be fused with it.
- *
- * For true atomic single-use semantics use {@see \KiwiCaptcha\Storage\RedisStorage}
- * (Redis GETDEL), which guarantees that two concurrent consumers can never
- * both win.
+ * This is best-effort single-use; implementers of
+ * {@see \KiwiCaptcha\AtomicStorageInterface} (e.g. {@see RedisStorage}, Redis
+ * GETDEL) guarantee that two concurrent consumers can never both win.
  */
 final class Psr6Storage implements StorageInterface
 {
@@ -28,9 +27,6 @@ final class Psr6Storage implements StorageInterface
      * rejects keys such as "kiwicaptcha:nonce").
      */
     private const PREFIX = 'kiwicaptcha_';
-
-    /** @var array<string, int> in-memory best-effort attempt counters (not atomic) */
-    private array $attempts = [];
 
     public function __construct(private readonly CacheItemPoolInterface $pool)
     {
@@ -78,23 +74,5 @@ final class Psr6Storage implements StorageInterface
     public function delete(string $nonce): void
     {
         $this->pool->deleteItem(self::PREFIX.$nonce);
-    }
-
-    public function attemptsUsed(string $nonce): int
-    {
-        return $this->attempts[$nonce] ?? 0;
-    }
-
-    /**
-     * Best-effort in-memory accounting. Because PSR-6 cannot atomically
-     * read-modify-write a counter, this never rejects: enforcement is left to
-     * the consume() single-use semantics, and RedisStorage provides a truly
-     * atomic attempt cap.
-     */
-    public function incrementAttempts(string $nonce, int $maxAttempts): bool
-    {
-        $this->attempts[$nonce] = ($this->attempts[$nonce] ?? 0) + 1;
-
-        return true;
     }
 }

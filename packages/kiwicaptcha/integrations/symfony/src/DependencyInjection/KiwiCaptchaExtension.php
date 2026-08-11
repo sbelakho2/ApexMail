@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
+use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use BelConsulting\KiwiCaptchaBundle\Security\ThrottledVerifier;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaExtension as TwigExtension;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
@@ -16,6 +17,7 @@ use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Storage\ArrayStorage;
+use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -98,12 +100,29 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // Verifier: wrapped in ThrottledVerifier for Argon2id mode so the
         // aggregate verification concurrency cap is enforced (KiwiCaptcha\Verifier
         // is final; the bundle-owned wrapper exposes the same verify()).
+        // Admission is enforced against Redis (across all PHP-FPM workers)
+        // when a Redis client is available — either from the 'redis_service'
+        // config option or from the RedisStorage storage definition — and
+        // falls back to the in-process semaphore (per-process only).
         $innerVerifier = (new Definition(Verifier::class, [$storageRef]))->setPublic(true);
         if ($config['algorithm'] === 'argon2id' && $config['argon2_max_concurrent_verifications'] > 0) {
+            $redisClient = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
+            $semaphoreRef = null;
+            if ($redisClient !== null) {
+                $container->setDefinition(
+                    'kiwi_captcha.argon2_redis_semaphore',
+                    (new Definition(RedisAdmissionSemaphore::class, [
+                        $redisClient,
+                        $config['argon2_max_concurrent_verifications'],
+                    ]))->setPublic(true),
+                );
+                $semaphoreRef = new Reference('kiwi_captcha.argon2_redis_semaphore');
+            }
             $container->setDefinition('kiwi_captcha.verifier.inner', $innerVerifier);
             $container->setDefinition('kiwi_captcha.verifier', (new Definition(ThrottledVerifier::class, [
                 new Reference('kiwi_captcha.verifier.inner'),
                 $config['argon2_max_concurrent_verifications'],
+                $semaphoreRef,
             ]))->setPublic(true));
         } else {
             $container->setDefinition('kiwi_captcha.verifier', $innerVerifier);
@@ -118,6 +137,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $config['rate_limit'],
                 $config['rate_limit_window_secs'],
                 $poolRef,
+                null,
+                // Pepper for the per-IP rate-limit HMAC keys: raw IPs are
+                // never stored (defaults to the bundle secret).
+                $config['rate_limit_pepper'] ?? $config['secret_key'],
             ]))->setPublic(true));
             $rateLimiterRef = new Reference('kiwi_captcha.rate_limiter');
         }
@@ -132,8 +155,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         ]))->addTag('routing.loader'));
 
         // ── Form type (renders the widget through the form theme) ──
+        // The route prefix is injected so the default 'endpoint' option
+        // follows the ACTUAL registered route (the standalone Twig widget
+        // derives its endpoint from the same prefix).
         $container->setDefinition(KiwiCaptchaType::class, (new Definition(KiwiCaptchaType::class, [
             new Reference(KiwiCaptchaRuntime::class),
+            '%kiwi_captcha.route_prefix%',
         ]))->addTag('form.type'));
 
         // ── Validator (local verification, no external calls) ──
@@ -176,6 +203,39 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return new Reference($storageId);
+    }
+
+    /**
+     * Find the Redis client to use for the Argon2 admission semaphore.
+     *
+     * Priority:
+     *  1. the `redis_service` config option (explicit client service id);
+     *  2. the storage service when it is a KiwiCaptcha\Storage\RedisStorage
+     *     definition (its first constructor argument is the client) —
+     *     aliases to the storage id are followed;
+     *  3. null — the caller falls back to the in-process semaphore.
+     */
+    private function resolveRedisClient(string $storageId, ?string $redisService, ContainerBuilder $container): ?Reference
+    {
+        if ($redisService !== null) {
+            return new Reference($redisService);
+        }
+
+        $id = $storageId;
+        if ($container->hasAlias($id)) {
+            $id = (string) $container->getAlias($id);
+        }
+        if (!$container->hasDefinition($id)) {
+            return null;
+        }
+        $definition = $container->getDefinition($id);
+        $class = $definition->getClass();
+        if ($class === null || !is_a($class, RedisStorage::class, true)) {
+            return null;
+        }
+        $client = $definition->getArgument(0);
+
+        return $client instanceof Reference ? $client : null;
     }
 
     private function environment(ContainerBuilder $container): string
