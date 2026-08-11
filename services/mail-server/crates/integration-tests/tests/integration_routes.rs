@@ -236,6 +236,7 @@ mod sales {
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("Redis pool");
         router(AppState {
+            config: Default::default(),
             db: db.clone(),
             redis,
             crm: CrmBackend::postgres(db.clone()),
@@ -281,6 +282,7 @@ mod sales {
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("Redis pool");
         Some(router(AppState {
+            config: Default::default(),
             db: db.clone(),
             redis,
             crm,

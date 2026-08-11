@@ -7,6 +7,7 @@ edition.workspace = true
 apexmail-lib = { path = "../apexmail-lib" }
 apexmail-db = { path = "../apexmail-db" }
 api-server = { path = "../api-server" }
+kiwicaptcha = { path = "../../../../packages/kiwicaptcha" }
 billing-service = { path = "../billing-service" }
 devex-service = { path = "../devex-service" }
 observability-service = { path = "../observability-service" }

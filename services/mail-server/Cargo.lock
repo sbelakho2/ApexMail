@@ -4904,6 +4904,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.9.0",
  "ids-engine",
+ "kiwicaptcha",
  "observability-service",
  "parking_lot",
  "pattern-matcher",
