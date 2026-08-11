@@ -32,7 +32,7 @@ final class Configuration implements ConfigurationInterface
                     ->max(65536)
                 ->end()
                 ->integerNode('argon_t')
-                    ->defaultValue(1)
+                    ->defaultValue(3)
                     ->min(1)
                 ->end()
                 ->integerNode('argon_p')

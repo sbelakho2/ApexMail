@@ -1,11 +1,11 @@
 [package]
 name = "kiwicaptcha"
 description = "KiwiCaptcha: a privacy-first, self-contained proof-of-work CAPTCHA engine (SHA-256 + Argon2id)"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["Bel Consulting OÜ <hello@bel.ee>"]
 license = "MIT"
-repository = "https://github.com/sbelakho2/ApexMail"
+repository = "https://github.com/Bel-Consulting-OU/kiwicaptcha"
 keywords = ["captcha", "proof-of-work", "sha256", "argon2", "security", "privacy"]
 categories = ["web-programming", "cryptography", "authentication"]
 

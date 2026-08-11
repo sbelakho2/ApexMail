@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "KiwiCaptcha WASM solvers (SHA-256 + Argon2id proof-of-work)"
 license = "MIT"
+repository = "https://github.com/Bel-Consulting-OU/kiwicaptcha"
 
 [workspace]
 members = ["tools/embed"]

@@ -33,7 +33,7 @@ final class Config
         public readonly string $secretKey,
         public readonly PoWAlgorithm $algorithm = PoWAlgorithm::Sha256,
         public readonly int $mKib = 0,
-        public readonly int $t = 1,
+        public readonly int $t = 3,
         public readonly int $p = 1,
         public readonly int $targetBits = 20,
         public readonly int $argon2TargetBits = 8,
