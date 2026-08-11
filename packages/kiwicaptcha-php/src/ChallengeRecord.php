@@ -80,11 +80,14 @@ final class ChallengeRecord
         return [
             'nonce' => $this->nonce,
             'scope' => $this->scope,
-            // Protocol v2 primary key; `ip_hash` is ALSO emitted (one release
-            // migration window) so old Rust readers that only know the legacy
-            // key still load v2 records.
+            // Protocol v2 primary key ONLY. The legacy `ip_hash` key must not
+            // be emitted alongside it: the Rust reader uses serde
+            // #[serde(alias = "ip_hash")], and serde rejects a struct that
+            // carries BOTH the field and its alias ("duplicate field") — a
+            // dual-key record would be unreadable by Rust. Readers still
+            // ACCEPT legacy ip_hash-only records (migration window); writers
+            // emit the v2 key only.
             'binding_tag' => $this->bindingTag,
-            'ip_hash' => $this->bindingTag,
             'issued_at' => $this->issuedAt,
             'expires_at' => $this->expiresAt,
             'algorithm' => $this->algorithm->value,

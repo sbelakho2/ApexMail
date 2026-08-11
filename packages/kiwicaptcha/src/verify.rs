@@ -344,11 +344,15 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //    theoretical minimum. Records without a high-resolution issuance
     //    timestamp are malformed — there is no legacy client-duration
     //    fallback (XV).
+    // Records without a high-resolution issuance timestamp are malformed —
+    // there is no legacy client-duration fallback (XV). This is enforced
+    // UNCONDITIONALLY (even when the timing floor is disabled) to match the
+    // PHP verifier exactly.
+    if ctx.record.issued_at_ns == 0 {
+        return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
+    }
     let floor = ctx.min_duration_ms.max(ctx.record.min_duration_ms);
     if floor > 0 {
-        if ctx.record.issued_at_ns == 0 {
-            return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
-        }
         if ctx.now_ns >= ctx.record.issued_at_ns {
             // High-resolution path: elapsed time between issuance and receipt,
             // both observed by the server clock. Both `now_ns` and

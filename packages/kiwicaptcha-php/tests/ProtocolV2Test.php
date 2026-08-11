@@ -122,12 +122,18 @@ final class ProtocolV2Test extends TestCase
         self::assertSame('tag123', $record->ipHash(), 'compat accessor must expose the binding tag');
     }
 
-    public function testToArrayEmitsBindingTagIpHashMirrorAndProtocolVersion(): void
+    public function testToArrayEmitsBindingTagOnlyAndProtocolVersion(): void
     {
         $data = $this->record()->toArray();
 
         self::assertSame('tag123', $data['binding_tag']);
-        self::assertSame('tag123', $data['ip_hash'], 'legacy ip_hash mirror must be emitted for old Rust readers');
+        // The legacy ip_hash key must NOT be emitted alongside binding_tag:
+        // the Rust reader uses #[serde(alias = "ip_hash")] and serde rejects
+        // a struct carrying both the field and its alias as a duplicate
+        // field — a dual-key record would be unreadable by Rust (caught by
+        // the live cross-language round trip). Writers emit the v2 key only;
+        // readers still ACCEPT ip_hash-only legacy records.
+        self::assertArrayNotHasKey('ip_hash', $data);
         self::assertSame(2, $data['protocol_version']);
     }
 

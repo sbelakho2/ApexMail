@@ -116,10 +116,13 @@ final class RedisStorageTest extends TestCase
         // The JSON keys are the shared language-neutral schema — identical to
         // the Rust serde keys, including attempts_used (Rust: #[serde(default)])
         // so a PHP-written record is complete for a Rust reader. Protocol v2
-        // emits binding_tag (primary) plus the legacy ip_hash mirror for one
-        // release, and protocol_version.
+        // emits binding_tag ONLY — never the legacy ip_hash key alongside it:
+        // the Rust reader uses #[serde(alias = "ip_hash")] and serde rejects a
+        // struct carrying both the field and its alias as a duplicate field,
+        // making a dual-key record unreadable by Rust (caught by the live
+        // cross-language round trip).
         self::assertSame([
-            'nonce', 'scope', 'binding_tag', 'ip_hash', 'issued_at', 'expires_at',
+            'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used',
@@ -129,7 +132,7 @@ final class RedisStorageTest extends TestCase
         self::assertSame(0, $data['attempts_used']);
         self::assertSame(123_456_789, $data['issued_at_ns']);
         self::assertSame('abc123', $data['binding_tag']);
-        self::assertSame('abc123', $data['ip_hash'], 'legacy ip_hash mirror must be emitted');
+        self::assertArrayNotHasKey('ip_hash', $data, 'legacy ip_hash key must NOT be emitted alongside binding_tag');
         self::assertSame(2, $data['protocol_version']);
     }
 
