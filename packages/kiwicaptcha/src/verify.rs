@@ -166,6 +166,8 @@ pub enum VerifyError {
     TooFast,
     #[error("challenge was issued to a different client IP")]
     IpMismatch,
+    #[error("submitted counter exceeds the solver maximum")]
+    CounterTooLarge,
     #[error("challenge was issued for a different scope")]
     WrongScope,
     #[error("too many verification attempts against this challenge")]
@@ -278,6 +280,13 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     expensive verification.
     if let Err(e) = validate_record(ctx.record) {
         return VerifyOutcome::Invalid(e);
+    }
+
+    // 0c. Counter bound: the official solvers never search beyond
+    //     SOLVER_MAX_HASHES; a larger counter is not a legitimate solution
+    //     and must not reach hash derivation (deterministic rejection).
+    if ctx.counter > crate::challenge::SOLVER_MAX_HASHES {
+        return VerifyOutcome::Invalid(VerifyError::CounterTooLarge);
     }
 
     // 1. Signature re-check over the protocol-appropriate canonical input.
@@ -1514,18 +1523,22 @@ mod tests {
 
     #[test]
     fn verify_rejects_counter_beyond_solver_cap() {
-        // The solver caps at MAX_SHA_HASHES (5M); a counter beyond that is
-        // either a bot or an invalid solution — it must still verify the hash
-        // correctly (a huge counter is just a different preimage).
-        let mut record = make_record(4); // low difficulty: counter found quickly
-        let counter = solve_for_test(&record).unwrap();
-        let huge = counter + 5_000_001;
-        // Huge counter is virtually certain to NOT meet the target.
+        // The solver caps at MAX_SHA_HASHES (5M); verify_solution must reject
+        // larger counters deterministically (a huge counter is not a
+        // legitimate solution and must never reach hash derivation).
+        let mut record = make_record(4);
+        let huge = crate::challenge::SOLVER_MAX_HASHES + 1;
         let outcome = verify(&mut record, huge, 5000);
         assert_eq!(
             outcome,
-            VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+            VerifyOutcome::Invalid(VerifyError::CounterTooLarge)
         );
+
+        // Exactly at the cap is verified normally (never CounterTooLarge —
+        // the hash outcome itself is probabilistic and irrelevant here).
+        let mut record2 = make_record(4);
+        let outcome = verify(&mut record2, crate::challenge::SOLVER_MAX_HASHES, 5000);
+        assert_ne!(outcome, VerifyOutcome::Invalid(VerifyError::CounterTooLarge));
     }
 
     #[test]
