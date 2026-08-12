@@ -20,6 +20,8 @@ final class RiskIdentityFactory
         private readonly RiskKeys $keys,
         private readonly int $sourceEpochSecs = 900,
         private readonly int $subnetEpochSecs = 900,
+        private readonly int $ipv4Prefix = 24,
+        private readonly int $ipv6Prefix = 56,
     ) {
     }
 
@@ -106,7 +108,7 @@ final class RiskIdentityFactory
     public function subnetId(string $ip, int $nowSecs): string
     {
         $epoch = intdiv($nowSecs, $this->subnetEpochSecs);
-        return $this->pseudonym($this->keys->subnet, 'net', $epoch, $this->maskIp($ip));
+        return $this->pseudonym($this->keys->subnet, 'net', $epoch, $this->maskIp($ip, $this->ipv4Prefix, $this->ipv6Prefix));
     }
 
     /** Session pseudonym: context "sess", no epoch, raw session cookie value. */

@@ -19,7 +19,8 @@ use Symfony\Component\HttpFoundation\Request;
  * the value itself.
  *
  * Privacy contract: the cookie is a random nonce with no embedded identity;
- * it expires after the configured TTL (default 180 days) and follows the
+ * it expires after the configured TTL (default 30 minutes; the spec's
+ * 15-30 minute window) and follows the
  * request scheme for the Secure flag (null default). Browsers that reject the
  * cookie (e.g. third-party contexts, strict blockers) simply fall back to a
  * session-less risk identity — the engine pads an absent session with zeros,
@@ -30,11 +31,11 @@ final class ContinuityCookie
     public const VALUE_PATTERN = '/^[0-9a-f]{32}$/D';
 
     public function __construct(
-        private readonly string $name = 'kiwi_risk_session',
-        private readonly int $ttlSecs = 15552000,
+        private readonly string $name = '__Host-kiwi-session',
+        private readonly int $ttlSecs = 1800,
         private readonly string $path = '/',
         private readonly ?bool $secure = null,
-        private readonly string $sameSite = 'lax',
+        private readonly string $sameSite = 'strict',
         private readonly bool $httpOnly = true,
     ) {
         if ($this->name === '') {

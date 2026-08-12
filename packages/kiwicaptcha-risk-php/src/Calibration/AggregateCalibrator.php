@@ -39,8 +39,13 @@ final class AggregateCalibrator implements CalibrationStore
     /** @var callable(): int */
     private $clock;
 
-    public function __construct(?callable $clock = null)
-    {
+    public function __construct(
+        ?callable $clock = null,
+        private readonly int $retentionSecs = self::RETENTION_SECS,
+        private readonly int $minSamples = self::MIN_SAMPLES,
+        private readonly int $maxAdjustment = self::BIAS_MAX,
+        private readonly int $maxChangePerMinute = self::MAX_CHANGE_PER_MIN,
+    ) {
         $this->clock = $clock ?? static fn (): int => time();
     }
 
@@ -60,7 +65,7 @@ final class AggregateCalibrator implements CalibrationStore
     {
         $this->prune($now);
         $samples = $this->samples[$scope] ?? [];
-        if (count($samples) < self::MIN_SAMPLES) {
+        if (count($samples) < $this->minSamples) {
             return 0;
         }
 
@@ -72,7 +77,7 @@ final class AggregateCalibrator implements CalibrationStore
         }
         $rate = $legit / count($samples);
         $raw = (int) round((0.5 - $rate) * 300.0);
-        $raw = max(self::BIAS_MIN, min(self::BIAS_MAX, $raw));
+        $raw = max(self::BIAS_MIN, min($this->maxAdjustment, $raw));
 
         $prev = $this->applied[$scope]['bias'] ?? 0;
         $dir = $raw <=> $prev;
@@ -91,7 +96,7 @@ final class AggregateCalibrator implements CalibrationStore
 
         $lastAppliedTs = $this->applied[$scope]['ts'] ?? $now - self::HYSTERESIS_SECS;
         $elapsedMin = max(1, ($now - $lastAppliedTs) / 60.0);
-        $allowed = self::MAX_CHANGE_PER_MIN * $elapsedMin;
+        $allowed = $this->maxChangePerMinute * $elapsedMin;
         $delta = (int) round(max(-$allowed, min($allowed, $raw - $prev)));
         $next = $prev + $delta;
 
@@ -101,7 +106,7 @@ final class AggregateCalibrator implements CalibrationStore
 
     private function prune(int $now): void
     {
-        $cutoff = $now - self::RETENTION_SECS;
+        $cutoff = $now - $this->retentionSecs;
         foreach ($this->samples as $scope => $list) {
             $kept = [];
             foreach ($list as $s) {

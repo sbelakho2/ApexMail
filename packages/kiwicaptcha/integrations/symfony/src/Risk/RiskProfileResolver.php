@@ -54,7 +54,9 @@ final class RiskProfileResolver
             RiskAction::Argon16 => $this->argon(16384),
             RiskAction::Argon32 => $this->argon(32768),
             RiskAction::Argon64 => $this->argon(65536),
-            RiskAction::StepUp => $this->algorithm === PoWAlgorithm::Sha256 ? $this->sha(20) : $this->argon(65536),
+            // StepUp is handled by the controller (403 STEP_UP_REQUIRED) and
+            // must never be mapped to a challenge profile.
+            RiskAction::StepUp => throw new \LogicException('StepUp is handled by the controller, not mapped to a profile'),
             RiskAction::Deny => null, // handled by the caller before issuance
         };
     }

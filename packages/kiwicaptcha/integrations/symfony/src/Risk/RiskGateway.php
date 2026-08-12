@@ -77,6 +77,30 @@ final class RiskGateway
         return $decision;
     }
 
+    /**
+     * POST-SOLVE decision (item 45): a fresh assessment with the SolveSuccess
+     * event, so a materially changed security context (e.g. a global attack
+     * storm while the client was solving) can demand STEP_UP/DENY even after
+     * a valid proof. The application decides what to do with the decision —
+     * a valid PoW never obligates it to honor the request when the context
+     * has changed.
+     */
+    public function postSolveDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null): RiskDecision
+    {
+        $decision = $this->engine->assess(new RiskContext(
+            scope: $this->scopeId($scope),
+            sourceIp: $ip,
+            sessionId: $session,
+            principalId: $principal,
+            event: RiskEventKind::SolveSuccess,
+            networkFlags: $this->classifier->classify($ip),
+            resources: new ResourcePressure(1000, 1000, 1000),
+        ));
+        $this->logDecision($scope, $decision);
+
+        return $decision;
+    }
+
     /** Post-issue signal: the challenge was actually minted (issue-debt). */
     public function challengeIssued(string $scope, string $ip, ?string $session): void
     {

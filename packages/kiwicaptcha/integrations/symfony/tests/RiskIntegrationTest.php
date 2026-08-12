@@ -92,10 +92,10 @@ final class RiskIntegrationTest extends TestCase
         // HttpOnly cookie (32 lowercase hex chars = 16 random bytes).
         $cookies = $response->headers->getCookies();
         self::assertCount(1, $cookies);
-        self::assertSame('kiwi_risk_session', $cookies[0]->getName());
+        self::assertSame('__Host-kiwi-session', $cookies[0]->getName());
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/D', $cookies[0]->getValue());
         self::assertTrue($cookies[0]->isHttpOnly());
-        self::assertSame('lax', $cookies[0]->getSameSite());
+        self::assertSame('strict', $cookies[0]->getSameSite());
         self::assertFalse($cookies[0]->isSecure(), 'secure=null must follow the (http) request scheme');
 
         // The engine saw the pre-issue assessment and the post-issue signal.
@@ -107,7 +107,7 @@ final class RiskIntegrationTest extends TestCase
     {
         $stack = $this->stack(new FakeRiskStateStore());
         $session = bin2hex(random_bytes(16));
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], ['kiwi_risk_session' => $session], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], ['__Host-kiwi-session' => $session], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
 
         $response = $stack['controller']->challenge($request);
         self::assertSame(200, $response->getStatusCode());
@@ -233,13 +233,20 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(20, $resolver->profileFor(RiskAction::Sha20)?->targetBits);
         self::assertSame(20, $resolver->profileFor(RiskAction::Argon32)?->targetBits, 'argon action on a sha app = sha20');
         self::assertSame(PoWAlgorithm::Sha256, $resolver->profileFor(RiskAction::Argon32)?->algorithm);
-        self::assertSame(20, $resolver->profileFor(RiskAction::StepUp)?->targetBits);
+        // StepUp is application-defined and handled by the controller
+        // (403 STEP_UP_REQUIRED) — it must NEVER map to a challenge profile.
+        try {
+            $resolver->profileFor(RiskAction::StepUp);
+            self::fail('StepUp must not map to a profile');
+        } catch (\LogicException) {
+            self::assertTrue(true);
+        }
 
         // Escalation-only: a floor already at 20 never weakens or repeats.
         $maxed = new RiskProfileResolver(PoWAlgorithm::Sha256, 20, 8);
         self::assertNull($maxed->profileFor(RiskAction::Sha20));
         self::assertNull($maxed->profileFor(RiskAction::Argon64));
-        self::assertNull($maxed->profileFor(RiskAction::StepUp));
+        // StepUp always throws (controller-handled), even at the max floor.
 
         // Argon app: argon actions map to real memory-hard profiles carrying
         // the app's argon2 difficulty; sha actions are no-ops (argon is
@@ -251,7 +258,13 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(6, $argon32?->targetBits);
         self::assertNull($argon->profileFor(RiskAction::Sha16));
         self::assertSame(65536, $argon->profileFor(RiskAction::Argon64)?->mKib);
-        self::assertSame(65536, $argon->profileFor(RiskAction::StepUp)?->mKib);
+        // StepUp always throws (controller-handled).
+        try {
+            $argon->profileFor(RiskAction::StepUp);
+            self::fail('StepUp must not map to a profile');
+        } catch (\LogicException) {
+            self::assertTrue(true);
+        }
     }
 
     public function testContinuityCookieValidatesAndMints(): void
@@ -260,19 +273,21 @@ final class RiskIntegrationTest extends TestCase
         $request = Request::create('/challenge', 'POST');
 
         self::assertNull($cookie->read($request), 'absent cookie reads null');
-        $request->cookies->set('kiwi_risk_session', 'zzzz');
+        $request->cookies->set('__Host-kiwi-session', 'zzzz');
         self::assertNull($cookie->read($request), 'non-hex value reads null');
-        $request->cookies->set('kiwi_risk_session', 'abc');
+        $request->cookies->set('__Host-kiwi-session', 'abc');
         self::assertNull($cookie->read($request), 'short value reads null');
 
         $minted = $cookie->mint();
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/D', $minted);
-        $request->cookies->set('kiwi_risk_session', $minted);
+        $request->cookies->set('__Host-kiwi-session', $minted);
         self::assertSame($minted, $cookie->read($request));
 
         $http = $cookie->cookie($request, $minted);
-        self::assertSame('kiwi_risk_session', $http->getName());
-        self::assertSame('lax', $http->getSameSite());
+        self::assertSame('__Host-kiwi-session', $http->getName());
+        self::assertSame('strict', $http->getSameSite());
+        self::assertSame(1800, $http->getExpiresTime() - time(), 'spec: 15-30 minute expiry');
+        self::assertTrue($http->isHttpOnly());
         self::assertTrue($http->isHttpOnly());
         self::assertFalse($http->isSecure(), 'secure=null follows the http request');
         $https = Request::create('https://example.com/challenge', 'POST');
@@ -295,13 +310,23 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(70000, $risk['saturations']['global']);
         self::assertSame(190, $risk['weights']['source_fast']);
         self::assertSame([1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'], $risk['global_floors']);
-        self::assertArrayHasKey('login', $risk['scopes']);
-        self::assertArrayHasKey('signup', $risk['scopes']);
-        self::assertSame(100, $risk['scopes']['login']['base_risk']);
-        self::assertSame('allow', $risk['scopes']['login']['minimum']);
+        // Spec section 31 defaults.
+        self::assertSame('sha16', $risk['scopes']['signup']['minimum']);
+        self::assertSame('sha18', $risk['scopes']['login']['minimum']);
+        self::assertSame('sha18', $risk['scopes']['password_reset']['minimum']);
+        self::assertSame('sha20', $risk['scopes']['admin_login']['minimum']);
+        self::assertSame('sha20', $risk['scopes']['financial_action']['minimum']);
+        self::assertSame(120, $risk['scopes']['login']['base_risk']);
+        self::assertTrue($risk['scopes']['login']['post_solve_check']);
         self::assertNull($risk['scopes']['login']['id']);
-        self::assertSame('kiwi_risk_session', $risk['continuity_cookie']['name']);
-        self::assertSame(15552000, $risk['continuity_cookie']['ttl_secs']);
+        self::assertNull($risk['master_secret']);
+        self::assertTrue($risk['global_pressure']['enabled']);
+        self::assertTrue($risk['argon_capacity']['enabled']);
+        self::assertSame(100, $risk['hard_limits']['source_per_second']);
+        self::assertFalse($risk['calibration']['enabled']);
+        self::assertNull($risk['network_classifier_file']);
+        self::assertSame('__Host-kiwi-session', $risk['continuity_cookie']['name']);
+        self::assertSame(1800, $risk['continuity_cookie']['ttl_secs']);
         self::assertNull($risk['continuity_cookie']['secure']);
         self::assertNull($risk['network_classifier_file']);
     }

@@ -25,7 +25,11 @@ use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Risk\RiskPolicy;
+use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
+use KiwiCaptcha\Risk\Calibration\AggregateCalibrator;
+use KiwiCaptcha\Risk\Metrics\RiskMetrics;
 use KiwiCaptcha\Risk\RiskScorer;
+use KiwiCaptcha\Risk\Storage\LocalEmergencyLimiter;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\RedisStorage;
@@ -258,14 +262,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $riskRedis = $this->resolveRiskRedisClient($riskConfig, $redisRef, $container);
             $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
 
+            $riskMaster = $riskConfig['master_secret'] ?? $config['secret_key'];
             $container->setDefinition('kiwi_captcha.risk.keys', (new Definition(RiskKeys::class))
                 ->setFactory([RiskKeys::class, 'fromMaster'])
-                ->setArguments([$config['secret_key']])
+                ->setArguments([$riskMaster])
                 ->setPublic(true));
             $container->setDefinition('kiwi_captcha.risk.identity_factory', new Definition(RiskIdentityFactory::class, [
                 new Reference('kiwi_captcha.risk.keys'),
                 $riskConfig['source_epoch_secs'],
                 $riskConfig['subnet_epoch_secs'],
+                $riskConfig['subnet_ipv4_prefix'],
+                $riskConfig['subnet_ipv6_prefix'],
             ]));
             if ($riskConfig['network_classifier_file'] !== null) {
                 $container->setDefinition('kiwi_captcha.risk.classifier', (new Definition(CidrNetworkClassifier::class))
@@ -290,6 +297,28 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $riskConfig['hysteresis_ms'],
                 $riskConfig['saturations'],
             ]));
+            $container->setDefinition('kiwi_captcha.risk.metrics', new Definition(RiskMetrics::class));
+
+            // In-process emergency limiter (cheap admission BEFORE the risk
+            // engine): a fixed per-process window from hard_limits.
+            $container->setDefinition('kiwi_captcha.risk.emergency_limiter', new Definition(LocalEmergencyLimiter::class, [
+                max(1, $riskConfig['hard_limits']['source_per_second']),
+            ]));
+
+            // Bounded automatic calibration (aggregate score buckets, no
+            // identity): adjusts only the per-scope bias.
+            $calibrationRef = null;
+            if ($riskConfig['calibration']['enabled']) {
+                $container->setDefinition('kiwi_captcha.risk.calibration', new Definition(AggregateCalibrator::class, [
+                    null, // default clock
+                    $riskConfig['calibration']['retention_secs'],
+                    $riskConfig['calibration']['min_samples'],
+                    $riskConfig['calibration']['max_adjustment'],
+                    $riskConfig['calibration']['max_change_per_minute'],
+                ]));
+                $calibrationRef = new Reference('kiwi_captcha.risk.calibration');
+            }
+
             // The engine is public so applications can read risk metrics
             // (RiskGateway::metricsSnapshot) or record their own
             // confirmed-legitimate/abuse signals.
@@ -306,6 +335,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $riskConfig['principal_ttl_secs'],
                 $riskConfig['dedupe_ttl_secs'],
                 $riskConfig['saturations'],
+                new Definition(CircuitBreaker::class),
+                new Reference('kiwi_captcha.risk.emergency_limiter'),
+                new Reference('kiwi_captcha.risk.metrics'),
+                $calibrationRef,
             ]))->setPublic(true));
             $container->setDefinition('kiwi_captcha.risk.resolver', new Definition(RiskProfileResolver::class, [
                 PoWAlgorithm::from($config['algorithm']),

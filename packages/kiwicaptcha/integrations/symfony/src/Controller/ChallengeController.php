@@ -98,6 +98,19 @@ final class ChallengeController
             }
 
             if ($decision !== null) {
+                if ($decision->action === RiskAction::StepUp) {
+                    // Step-up is application-defined (verified email link,
+                    // passkey, existing session, TOTP...): KiwiCaptcha only
+                    // says "PoW alone is insufficient for this request".
+                    return $this->privateJson(
+                        ['error' => ['code' => 'STEP_UP_REQUIRED', 'message' => 'Additional verification is required for this request.']],
+                        Response::HTTP_FORBIDDEN,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
+                    );
+                }
+
                 if ($decision->action === RiskAction::Deny) {
                     $body = ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']];
                     if ($decision->retryAfterMs !== null) {

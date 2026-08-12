@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk;
 
 use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
+use KiwiCaptcha\Risk\Calibration\CalibrationStore;
 use KiwiCaptcha\Risk\Metrics\RiskMetrics;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
 use KiwiCaptcha\Risk\Storage\LocalEmergencyLimiter;
@@ -54,6 +55,7 @@ final class AdaptiveRiskEngine
         private readonly CircuitBreaker $breaker = new CircuitBreaker(),
         private readonly LocalEmergencyLimiter $limiter = new LocalEmergencyLimiter(),
         private readonly RiskMetrics $metrics = new RiskMetrics(),
+        private readonly ?CalibrationStore $calibration = null,
     ) {
     }
 
@@ -103,7 +105,14 @@ final class AdaptiveRiskEngine
         $this->metrics->recordLatency('store:observe', (microtime(true) - $start) * 1000);
         $this->breaker->recordSuccess();
 
-        $score = $this->scorer->score($this->policy->baseRisk($c->scope), $vector, $this->policy->weights);
+        $base = $this->policy->baseRisk($c->scope);
+        if ($this->calibration !== null) {
+            // Bounded automatic calibration: adjust ONLY the scope bias
+            // (-100..+150) from aggregate score-bucket statistics; never
+            // rewrite weights autonomously.
+            $base = max(0, min(1000, $base + $this->calibration->biasForScope($c->scope, $nowMs)));
+        }
+        $score = $this->scorer->score($base, $vector, $this->policy->weights);
         $decision = $this->policy->decide(
             scope: $c->scope,
             score: $score,
@@ -121,6 +130,12 @@ final class AdaptiveRiskEngine
     }
 
     /** Outcome feedback path (e.g. a post-solve protected action). */
+    /** Stable scope-name -> int id (crc32 & 0x7fffffff), for the label helpers. */
+    private function scopeId(string $scope): int
+    {
+        return crc32($scope) & 0x7fffffff;
+    }
+
     public function record(RiskEventKind $kind, int $scope, string $ip, ?string $sessionId = null, ?string $principalId = null): void
     {
         $this->assess(new RiskContext(
@@ -136,12 +151,16 @@ final class AdaptiveRiskEngine
 
     public function confirmedLegitimate(string $scope, string $ip, ?string $principalId = null): void
     {
-        $this->record(RiskEventKind::ConfirmedLegitimate, (int) $scope, $ip, null, $principalId);
+        $this->calibration?->record($this->scopeId($scope), 0, RiskAction::Allow, true);
+
+        $this->record(RiskEventKind::ConfirmedLegitimate, $this->scopeId($scope), $ip, null, $principalId);
     }
 
     public function confirmedAbuse(string $scope, string $ip, ?string $principalId = null): void
     {
-        $this->record(RiskEventKind::ConfirmedAbuse, (int) $scope, $ip, null, $principalId);
+        $this->calibration?->record($this->scopeId($scope), 10, RiskAction::Deny, false);
+
+        $this->record(RiskEventKind::ConfirmedAbuse, $this->scopeId($scope), $ip, null, $principalId);
     }
 
     private function buildObservation(RiskContext $c, int $nowMs): RiskObservation
