@@ -183,6 +183,23 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         self::assertSame(0, $this->leases($client));
     }
 
+    public function testCapacityAndUsageExposeLiveSlots(): void
+    {
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 3, 'usage-probe');
+
+        self::assertSame(3, $semaphore->capacity());
+        self::assertSame(0, $semaphore->usage());
+
+        $token = $semaphore->acquire();
+        self::assertNotNull($token);
+        self::assertSame(1, $semaphore->usage(), 'usage = live lease-set members');
+
+        $semaphore->release($token);
+        self::assertSame(0, $semaphore->usage());
+        self::assertSame(0, (new RedisAdmissionSemaphore($client, 0))->usage(), 'disabled cap reports 0 usage');
+    }
+
     public function testGateRejectsSaturatedVerificationWithoutBurningTheRecord(): void
     {
         $client = $this->requirePredis();

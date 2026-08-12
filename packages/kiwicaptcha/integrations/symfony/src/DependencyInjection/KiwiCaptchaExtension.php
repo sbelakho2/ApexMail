@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\RedisRiskHealthProvider;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
@@ -22,6 +23,7 @@ use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
 use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
+use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Risk\RiskPolicy;
@@ -258,7 +260,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $riskGatewayRef = null;
         $riskCookieRef = null;
         if ($riskConfig['enabled']) {
-            [$policyConfig, $scopeIds] = $this->buildRiskPolicy($riskConfig);
+            [$policyConfig, $scopeIds, $postSolveScopes, $unknownScopeId] = $this->buildRiskPolicy($riskConfig);
             $riskRedis = $this->resolveRiskRedisClient($riskConfig, $redisRef, $container);
             $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
 
@@ -286,42 +288,54 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setFactory([RiskPolicy::class, 'fromConfig'])
                 ->setArguments([$policyConfig])
                 ->setPublic(true));
-            $container->setDefinition('kiwi_captcha.risk.store', new Definition(RedisRiskStateStore::class, [
+            // The risk state store is self-contained in the package (the
+            // canonical risk-v1 Lua ships at resources/risk-v1.lua). The
+            // session TTL comes from the continuity-cookie lifetime: a
+            // session signal must never outlive the cookie that carries it.
+            $container->setDefinition('kiwi_captcha.risk.store', (new Definition(RedisRiskStateStore::class, [
                 $riskRedis,
                 $namespace,
                 $riskConfig['source_epoch_secs'],
                 $riskConfig['subnet_epoch_secs'],
                 $riskConfig['state_ttl_secs'],
-                $riskConfig['principal_ttl_secs'],
-                $riskConfig['dedupe_ttl_secs'],
-                $riskConfig['hysteresis_ms'],
-                $riskConfig['saturations'],
-            ]));
+            ]))
+                ->setArgument('$principalTtlSecs', $riskConfig['principal_ttl_secs'])
+                ->setArgument('$sessionTtlSecs', $riskConfig['continuity_cookie']['ttl_secs'])
+                ->setArgument('$dedupeTtlSecs', $riskConfig['dedupe_ttl_secs'])
+                ->setArgument('$hysteresisMs', $riskConfig['hysteresis_ms'])
+                ->setArgument('$saturations', $riskConfig['saturations']));
             $container->setDefinition('kiwi_captcha.risk.metrics', new Definition(RiskMetrics::class));
 
             // In-process emergency limiter (cheap admission BEFORE the risk
-            // engine): a fixed per-process window from hard_limits.
+            // engine): fixed per-process windows from hard_limits — source
+            // AND global (assess() runs both before any state backend).
             $container->setDefinition('kiwi_captcha.risk.emergency_limiter', new Definition(LocalEmergencyLimiter::class, [
                 max(1, $riskConfig['hard_limits']['source_per_second']),
+                max(1, $riskConfig['hard_limits']['global_per_second']),
             ]));
 
-            // Bounded automatic calibration (aggregate score buckets, no
-            // identity): adjusts only the per-scope bias.
+            // Redis-backed aggregate calibration (score-bucket statistics,
+            // no identity): adjusts only the per-scope bias. Receipts are
+            // keyed on decision ids, so the same Predis client + namespace
+            // as the risk state store keeps every calibration key in one
+            // hash-tag family.
             $calibrationRef = null;
             if ($riskConfig['calibration']['enabled']) {
                 $container->setDefinition('kiwi_captcha.risk.calibration', new Definition(AggregateCalibrator::class, [
-                    null, // default clock
-                    $riskConfig['calibration']['retention_secs'],
-                    $riskConfig['calibration']['min_samples'],
-                    $riskConfig['calibration']['max_adjustment'],
-                    $riskConfig['calibration']['max_change_per_minute'],
+                    $riskRedis,
+                    $namespace,
                 ]));
                 $calibrationRef = new Reference('kiwi_captcha.risk.calibration');
             }
 
             // The engine is public so applications can read risk metrics
             // (RiskGateway::metricsSnapshot) or record their own
-            // confirmed-legitimate/abuse signals.
+            // confirmed-legitimate/abuse signals. The trailing parameters
+            // are passed BY NAME against the final package contract
+            // (principalTtlSecs, saturations, calibration) so their position
+            // in the constructor cannot drift from this wiring. The session
+            // TTL lives on the state store, the global per-second limit on
+            // the emergency limiter — both wired above.
             $container->setDefinition('kiwi_captcha.risk.engine', (new Definition(AdaptiveRiskEngine::class, [
                 new Reference('kiwi_captcha.risk.store'),
                 new Reference('kiwi_captcha.risk.classifier'),
@@ -332,18 +346,30 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $riskConfig['source_epoch_secs'],
                 $riskConfig['subnet_epoch_secs'],
                 $riskConfig['state_ttl_secs'],
-                $riskConfig['principal_ttl_secs'],
-                $riskConfig['dedupe_ttl_secs'],
-                $riskConfig['saturations'],
-                new Definition(CircuitBreaker::class),
-                new Reference('kiwi_captcha.risk.emergency_limiter'),
-                new Reference('kiwi_captcha.risk.metrics'),
-                $calibrationRef,
-            ]))->setPublic(true));
+            ]))
+                ->setArgument('$principalTtlSecs', $riskConfig['principal_ttl_secs'])
+                ->setArgument('$dedupeTtlSecs', $riskConfig['dedupe_ttl_secs'])
+                ->setArgument('$saturations', $riskConfig['saturations'])
+                ->setArgument('$breaker', new Definition(CircuitBreaker::class))
+                ->setArgument('$limiter', new Reference('kiwi_captcha.risk.emergency_limiter'))
+                ->setArgument('$metrics', new Reference('kiwi_captcha.risk.metrics'))
+                ->setArgument('$calibration', $calibrationRef)
+                ->setPublic(true));
             $container->setDefinition('kiwi_captcha.risk.resolver', new Definition(RiskProfileResolver::class, [
                 PoWAlgorithm::from($config['algorithm']),
                 $config['difficulty_bits'],
-                $config['argon2_difficulty_bits'],
+            ]));
+
+            // Live resource pressure: remaining Redis admission-semaphore
+            // slots (argon_capacity.enabled gate), risk Redis health.
+            // Unobservable sources stay nominal (1000).
+            $container->setDefinition('kiwi_captcha.risk.resource_pressure', new Definition(RedisRiskHealthProvider::class, [
+                $riskConfig['argon_capacity']['enabled']
+                    ? ($container->hasDefinition('kiwi_captcha.argon2_redis_semaphore')
+                        ? new Reference('kiwi_captcha.argon2_redis_semaphore')
+                        : null)
+                    : null,
+                $riskRedis,
             ]));
             $loggerRef = $container->hasDefinition('logger') || $container->hasAlias('logger')
                 ? new Reference('logger')
@@ -353,8 +379,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 new Reference('kiwi_captcha.risk.classifier'),
                 new Reference('kiwi_captcha.risk.resolver'),
                 $scopeIds,
-                $loggerRef,
-            ]))->setPublic(true));
+            ]))
+                ->setArgument('$logger', $loggerRef)
+                ->setArgument('$resources', new Reference('kiwi_captcha.risk.resource_pressure'))
+                ->setArgument('$postSolveScopes', $postSolveScopes)
+                ->setArgument('$unknownScopeMode', $riskConfig['unknown_scope']['mode'])
+                ->setArgument('$unknownScopeId', $unknownScopeId)
+                ->setPublic(true));
             $cookie = $riskConfig['continuity_cookie'];
             $container->setDefinition(ContinuityCookie::class, (new Definition(ContinuityCookie::class, [
                 $cookie['name'],
@@ -494,17 +525,44 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * wins, otherwise the id is crc32(scope name) & 0x7fffffff. Two scopes
      * with the same id would silently share risk state — refuse the config.
      *
-     * @return array{0: array<string, mixed>, 1: array<string, int>}
+     * Contract invariants for the policy handed to RiskPolicy::fromConfig:
+     *  - global_floors is an array of FIVE entries with index 0 = Allow
+     *    (level 0 is the idle level). When global_pressure.enabled is false
+     *    every floor is Allow — the global controller is off.
+     *  - unknown_scope.mode "minimum" adds a synthetic scope entry
+     *    (base_risk 100, minimum/degraded sha20) under a reserved id
+     *    (1..u32::MAX, never colliding with a configured id); "reject"
+     *    leaves the policy without it and the gateway declines unknown
+     *    scopes with UnknownScopeException.
+     *
+     * @return array{0: array<string, mixed>, 1: array<string, int>, 2: array<string, bool>, 3: ?int}
+     *         [policy config, scope-name => scope-id, scope-name => post_solve_check, synthetic unknown-scope id]
      */
     private function buildRiskPolicy(array $riskConfig): array
     {
+        // RiskPolicy::fromConfig enforces version equality: the policy
+        // config's version must equal the package's contract version
+        // (RiskPolicy::CONTRACT_VERSION). The operator's policy_version
+        // knob is the value written into decisions — it must agree with the
+        // contract the package parses, so refuse a mismatch at compile time.
+        if ($riskConfig['policy_version'] !== RiskPolicy::CONTRACT_VERSION) {
+            throw new \InvalidArgumentException(sprintf(
+                'kiwi_captcha.risk.policy_version must equal the risk package contract version %d (got %d) — '.
+                'the risk-v1 policy parser only accepts its current contract version',
+                RiskPolicy::CONTRACT_VERSION,
+                $riskConfig['policy_version'],
+            ));
+        }
         $policyConfig = [
-            'version' => $riskConfig['policy_version'],
+            'version' => RiskPolicy::CONTRACT_VERSION,
             'weights' => $riskConfig['weights'],
             'scopes' => [],
-            'global_floors' => $riskConfig['global_floors'],
+            'global_floors' => $riskConfig['global_pressure']['enabled']
+                ? [0 => RiskAction::Allow->value] + $riskConfig['global_floors']
+                : array_fill(0, 5, RiskAction::Allow->value),
         ];
         $scopeIds = [];
+        $postSolveScopes = [];
         foreach ($riskConfig['scopes'] as $name => $spec) {
             $id = $spec['id'] ?? (crc32($name) & 0x7fffffff);
             if ($id < 1) {
@@ -522,6 +580,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ));
             }
             $scopeIds[$name] = $id;
+            $postSolveScopes[$name] = $spec['post_solve_check'];
             $policyConfig['scopes'][$id] = [
                 'base_risk' => $spec['base_risk'],
                 'minimum' => $spec['minimum'],
@@ -531,7 +590,36 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
         ksort($policyConfig['scopes']);
 
-        return [$policyConfig, $scopeIds];
+        $unknownScopeId = null;
+        if ($riskConfig['unknown_scope']['mode'] === 'minimum') {
+            $unknownScopeId = $this->reserveUnknownScopeId($scopeIds);
+            $policyConfig['scopes'][$unknownScopeId] = [
+                'base_risk' => 100,
+                'minimum' => RiskAction::Sha20->value,
+                'post_solve_check' => false,
+                'degraded' => RiskAction::Sha20->value,
+            ];
+        }
+
+        return [$policyConfig, $scopeIds, $postSolveScopes, $unknownScopeId];
+    }
+
+    /**
+     * A stable synthetic scope id for unknown scopes in 'minimum' mode:
+     * starts at u32::MAX and walks down until it collides with no
+     * configured scope id (the risk-v1 contract allows ids 1..u32::MAX).
+     *
+     * @param array<string, int> $scopeIds
+     */
+    private function reserveUnknownScopeId(array $scopeIds): int
+    {
+        $used = array_values($scopeIds);
+        for ($id = 0xFFFFFFFF; $id >= 1; --$id) {
+            if (!\in_array($id, $used, true)) {
+                return $id;
+            }
+        }
+        throw new \InvalidArgumentException('Cannot reserve a synthetic scope id for unknown_scope.mode=minimum: every id 1..u32::MAX is taken by a configured scope');
     }
 
     /**

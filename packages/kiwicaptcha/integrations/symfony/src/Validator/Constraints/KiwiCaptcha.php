@@ -24,8 +24,19 @@ class KiwiCaptcha extends Constraint
 {
     public const NOT_SOLVED_ERROR = 'kiwicaptcha_not_solved';
 
+    /**
+     * The token verified correctly, but the scope's post_solve_check
+     * re-assessment returned a Deny: the security context materially changed
+     * while the client was solving, so the valid proof does not clear the
+     * request. Distinct from NOT_SOLVED_ERROR so applications can react
+     * (fresh challenge, step-up, human review) instead of forcing a silent
+     * re-solve loop.
+     */
+    public const POST_SOLVE_REJECTED_ERROR = 'kiwi.post_solve_rejected';
+
     protected const ERROR_NAMES = [
         self::NOT_SOLVED_ERROR => 'NOT_SOLVED_ERROR',
+        self::POST_SOLVE_REJECTED_ERROR => 'POST_SOLVE_REJECTED_ERROR',
     ];
 
     public string $message = 'The security check failed. Please try again.';

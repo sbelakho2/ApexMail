@@ -75,19 +75,35 @@ impl RiskEventKind {
 
 /// One immutable observation applied atomically to the risk state.
 ///
-/// `source_id`/`subnet_id` are 128-bit pseudonyms from the identity module;
-/// `session_id`/`principal_id` are the same, or `None` when the request
-/// carries no session/principal. `event_id` is 16 random bytes and is the
-/// dedupe key: an identical event_id never double-increments the state.
+/// Source/subnet identities are EPOCH-scoped hex pseudonyms (32 hex chars)
+/// from the identity factory: `source_id` is the current-epoch id,
+/// `source_id_prev`/`source_id_next` are the SAME source HMAC'd with the
+/// epoch-1/epoch+1 windows (the store's ±1 keys must never reuse the
+/// current-epoch pseudonym). `session_id`/`principal_id` are 128-bit
+/// pseudonyms, or `None` when the request carries no session/principal.
+/// `event_id` is the dedupe key (16 random bytes in hex; `''` disables
+/// dedupe) — an identical event_id never double-increments the state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RiskObservation {
     pub event: RiskEventKind,
-    pub scope: u16,
-    pub source_id: [u8; 16],
-    pub subnet_id: [u8; 16],
+    pub scope: u32,
+    /// Source epoch window (seconds / source epoch secs).
+    pub source_epoch: i64,
+    /// Source pseudonym hex for epoch-1, current, epoch+1.
+    pub source_id_prev: String,
+    pub source_id: String,
+    pub source_id_next: String,
+    /// Subnet epoch window (seconds / subnet epoch secs).
+    pub subnet_epoch: i64,
+    /// Subnet pseudonym hex for epoch-1, current, epoch+1.
+    pub subnet_id_prev: String,
+    pub subnet_id: String,
+    pub subnet_id_next: String,
     pub session_id: Option<[u8; 16]>,
     pub principal_id: Option<[u8; 16]>,
-    pub event_id: [u8; 16],
+    /// Dedupe key: 16 random bytes in hex (32 chars); `''` = dedupe
+    /// disabled.
+    pub event_id: String,
     /// Classifier-derived network risk (0..1000), side-channel into the
     /// Lua's reserved `network_risk` slot.
     pub network_risk: u16,
@@ -95,16 +111,31 @@ pub struct RiskObservation {
     pub now_ms: u64,
 }
 
+impl RiskObservation {
+    /// Generates a fresh 16-byte dedupe id in hex.
+    pub fn new_event_id() -> String {
+        let mut bytes = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+        hex::encode(bytes)
+    }
+}
+
 impl Default for RiskObservation {
     fn default() -> Self {
         RiskObservation {
             event: RiskEventKind::PreIssue,
             scope: 0,
-            source_id: [0u8; 16],
-            subnet_id: [0u8; 16],
+            source_epoch: 0,
+            source_id_prev: "0".repeat(32),
+            source_id: "0".repeat(32),
+            source_id_next: "0".repeat(32),
+            subnet_epoch: 0,
+            subnet_id_prev: "0".repeat(32),
+            subnet_id: "0".repeat(32),
+            subnet_id_next: "0".repeat(32),
             session_id: None,
             principal_id: None,
-            event_id: [0u8; 16],
+            event_id: String::new(),
             network_risk: 0,
             now_ms: 0,
         }
@@ -148,8 +179,19 @@ mod tests {
         let o = RiskObservation::default();
         assert_eq!(o.event, RiskEventKind::PreIssue);
         assert_eq!(o.scope, 0);
-        assert_eq!(o.source_id, [0u8; 16]);
+        assert_eq!(o.source_epoch, 0);
+        assert_eq!(o.source_id.len(), 32);
         assert_eq!(o.session_id, None);
         assert_eq!(o.network_risk, 0);
+        assert_eq!(o.event_id, "");
+    }
+
+    #[test]
+    fn new_event_id_is_32_hex_chars() {
+        let a = RiskObservation::new_event_id();
+        let b = RiskObservation::new_event_id();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 }

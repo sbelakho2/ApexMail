@@ -12,29 +12,38 @@ use crate::signals::SignalVector;
 pub enum RiskStoreError {
     #[error("risk state backend unavailable: {0}")]
     BackendUnavailable(String),
-    #[error("duplicate event_id")]
-    DuplicateEvent,
     #[error("risk script error: {0}")]
     ScriptError(String),
     #[error("risk state backend timeout: {0}")]
     Timeout(String),
 }
 
-/// Risk state store: applies an observation exactly once (event_id dedupe)
-/// and returns the current signal vector.
+/// The full reply of one store application: the signal vector plus the
+/// global pressure level, cooldown deadline and dedupe verdict tracked by
+/// the backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observed {
+    pub vector: SignalVector,
+    pub global_level: u8,
+    pub cooldown_until_ms: u64,
+    /// True when the event_id was already applied: the state was NOT
+    /// mutated and the returned signals are the current ones (there is no
+    /// duplicate error in risk-v1 semantics).
+    pub is_duplicate: bool,
+}
+
+/// Risk state store: applies an observation (event_id dedupe) and returns
+/// the current signal vector.
 ///
-/// A duplicate event_id is a documented no-op that surfaces as
-/// [`RiskStoreError::DuplicateEvent`]; the engine's degraded path is NOT
-/// triggered for it by the store itself.
+/// A duplicate event_id is a documented no-op: the state is untouched and
+/// the current signals are returned with `is_duplicate = true`.
 pub trait RiskStateStore {
-    /// Applies the observation and returns the resulting [`SignalVector`].
+    /// Applies the observation and returns the resulting [`Observed`].
     ///
     /// # Errors
     ///
-    /// - [`RiskStoreError::DuplicateEvent`] when the event_id was already
-    ///   applied (the state is untouched).
     /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
-    fn observe(&self, o: &crate::event::RiskObservation) -> Result<SignalVector, RiskStoreError>;
+    fn observe(&self, o: &crate::event::RiskObservation) -> Result<Observed, RiskStoreError>;
 
     /// Last observed global pressure level (0..4) reported by the backend
     /// during the most recent successful assessment. Stores without the
@@ -53,25 +62,38 @@ pub trait RiskStateStore {
 /// Convenience wrapper for recording events without building an
 /// [`crate::event::RiskObservation`] by hand.
 pub trait RiskStateStoreExt: RiskStateStore {
-    /// Records an event with the given pseudonym ids and a fresh caller-
-    /// supplied event_id, returning the resulting vector.
+    /// Records an event with the given epoch-scoped pseudonyms and a fresh
+    /// caller-supplied event_id, returning the resulting [`Observed`].
+    #[allow(clippy::too_many_arguments)]
     fn record_event(
         &self,
         event: RiskEventKind,
-        scope: u16,
-        source_id: [u8; 16],
-        subnet_id: [u8; 16],
-        event_id: [u8; 16],
+        scope: u32,
+        source_epoch: i64,
+        source_id_prev: &str,
+        source_id: &str,
+        source_id_next: &str,
+        subnet_epoch: i64,
+        subnet_id_prev: &str,
+        subnet_id: &str,
+        subnet_id_next: &str,
+        event_id: &str,
         now_ms: u64,
-    ) -> Result<SignalVector, RiskStoreError> {
+    ) -> Result<Observed, RiskStoreError> {
         let observation = crate::event::RiskObservation {
             event,
             scope,
-            source_id,
-            subnet_id,
+            source_epoch,
+            source_id_prev: source_id_prev.to_string(),
+            source_id: source_id.to_string(),
+            source_id_next: source_id_next.to_string(),
+            subnet_epoch,
+            subnet_id_prev: subnet_id_prev.to_string(),
+            subnet_id: subnet_id.to_string(),
+            subnet_id_next: subnet_id_next.to_string(),
             session_id: None,
             principal_id: None,
-            event_id,
+            event_id: event_id.to_string(),
             network_risk: 0,
             now_ms,
         };

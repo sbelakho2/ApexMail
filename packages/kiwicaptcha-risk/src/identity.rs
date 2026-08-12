@@ -13,6 +13,8 @@ use std::net::IpAddr;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use crate::keys::RiskKeys;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Canonical IP form: family byte (`0x04`/`0x06`) + packed bytes.
@@ -45,13 +47,14 @@ pub fn canonical_ip(ip: IpAddr) -> Vec<u8> {
 
 /// 128-bit ephemeral pseudonym: the first 16 bytes of the HMAC-SHA256
 /// described in the contract. The epoch is encoded as an 8-byte big-endian
-/// unsigned integer.
-pub fn pseudonym(key: &[u8], context: &[u8], epoch: u64, material: &[u8]) -> [u8; 16] {
+/// unsigned integer (the two's-complement reinterpretation of a negative
+/// `i64` epoch, matching PHP's `pack('J', $epoch)`).
+pub fn pseudonym(key: &[u8], context: &[u8], epoch: i64, material: &[u8]) -> [u8; 16] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(b"kiwi-risk-id-v1\0");
     mac.update(context);
     mac.update(b"\0");
-    mac.update(&epoch.to_be_bytes());
+    mac.update(&(epoch as u64).to_be_bytes());
     mac.update(material);
     let digest = mac.finalize().into_bytes();
     let mut out = [0u8; 16];
@@ -93,6 +96,91 @@ pub fn masked_network(ip: IpAddr, ipv4_prefix: u8, ipv6_prefix: u8) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Derives the epoch-scoped source/subnet pseudonyms and the stable
+/// session/principal pseudonyms, mirroring the PHP `RiskIdentityFactory`.
+///
+/// Every epoch key MUST use the pseudonym HMAC'd with ITS OWN epoch: the
+/// engine builds prev/current/next ids at `floor(now/900)-1`,
+/// `floor(now/900)`, `floor(now/900)+1` and the store addresses
+/// `src:<epoch>:<id>`, `src:<epoch-1>:<id_prev>`, `src:<epoch+1>:<id_next>`
+/// (same for `net`).
+#[derive(Debug, Clone)]
+pub struct RiskIdentityFactory {
+    keys: RiskKeys,
+    source_epoch_secs: i64,
+    subnet_epoch_secs: i64,
+    ipv4_prefix: u8,
+    ipv6_prefix: u8,
+}
+
+impl RiskIdentityFactory {
+    /// Contract defaults: 900 s epochs, /24 IPv4 and /56 IPv6 masks.
+    pub fn new(keys: RiskKeys) -> RiskIdentityFactory {
+        RiskIdentityFactory {
+            keys,
+            source_epoch_secs: 900,
+            subnet_epoch_secs: 900,
+            ipv4_prefix: 24,
+            ipv6_prefix: 56,
+        }
+    }
+
+    /// Builds a factory with explicit epoch windows (tests and alternate
+    /// deployments); the network masks stay at the contract defaults.
+    pub fn with_epochs(
+        keys: RiskKeys,
+        source_epoch_secs: i64,
+        subnet_epoch_secs: i64,
+    ) -> RiskIdentityFactory {
+        let mut factory = RiskIdentityFactory::new(keys);
+        factory.source_epoch_secs = source_epoch_secs;
+        factory.subnet_epoch_secs = subnet_epoch_secs;
+        factory
+    }
+
+    /// Source pseudonym (hex) for the current epoch at `now_secs`.
+    pub fn source_id(&self, ip: IpAddr, now_secs: i64) -> String {
+        self.source_id_for_epoch(ip, now_secs / self.source_epoch_secs)
+    }
+
+    /// Subnet pseudonym (hex) for the current epoch at `now_secs`.
+    pub fn subnet_id(&self, ip: IpAddr, now_secs: i64) -> String {
+        self.subnet_id_for_epoch(ip, now_secs / self.subnet_epoch_secs)
+    }
+
+    /// Source pseudonym (hex) for an EXPLICIT epoch: context `b"src"`,
+    /// material = family byte + packed IP.
+    pub fn source_id_for_epoch(&self, ip: IpAddr, epoch: i64) -> String {
+        hex::encode(pseudonym(
+            &self.keys.source,
+            b"src",
+            epoch,
+            &canonical_ip(ip),
+        ))
+    }
+
+    /// Subnet pseudonym (hex) for an EXPLICIT epoch: context `b"net"`,
+    /// material = masked network (/24 IPv4, /56 IPv6).
+    pub fn subnet_id_for_epoch(&self, ip: IpAddr, epoch: i64) -> String {
+        hex::encode(pseudonym(
+            &self.keys.subnet,
+            b"net",
+            epoch,
+            &masked_network(ip, self.ipv4_prefix, self.ipv6_prefix),
+        ))
+    }
+
+    /// Session pseudonym (context `b"sess"`, no epoch): 16 raw bytes.
+    pub fn session_id(&self, raw: &[u8]) -> [u8; 16] {
+        pseudonym(&self.keys.session, b"sess", 0, raw)
+    }
+
+    /// Principal pseudonym (context `b"prin"`, no epoch): 16 raw bytes.
+    pub fn principal_id(&self, raw: &[u8]) -> [u8; 16] {
+        pseudonym(&self.keys.principal, b"prin", 0, raw)
+    }
 }
 
 #[cfg(test)]
@@ -203,5 +291,70 @@ mod tests {
         };
         assert_eq!(&masked[1..9], &octets[..8]);
         assert!(masked[9..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn factory_ids_are_epoch_scoped_hex() {
+        let keys = RiskKeys::from_master(&[0x42; 32]);
+        let factory = RiskIdentityFactory::new(keys.clone());
+        let ip: IpAddr = "203.0.113.27".parse().unwrap();
+
+        let cur = factory.source_id_for_epoch(ip, 7);
+        assert_eq!(cur.len(), 32);
+        assert!(cur.chars().all(|c| c.is_ascii_hexdigit()));
+        // The explicit-epoch construction must equal the canonical HMAC.
+        assert_eq!(
+            cur,
+            hex::encode(pseudonym(&keys.source, b"src", 7, &canonical_ip(ip)))
+        );
+        // Each epoch gets its own pseudonym: prev/current/next all differ.
+        let prev = factory.source_id_for_epoch(ip, 6);
+        let next = factory.source_id_for_epoch(ip, 8);
+        assert_ne!(cur, prev);
+        assert_ne!(cur, next);
+        assert_ne!(prev, next);
+
+        let net_cur = factory.subnet_id_for_epoch(ip, 7);
+        assert_eq!(
+            net_cur,
+            hex::encode(pseudonym(
+                &keys.subnet,
+                b"net",
+                7,
+                &masked_network(ip, 24, 56)
+            ))
+        );
+        // Source and subnet contexts never collide.
+        assert_ne!(cur, net_cur);
+
+        // Current-epoch convenience matches the explicit form.
+        assert_eq!(factory.source_id(ip, 7 * 900 + 42), cur);
+        assert_eq!(factory.subnet_id(ip, 7 * 900 + 42), net_cur);
+
+        // Session/principal are epoch-free raw pseudonyms.
+        assert_eq!(
+            factory.session_id(b"raw"),
+            pseudonym(&keys.session, b"sess", 0, b"raw")
+        );
+        assert_eq!(
+            factory.principal_id(b"raw"),
+            pseudonym(&keys.principal, b"prin", 0, b"raw")
+        );
+    }
+
+    #[test]
+    fn factory_with_epochs_changes_windows() {
+        let keys = RiskKeys::from_master(&[0x42; 32]);
+        let factory = RiskIdentityFactory::with_epochs(keys, 60, 120);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        // now_secs 125: source epoch 125/60 = 2, subnet epoch 125/120 = 1.
+        assert_eq!(
+            factory.source_id(ip, 125),
+            factory.source_id_for_epoch(ip, 2)
+        );
+        assert_eq!(
+            factory.subnet_id(ip, 125),
+            factory.subnet_id_for_epoch(ip, 1)
+        );
     }
 }

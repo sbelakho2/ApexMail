@@ -8,7 +8,7 @@ use crate::resources::ResourcePressure;
 
 /// Inputs of one risk assessment.
 pub struct RiskContext<'a> {
-    pub scope: u16,
+    pub scope: u32,
     pub source_ip: IpAddr,
     /// Raw session cookie value (pseudonymized before storage).
     pub session_id: Option<&'a [u8]>,
@@ -22,7 +22,7 @@ pub struct RiskContext<'a> {
 impl<'a> RiskContext<'a> {
     /// Convenience constructor for tests and simple call sites.
     pub fn new(
-        scope: u16,
+        scope: u32,
         source_ip: IpAddr,
         session_id: Option<&'a [u8]>,
         principal_id: Option<&'a [u8]>,

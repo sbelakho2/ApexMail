@@ -18,21 +18,24 @@ fn crc16_reference_vectors() {
 #[test]
 fn full_observation_key_set_is_single_slot() {
     let ns = common::unique_namespace("keyslot");
-    let epoch = (common::T0 / 1000) / 900;
-    let source = [0xAA; 16];
-    let subnet = [0xBB; 16];
+    let (src_epoch, src_prev, src_cur, src_next) = common::epoch_ids(0xAA, common::T0);
+    let (net_epoch, net_prev, net_cur, net_next) = common::epoch_ids(0xBB, common::T0);
     let session_bytes = [0xCC; 16];
     let principal_bytes = [0xDD; 16];
     let session = Some(session_bytes);
     let principal = Some(principal_bytes);
-    let event = [0xEE; 16];
+    let event = common::event_id(0xEE);
 
     let keys = RedisRiskStateStore::keys_for(
         &ns,
-        epoch,
-        epoch,
-        &source,
-        &subnet,
+        src_epoch,
+        &src_prev,
+        &src_cur,
+        &src_next,
+        net_epoch,
+        &net_prev,
+        &net_cur,
+        &net_next,
         session.as_ref().map(|v| v.as_slice()),
         principal.as_ref().map(|v| v.as_slice()),
         &event,
@@ -54,12 +57,20 @@ fn full_observation_key_set_is_single_slot() {
     for key in &keys {
         assert!(key.starts_with(&tag), "key {key} must carry the {tag} tag");
     }
+    // The current-epoch key carries the CURRENT pseudonym; the ±1 keys
+    // carry the epoch-scoped prev/next pseudonyms (never the current one).
     assert!(keys
         .iter()
-        .any(|k| k.contains(":risk:src:") && k.contains(&hex::encode(source))));
+        .any(|k| k == &format!("{tag}:risk:src:{src_epoch}:{src_cur}")));
     assert!(keys
         .iter()
-        .any(|k| k.contains(":risk:net:") && k.contains(&hex::encode(subnet))));
+        .any(|k| k == &format!("{tag}:risk:src:{}:{src_prev}", src_epoch - 1)));
+    assert!(keys
+        .iter()
+        .any(|k| k == &format!("{tag}:risk:src:{}:{src_next}", src_epoch + 1)));
+    assert!(keys
+        .iter()
+        .any(|k| k == &format!("{tag}:risk:net:{net_epoch}:{net_cur}")));
     assert!(keys
         .iter()
         .any(|k| k.contains(":risk:session:") && k.contains(&hex::encode(session_bytes))));
@@ -69,7 +80,7 @@ fn full_observation_key_set_is_single_slot() {
     assert!(keys.iter().any(|k| k.ends_with(":risk:global")));
     assert!(keys
         .iter()
-        .any(|k| k.contains(":risk:dedupe:") && k.contains(&hex::encode(event))));
+        .any(|k| k.contains(":risk:dedupe:") && k.contains(&event)));
 
     // A foreign tag in the set must fail the slot assertion.
     let mut broken = keys.clone();
@@ -80,9 +91,21 @@ fn full_observation_key_set_is_single_slot() {
 #[test]
 fn keys_for_maps_missing_ids_to_the_zero_placeholder() {
     let ns = common::unique_namespace("keyslot");
-    let epoch = (common::T0 / 1000) / 900;
+    let (src_epoch, src_prev, src_cur, src_next) = common::epoch_ids(0xAA, common::T0);
+    let (net_epoch, net_prev, net_cur, net_next) = common::epoch_ids(0xBB, common::T0);
     let keys = RedisRiskStateStore::keys_for(
-        &ns, epoch, epoch, &[1u8; 16], &[2u8; 16], None, None, &[3u8; 16],
+        &ns,
+        src_epoch,
+        &src_prev,
+        &src_cur,
+        &src_next,
+        net_epoch,
+        &net_prev,
+        &net_cur,
+        &net_next,
+        None,
+        None,
+        &common::event_id(3),
     );
     assert!(
         keys.iter()

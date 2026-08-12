@@ -150,16 +150,141 @@ final class RiskPolicyTest extends TestCase
         self::assertNotSame(RiskAction::Deny, $d->action);
     }
 
-    public function testArgonDemotionOnLowArgonCapacity(): void
+    public function testArgonCapacityEscalatesToStepUpLast(): void
     {
         $policy = RiskPolicy::fromConfig($this->config());
+        // The argon-capacity check is the LAST step: a final Argon action
+        // with argonCapacity < 300 escalates to StepUp (never Sha20, and
+        // never reintroduced by the floor/minimum re-clamp).
         $d = $policy->decide(1, 600, $this->zeroVector(), new ResourcePressure(299, 1000, 1000), 0, 1_700_000_000_000);
-        self::assertSame(RiskAction::Sha20, $d->action);
+        self::assertSame(RiskAction::StepUp, $d->action);
         self::assertTrue($d->hasReason(RiskReason::CapacityPressure));
 
         $d = $policy->decide(1, 600, $this->zeroVector(), new ResourcePressure(300, 1000, 1000), 0, 1_700_000_000_000);
         self::assertSame(RiskAction::Argon16, $d->action);
         self::assertFalse($d->hasReason(RiskReason::CapacityPressure));
+    }
+
+    public function testArgonCapacityCheckIsLastSoFloorsCannotReintroduceArgon(): void
+    {
+        // scope 3 has minimum argon32; with a global floor of argon16 and
+        // low argon capacity, the final action must STILL step up (the
+        // capacity check runs after the floor/minimum re-clamp).
+        $config = $this->config();
+        $config['global_floors'] = [0 => 'allow', 1 => 'argon16', 2 => 'argon32', 3 => 'argon64', 4 => 'argon64'];
+        $policy = RiskPolicy::fromConfig($config);
+        $d = $policy->decide(3, 0, $this->zeroVector(), new ResourcePressure(1, 1000, 1000), 1, 1_700_000_000_000);
+        self::assertSame(RiskAction::StepUp, $d->action);
+        self::assertTrue($d->hasReason(RiskReason::CapacityPressure));
+    }
+
+    public function testVersionMismatchThrows(): void
+    {
+        $config = $this->config();
+        $config['version'] = 99;
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+    }
+
+    public function testBaseRiskOutOfRangeThrows(): void
+    {
+        $config = $this->config();
+        $config['scopes'][1]['base_risk'] = 1001;
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+
+        $config = $this->config();
+        $config['scopes'][1]['base_risk'] = -1;
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+    }
+
+    public function testScopeIdZeroThrows(): void
+    {
+        $config = $this->config();
+        $config['scopes'][0] = ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'sha20'];
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+    }
+
+    public function testGlobalFloorsValidation(): void
+    {
+        // Level 0 must be Allow.
+        $config = $this->config();
+        $config['global_floors'] = [0 => 'sha16', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'];
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+
+        // Levels outside 0..4 are rejected.
+        $config = $this->config();
+        $config['global_floors'] = [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20', 5 => 'deny'];
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+
+        // A full explicit config parses and index 0 stays Allow.
+        $config = $this->config();
+        $config['global_floors'] = [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'];
+        $policy = RiskPolicy::fromConfig($config);
+        self::assertSame(RiskAction::Allow, $policy->globalFloors[0]);
+        self::assertCount(5, $policy->globalFloors);
+    }
+
+    public function testGlobalFloorAppliedInDegradedMode(): void
+    {
+        $config = $this->config();
+        $config['global_floors'] = [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'argon32'];
+        $policy = RiskPolicy::fromConfig($config);
+
+        // scope 1: degraded sha20 (3) < floor argon32 (5) at level 4.
+        $d = $policy->degradedDecision(1, 4);
+        self::assertSame(RiskAction::Argon32, $d->action);
+        // At level 0 the floor is Allow: degraded sha20 wins.
+        $d = $policy->degradedDecision(1, 0);
+        self::assertSame(RiskAction::Sha20, $d->action);
+    }
+
+    public function testContributorReasonsTopFour(): void
+    {
+        $policy = RiskPolicy::fromConfig($this->config());
+        // Contributions (weights: source_fast 190, replay 320, network_risk
+        // 100, global_pressure 170):
+        //   replay 700 -> 224, source_fast 950 -> 180, network_risk 900 ->
+        //   90, global_pressure 500 -> 85, scope_switch 1000 -> 60.
+        $vector = SignalVector::fromArray([
+            'source_fast' => 950,
+            'scope_switch' => 1000,
+            'replay' => 700,
+            'network_risk' => 900,
+            'global_pressure' => 500,
+        ]);
+        $d = $policy->decide(1, 0, $vector, $this->healthy(), 0, 1_700_000_000_000);
+        // Overrides first (replay >= 700, source_fast >= 950 and
+        // network_risk >= 900 hard-deny), then contributors, deduped and
+        // capped at 4 total.
+        self::assertSame(RiskAction::Deny, $d->action);
+        self::assertSame([
+            RiskReason::ReplayTraffic,
+            RiskReason::HardRateLimit,
+            RiskReason::LocalNetworkRisk,
+            RiskReason::SourceBurst,
+        ], $d->reasons);
+
+        // Non-deny case: contributors only, ordered by contribution desc
+        // (ties in SignalVector order).
+        $vector = SignalVector::fromArray([
+            'source_fast' => 100,
+            'source_slow' => 100,
+            'replay' => 100,
+            'network_risk' => 100,
+        ]);
+        $d = $policy->decide(1, 0, $vector, $this->healthy(), 0, 1_700_000_000_000);
+        // source_fast 19, source_slow 11, replay 32, network_risk 10
+        self::assertSame([
+            RiskReason::ReplayTraffic,
+            RiskReason::SourceBurst,
+            RiskReason::SourceSustained,
+            RiskReason::LocalNetworkRisk,
+        ], $d->reasons);
     }
 
     public function testNetworkRiskOverride(): void

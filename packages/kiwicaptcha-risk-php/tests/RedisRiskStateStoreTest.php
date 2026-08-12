@@ -17,7 +17,8 @@ use PHPUnit\Framework\TestCase;
  *
  * The Lua script executes atomically, so sequential calls in one process
  * are equivalent to concurrent ones for state semantics; the store asserts
- * that all keys share one Redis Cluster slot.
+ * that all keys share one Redis Cluster slot. Each epoch key uses its OWN
+ * epoch's pseudonym (prev/current/next differ).
  */
 final class RedisRiskStateStoreTest extends TestCase
 {
@@ -43,15 +44,28 @@ final class RedisRiskStateStoreTest extends TestCase
         );
     }
 
-    private function observation(string $eventId, int $scope = 0, int $nowMs = self::T0, int $networkRisk = 0): RiskObservation
-    {
+    private function observation(
+        string $eventId,
+        int $scope = 0,
+        int $nowMs = self::T0,
+        int $networkRisk = 0,
+        RiskEventKind $event = RiskEventKind::PreIssue,
+        ?string $sessionId = null,
+        ?string $principalId = null,
+    ): RiskObservation {
         return new RiskObservation(
-            event: RiskEventKind::PreIssue,
+            event: $event,
             scope: $scope,
-            sourceId: str_repeat('a', 32),
-            subnetId: str_repeat('b', 32),
-            sessionId: null,
-            principalId: null,
+            sourceEpoch: 12345,
+            sourceIdPrev: str_repeat('a', 32),
+            sourceId: str_repeat('b', 32),
+            sourceIdNext: str_repeat('c', 32),
+            subnetEpoch: 12345,
+            subnetIdPrev: str_repeat('d', 32),
+            subnetId: str_repeat('e', 32),
+            subnetIdNext: str_repeat('f', 32),
+            sessionId: $sessionId,
+            principalId: $principalId,
             eventId: $eventId,
             networkRisk: $networkRisk,
             nowMs: $nowMs,
@@ -69,25 +83,71 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertSame(0, $vector->issueDebt);
         self::assertSame(28, $vector->globalPressure); // 2000*1000/70000
         self::assertSame(0, $vector->networkRisk);    // classifier side-channel override
-        self::assertSame(0, $vector->principalCredit); // reserved
+        self::assertSame(0, $vector->principalCredit); // no principal state
         self::assertSame(0, $store->lastGlobalLevel());
+        self::assertFalse($store->lastIsDuplicate());
     }
 
-    public function testDuplicateEventIdIsANoOp(): void
+    public function testPrincipalCreditIsReal(): void
+    {
+        // AuthenticationSuccess (10) against a PRESENT principal: +2000 raw
+        // principal trust -> 2000*1000/10000 = 200.
+        $store = $this->store();
+        $vector = $store->observe($this->observation(
+            str_repeat('a', 32),
+            0,
+            self::T0,
+            0,
+            RiskEventKind::AuthenticationSuccess,
+            null,
+            str_repeat('f', 32),
+        ));
+        self::assertSame(200, $vector->principalCredit);
+        self::assertSame(200, $vector->trustCredit); // max3(src, sess, prin) = prin
+
+        // SolveSuccess (3) against a PRESENT session on a FRESH store:
+        // session trust +150 -> 150*1000/10000 = 15.
+        $store = $this->store();
+        $vector = $store->observe($this->observation(
+            str_repeat('b', 32),
+            0,
+            self::T0,
+            0,
+            RiskEventKind::SolveSuccess,
+            str_repeat('e', 32),
+            null,
+        ));
+        self::assertSame(15, $vector->trustCredit);
+        self::assertSame(0, $vector->principalCredit);
+
+        // No session/principal: no credit at all.
+        $store = $this->store();
+        $vector = $store->observe($this->observation(str_repeat('c', 32)));
+        self::assertSame(0, $vector->principalCredit);
+        self::assertSame(0, $vector->trustCredit);
+    }
+
+    public function testDuplicateEventIdReturnsCurrentSignalsWithDuplicateFlag(): void
     {
         $store = $this->store();
         $eventId = str_repeat('7', 32);
 
         $first = $store->observe($this->observation($eventId));
         self::assertSame(125, $first->sourceFast);
+        self::assertFalse($store->lastIsDuplicate());
 
+        // Duplicate: state NOT applied again, but the CURRENT signals ARE
+        // returned with is_duplicate = 1 (no -1 marker anymore).
         $duplicate = $store->observe($this->observation($eventId));
-        self::assertSame(SignalVector::zero()->toArray(), $duplicate->toArray());
+        self::assertSame(125, $duplicate->sourceFast, 'duplicate must return the current signals');
+        self::assertSame(10, $duplicate->sourceSlow);
+        self::assertTrue($store->lastIsDuplicate());
 
         // A distinct event must observe the state from a SINGLE increment.
         $third = $store->observe($this->observation(str_repeat('8', 32)));
         self::assertSame(250, $third->sourceFast);
         self::assertSame(20, $third->sourceSlow);
+        self::assertFalse($store->lastIsDuplicate());
     }
 
     public function testNetworkRiskOverrideSlot(): void
@@ -158,17 +218,16 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertSame(0x31C3, RedisRiskStateStore::crc16('123456789'));
 
         $store = $this->store();
-        // Contract key set for one observation (epoch floor(now/900)).
-        $nowSecs = intdiv(self::T0, 1000);
-        $epoch = intdiv($nowSecs, 900);
+        // Contract key set for one observation: each epoch uses ITS OWN
+        // pseudonym (prev/current/next differ).
         $tag = '{kiwi:' . 'slot' . '}';
         $keys = [
-            "{$tag}:risk:src:{$epoch}:" . str_repeat('a', 32),
-            "{$tag}:risk:src:" . ($epoch - 1) . ':' . str_repeat('a', 32),
-            "{$tag}:risk:src:" . ($epoch + 1) . ':' . str_repeat('a', 32),
-            "{$tag}:risk:net:{$epoch}:" . str_repeat('b', 32),
-            "{$tag}:risk:net:" . ($epoch - 1) . ':' . str_repeat('b', 32),
-            "{$tag}:risk:net:" . ($epoch + 1) . ':' . str_repeat('b', 32),
+            "{$tag}:risk:src:12345:" . str_repeat('b', 32),
+            "{$tag}:risk:src:12344:" . str_repeat('a', 32),
+            "{$tag}:risk:src:12346:" . str_repeat('c', 32),
+            "{$tag}:risk:net:12345:" . str_repeat('e', 32),
+            "{$tag}:risk:net:12344:" . str_repeat('d', 32),
+            "{$tag}:risk:net:12346:" . str_repeat('f', 32),
             "{$tag}:risk:session:" . str_repeat('0', 32),
             "{$tag}:risk:principal:" . str_repeat('0', 32),
             "{$tag}:risk:global",

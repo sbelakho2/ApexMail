@@ -82,6 +82,25 @@ impl RiskAction {
     }
 }
 
+impl std::str::FromStr for RiskAction {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<RiskAction, ()> {
+        match s {
+            "allow" => Ok(RiskAction::Allow),
+            "sha16" => Ok(RiskAction::Sha16),
+            "sha18" => Ok(RiskAction::Sha18),
+            "sha20" => Ok(RiskAction::Sha20),
+            "argon16" => Ok(RiskAction::Argon16),
+            "argon32" => Ok(RiskAction::Argon32),
+            "argon64" => Ok(RiskAction::Argon64),
+            "step_up" => Ok(RiskAction::StepUp),
+            "deny" => Ok(RiskAction::Deny),
+            _ => Err(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

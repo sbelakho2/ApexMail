@@ -81,16 +81,26 @@ impl RiskReason {
 pub enum PolicyError {
     #[error("policy config requires an int \"version\"")]
     InvalidVersion,
+    #[error("policy config version {config} does not match the requested version {requested}")]
+    VersionMismatch { requested: u32, config: i64 },
     #[error("policy config requires a \"weights\" object")]
     InvalidWeights,
     #[error("policy config requires a \"scopes\" object")]
     InvalidScopes,
     #[error("scope {0} requires base_risk, minimum, post_solve_check and degraded")]
     InvalidScope(String),
+    #[error("scope {0} base_risk must be an integer within 0..1000")]
+    InvalidBaseRisk(String),
+    #[error("scope id {0} must be within 1..=4294967295 (0 is rejected)")]
+    InvalidScopeId(String),
     #[error("weight values must be within 0..1000")]
     InvalidWeightValue,
     #[error("invalid action string: {0}")]
     InvalidAction(String),
+    #[error(
+        "global_floors must have exactly 5 entries (levels 0..4) with level 0 = \"allow\": {0}"
+    )]
+    InvalidGlobalFloors(String),
 }
 
 /// Per-scope policy settings.
@@ -109,9 +119,9 @@ pub struct RiskPolicy {
     /// sha256 of the canonical JSON of the full config.
     pub hash: [u8; 32],
     pub weights: RiskWeights,
-    pub scopes: HashMap<u16, ScopePolicy>,
+    pub scopes: HashMap<u32, ScopePolicy>,
     /// Global pressure level 0..4 -> minimum action floor. Level 0 has no
-    /// floor.
+    /// floor (Allow).
     pub global_floors: [RiskAction; 5],
 }
 
@@ -125,9 +135,23 @@ impl RiskPolicy {
     ];
 
     /// Parses a policy config and computes the canonical-config hash.
+    ///
+    /// Invariants: the config `version` MUST equal the requested version;
+    /// every scope id must be within 1..=u32::MAX (0 rejected); every
+    /// `base_risk` must be an integer within 0..=1000 (no silent cast);
+    /// `global_floors` must have EXACTLY 5 entries (levels 0..4) with
+    /// level 0 = Allow and levels 1..4 valid actions.
     pub fn from_config(version: u32, config: &Value) -> Result<RiskPolicy, PolicyError> {
-        if config.get("version").is_none() {
-            return Err(PolicyError::InvalidVersion);
+        let config_version = config
+            .get("version")
+            .ok_or(PolicyError::InvalidVersion)?
+            .as_i64()
+            .ok_or(PolicyError::InvalidVersion)?;
+        if config_version != version as i64 {
+            return Err(PolicyError::VersionMismatch {
+                requested: version,
+                config: config_version,
+            });
         }
         let weights_value = config
             .get("weights")
@@ -159,9 +183,12 @@ impl RiskPolicy {
         let scopes_obj = scopes_value.as_object().ok_or(PolicyError::InvalidScopes)?;
         let mut scopes = HashMap::new();
         for (key, spec) in scopes_obj {
-            let scope: u16 = key
+            let scope: u32 = key
                 .parse()
-                .map_err(|_| PolicyError::InvalidScope(key.clone()))?;
+                .map_err(|_| PolicyError::InvalidScopeId(key.clone()))?;
+            if scope == 0 {
+                return Err(PolicyError::InvalidScopeId(key.clone()));
+            }
             let spec_obj = spec
                 .as_object()
                 .ok_or_else(|| PolicyError::InvalidScope(key.clone()))?;
@@ -171,10 +198,13 @@ impl RiskPolicy {
                     return Err(PolicyError::InvalidScope(key.clone()));
                 }
             }
-            let base_risk = spec["base_risk"]
+            let base_risk_value = spec["base_risk"]
                 .as_u64()
-                .ok_or_else(|| PolicyError::InvalidScope(key.clone()))?
-                as u16;
+                .ok_or_else(|| PolicyError::InvalidBaseRisk(key.clone()))?;
+            if base_risk_value > 1000 {
+                return Err(PolicyError::InvalidBaseRisk(key.clone()));
+            }
+            let base_risk = base_risk_value as u16;
             let minimum = parse_action(&spec["minimum"])?;
             let post_solve_check = spec["post_solve_check"]
                 .as_bool()
@@ -192,15 +222,38 @@ impl RiskPolicy {
         }
 
         let mut floors = Self::DEFAULT_GLOBAL_FLOORS;
-        if let Some(floors_value) = config.get("global_floors") {
-            if let Some(obj) = floors_value.as_object() {
+        match config.get("global_floors") {
+            None => {
+                return Err(PolicyError::InvalidGlobalFloors(
+                    "global_floors is required".to_string(),
+                ));
+            }
+            Some(floors_value) => {
+                let obj = floors_value
+                    .as_object()
+                    .ok_or_else(|| PolicyError::InvalidGlobalFloors("not an object".to_string()))?;
+                if obj.len() != 5 {
+                    return Err(PolicyError::InvalidGlobalFloors(format!(
+                        "expected 5 entries, got {}",
+                        obj.len()
+                    )));
+                }
                 for (key, action) in obj {
-                    let level: usize = key
-                        .parse()
-                        .map_err(|_| PolicyError::InvalidAction(key.clone()))?;
-                    if (1..=4).contains(&level) {
-                        floors[level] = parse_action(action)?;
+                    let level: u8 = key.parse().map_err(|_| {
+                        PolicyError::InvalidGlobalFloors(format!("bad level {key}"))
+                    })?;
+                    if level > 4 {
+                        return Err(PolicyError::InvalidGlobalFloors(format!(
+                            "level {level} out of range 0..4"
+                        )));
                     }
+                    let parsed = parse_action(action)?;
+                    if level == 0 && parsed != RiskAction::Allow {
+                        return Err(PolicyError::InvalidGlobalFloors(
+                            "level 0 must be \"allow\"".to_string(),
+                        ));
+                    }
+                    floors[level as usize] = parsed;
                 }
             }
         }
@@ -217,12 +270,12 @@ impl RiskPolicy {
     }
 
     /// Base risk for a scope (default 100).
-    pub fn base_risk(&self, scope: u16) -> u16 {
+    pub fn base_risk(&self, scope: u32) -> u16 {
         self.scopes.get(&scope).map_or(100, |s| s.base_risk)
     }
 
     /// Minimum action for a scope (default Allow).
-    pub fn minimum(&self, scope: u16) -> RiskAction {
+    pub fn minimum(&self, scope: u32) -> RiskAction {
         self.scopes
             .get(&scope)
             .map_or(RiskAction::Allow, |s| s.minimum)
@@ -230,10 +283,16 @@ impl RiskPolicy {
 
     /// Full decision: band action, clamped to the scope minimum and the
     /// global floor, then hard overrides with reasons.
+    ///
+    /// Argon re-escalation order: `action = strongest(band, minimum,
+    /// floor)` FIRST; THEN, when the FINAL action is Argon and the argon
+    /// capacity is below 300, the action steps UP to `StepUp` — the
+    /// capacity check is LAST, so floors/minimum can never reintroduce
+    /// Argon after a demotion.
     #[allow(clippy::too_many_arguments)]
     pub fn decide(
         &self,
-        scope: u16,
+        scope: u32,
         score: u16,
         s: &SignalVector,
         r: &ResourcePressure,
@@ -266,10 +325,6 @@ impl RiskPolicy {
             reasons.push(RiskReason::CapacityPressure);
             deny = true;
         }
-        if action.is_argon() && r.argon_capacity < 300 {
-            action = RiskAction::Sha20;
-            reasons.push(RiskReason::CapacityPressure);
-        }
         if s.network_risk >= 900 {
             reasons.push(RiskReason::LocalNetworkRisk);
             deny = true;
@@ -288,8 +343,12 @@ impl RiskPolicy {
 
         if deny {
             action = RiskAction::Deny;
-        } else {
-            action = strongest(action, minimum, floor);
+        } else if action.is_argon() && r.argon_capacity < 300 {
+            // Capacity check LAST: the FINAL action is Argon and the
+            // backend cannot serve memory-hard work — re-escalate to the
+            // interactive step-up flow instead of weakening the guard.
+            action = RiskAction::StepUp;
+            reasons.push(RiskReason::CapacityPressure);
         }
 
         // Deduplicate in priority order, cap at 4.
@@ -309,18 +368,21 @@ impl RiskPolicy {
             global_level,
             retry_after_ms,
             band: (score.clamp(0, 1000) / 100) as u8,
+            decision_id: String::new(),
         }
     }
 
     /// Degraded decision (state backend unavailable): the scope's degraded
-    /// action clamped to at least the scope minimum. Never fails open below
-    /// the minimum.
-    pub fn degraded_decision(&self, scope: u16, global_level: u8) -> RiskDecision {
+    /// action clamped to at least the scope minimum AND the global floor of
+    /// the store's last known level (`global_floors[min(level, 4)]`;
+    /// level 0 = Allow). Never fails open below the minimum or the floor.
+    pub fn degraded_decision(&self, scope: u32, global_level: u8) -> RiskDecision {
         let degraded = self
             .scopes
             .get(&scope)
             .map_or(RiskAction::Allow, |s| s.degraded);
-        let action = strongest(degraded, self.minimum(scope), RiskAction::Allow);
+        let floor = self.global_floors[(global_level as usize).min(4)];
+        let action = strongest(degraded, self.minimum(scope), floor);
 
         RiskDecision {
             score: 0,
@@ -330,6 +392,7 @@ impl RiskPolicy {
             global_level,
             retry_after_ms: None,
             band: 0,
+            decision_id: String::new(),
         }
     }
 }
@@ -433,7 +496,7 @@ mod tests {
                 "2": { "base_risk": 150, "minimum": "sha16", "post_solve_check": true, "degraded": "sha20" },
                 "3": { "base_risk": 200, "minimum": "argon32", "post_solve_check": true, "degraded": "argon16" }
             },
-            "global_floors": { "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" }
+            "global_floors": { "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" }
         })
     }
 
@@ -480,7 +543,7 @@ mod tests {
     #[test]
     fn scope_minimum_never_violated() {
         let p = policy();
-        for scope in [1u16, 2, 3] {
+        for scope in [1u32, 2, 3] {
             for score in (0..=1000).step_by(25) {
                 let d = p.decide(
                     scope,
@@ -664,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn argon_demotion_on_low_argon_capacity() {
+    fn argon_step_up_on_low_argon_capacity() {
         let p = policy();
         let d = p.decide(
             1,
@@ -678,7 +741,7 @@ mod tests {
             1_700_000_000_000,
             0,
         );
-        assert_eq!(d.action, RiskAction::Sha20);
+        assert_eq!(d.action, RiskAction::StepUp);
         assert!(d.has_reason(RiskReason::CapacityPressure));
 
         let d = p.decide(
@@ -695,6 +758,45 @@ mod tests {
         );
         assert_eq!(d.action, RiskAction::Argon16);
         assert!(!d.has_reason(RiskReason::CapacityPressure));
+    }
+
+    #[test]
+    fn floors_or_minimum_never_reintroduce_argon() {
+        // Score 600 -> Argon16; global floor 4 is Sha20 (rank 3 < 4) so the
+        // strongest() is still Argon16. With argon capacity exhausted the
+        // FINAL action must StepUp — a subsequent floor/minimum clamp must
+        // not resurrect Argon.
+        let p = policy();
+        let d = p.decide(
+            1,
+            600,
+            &zero_vector(),
+            &ResourcePressure {
+                argon_capacity: 100,
+                ..Default::default()
+            },
+            4,
+            1_700_000_000_000,
+            0,
+        );
+        assert_eq!(d.action, RiskAction::StepUp);
+        assert!(d.has_reason(RiskReason::CapacityPressure));
+
+        // Scope 3 minimum is argon32: even the minimum alone cannot keep
+        // Argon when the backend cannot serve it.
+        let d = p.decide(
+            3,
+            100,
+            &zero_vector(),
+            &ResourcePressure {
+                argon_capacity: 50,
+                ..Default::default()
+            },
+            0,
+            1_700_000_000_000,
+            0,
+        );
+        assert_eq!(d.action, RiskAction::StepUp);
     }
 
     #[test]
@@ -803,6 +905,110 @@ mod tests {
         // unknown scope degrades to allow
         let d = p.degraded_decision(999, 0);
         assert_eq!(d.action, RiskAction::Allow);
+    }
+
+    #[test]
+    fn degraded_uses_last_known_level_floor() {
+        let p = policy();
+        // scope 2: degraded sha20 (3), minimum sha16 (1). The floor only
+        // matters when it is STRONGER than the degraded action: at level 4
+        // (floor sha20) and level 0 (allow) the result stays Sha20.
+        assert_eq!(p.degraded_decision(2, 0).action, RiskAction::Sha20);
+        assert_eq!(p.degraded_decision(2, 4).action, RiskAction::Sha20);
+
+        // A scope whose degraded action is Allow: the last known global
+        // floor must lift it (level 4 -> Sha20); at level 0 -> Allow.
+        let weak = RiskPolicy::from_config(
+            3,
+            &json!({
+                "version": 3,
+                "weights": { "source_fast": 1, "source_slow": 1, "subnet_fast": 1,
+                             "issue_debt": 1, "bad_proof": 1, "malformed": 1,
+                             "replay": 1, "action_failure": 1, "scope_switch": 1,
+                             "global_pressure": 1, "network_risk": 1,
+                             "trust_credit": 1, "principal_credit": 1 },
+                "scopes": {
+                    "4": { "base_risk": 100, "minimum": "allow", "post_solve_check": true, "degraded": "allow" }
+                },
+                "global_floors": { "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" }
+            }),
+        )
+        .expect("config parses");
+        assert_eq!(weak.degraded_decision(4, 0).action, RiskAction::Allow);
+        assert_eq!(weak.degraded_decision(4, 1).action, RiskAction::Sha16);
+        assert_eq!(weak.degraded_decision(4, 2).action, RiskAction::Sha18);
+        assert_eq!(weak.degraded_decision(4, 4).action, RiskAction::Sha20);
+    }
+
+    #[test]
+    fn config_version_mismatch_is_rejected() {
+        let mut cfg = config();
+        cfg["version"] = json!(4);
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::VersionMismatch {
+                requested: 3,
+                config: 4
+            })
+        ));
+        // The requested version must also be an int in the config.
+        cfg["version"] = json!("3");
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidVersion)
+        ));
+    }
+
+    #[test]
+    fn base_risk_out_of_range_is_rejected() {
+        let mut cfg = config();
+        cfg["scopes"]["1"]["base_risk"] = json!(1001);
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidBaseRisk(_))
+        ));
+        // Non-integer base_risk is rejected too (no silent cast).
+        let mut cfg = config();
+        cfg["scopes"]["1"]["base_risk"] = json!("100");
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidBaseRisk(_))
+        ));
+    }
+
+    #[test]
+    fn scope_id_zero_is_rejected() {
+        let mut cfg = config();
+        cfg["scopes"]["0"] = cfg["scopes"]["1"].clone();
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidScopeId(_))
+        ));
+    }
+
+    #[test]
+    fn global_floors_require_exactly_five_entries() {
+        // Missing "0" -> rejected.
+        let mut cfg = config();
+        cfg["global_floors"] = json!({ "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" });
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidGlobalFloors(_))
+        ));
+        // Level 0 != allow -> rejected.
+        let mut cfg = config();
+        cfg["global_floors"]["0"] = json!("sha16");
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidGlobalFloors(_))
+        ));
+        // Missing entry -> rejected.
+        let mut cfg = config();
+        cfg["global_floors"].as_object_mut().unwrap().remove("4");
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidGlobalFloors(_))
+        ));
     }
 
     #[test]

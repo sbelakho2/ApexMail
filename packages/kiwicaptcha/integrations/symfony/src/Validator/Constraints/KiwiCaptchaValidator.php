@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Validator\Constraints;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Verifier;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Validator\Constraint;
@@ -69,9 +70,36 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // unknown scopes are still observed (crc32 fallback id). An
         // unavailable client IP is not a risk signal and must never break
         // the form submit (RiskGateway skips it internally).
+        //
+        // POST-SOLVE CHECK: when the scope opts in (post_solve_check), a
+        // VALID solve additionally runs a fresh SolveSuccess assessment with
+        // the same context. A Deny there fails the validation with the
+        // distinct POST_SOLVE_REJECTED_ERROR (the security context changed
+        // while the client was solving); the outcome is recorded as
+        // ConfirmedLegitimate / ConfirmedAbuse feedback with the post-solve
+        // decision id (which replaces the plain SolveSuccess signal for
+        // these scopes — one signal per solve, never both).
         if ($this->risk !== null) {
             $session = $request !== null ? $this->continuityCookie?->read($request) : null;
-            $this->risk->solveOutcome($constraint->scope, (string) ($clientIp ?? ''), $session, $outcome->error);
+            $ip = (string) ($clientIp ?? '');
+            if ($outcome->isOk() && $this->risk->postSolveCheck($constraint->scope)) {
+                try {
+                    $postSolve = $this->risk->postSolveDecision($constraint->scope, $ip, $session);
+                } catch (\InvalidArgumentException) {
+                    // No risk signal available for this context — the valid
+                    // solve stands on its own.
+                    $postSolve = null;
+                }
+                if ($postSolve !== null && $postSolve->action === RiskAction::Deny) {
+                    $this->context->buildViolation($constraint->message)
+                        ->setCode(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR)
+                        ->addViolation();
+
+                    return;
+                }
+            } else {
+                $this->risk->solveOutcome($constraint->scope, $ip, $session, $outcome->error);
+            }
         }
 
         if (!$outcome->isOk()) {

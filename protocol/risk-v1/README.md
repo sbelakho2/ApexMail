@@ -111,3 +111,43 @@ identical in:
 Files:
 - `fixtures.json` — golden scoring fixtures (authoritative).
 - `risk.lua` — canonical Redis state script (authoritative, embedded).
+
+8. Request vs feedback — ONLY `PreIssue` (1) counts as a REQUEST: it
+   increments `rf`/`rs` and the scope-switch channel. Feedback events
+   (2..14) mutate only their own channels; they never inflate velocity
+   or the emergency limiters. `assess()` (PreIssue) enforces the source
+   AND global emergency windows; `record_feedback()` runs neither.
+
+9. Session and principal state — the Lua updates and saves the session
+   state (when `has_session=1`) and principal state (when
+   `has_principal=1`) with event-specific semantics: principal trust for
+   AuthenticationSuccess / ProtectedActionSuccess / ConfirmedLegitimate,
+   failure pressure for AuthenticationFailure / ProtectedActionFailure /
+   ConfirmedAbuse. `principal_credit` in the SignalVector is REAL.
+
+10. Epoch pseudonym continuity — the observation carries prev/current/next
+    pseudonyms, each HMAC'd with ITS OWN epoch
+    (`source_id_for_epoch(ip, epoch-1/0/+1)`); the ±1 keys are
+    observer-only until a later epoch writes them.
+
+11. Idempotency — a caller-supplied `idempotency_key` is used verbatim as
+    the event_id; a duplicate returns the CURRENT signals with
+    `is_duplicate=1` (state untouched) — identical in both languages.
+
+12. Calibration — bounded Redis aggregate buckets
+    `{kiwi:<ns>}:cal:<scope>:<hour>` (fields `b<band>a<action>:legit|abuse`,
+    48 h TTL, at most 24 keys per scope) with JSON-string decision receipts
+    `{kiwi:<ns>}:cal:receipt:<decision_id>` (EX 300, consumed via GETDEL).
+    Bias = clamp(((abuse - legit) * 1000 / total) * 2 / 10, -200, 200),
+    integer division; applied to the score BEFORE band mapping in both
+    languages.
+
+13. Degraded mode applies `strongest(scope.degraded, scope.minimum,
+    global_floors[min(last_known_level, 4)])` — the last known global
+    attack floor survives backend failure.
+
+14. Argon capacity is checked LAST: `action = strongest(ladder, minimum,
+    floor)` then, if the final action is Argon and argon capacity < 300 →
+    StepUp. Floors can never reintroduce Argon.
+
+15. Scope ids are u32 (1..=4294967295; 0 rejected) in both languages.

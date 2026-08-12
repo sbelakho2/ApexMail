@@ -113,6 +113,31 @@ LUA;
         $this->eval(self::RELEASE_SCRIPT, [$this->key], [$lease]);
     }
 
+    /** The configured concurrency cap (0 = disabled). */
+    public function capacity(): int
+    {
+        return $this->maxConcurrent;
+    }
+
+    /**
+     * Live number of held leases (ZCARD of the lease set), or 0 when the
+     * cap is disabled or the backend is unreachable. Read-only telemetry
+     * for the resource-pressure provider — never breaks the caller.
+     */
+    public function usage(): int
+    {
+        if ($this->maxConcurrent <= 0) {
+            return 0;
+        }
+        try {
+            return $this->client instanceof \Redis
+                ? (int) $this->client->zCard($this->key)
+                : (int) $this->client->zcard($this->key);
+        } catch (\Throwable) {
+            return 0;
+        }
+    }
+
     /**
      * Run a Lua script against whichever client implementation is in use.
      *

@@ -8,9 +8,14 @@ namespace KiwiCaptcha\Risk;
  * Immutable risk decision produced by the policy.
  *
  * Reasons are internal only (never exposed to the client) and capped at 4.
+ * decisionId is a fresh random 16-byte hex id (internal handle used to
+ * pair later confirmed outcomes back to this decision via calibration
+ * receipts).
  */
 final class RiskDecision implements \JsonSerializable
 {
+    public readonly string $decisionId;
+
     /** @param list<RiskReason> $reasons max 4 */
     public function __construct(
         public readonly int $score,
@@ -20,7 +25,9 @@ final class RiskDecision implements \JsonSerializable
         public readonly int $globalLevel,
         public readonly ?int $retryAfterMs = null,
         public readonly int $band = 0,
+        ?string $decisionId = null,
     ) {
+        $this->decisionId = $decisionId ?? bin2hex(random_bytes(16));
         foreach ($reasons as $reason) {
             if (!$reason instanceof RiskReason) {
                 throw new \InvalidArgumentException('RiskDecision reasons must be RiskReason instances');

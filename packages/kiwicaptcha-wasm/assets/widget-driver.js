@@ -8,7 +8,7 @@
   // driver can create the worker from a Blob URL (no network, same-origin by
   // construction); when the wasm glue is present as an inline <script> in
   // the page its source is prepended to the Blob, and the worker also tries
-  // importScripts("kiwicaptacha-wasm.js") for file-based deployments
+  // importScripts("kiwicaptcha-wasm.js") for file-based deployments
   // (data-kiwi-worker-src). Keep this literal EXACTLY in sync with
   // assets/kiwi-worker.js (the standalone asset); it must not contain
   // backticks, ${ or a closing-script-tag sequence (the driver is inlined
@@ -17,7 +17,7 @@
   "use strict";
 
   var loader = null;
-  try { importScripts("kiwicaptacha-wasm.js"); } catch (e) {}
+  try { importScripts("kiwicaptcha-wasm.js"); } catch (e) {}
   if (typeof self !== "undefined" && self.__kiwiCaptchaWasm) {
     loader = self.__kiwiCaptchaWasm;
   }

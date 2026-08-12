@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\UnknownScopeException;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskAction;
@@ -79,11 +80,15 @@ final class ChallengeController
 
         // Adaptive risk: read (or mint) the continuity session, assess the
         // source BEFORE any challenge is written, and act on the decision.
-        // An invalid client IP (no risk signal available) or a store outage
-        // (the engine degrades internally) never blocks issuance.
+        // An invalid client IP (no risk signal available), a store outage
+        // (the engine degrades internally), or an unknown scope in
+        // 'reject' mode (the adaptive engine declines to evaluate) never
+        // blocks issuance — the default profile is issued and the baseline
+        // Kiwi verification still applies.
         $riskSession = null;
         $mintedCookie = false;
         $profile = null;
+        $riskAssessed = false;
         if ($this->risk !== null) {
             $riskSession = $this->continuityCookie?->read($request);
             if ($riskSession === null) {
@@ -93,6 +98,11 @@ final class ChallengeController
 
             try {
                 $decision = $this->risk->preIssue($scope, $clientIp, $riskSession);
+                $riskAssessed = true;
+            } catch (UnknownScopeException) {
+                // Scope not configured + unknown_scope.mode=reject: the
+                // adaptive engine declines — issue the default profile.
+                $decision = null;
             } catch (\InvalidArgumentException) {
                 $decision = null;
             }
@@ -137,8 +147,8 @@ final class ChallengeController
             );
         }
 
-        if ($this->risk !== null) {
-            $this->risk->challengeIssued($scope, $clientIp, $riskSession);
+        if ($this->risk !== null && $riskAssessed && $decision !== null) {
+            $this->risk->challengeIssued($scope, $clientIp, $riskSession, $decision->decisionId);
         }
 
         return $this->privateJson($challenge->toArray(), Response::HTTP_OK, $request, $riskSession, $mintedCookie);

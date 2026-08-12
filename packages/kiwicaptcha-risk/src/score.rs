@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::policy::RiskReason;
 use crate::signals::SignalVector;
 
 /// 13 weight fields, same names/order as [`SignalVector`].
@@ -75,6 +76,55 @@ pub fn score(base: u16, s: &SignalVector, w: &RiskWeights) -> u16 {
     risk -= weighted(s.trust_credit, w.trust_credit) as i32;
     risk -= weighted(s.principal_credit, w.principal_credit) as i32;
     risk.clamp(0, 1000) as u16
+}
+
+/// The 11 positive signals in SignalVector order with their per-signal
+/// contributions `(v * w) / 1000` (integer); only strictly positive
+/// contributions are recorded. The `RiskReason` codes are in contract
+/// order: SourceBurst, SourceSustained, NetworkBurst, ChallengeDebt,
+/// InvalidProofs, MalformedTraffic, ReplayTraffic, ActionFailures,
+/// ScopeHopping, GlobalAttack, LocalNetworkRisk.
+pub fn contributors(s: &SignalVector, w: &RiskWeights) -> Vec<(RiskReason, u32)> {
+    let mut out = Vec::with_capacity(11);
+    let mut push = |reason: RiskReason, value: u16, weight: u16| {
+        let contribution = weighted(value, weight);
+        if contribution > 0 {
+            out.push((reason, contribution));
+        }
+    };
+    push(RiskReason::SourceBurst, s.source_fast, w.source_fast);
+    push(RiskReason::SourceSustained, s.source_slow, w.source_slow);
+    push(RiskReason::NetworkBurst, s.subnet_fast, w.subnet_fast);
+    push(RiskReason::ChallengeDebt, s.issue_debt, w.issue_debt);
+    push(RiskReason::InvalidProofs, s.bad_proof, w.bad_proof);
+    push(RiskReason::MalformedTraffic, s.malformed, w.malformed);
+    push(RiskReason::ReplayTraffic, s.replay, w.replay);
+    push(
+        RiskReason::ActionFailures,
+        s.action_failure,
+        w.action_failure,
+    );
+    push(RiskReason::ScopeHopping, s.scope_switch, w.scope_switch);
+    push(
+        RiskReason::GlobalAttack,
+        s.global_pressure,
+        w.global_pressure,
+    );
+    push(RiskReason::LocalNetworkRisk, s.network_risk, w.network_risk);
+    out
+}
+
+/// The top-4 contributor reasons: sorted by contribution descending (ties
+/// keep SignalVector order), capped at 4. This NEVER changes the score —
+/// it only explains it.
+pub fn top_contributor_reasons(s: &SignalVector, w: &RiskWeights) -> Vec<RiskReason> {
+    let mut contributions = contributors(s, w);
+    contributions.sort_by_key(|(_, contribution)| std::cmp::Reverse(*contribution));
+    contributions.truncate(4);
+    contributions
+        .into_iter()
+        .map(|(reason, _)| reason)
+        .collect()
 }
 
 #[cfg(test)]
@@ -300,5 +350,56 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(score(100, &trust_only, &w), 0);
+    }
+
+    #[test]
+    fn contributor_reasons_order_and_sort() {
+        let w = RiskWeights::default();
+        // Only two signals contribute; contributions differ.
+        let s = SignalVector {
+            source_fast: 500, // 500*190/1000 = 95
+            replay: 300,      // 300*320/1000 = 96
+            ..Default::default()
+        };
+        let top = top_contributor_reasons(&s, &w);
+        assert_eq!(
+            top,
+            vec![RiskReason::ReplayTraffic, RiskReason::SourceBurst]
+        );
+
+        // Ties keep SignalVector order: scope_switch 1000 -> 60 and
+        // network_risk 600 -> 60 contribute equally; scope_switch (earlier
+        // in SignalVector order) must sort first.
+        let s = SignalVector {
+            scope_switch: 1000, // 60
+            network_risk: 600,  // 60
+            source_fast: 1000,  // 190
+            ..Default::default()
+        };
+        let top = top_contributor_reasons(&s, &w);
+        assert_eq!(
+            top,
+            vec![
+                RiskReason::SourceBurst,
+                RiskReason::ScopeHopping,
+                RiskReason::LocalNetworkRisk,
+            ]
+        );
+
+        // Zero vector: no contributors.
+        assert!(contributors(&SignalVector::zero(), &w).is_empty());
+        assert!(top_contributor_reasons(&SignalVector::zero(), &w).is_empty());
+    }
+
+    #[test]
+    fn contributor_reasons_never_change_the_score() {
+        let w = RiskWeights::default();
+        let mut prng = SeededVector::new();
+        for _ in 0..500 {
+            let vector = prng.vector();
+            let before = score(100, &vector, &w);
+            let _ = top_contributor_reasons(&vector, &w);
+            assert_eq!(score(100, &vector, &w), before);
+        }
     }
 }

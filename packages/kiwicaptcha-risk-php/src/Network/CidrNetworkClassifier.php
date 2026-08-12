@@ -11,6 +11,13 @@ namespace KiwiCaptcha\Risk\Network;
  * reserved, hosting, proxy, tor, blocked. Matching is done on the raw
  * prefix bits of the inet_pton bytes, so IPv4/IPv6 never cross-match.
  *
+ * The rule set is compiled ONCE at construction into a bitwise radix trie
+ * (two children per level; IPv4 depth 32, IPv6 depth 128): classify(ip)
+ * walks the trie in O(prefix depth) instead of an O(n) CIDR scan, while
+ * preserving the exact classification semantics (longest-prefix match
+ * wins — the flags of every matching prefix are OR'd — same NetworkFlags
+ * fields and labels).
+ *
  * Constructor input format (per entry):
  *   ['cidr' => '203.0.113.0/24', 'flags' => ['hosting', 'proxy']]
  *
@@ -25,14 +32,21 @@ final class CidrNetworkClassifier implements NetworkClassifierInterface
     public const FLAG_TOR = 'tor';
     public const FLAG_BLOCKED = 'blocked';
 
-    /** @var list<array{network:string, prefix:int, flags:NetworkFlags}> */
-    private array $entries = [];
+    /**
+     * Trie root: children keyed by the address family ('4' IPv4 / '6'
+     * IPv6 — the raw inet_pton byte length, so IPv4/IPv6 never
+     * cross-match), then a binary trie per family. Each node is
+     * ['children' => array<int, array>, 'flags' => ?NetworkFlags].
+     */
+    private array $root;
 
     /** @param list<array{cidr:string, flags:list<string>}> $entries */
     public function __construct(array $entries)
     {
+        $this->root = ['children' => [], 'flags' => null];
         foreach ($entries as $entry) {
-            $this->entries[] = $this->parseEntry($entry);
+            $parsed = $this->parseEntry($entry);
+            $this->insert($parsed['network'], $parsed['prefix'], $parsed['flags']);
         }
     }
 
@@ -68,51 +82,60 @@ final class CidrNetworkClassifier implements NetworkClassifierInterface
         if (strlen($bytes) === 16 && substr($bytes, 0, 12) === "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff") {
             $bytes = substr($bytes, 12, 4);
         }
-        $family = strlen($bytes);
+        $family = strlen($bytes) === 4 ? '4' : '6';
+        $bits = strlen($bytes) * 8;
 
-        $reserved = false;
-        $hosting = false;
-        $proxy = false;
-        $tor = false;
-        $blocked = false;
-
-        foreach ($this->entries as $entry) {
-            if (strlen($entry['network']) !== $family) {
-                continue;
-            }
-            if ($this->matches($bytes, $entry['network'], $entry['prefix'])) {
-                $f = $entry['flags'];
-                $reserved = $reserved || $f->reserved;
-                $hosting = $hosting || $f->knownHosting;
-                $proxy = $proxy || $f->knownProxy;
-                $tor = $tor || $f->torExit;
-                $blocked = $blocked || $f->blocked();
+        $accumulated = null;
+        $node = $this->root['children'][$family] ?? null;
+        if ($node !== null && $node['flags'] !== null) {
+            // /0 rules attach to the family node and match every address.
+            $accumulated = $this->mergeFlags($accumulated, $node['flags']);
+        }
+        for ($i = 0; $i < $bits && $node !== null; $i++) {
+            $bit = (ord($bytes[intdiv($i, 8)]) >> (7 - ($i % 8))) & 1;
+            $node = $node['children'][$bit] ?? null;
+            if ($node !== null && $node['flags'] !== null) {
+                $accumulated = $this->mergeFlags($accumulated, $node['flags']);
             }
         }
 
-        return new NetworkFlags(
-            reserved: $reserved,
-            knownHosting: $hosting,
-            knownProxy: $proxy,
-            torExit: $tor,
-            localRiskBucket: $blocked ? 255 : 0,
-        );
+        return $accumulated ?? new NetworkFlags();
     }
 
-    private function matches(string $ipBytes, string $networkBytes, int $prefix): bool
+    /**
+     * Inserts one rule into the trie: walks the address bits up to the
+     * prefix length, then ORs the entry flags into the node at that depth.
+     */
+    private function insert(string $bytes, int $prefix, NetworkFlags $flags): void
     {
-        $fullBytes = intdiv($prefix, 8);
-        for ($i = 0; $i < $fullBytes; $i++) {
-            if ($ipBytes[$i] !== $networkBytes[$i]) {
-                return false;
+        $family = strlen($bytes) === 4 ? '4' : '6';
+        $node = &$this->root['children'][$family];
+        if (!is_array($node)) {
+            $node = ['children' => [], 'flags' => null];
+        }
+        for ($i = 0; $i < $prefix; $i++) {
+            $bit = (ord($bytes[intdiv($i, 8)]) >> (7 - ($i % 8))) & 1;
+            if (!isset($node['children'][$bit])) {
+                $node['children'][$bit] = ['children' => [], 'flags' => null];
             }
+            $node = &$node['children'][$bit];
         }
-        $remain = $prefix % 8;
-        if ($remain === 0) {
-            return true;
+        $node['flags'] = $this->mergeFlags($node['flags'], $flags);
+    }
+
+    /** Flag union with the exact legacy semantics (localRiskBucket 0/255). */
+    private function mergeFlags(?NetworkFlags $a, NetworkFlags $b): NetworkFlags
+    {
+        if ($a === null) {
+            return $b;
         }
-        $mask = 0xFF << (8 - $remain) & 0xFF;
-        return (ord($ipBytes[$fullBytes]) & $mask) === (ord($networkBytes[$fullBytes]) & $mask);
+        return new NetworkFlags(
+            reserved: $a->reserved || $b->reserved,
+            knownHosting: $a->knownHosting || $b->knownHosting,
+            knownProxy: $a->knownProxy || $b->knownProxy,
+            torExit: $a->torExit || $b->torExit,
+            localRiskBucket: ($a->blocked() || $b->blocked()) ? 255 : 0,
+        );
     }
 
     /** @param array{cidr:string, flags:list<string>} $entry */

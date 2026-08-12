@@ -12,6 +12,9 @@ use rand::RngCore;
 /// Fixed clock (epoch ms): no decay between same-ts events.
 pub const T0: u64 = 1_700_000_000_000;
 
+/// Default source/subnet epoch window used by the helpers.
+pub const EPOCH_SECS: i64 = 900;
+
 /// Deterministic LCG matching the 10k parity stream (verified first value
 /// 291): `x_{n+1} = (x_n * 6364136223846793005 + 1442695040888963407)
 /// mod 2^64`, `value = (x >> 11) % 1001`.
@@ -41,11 +44,11 @@ pub fn vector(state: &mut u64) -> SignalVector {
     }
 }
 
-/// event_id from a u64 (bytes 0..8 = big-endian n, rest zeroed).
-pub fn event_id(n: u64) -> [u8; 16] {
+/// event_id from a u64 (bytes 0..8 = big-endian n, rest zeroed), hex.
+pub fn event_id(n: u64) -> String {
     let mut out = [0u8; 16];
     out[..8].copy_from_slice(&n.to_be_bytes());
-    out
+    hex::encode(out)
 }
 
 /// `tcp://` predis-style URLs are normalized to `redis://`; `None` when
@@ -68,23 +71,53 @@ pub fn unique_namespace(prefix: &str) -> String {
     format!("{prefix}{}", hex::encode(suffix))
 }
 
-/// A PreIssue observation with the given pseudonyms at the fixed clock.
+/// 32-char hex id from a 16-byte pattern (per-epoch distinct variants).
+fn epoch_id(pattern: u8, marker: u8) -> String {
+    let mut out = [pattern; 16];
+    out[15] = marker;
+    hex::encode(out)
+}
+
+/// Epoch-scoped pseudonyms (prev/current/next) derived from one base
+/// pattern, at the T0 epoch window. Each epoch id is DISTINCT (the current
+/// epoch's pseudonym is never reused for the ±1 keys).
+pub fn epoch_ids(pattern: u8, now_ms: u64) -> (i64, String, String, String) {
+    let epoch = ((now_ms / 1000) / EPOCH_SECS as u64) as i64;
+    (
+        epoch,
+        epoch_id(pattern, 0x01),
+        epoch_id(pattern, 0x02),
+        epoch_id(pattern, 0x03),
+    )
+}
+
+/// An observation with the given pseudonyms at the fixed clock. The
+/// prev/next ids are the epoch-scoped variants of the same pattern, so the
+/// ±1 keys never reuse the current pseudonym.
 #[allow(clippy::too_many_arguments)]
 pub fn observation(
     event: RiskEventKind,
-    scope: u16,
-    source_id: [u8; 16],
-    subnet_id: [u8; 16],
+    scope: u32,
+    source_id: String,
+    subnet_id: String,
     session_id: Option<[u8; 16]>,
     principal_id: Option<[u8; 16]>,
-    event_id: [u8; 16],
+    event_id: String,
     now_ms: u64,
 ) -> RiskObservation {
+    let (src_epoch, src_prev, _src_cur, src_next) = epoch_ids(0xAA, now_ms);
+    let (net_epoch, net_prev, _net_cur, net_next) = epoch_ids(0xBB, now_ms);
     RiskObservation {
         event,
         scope,
+        source_epoch: src_epoch,
+        source_id_prev: src_prev,
         source_id,
+        source_id_next: src_next,
+        subnet_epoch: net_epoch,
+        subnet_id_prev: net_prev,
         subnet_id,
+        subnet_id_next: net_next,
         session_id,
         principal_id,
         event_id,

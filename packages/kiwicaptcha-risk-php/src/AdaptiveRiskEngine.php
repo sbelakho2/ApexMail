@@ -15,9 +15,14 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
 /**
  * Adaptive risk engine: assesses one request and returns a RiskDecision.
  *
- * Pipeline: emergency limiter -> observation -> circuit breaker -> state
+ * Pipeline: emergency limiter (source window THEN global window, both
+ * before any state backend) -> observation -> circuit breaker -> state
  * store (EVALSHA) -> scorer -> policy. Backend failure degrades instead of
  * failing the request.
+ *
+ * assess() is the PRE-ISSUE path (request velocity + decision);
+ * record_feedback() is the FEEDBACK path (no limiter, no decision — a
+ * plain EventReceipt). record() is a deprecated alias of record_feedback.
  *
  * The epoch/ttl/saturation parameters are the engine-level configuration
  * and are expected to match the injected RedisRiskStateStore (which carries
@@ -37,6 +42,7 @@ final class AdaptiveRiskEngine
         'switch' => 10000,
         'global' => 70000,
         'trust' => 10000,
+        'principal' => 10000,
     ];
 
     public function __construct(
@@ -64,11 +70,20 @@ final class AdaptiveRiskEngine
         return $this->metrics;
     }
 
-    public function assess(RiskContext $c): RiskDecision
+    /**
+     * PRE-ISSUE assessment: emergency limiter (source window THEN global
+     * window) -> PreIssue observation -> store -> scorer -> policy.
+     *
+     * @param string|null $idempotencyKey caller-supplied event_id used
+     *                                    VERBATIM (retries with the same key
+     *                                    are deduped by the Lua); null =
+     *                                    fresh random 16-byte hex
+     */
+    public function assess(RiskContext $c, ?string $idempotencyKey = null): RiskDecision
     {
         $nowMs = (int) floor(microtime(true) * 1000);
 
-        if (!$this->limiter->allow()) {
+        if (!$this->limiter->allow() || !$this->limiter->allowGlobal()) {
             $this->metrics->increment('denied:limiter');
             $decision = new RiskDecision(
                 score: 1000,
@@ -80,15 +95,17 @@ final class AdaptiveRiskEngine
                 band: 10,
             );
             $this->recordDecisionMetrics($c->scope, $decision);
+            $this->registerCalibrationReceipt($c->scope, $decision);
             return $decision;
         }
 
-        $observation = $this->buildObservation($c, $nowMs);
+        $observation = $this->buildObservation($c, $nowMs, $idempotencyKey);
 
         if ($this->breaker->isOpen()) {
             $this->metrics->increment('degraded:breaker');
             $decision = $this->policy->degradedDecision($c->scope, $this->storeGlobalLevel());
             $this->recordDecisionMetrics($c->scope, $decision);
+            $this->registerCalibrationReceipt($c->scope, $decision);
             return $decision;
         }
 
@@ -100,6 +117,7 @@ final class AdaptiveRiskEngine
             $this->metrics->increment('degraded:store');
             $decision = $this->policy->degradedDecision($c->scope, $this->storeGlobalLevel());
             $this->recordDecisionMetrics($c->scope, $decision);
+            $this->registerCalibrationReceipt($c->scope, $decision);
             return $decision;
         }
         $this->metrics->recordLatency('store:observe', (microtime(true) - $start) * 1000);
@@ -108,9 +126,15 @@ final class AdaptiveRiskEngine
         $base = $this->policy->baseRisk($c->scope);
         if ($this->calibration !== null) {
             // Bounded automatic calibration: adjust ONLY the scope bias
-            // (-100..+150) from aggregate score-bucket statistics; never
-            // rewrite weights autonomously.
-            $base = max(0, min(1000, $base + $this->calibration->biasForScope($c->scope, $nowMs)));
+            // (-200..+200) from the Redis aggregate score-bucket
+            // statistics; never rewrite weights autonomously. A failing
+            // calibration backend is silent — it never breaks issuance.
+            try {
+                $bias = $this->calibration->biasForScope($c->scope, $nowMs);
+            } catch (\Throwable) {
+                $bias = 0;
+            }
+            $base = max(0, min(1000, $base + $bias));
         }
         $score = $this->scorer->score($base, $vector, $this->policy->weights);
         $decision = $this->policy->decide(
@@ -126,19 +150,58 @@ final class AdaptiveRiskEngine
         $this->metrics->gauge('global:level', $decision->globalLevel);
         $this->metrics->gauge('resources:argon_capacity', $c->resources->argonCapacity);
         $this->recordDecisionMetrics($c->scope, $decision);
+        $this->registerCalibrationReceipt($c->scope, $decision);
         return $decision;
     }
 
-    /** Outcome feedback path (e.g. a post-solve protected action). */
-    /** Stable scope-name -> int id (crc32 & 0x7fffffff), for the label helpers. */
-    private function scopeId(string $scope): int
+    /**
+     * Outcome feedback path (e.g. a post-solve protected action). NEVER
+     * runs the emergency limiter and NEVER produces a decision: the
+     * observation is stored and the current signals returned as an
+     * EventReceipt. Store failures are silent (zero signals, not a
+     * duplicate).
+     *
+     * When the event is ConfirmedLegitimate/ConfirmedAbuse AND $decisionId
+     * is given, the calibration receipt registered for that decision is
+     * consumed and the outcome recorded against the ORIGINAL decision's
+     * scope/band/action.
+     *
+     * @param string|null $idempotencyKey caller-supplied event_id used
+     *                                    VERBATIM (dedupe), null = fresh
+     * @param string|null $decisionId     the RiskDecision::decisionId being
+     *                                    confirmed (calibration pairing)
+     */
+    public function record_feedback(RiskEventKind $event, RiskContext $c, ?string $idempotencyKey = null, ?string $decisionId = null): EventReceipt
     {
-        return crc32($scope) & 0x7fffffff;
+        $nowMs = (int) floor(microtime(true) * 1000);
+        $observation = $this->buildObservation($c, $nowMs, $idempotencyKey, $event);
+        try {
+            $vector = $this->store->observe($observation);
+            $isDuplicate = method_exists($this->store, 'lastIsDuplicate') && (bool) $this->store->lastIsDuplicate();
+        } catch (RiskStoreException $e) {
+            $this->breaker->recordFailure();
+            $vector = SignalVector::zero();
+            $isDuplicate = false;
+        }
+
+        if (($event === RiskEventKind::ConfirmedLegitimate || $event === RiskEventKind::ConfirmedAbuse) && $decisionId !== null) {
+            $this->consumeCalibrationReceipt($decisionId, $event === RiskEventKind::ConfirmedLegitimate);
+        }
+
+        return new EventReceipt(
+            eventId: $observation->eventId,
+            isDuplicate: $isDuplicate,
+            signals: $vector,
+        );
     }
 
-    public function record(RiskEventKind $kind, int $scope, string $ip, ?string $sessionId = null, ?string $principalId = null): void
+    /**
+     * @deprecated use record_feedback() (same behavior; the feedback path
+     *             never runs the limiter and never produces a decision)
+     */
+    public function record(RiskEventKind $kind, int $scope, string $ip, ?string $sessionId = null, ?string $principalId = null): EventReceipt
     {
-        $this->assess(new RiskContext(
+        return $this->record_feedback($kind, new RiskContext(
             scope: $scope,
             sourceIp: $ip,
             sessionId: $sessionId,
@@ -151,29 +214,46 @@ final class AdaptiveRiskEngine
 
     public function confirmedLegitimate(string $scope, string $ip, ?string $principalId = null): void
     {
-        $this->calibration?->record($this->scopeId($scope), 0, RiskAction::Allow, true);
+        try {
+            $this->calibration?->record($this->scopeId($scope), 0, RiskAction::Allow, true);
+        } catch (\Throwable) {
+            // calibration must never break feedback
+        }
 
         $this->record(RiskEventKind::ConfirmedLegitimate, $this->scopeId($scope), $ip, null, $principalId);
     }
 
     public function confirmedAbuse(string $scope, string $ip, ?string $principalId = null): void
     {
-        $this->calibration?->record($this->scopeId($scope), 10, RiskAction::Deny, false);
+        try {
+            $this->calibration?->record($this->scopeId($scope), 10, RiskAction::Deny, false);
+        } catch (\Throwable) {
+            // calibration must never break feedback
+        }
 
         $this->record(RiskEventKind::ConfirmedAbuse, $this->scopeId($scope), $ip, null, $principalId);
     }
 
-    private function buildObservation(RiskContext $c, int $nowMs): RiskObservation
+    private function buildObservation(RiskContext $c, int $nowMs, ?string $idempotencyKey = null, ?RiskEventKind $event = null): RiskObservation
     {
+        $event ??= $c->event;
         $nowSecs = intdiv($nowMs, 1000);
+        $srcEpoch = intdiv($nowSecs, $this->sourceEpochSecs);
+        $netEpoch = intdiv($nowSecs, $this->subnetEpochSecs);
         return new RiskObservation(
-            event: $c->event,
+            event: $event,
             scope: $c->scope,
-            sourceId: $this->identityFactory->sourceId($c->sourceIp, $nowSecs),
-            subnetId: $this->identityFactory->subnetId($c->sourceIp, $nowSecs),
+            sourceEpoch: $srcEpoch,
+            sourceIdPrev: $this->identityFactory->sourceIdForEpoch($c, $srcEpoch - 1),
+            sourceId: $this->identityFactory->sourceIdForEpoch($c, $srcEpoch),
+            sourceIdNext: $this->identityFactory->sourceIdForEpoch($c, $srcEpoch + 1),
+            subnetEpoch: $netEpoch,
+            subnetIdPrev: $this->identityFactory->subnetIdForEpoch($c, $netEpoch - 1),
+            subnetId: $this->identityFactory->subnetIdForEpoch($c, $netEpoch),
+            subnetIdNext: $this->identityFactory->subnetIdForEpoch($c, $netEpoch + 1),
             sessionId: $c->sessionId !== null ? $this->identityFactory->sessionId($c->sessionId) : null,
             principalId: $c->principalId !== null ? $this->identityFactory->principalId($c->principalId) : null,
-            eventId: RiskObservation::newEventId(),
+            eventId: $idempotencyKey ?? RiskObservation::newEventId(),
             networkRisk: $c->networkFlags->networkRisk(),
             nowMs: $nowMs,
         );
@@ -193,6 +273,51 @@ final class AdaptiveRiskEngine
             return $this->store->lastCooldownUntilMs();
         }
         return 0;
+    }
+
+    /** Stable scope-name -> int id (crc32 & 0x7fffffff), for the label helpers. */
+    private function scopeId(string $scope): int
+    {
+        return crc32($scope) & 0x7fffffff;
+    }
+
+    /**
+     * Registers the calibration receipt for one decision so a later
+     * confirmed outcome can be paired back to its scope/band/action.
+     * Failures are silent — calibration never breaks issuance.
+     */
+    private function registerCalibrationReceipt(int $scope, RiskDecision $decision): void
+    {
+        if ($this->calibration === null) {
+            return;
+        }
+        try {
+            $this->calibration->recordReceipt($decision->decisionId, $scope, $decision->band, $decision->action);
+        } catch (\Throwable) {
+            // calibration must never break issuance
+        }
+    }
+
+    /**
+     * Consumes the calibration receipt for $decisionId (if any) and records
+     * the confirmed outcome against the ORIGINAL decision's
+     * scope/band/action. Failures are silent.
+     */
+    private function consumeCalibrationReceipt(string $decisionId, bool $legitimate): void
+    {
+        if ($this->calibration === null) {
+            return;
+        }
+        try {
+            $receipt = $this->calibration->consumeReceipt($decisionId);
+        } catch (\Throwable) {
+            return;
+        }
+        if ($receipt === null) {
+            return;
+        }
+        $action = RiskAction::tryFrom((string) ($receipt['action'] ?? '')) ?? RiskAction::Allow;
+        $this->calibration->record((int) ($receipt['scope'] ?? 0), (int) ($receipt['band'] ?? 0), $action, $legitimate);
     }
 
     private function recordDecisionMetrics(int $scope, RiskDecision $decision): void

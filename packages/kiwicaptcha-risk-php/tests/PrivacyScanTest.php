@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Risk\Tests;
 
+use KiwiCaptcha\Risk\Network\NetworkFlags;
+use KiwiCaptcha\Risk\ResourcePressure;
+use KiwiCaptcha\Risk\RiskContext;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
@@ -24,9 +27,9 @@ use PHPUnit\Framework\TestCase;
  * MATCH 'kiwi:*' glob matches nothing; the namespace-scoped pattern is the
  * strict equivalent and stays isolated from parallel test processes.
  *
- * Note: session/principal keys are OBSERVER-ONLY in risk.lua (HMGET, never
- * saved), so their pseudonyms never even enter the key space — the raw
- * principal id exists nowhere, in any form.
+ * Session/principal state IS persisted when the observation carries them
+ * (has_session/has_principal = 1) — under their keyed HMAC pseudonyms, so
+ * the raw principal id / UA / email exist nowhere in any form.
  */
 final class PrivacyScanTest extends TestCase
 {
@@ -56,16 +59,31 @@ final class PrivacyScanTest extends TestCase
         // Real observations derived from the raw values under test.
         $factory = new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat("\x42", 32)));
         $nowSecs = intdiv(self::T0, 1000);
-        $sourceId = $factory->sourceId(self::IP, $nowSecs);
-        $subnetId = $factory->subnetId(self::IP, $nowSecs);
+        $srcEpoch = intdiv($nowSecs, 900);
+        $netEpoch = intdiv($nowSecs, 900);
+        $ctx = new RiskContext(
+            scope: 1,
+            sourceIp: self::IP,
+            sessionId: null,
+            principalId: null,
+            event: RiskEventKind::PreIssue,
+            networkFlags: new NetworkFlags(),
+            resources: new ResourcePressure(1000, 1000, 1000),
+        );
+        $sourceId = $factory->sourceIdForEpoch($ctx, $srcEpoch);
+        $sourceIdPrev = $factory->sourceIdForEpoch($ctx, $srcEpoch - 1);
+        $sourceIdNext = $factory->sourceIdForEpoch($ctx, $srcEpoch + 1);
+        $subnetId = $factory->subnetIdForEpoch($ctx, $netEpoch);
+        $subnetIdPrev = $factory->subnetIdForEpoch($ctx, $netEpoch - 1);
+        $subnetIdNext = $factory->subnetIdForEpoch($ctx, $netEpoch + 1);
         $principalId = $factory->principalId(self::PRINCIPAL);
         $sessionUa = $factory->sessionId(self::UA);
         $sessionEmail = $factory->sessionId(self::EMAIL);
 
         $observations = [
-            new RiskObservation(event: RiskEventKind::PreIssue, scope: 1, sourceId: $sourceId, subnetId: $subnetId, sessionId: $sessionUa, principalId: $principalId, eventId: RiskObservation::newEventId(), networkRisk: 0, nowMs: self::T0),
-            new RiskObservation(event: RiskEventKind::ProtectedActionFailure, scope: 1, sourceId: $sourceId, subnetId: $subnetId, sessionId: $sessionEmail, principalId: $principalId, eventId: RiskObservation::newEventId(), networkRisk: 0, nowMs: self::T0),
-            new RiskObservation(event: RiskEventKind::ConfirmedAbuse, scope: 1, sourceId: $sourceId, subnetId: $subnetId, sessionId: $sessionUa, principalId: $principalId, eventId: RiskObservation::newEventId(), networkRisk: 0, nowMs: self::T0),
+            new RiskObservation(event: RiskEventKind::PreIssue, scope: 1, sourceEpoch: $srcEpoch, sourceIdPrev: $sourceIdPrev, sourceId: $sourceId, sourceIdNext: $sourceIdNext, subnetEpoch: $netEpoch, subnetIdPrev: $subnetIdPrev, subnetId: $subnetId, subnetIdNext: $subnetIdNext, sessionId: $sessionUa, principalId: $principalId, eventId: RiskObservation::newEventId(), networkRisk: 0, nowMs: self::T0),
+            new RiskObservation(event: RiskEventKind::ProtectedActionFailure, scope: 1, sourceEpoch: $srcEpoch, sourceIdPrev: $sourceIdPrev, sourceId: $sourceId, sourceIdNext: $sourceIdNext, subnetEpoch: $netEpoch, subnetIdPrev: $subnetIdPrev, subnetId: $subnetId, subnetIdNext: $subnetIdNext, sessionId: $sessionEmail, principalId: $principalId, eventId: RiskObservation::newEventId(), networkRisk: 0, nowMs: self::T0),
+            new RiskObservation(event: RiskEventKind::ConfirmedAbuse, scope: 1, sourceEpoch: $srcEpoch, sourceIdPrev: $sourceIdPrev, sourceId: $sourceId, sourceIdNext: $sourceIdNext, subnetEpoch: $netEpoch, subnetIdPrev: $subnetIdPrev, subnetId: $subnetId, subnetIdNext: $subnetIdNext, sessionId: $sessionUa, principalId: $principalId, eventId: RiskObservation::newEventId(), networkRisk: 0, nowMs: self::T0),
         ];
         foreach ($observations as $observation) {
             $store->observe($observation);
@@ -88,8 +106,10 @@ final class PrivacyScanTest extends TestCase
         // The source pseudonym is what the scan must find — proof the scan
         // actually saw this namespace's state.
         self::assertStringContainsString($sourceId, $allKeys);
-        // Session/principal state is observer-only: never persisted at all.
-        self::assertStringNotContainsString($principalId, $allKeys);
+        // Session/principal state is persisted under its HMAC pseudonym:
+        // the principal pseudonym (NOT the raw principal id) is present.
+        self::assertStringContainsString($principalId, $allKeys);
+        self::assertStringNotContainsString(self::PRINCIPAL, $allKeys);
 
         $blob = $allKeys;
         foreach ($keys as $key) {

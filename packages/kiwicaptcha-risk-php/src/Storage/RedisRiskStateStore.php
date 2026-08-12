@@ -12,15 +12,19 @@ use Predis\Response\ServerException;
 /**
  * Redis-backed risk state store running the canonical risk-v1 Lua script.
  *
- * The script is the shared cross-language asset at
- * <repo-root>/protocol/risk-v1/risk.lua, resolved via
- * realpath(__DIR__.'/../../../../protocol/risk-v1/risk.lua') and loaded
- * with EVALSHA (NOSCRIPT fallback to EVAL + SCRIPT LOAD, sha cached).
+ * The script is the cross-language shared asset BUNDLED with this package
+ * at resources/risk-v1.lua (self-contained — no monorepo paths), resolved
+ * via dirname(__DIR__, 2) . '/resources/risk-v1.lua' and loaded with
+ * EVALSHA (NOSCRIPT fallback to EVAL + SCRIPT LOAD, sha cached). The old
+ * monorepo copy (protocol/risk-v1/risk.lua) is obsolete.
  *
  * All keys carry the hash tag {kiwi:<namespace>} so the script is Cluster
  * safe. The Lua's network_risk slot (always 0) is overridden with the
- * observation's classifier-derived network risk; principal_credit (0,
- * reserved) is passed through.
+ * observation's classifier-derived network risk; principal_credit is the
+ * REAL Lua value (no longer hardcoded 0); the duplicate flag (result[15])
+ * is exposed via lastIsDuplicate(). Source/subnet keys use the
+ * epoch-parameterized pseudonyms carried on the observation (each epoch's
+ * key uses its OWN epoch's pseudonym, never the current-epoch one).
  *
  * Timeouts: the predis Client is caller-supplied; createClient() builds
  * one with a 5 ms connection timeout and 10 ms read/write timeout. Predis
@@ -41,17 +45,19 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         'switch' => 10000,
         'global' => 70000,
         'trust' => 10000,
+        'principal' => 10000,
     ];
 
     private string $script;
     private ?string $scriptSha = null;
     private int $lastGlobalLevel = 0;
     private int $lastCooldownUntilMs = 0;
+    private bool $lastIsDuplicate = false;
 
     /**
-     * @param string   $namespace     deployment namespace used in the hash tag {kiwi:<namespace>}
-     * @param int      $hysteresisMs  global level hysteresis window
-     * @param array<string, int> $saturations raw saturation values keyed src_fast..trust (Lua ARGV order)
+     * @param string   $namespace       deployment namespace used in the hash tag {kiwi:<namespace>}
+     * @param int      $hysteresisMs    global level hysteresis window
+     * @param array<string, int> $saturations raw saturation values keyed src_fast..principal (Lua ARGV order)
      */
     public function __construct(
         private readonly Client $client,
@@ -59,6 +65,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         private readonly int $sourceEpochSecs = 900,
         private readonly int $subnetEpochSecs = 900,
         private readonly int $stateTtlSecs = 1800,
+        private readonly int $sessionTtlSecs = 1800,
         private readonly int $principalTtlSecs = 86400,
         private readonly int $dedupeTtlSecs = 60,
         private readonly int $hysteresisMs = 60000,
@@ -67,16 +74,17 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Risk namespace must be non-empty and free of braces');
         }
-        $path = realpath(__DIR__ . '/../../../../protocol/risk-v1/risk.lua');
-        if ($path === false || !is_file($path)) {
+        $path = dirname(__DIR__, 2) . '/resources/risk-v1.lua';
+        if (!is_file($path)) {
             throw new \RuntimeException(
-                'Cannot locate the canonical risk-v1 script at protocol/risk-v1/risk.lua ' .
-                '(resolved from ' . __DIR__ . '). This package is intended to run from the monorepo.'
+                'Cannot locate the bundled risk-v1 script at resources/risk-v1.lua ' .
+                '(resolved from ' . __DIR__ . '). The script ships with this package — ' .
+                'the old monorepo copy (protocol/risk-v1/risk.lua) is obsolete.'
             );
         }
         $script = @file_get_contents($path);
         if ($script === false) {
-            throw new \RuntimeException(sprintf('Cannot read the canonical risk-v1 script at %s', $path));
+            throw new \RuntimeException(sprintf('Cannot read the bundled risk-v1 script at %s', $path));
         }
         $this->script = $script;
     }
@@ -105,6 +113,11 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         return $this->lastCooldownUntilMs;
     }
 
+    public function lastIsDuplicate(): bool
+    {
+        return $this->lastIsDuplicate;
+    }
+
     public function namespace(): string
     {
         return $this->namespace;
@@ -112,10 +125,6 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
 
     public function observe(RiskObservation $observation): SignalVector
     {
-        $nowMs = $observation->nowMs;
-        $nowSecs = intdiv($nowMs, 1000);
-        $srcEpoch = intdiv($nowSecs, $this->sourceEpochSecs);
-        $netEpoch = intdiv($nowSecs, $this->subnetEpochSecs);
         $ns = $this->namespace;
         $tag = "{kiwi:{$ns}}";
         $sourceId = $observation->sourceId;
@@ -124,12 +133,12 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         $principalId = $observation->principalId ?? str_repeat('0', 32);
 
         $keys = [
-            "{$tag}:risk:src:{$srcEpoch}:{$sourceId}",
-            "{$tag}:risk:src:" . ($srcEpoch - 1) . ":{$sourceId}",
-            "{$tag}:risk:src:" . ($srcEpoch + 1) . ":{$sourceId}",
-            "{$tag}:risk:net:{$netEpoch}:{$subnetId}",
-            "{$tag}:risk:net:" . ($netEpoch - 1) . ":{$subnetId}",
-            "{$tag}:risk:net:" . ($netEpoch + 1) . ":{$subnetId}",
+            "{$tag}:risk:src:{$observation->sourceEpoch}:{$sourceId}",
+            "{$tag}:risk:src:" . ($observation->sourceEpoch - 1) . ":{$observation->sourceIdPrev}",
+            "{$tag}:risk:src:" . ($observation->sourceEpoch + 1) . ":{$observation->sourceIdNext}",
+            "{$tag}:risk:net:{$observation->subnetEpoch}:{$subnetId}",
+            "{$tag}:risk:net:" . ($observation->subnetEpoch - 1) . ":{$observation->subnetIdPrev}",
+            "{$tag}:risk:net:" . ($observation->subnetEpoch + 1) . ":{$observation->subnetIdNext}",
             "{$tag}:risk:session:{$sessionId}",
             "{$tag}:risk:principal:{$principalId}",
             "{$tag}:risk:global",
@@ -141,7 +150,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         $args = [
             $observation->event->value,
             $observation->scope,
-            $nowMs,
+            $observation->nowMs,
             $observation->eventId,
             $this->dedupeTtlSecs,
             $this->stateTtlSecs,
@@ -156,20 +165,22 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
             $sat['switch'],
             $sat['global'],
             $sat['trust'],
+            $sat['principal'],
+            $observation->sessionId !== null ? 1 : 0,
+            $observation->principalId !== null ? 1 : 0,
+            $this->sessionTtlSecs,
+            $this->principalTtlSecs,
         ];
 
         $result = $this->runScript($keys, $args);
 
-        if (is_array($result) && count($result) === 1 && (int) $result[0] === -1) {
-            // Duplicate event_id: documented no-op returning the empty vector.
-            return SignalVector::zero();
-        }
-        if (!is_array($result) || count($result) < 15) {
+        if (!is_array($result) || count($result) < 16) {
             throw new RiskStoreException('Risk script returned an unexpected payload');
         }
 
         $this->lastGlobalLevel = (int) $result[13];
         $this->lastCooldownUntilMs = (int) $result[14];
+        $this->lastIsDuplicate = ((int) $result[15]) === 1;
 
         return new SignalVector(
             sourceFast: (int) $result[0],
@@ -184,7 +195,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
             globalPressure: (int) $result[9],
             networkRisk: $observation->networkRisk,
             trustCredit: (int) $result[11],
-            principalCredit: 0,
+            principalCredit: (int) $result[12],
         );
     }
 

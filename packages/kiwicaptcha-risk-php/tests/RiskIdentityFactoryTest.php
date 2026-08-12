@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Risk\Tests;
 
+use KiwiCaptcha\Risk\Network\NetworkFlags;
+use KiwiCaptcha\Risk\ResourcePressure;
+use KiwiCaptcha\Risk\RiskContext;
+use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
 use PHPUnit\Framework\TestCase;
@@ -13,6 +17,19 @@ final class RiskIdentityFactoryTest extends TestCase
     private function factory(): RiskIdentityFactory
     {
         return new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat(chr(0x42), 32)));
+    }
+
+    private function context(): RiskContext
+    {
+        return new RiskContext(
+            scope: 1,
+            sourceIp: '203.0.113.27',
+            sessionId: null,
+            principalId: null,
+            event: RiskEventKind::PreIssue,
+            networkFlags: new NetworkFlags(),
+            resources: new ResourcePressure(1000, 1000, 1000),
+        );
     }
 
     public function testCanonicalIpForms(): void
@@ -109,5 +126,32 @@ final class RiskIdentityFactoryTest extends TestCase
     {
         $f = $this->factory();
         self::assertSame($f->sourceId('203.0.113.27', 1000), $f->sourceId('203.0.113.27', 1000));
+    }
+
+    public function testSourceIdForEpochMatchesTheDerivation(): void
+    {
+        $f = $this->factory();
+        $ctx = $this->context();
+        $nowSecs = 1_700_000_000;
+        $epoch = intdiv($nowSecs, 900);
+        // The explicit-epoch form must agree with the derived form, and the
+        // epoch±1 pseudonyms must differ (each epoch's key uses its own
+        // pseudonym, never the current-epoch one).
+        self::assertSame($f->sourceId('203.0.113.27', $nowSecs), $f->sourceIdForEpoch($ctx, $epoch));
+        self::assertNotSame($f->sourceIdForEpoch($ctx, $epoch), $f->sourceIdForEpoch($ctx, $epoch - 1));
+        self::assertNotSame($f->sourceIdForEpoch($ctx, $epoch), $f->sourceIdForEpoch($ctx, $epoch + 1));
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $f->sourceIdForEpoch($ctx, $epoch));
+    }
+
+    public function testSubnetIdForEpochMatchesTheDerivation(): void
+    {
+        $f = $this->factory();
+        $ctx = $this->context();
+        $nowSecs = 1_700_000_000;
+        $epoch = intdiv($nowSecs, 900);
+        self::assertSame($f->subnetId('203.0.113.27', $nowSecs), $f->subnetIdForEpoch($ctx, $epoch));
+        self::assertNotSame($f->subnetIdForEpoch($ctx, $epoch), $f->subnetIdForEpoch($ctx, $epoch - 1));
+        self::assertNotSame($f->subnetIdForEpoch($ctx, $epoch), $f->subnetIdForEpoch($ctx, $epoch + 1));
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $f->subnetIdForEpoch($ctx, $epoch));
     }
 }

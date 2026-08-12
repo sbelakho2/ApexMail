@@ -7,27 +7,36 @@ namespace KiwiCaptcha\Risk;
 /**
  * One immutable observation applied atomically to the risk state.
  *
- * sourceId/subnetId are 16-byte hex pseudonyms (32 hex chars) from
- * RiskIdentityFactory; sessionId/principalId are the same, or null when the
- * request carries no session/principal. eventId is 16 random bytes in hex
- * and is the dedupe key (an identical event_id never double-increments).
+ * Each source/subnet identity carries its epoch plus the pseudonyms for
+ * epoch-1 (previous boundary), the current epoch and epoch+1 (next
+ * boundary) — every epoch key uses the pseudonym HMAC'd with ITS OWN
+ * epoch, never the current-epoch pseudonym. sessionId/principalId are the
+ * same 16-byte hex pseudonyms, or null when the request carries no
+ * session/principal. eventId is 16 random bytes in hex and is the dedupe
+ * key (an identical event_id never double-increments).
  */
 final class RiskObservation
 {
     public function __construct(
         public readonly RiskEventKind $event,
         public readonly int $scope,
+        public readonly int $sourceEpoch,
+        public readonly string $sourceIdPrev,
         public readonly string $sourceId,
+        public readonly string $sourceIdNext,
+        public readonly int $subnetEpoch,
+        public readonly string $subnetIdPrev,
         public readonly string $subnetId,
+        public readonly string $subnetIdNext,
         public readonly ?string $sessionId,
         public readonly ?string $principalId,
         public readonly string $eventId,
         public readonly int $networkRisk,
         public readonly int $nowMs,
     ) {
-        foreach ([$sourceId, $subnetId] as $id) {
+        foreach ([$sourceIdPrev, $sourceId, $sourceIdNext, $subnetIdPrev, $subnetId, $subnetIdNext] as $id) {
             if (!preg_match('/^[0-9a-f]{32}$/', $id)) {
-                throw new \InvalidArgumentException('sourceId/subnetId must be 16-byte hex pseudonyms');
+                throw new \InvalidArgumentException('source/subnet pseudonyms must be 16-byte hex');
             }
         }
         if (($sessionId !== null && !preg_match('/^[0-9a-f]{32}$/', $sessionId))

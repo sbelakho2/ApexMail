@@ -20,11 +20,11 @@ use KiwiCaptcha\Risk\RiskAction;
  *    the configured algorithm is sha256 and the action exceeds the app's
  *    difficulty_bits; no-op otherwise — an argon2id deployment is already
  *    at least as strong).
- *  - argon16/32/64      -> Argon2id at 16/32/64 MiB (t=3, p=1, the app's
- *    argon2_difficulty_bits as the target). When the configured algorithm
- *    is sha256 (no argon solver configured), the action escalates to the
- *    strongest SHA profile instead (sha20) — same intent (more work),
- *    different cost curve.
+ *  - argon16/32/64      -> the audited Argon2id profiles (m = 16/32/64 MiB,
+ *    t = 3, p = 1, target bits 1 — memory cost is the economic control, NOT
+ *    the app's argon2_difficulty_bits). The core's issueWithProfile accepts
+ *    a profile directly regardless of the app default, so a SHA-configured
+ *    deployment can still issue Argon work via the risk ladder.
  *  - step_up            -> the strongest profile of the configured family
  *    (sha20 / argon64). The bundle cannot perform application-level step-up
  *    (MFA etc.); the hardest challenge is its closest approximation, and
@@ -40,7 +40,6 @@ final class RiskProfileResolver
     public function __construct(
         private readonly PoWAlgorithm $algorithm,
         private readonly int $shaFloorBits,
-        private readonly int $argon2FloorBits,
     ) {
     }
 
@@ -51,9 +50,10 @@ final class RiskProfileResolver
             RiskAction::Sha16 => $this->sha(16),
             RiskAction::Sha18 => $this->sha(18),
             RiskAction::Sha20 => $this->sha(20),
-            RiskAction::Argon16 => $this->argon(16384),
-            RiskAction::Argon32 => $this->argon(32768),
-            RiskAction::Argon64 => $this->argon(65536),
+            // Audited profiles: target bits 1, t=3, p=1, memory is the cost.
+            RiskAction::Argon16 => ChallengeProfile::argon16(),
+            RiskAction::Argon32 => ChallengeProfile::argon32(),
+            RiskAction::Argon64 => ChallengeProfile::argon64(),
             // StepUp is handled by the controller (403 STEP_UP_REQUIRED) and
             // must never be mapped to a challenge profile.
             RiskAction::StepUp => throw new \LogicException('StepUp is handled by the controller, not mapped to a profile'),
@@ -68,23 +68,5 @@ final class RiskProfileResolver
         }
 
         return ChallengeProfile::sha($bits);
-    }
-
-    private function argon(int $mKib): ?ChallengeProfile
-    {
-        if ($this->algorithm !== PoWAlgorithm::Argon2id) {
-            // SHA-only deployment: escalate to the strongest SHA profile
-            // instead of a memory-hard one (the argon solver/config is not
-            // part of this deployment's resource profile).
-            return $this->sha(20);
-        }
-
-        return new ChallengeProfile(
-            algorithm: PoWAlgorithm::Argon2id,
-            targetBits: $this->argon2FloorBits,
-            mKib: $mKib,
-            t: 3,
-            p: 1,
-        );
     }
 }

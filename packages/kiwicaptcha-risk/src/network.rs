@@ -1,5 +1,5 @@
-//! Network classification flags for a source IP and the static CIDR
-//! classifier.
+//! Network classification flags for a source IP and the bitwise radix
+//! trie classifier.
 
 use std::net::IpAddr;
 
@@ -77,19 +77,41 @@ impl CidrEntry {
     }
 }
 
-/// Static CIDR-block network classifier.
+/// Bitwise radix trie over the canonical address bits.
 ///
-/// Entries are `(cidr, flags)` pairs; flags may be any subset of
-/// `reserved, hosting, proxy, tor, blocked`. Matching is done on the raw
-/// prefix bits of the canonical IP bytes, so IPv4/IPv6 never cross-match.
-#[derive(Debug)]
+/// IPv4 addresses traverse a depth-32 tree, IPv6 a depth-128 tree; the two
+/// families live in SEPARATE tries (a `/0` IPv4 entry can never match an
+/// IPv6 address, mirroring the legacy family check). The trie is built
+/// ONCE in the constructor; `classify` walks at most `prefix depth` nodes
+/// (32/128), never scanning the whole entry list.
+///
+/// Classification preserves the EXACT legacy semantics: the flags of EVERY
+/// matching prefix on the path are combined (OR) — a `/0` hosting entry
+/// and a `/32` tor entry both apply to the same address.
+#[derive(Debug, Default)]
 pub struct CidrNetworkClassifier {
-    entries: Vec<(CidrEntry, NetworkFlags)>,
+    v4: TrieNode,
+    v6: TrieNode,
+}
+
+#[derive(Debug, Default)]
+struct TrieNode {
+    flags: Option<NetworkFlags>,
+    children: [Option<Box<TrieNode>>; 2],
 }
 
 impl CidrNetworkClassifier {
+    /// Builds the trie from `(cidr, flags)` pairs (entries may be in any
+    /// order; matches are prefix-based, so insertion order never matters).
     pub fn from_entries(entries: Vec<(CidrEntry, NetworkFlags)>) -> CidrNetworkClassifier {
-        CidrNetworkClassifier { entries }
+        let mut classifier = CidrNetworkClassifier::default();
+        for (entry, flags) in entries {
+            match entry.network {
+                IpAddr::V4(_) => insert(&mut classifier.v4, entry, flags),
+                IpAddr::V6(_) => insert(&mut classifier.v6, entry, flags),
+            }
+        }
+        classifier
     }
 
     /// Parses one entry per line: `"cidr,flag1,flag2"` — lines starting
@@ -129,58 +151,72 @@ impl CidrNetworkClassifier {
     }
 }
 
+/// Inserts one entry into a family trie: `prefix` ADDRESS bits (the family
+/// byte is stripped — it selects the trie, it never counts toward the
+/// prefix depth) walk the binary tree; the entry's flags land on the node
+/// at the prefix depth (duplicate CIDRs COMBINE their flags, exactly like
+/// the legacy linear scan).
+fn insert(root: &mut TrieNode, entry: CidrEntry, flags: NetworkFlags) {
+    let bits = address_bits(entry.network);
+    let mut node = root;
+    for &bit in bits.iter().take(entry.prefix as usize) {
+        let child = &mut node.children[bit as usize];
+        if child.is_none() {
+            *child = Some(Box::new(TrieNode::default()));
+        }
+        node = child.as_mut().expect("child set above");
+    }
+    match &mut node.flags {
+        Some(existing) => merge_flags(existing, flags),
+        None => node.flags = Some(flags),
+    }
+}
+
+/// The canonical address bits, MSB first, WITH the family byte stripped.
+fn address_bits(ip: IpAddr) -> Vec<u8> {
+    let canonical = canonical_ip(ip);
+    let mut bits = Vec::with_capacity((canonical.len() - 1) * 8);
+    for byte in &canonical[1..] {
+        for i in (0..8).rev() {
+            bits.push((byte >> i) & 1);
+        }
+    }
+    bits
+}
+
 impl NetworkClassifier for CidrNetworkClassifier {
     fn classify(&self, ip: IpAddr) -> NetworkFlags {
         let canonical = canonical_ip(ip);
         let family = canonical[0];
-        let ip_bytes = &canonical[1..];
-
+        let root = if family == 0x04 { &self.v4 } else { &self.v6 };
+        let bits = address_bits(ip);
         let mut flags = NetworkFlags::default();
-        for (entry, entry_flags) in &self.entries {
-            let entry_family = if matches!(entry.network, IpAddr::V4(_)) {
-                0x04
-            } else {
-                0x06
-            };
-            if entry_family != family {
-                continue;
+        let mut node = root;
+        for bit in &bits {
+            // Combine every matching prefix's flags on the path.
+            if let Some(node_flags) = node.flags {
+                merge_flags(&mut flags, node_flags);
             }
-            if prefix_matches(ip_bytes, &canonical_bytes(entry.network), entry.prefix) {
-                flags.reserved |= entry_flags.reserved;
-                flags.known_hosting |= entry_flags.known_hosting;
-                flags.known_proxy |= entry_flags.known_proxy;
-                flags.tor_exit |= entry_flags.tor_exit;
-                if entry_flags.blocked() {
-                    flags.local_risk_bucket = 255;
-                }
+            match &node.children[*bit as usize] {
+                Some(child) => node = child,
+                None => break,
             }
+        }
+        if let Some(node_flags) = node.flags {
+            merge_flags(&mut flags, node_flags);
         }
         flags
     }
 }
 
-fn canonical_bytes(ip: IpAddr) -> Vec<u8> {
-    match ip {
-        IpAddr::V4(v4) => v4.octets().to_vec(),
-        IpAddr::V6(v6) => v6.octets().to_vec(),
+fn merge_flags(target: &mut NetworkFlags, other: NetworkFlags) {
+    target.reserved |= other.reserved;
+    target.known_hosting |= other.known_hosting;
+    target.known_proxy |= other.known_proxy;
+    target.tor_exit |= other.tor_exit;
+    if other.blocked() {
+        target.local_risk_bucket = 255;
     }
-}
-
-/// Prefix match over raw address bytes (family byte already stripped).
-fn prefix_matches(ip_bytes: &[u8], network_bytes: &[u8], prefix: u8) -> bool {
-    let full_bytes = (prefix / 8) as usize;
-    if ip_bytes.len() != network_bytes.len() {
-        return false;
-    }
-    if ip_bytes[..full_bytes] != network_bytes[..full_bytes] {
-        return false;
-    }
-    let remain = prefix % 8;
-    if remain == 0 {
-        return true;
-    }
-    let mask = 0xFFu8 << (8 - remain);
-    (ip_bytes[full_bytes] & mask) == (network_bytes[full_bytes] & mask)
 }
 
 /// Classifier construction/parsing error.
@@ -354,6 +390,31 @@ mod tests {
         );
         assert!(classifier.classify("192.0.2.1".parse().unwrap()).blocked());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn duplicate_cidrs_combine_flags() {
+        // Legacy linear scan ORs the flags of every matching entry; the
+        // trie must do the same when two entries share one prefix.
+        let classifier = CidrNetworkClassifier::from_entries(vec![
+            (
+                entry("203.0.113.0/24"),
+                NetworkFlags {
+                    known_hosting: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                entry("203.0.113.0/24"),
+                NetworkFlags {
+                    tor_exit: true,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let flags = classifier.classify("203.0.113.9".parse().unwrap());
+        assert!(flags.known_hosting);
+        assert!(flags.tor_exit);
     }
 
     #[test]

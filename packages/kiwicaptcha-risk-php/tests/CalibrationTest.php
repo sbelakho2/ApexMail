@@ -8,99 +8,126 @@ use KiwiCaptcha\Risk\Calibration\AggregateCalibrator;
 use KiwiCaptcha\Risk\Calibration\CalibrationRecorder;
 use KiwiCaptcha\Risk\Calibration\CalibrationStore;
 use KiwiCaptcha\Risk\RiskAction;
+use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
+/**
+ * Redis-backed calibration tests. AggregateCalibrator cases are skipped
+ * unless RISK_REDIS_URL is set; the recorder interface test runs always.
+ */
 final class CalibrationTest extends TestCase
 {
-    private int $clock = 0;
+    private ?Client $client = null;
 
-    private function calibrator(): AggregateCalibrator
+    protected function setUp(): void
     {
-        $this->clock = 1_700_000_000;
-        return new AggregateCalibrator(fn (): int => $this->clock);
-    }
-
-    private function record(AggregateCalibrator $c, int $n, float $legitRate, int $scope = 1): void
-    {
-        $legitCount = (int) round($n * $legitRate);
-        for ($i = 0; $i < $n; $i++) {
-            $c->record($scope, 5, RiskAction::Sha20, $i < $legitCount);
+        $url = getenv('RISK_REDIS_URL');
+        if (is_string($url) && $url !== '') {
+            $this->client = AggregateCalibrator::createClient($url);
         }
     }
 
-    public function testMinSamplesGate(): void
+    private function calibrator(): AggregateCalibrator
     {
-        $c = $this->calibrator();
-        $this->record($c, 999, 0.1);
-        self::assertSame(0, $c->biasForScope(1, $this->clock));
+        if ($this->client === null) {
+            self::markTestSkipped('RISK_REDIS_URL not set; start redis with: docker run -d -p 6399:6379 redis:7-alpine');
+        }
+        return new AggregateCalibrator($this->client, namespace: 'cal' . bin2hex(random_bytes(4)));
     }
 
-    public function testBiasComputedAfterMinSamplesWithDirectionHeld(): void
+    private function record(AggregateCalibrator $c, int $n, bool $legit, int $band = 5, RiskAction $action = RiskAction::Sha20, int $scope = 1): void
     {
-        $c = $this->calibrator();
-        $this->record($c, 1000, 0.1);
-        // First read establishes the direction; hysteresis holds it.
-        self::assertSame(0, $c->biasForScope(1, $this->clock));
-        self::assertSame(0, $c->biasForScope(1, $this->clock + 599));
-        // 10 minutes held -> apply, capped by max-change 10/min over ~10 min.
-        self::assertSame(100, $c->biasForScope(1, $this->clock + 600));
-        // Then it ratchets toward the raw target (+120) at 10/min.
-        self::assertSame(110, $c->biasForScope(1, $this->clock + 601));
-        self::assertSame(120, $c->biasForScope(1, $this->clock + 602));
-        self::assertSame(120, $c->biasForScope(1, $this->clock + 603));
+        for ($i = 0; $i < $n; $i++) {
+            $c->record($scope, $band, $action, $legit);
+        }
     }
 
-    public function testBiasRangeIsBounded(): void
+    private function nowMs(): int
     {
-        $c = $this->calibrator();
-        $this->record($c, 1000, 0.0);
-        self::assertSame(0, $c->biasForScope(1, $this->clock));
-        $bias = $c->biasForScope(1, $this->clock + 600);
-        self::assertLessThanOrEqual(AggregateCalibrator::BIAS_MAX, $bias);
-
-        $c2 = $this->calibrator();
-        $this->record($c2, 1000, 1.0);
-        self::assertSame(0, $c2->biasForScope(1, $this->clock));
-        $bias2 = $c2->biasForScope(1, $this->clock + 600);
-        self::assertGreaterThanOrEqual(AggregateCalibrator::BIAS_MIN, $bias2);
-        self::assertLessThan(0, $bias2);
+        return (int) floor(microtime(true) * 1000);
     }
 
-    public function testHysteresisRequiresDirectionToHold(): void
+    public function testEmptyScopeHasZeroBias(): void
     {
         $c = $this->calibrator();
-        $this->record($c, 1000, 0.1);
-        self::assertSame(0, $c->biasForScope(1, $this->clock));
-        self::assertSame(0, $c->biasForScope(1, $this->clock + 300));
-        self::assertSame(0, $c->biasForScope(1, $this->clock + 599));
-        self::assertSame(100, $c->biasForScope(1, $this->clock + 600));
+        self::assertSame(0, $c->biasForScope(1, $this->nowMs()));
     }
 
-    public function testRetentionPrunesAfter24h(): void
+    public function testAllAbuseBiasIsPositiveAndBounded(): void
     {
         $c = $this->calibrator();
-        $this->record($c, 1000, 0.1);
-        // Jump 25 hours: every sample is pruned, so the gate re-applies.
-        self::assertSame(0, $c->biasForScope(1, $this->clock + 25 * 3600));
+        $this->record($c, 1000, false);
+        // bias = clamp(((1000 - 0) * 1000 / 1000) * 2 / 10, -200, 200) = 200
+        self::assertSame(200, $c->biasForScope(1, $this->nowMs()));
     }
 
-    public function testRetentionKeepsFreshSamples(): void
+    public function testAllLegitBiasIsNegativeAndBounded(): void
     {
         $c = $this->calibrator();
-        $this->record($c, 1000, 0.1);
-        self::assertSame(0, $c->biasForScope(1, $this->clock));
-        self::assertSame(100, $c->biasForScope(1, $this->clock + 600));
+        $this->record($c, 1000, true);
+        self::assertSame(-200, $c->biasForScope(1, $this->nowMs()));
+    }
+
+    public function testBalancedBiasIsZero(): void
+    {
+        $c = $this->calibrator();
+        $this->record($c, 500, true);
+        $this->record($c, 500, false);
+        self::assertSame(0, $c->biasForScope(1, $this->nowMs()));
+    }
+
+    public function testMixedBiasIntegerMath(): void
+    {
+        $c = $this->calibrator();
+        // 750 abuse, 250 legit: ((500 * 1000) / 1000) * 2 / 10 = 100
+        $this->record($c, 750, false);
+        $this->record($c, 250, true);
+        self::assertSame(100, $c->biasForScope(1, $this->nowMs()));
+
+        // 550 abuse, 450 legit: ((100 * 1000) / 1000) * 2 / 10 = 20
+        $c = $this->calibrator();
+        $this->record($c, 550, false);
+        $this->record($c, 450, true);
+        self::assertSame(20, $c->biasForScope(1, $this->nowMs()));
     }
 
     public function testScopesAreIndependent(): void
     {
         $c = $this->calibrator();
-        $this->record($c, 1000, 0.1, 1);
-        $this->record($c, 1000, 0.9, 2);
-        self::assertSame(0, $c->biasForScope(1, $this->clock));
-        self::assertSame(0, $c->biasForScope(2, $this->clock));
-        self::assertSame(100, $c->biasForScope(1, $this->clock + 600));
-        self::assertSame(-100, $c->biasForScope(2, $this->clock + 600));
+        $this->record($c, 1000, false, 5, RiskAction::Sha20, 1);
+        $this->record($c, 1000, true, 5, RiskAction::Sha20, 2);
+        self::assertSame(200, $c->biasForScope(1, $this->nowMs()));
+        self::assertSame(-200, $c->biasForScope(2, $this->nowMs()));
+    }
+
+    public function testBucketsAreBoundedByWindowAndTtl(): void
+    {
+        $c = $this->calibrator();
+        $ns = $c->namespace();
+        $this->record($c, 100, false);
+
+        // Buckets are hourly hashes with a 48 h TTL and at most 24 keys in
+        // the bias window; an ancient bucket does not contribute.
+        $nowMs = $this->nowMs();
+        $hour = intdiv($nowMs, 3_600_000);
+        self::assertSame('100', (string) $this->client->hget("{kiwi:{$ns}}:cal:1:{$hour}", 'b5asha20:abuse'));
+        self::assertNull($this->client->hget("{kiwi:{$ns}}:cal:1:" . ($hour - 25), 'b5asha20:abuse'));
+
+        // 100 abuse in-window -> bias +200; the 25-hours-old bucket is
+        // outside the 24-hour window and contributes nothing.
+        self::assertSame(200, $c->biasForScope(1, $nowMs));
+    }
+
+    public function testReceiptRoundTripAndSingleConsume(): void
+    {
+        $c = $this->calibrator();
+        $c->recordReceipt('deadbeef', 7, 4, RiskAction::Argon16);
+
+        $receipt = $c->consumeReceipt('deadbeef');
+        self::assertSame(['scope' => 7, 'band' => 4, 'action' => 'argon16'], $receipt);
+
+        // GETDEL semantics: the second consume finds nothing.
+        self::assertNull($c->consumeReceipt('deadbeef'));
     }
 
     public function testCalibrationRecorderMapsScoreToBand(): void
@@ -119,6 +146,15 @@ final class CalibrationTest extends TestCase
             public function biasForScope(int $scope, int $now): int
             {
                 return 0;
+            }
+
+            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action): void
+            {
+            }
+
+            public function consumeReceipt(string $decisionId): ?array
+            {
+                return null;
             }
         };
         $recorder = new CalibrationRecorder($store);

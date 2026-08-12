@@ -1,7 +1,8 @@
 //! Redis concurrency guarantees (real Redis, skipped unless RISK_REDIS_URL):
 //! the canonical Lua script runs atomically, so concurrent observations with
 //! unique event_ids never lose increments, concurrent duplicates increment
-//! exactly once, TTL expiry is honored (no state resurrection), and the
+//! exactly once (duplicates are no-ops returning the current signals with
+//! `is_duplicate`), TTL expiry is honored (no state resurrection), and the
 //! global level hysteresis window holds.
 //!
 //! Every subtest uses its own fresh namespace (the store takes the
@@ -14,8 +15,7 @@ use std::time::Duration;
 
 use kiwicaptcha_risk::event::RiskEventKind;
 use kiwicaptcha_risk::redis::{RedisRiskStateStore, DEFAULT_SATURATIONS};
-use kiwicaptcha_risk::signals::SignalVector;
-use kiwicaptcha_risk::store::{RiskStateStore, RiskStoreError};
+use kiwicaptcha_risk::store::{Observed, RiskStateStore, RiskStoreError};
 
 const HUNDRED: usize = 100;
 
@@ -32,16 +32,16 @@ fn store() -> RedisRiskStateStore {
 fn store_with(
     state_ttl_secs: u64,
     hysteresis_ms: u64,
-    saturations: [u32; 10],
+    saturations: [u32; 11],
 ) -> RedisRiskStateStore {
     RedisRiskStateStore::with_options(
         client(),
         &common::unique_namespace("conc"),
-        900,
-        900,
         state_ttl_secs,
         60,
         hysteresis_ms,
+        1800,
+        86_400,
         saturations,
     )
 }
@@ -52,16 +52,18 @@ fn store_with(
 fn storm(
     store: &RedisRiskStateStore,
     event: RiskEventKind,
-    scope: u16,
+    scope: u32,
     count: usize,
-    source_id: [u8; 16],
-    subnet_id: [u8; 16],
-    event_id: fn(u64) -> [u8; 16],
+    source_id: String,
+    subnet_id: String,
+    event_id: fn(u64) -> String,
     now_ms: u64,
-) -> Vec<Result<SignalVector, RiskStoreError>> {
+) -> Vec<Result<Observed, RiskStoreError>> {
     thread::scope(|s| {
         let handles: Vec<_> = (0..count)
             .map(|i| {
+                let source_id = source_id.clone();
+                let subnet_id = subnet_id.clone();
                 s.spawn(move || {
                     store.observe(&common::observation(
                         event,
@@ -88,10 +90,10 @@ fn storm(
 /// snapshots, so they cannot be trusted as the final state).
 fn probe(
     store: &RedisRiskStateStore,
-    source_id: [u8; 16],
-    subnet_id: [u8; 16],
+    source_id: String,
+    subnet_id: String,
     now_ms: u64,
-) -> SignalVector {
+) -> Observed {
     store
         .observe(&common::observation(
             RiskEventKind::PreIssue,
@@ -113,15 +115,15 @@ fn hundred_concurrent_source_events_lose_nothing() {
         return;
     };
     let store = store();
-    let source = [0xAA; 16];
+    let source = hex::encode([0xAA; 16]);
     // Same source pseudonym for all 100 threads, unique event_ids.
     let results = storm(
         &store,
         RiskEventKind::PreIssue,
         0,
         HUNDRED,
-        source,
-        [0xBB; 16],
+        source.clone(),
+        hex::encode([0xBB; 16]),
         common::event_id,
         common::T0,
     );
@@ -129,7 +131,7 @@ fn hundred_concurrent_source_events_lose_nothing() {
     assert!(results.iter().all(|r| r.is_ok()));
 
     // 100 * 1000 raw = 100_000 >= src_fast saturation 8000: exactly 1000.
-    let final_vector = probe(&store, source, [0xBB; 16], common::T0);
+    let final_vector = probe(&store, source, hex::encode([0xBB; 16]), common::T0).vector;
     assert_eq!(
         final_vector.source_fast, 1000,
         "lost source_fast increments"
@@ -159,13 +161,19 @@ fn hundred_concurrent_source_events_non_saturated_exact() {
         RiskEventKind::PreIssue,
         0,
         HUNDRED,
-        [0xAA; 16],
-        [0xBB; 16],
+        hex::encode([0xAA; 16]),
+        hex::encode([0xBB; 16]),
         common::event_id,
         common::T0,
     );
     assert!(results.iter().all(|r| r.is_ok()));
-    let final_vector = probe(&store, [0xAA; 16], [0xBB; 16], common::T0);
+    let final_vector = probe(
+        &store,
+        hex::encode([0xAA; 16]),
+        hex::encode([0xBB; 16]),
+        common::T0,
+    )
+    .vector;
     assert_eq!(final_vector.source_fast, 10);
     assert_eq!(final_vector.source_slow, 10);
 }
@@ -184,13 +192,19 @@ fn hundred_concurrent_subnet_events_lose_nothing() {
         RiskEventKind::PreIssue,
         0,
         HUNDRED,
-        [0xAA; 16],
-        [0xBB; 16],
+        hex::encode([0xAA; 16]),
+        hex::encode([0xBB; 16]),
         common::event_id,
         common::T0,
     );
     assert!(results.iter().all(|r| r.is_ok()));
-    let final_vector = probe(&store, [0xAA; 16], [0xBB; 16], common::T0);
+    let final_vector = probe(
+        &store,
+        hex::encode([0xAA; 16]),
+        hex::encode([0xBB; 16]),
+        common::T0,
+    )
+    .vector;
     assert_eq!(
         final_vector.subnet_fast, 1000,
         "lost subnet_fast increments"
@@ -210,8 +224,8 @@ fn hundred_concurrent_global_events_reach_top_without_negatives() {
         RiskEventKind::PreIssue,
         0,
         HUNDRED,
-        [0xAA; 16],
-        [0xBB; 16],
+        hex::encode([0xAA; 16]),
+        hex::encode([0xBB; 16]),
         common::event_id,
         common::T0,
     );
@@ -219,7 +233,13 @@ fn hundred_concurrent_global_events_reach_top_without_negatives() {
 
     // The post-storm probe reflects the full storm: level 4, every counter
     // a normalized 0..=1000 value (a negative counter would wrap and fail).
-    let final_vector = probe(&store, [0xAA; 16], [0xBB; 16], common::T0);
+    let final_vector = probe(
+        &store,
+        hex::encode([0xAA; 16]),
+        hex::encode([0xBB; 16]),
+        common::T0,
+    )
+    .vector;
     assert_eq!(
         store.last_global_level(),
         4,
@@ -264,8 +284,8 @@ fn no_expired_state_resurrection_after_ttl() {
             .observe(&common::observation(
                 RiskEventKind::PreIssue,
                 0,
-                [0xAA; 16],
-                [0xBB; 16],
+                hex::encode([0xAA; 16]),
+                hex::encode([0xBB; 16]),
                 None,
                 None,
                 common::event_id(i as u64),
@@ -284,8 +304,8 @@ fn no_expired_state_resurrection_after_ttl() {
         .observe(&common::observation(
             RiskEventKind::PreIssue,
             0,
-            [0xAA; 16],
-            [0xBB; 16],
+            hex::encode([0xAA; 16]),
+            hex::encode([0xBB; 16]),
             None,
             None,
             common::event_id(0xDEAD),
@@ -293,9 +313,9 @@ fn no_expired_state_resurrection_after_ttl() {
         ))
         .expect("observe");
     assert_eq!(
-        fresh.source_fast, 125,
+        fresh.vector.source_fast, 125,
         "expired state must not resurrect (got {}, expected the fresh single-event value 125)",
-        fresh.source_fast
+        fresh.vector.source_fast
     );
 }
 
@@ -313,8 +333,8 @@ fn global_level_enters_hysteresis_hold_after_storm() {
         RiskEventKind::PreIssue,
         2,
         32,
-        [0xAA; 16],
-        [0xBB; 16],
+        hex::encode([0xAA; 16]),
+        hex::encode([0xBB; 16]),
         common::event_id,
         common::T0,
     );
@@ -329,8 +349,8 @@ fn global_level_enters_hysteresis_hold_after_storm() {
         .observe(&common::observation(
             RiskEventKind::PreIssue,
             2,
-            [0xAA; 16],
-            [0xBB; 16],
+            hex::encode([0xAA; 16]),
+            hex::encode([0xBB; 16]),
             None,
             None,
             common::event_id(33),
@@ -342,7 +362,6 @@ fn global_level_enters_hysteresis_hold_after_storm() {
         2,
         "level must drop to the target after the hysteresis window"
     );
-    assert_eq!(store.last_cooldown_until_ms(), 0);
     assert_eq!(store.last_cooldown_until_ms(), 0);
 }
 
@@ -356,31 +375,41 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
     let duplicate_id = common::event_id(77);
 
     // 100 threads race with the SAME event_id: the Lua's GET-then-SET dedupe
-    // is atomic, so exactly ONE call may increment; the rest must surface as
-    // DuplicateEvent (no-ops that leave the state untouched).
-    let mut ok = 0;
-    let mut dup = 0;
+    // is atomic, so exactly ONE call may increment; the rest are duplicate
+    // no-ops that return the CURRENT signals with is_duplicate=true.
+    let mut winners = 0;
+    let mut dups = 0;
     for _ in 0..HUNDRED {
-        match storm_store.observe(&common::observation(
-            RiskEventKind::PreIssue,
-            0,
-            [0xAA; 16],
-            [0xBB; 16],
-            None,
-            None,
-            duplicate_id,
-            common::T0,
-        )) {
-            Ok(vector) => {
-                ok += 1;
-                assert_eq!(vector.source_fast, 125, "winner sees a single increment");
-            }
-            Err(RiskStoreError::DuplicateEvent) => dup += 1,
-            Err(other) => panic!("unexpected error: {other}"),
+        let observed = storm_store
+            .observe(&common::observation(
+                RiskEventKind::PreIssue,
+                0,
+                hex::encode([0xAA; 16]),
+                hex::encode([0xBB; 16]),
+                None,
+                None,
+                duplicate_id.clone(),
+                common::T0,
+            ))
+            .expect("duplicates never error");
+        if observed.is_duplicate {
+            dups += 1;
+        } else {
+            winners += 1;
+            assert_eq!(
+                observed.vector.source_fast, 125,
+                "winner sees a single increment"
+            );
         }
+        // Every caller sees the CURRENT signals (125): duplicates are
+        // no-ops, not errors.
+        assert_eq!(observed.vector.source_fast, 125);
     }
-    assert_eq!(ok, 1, "exactly one increment for 100 identical event_ids");
-    assert_eq!(dup, HUNDRED - 1);
+    assert_eq!(
+        winners, 1,
+        "exactly one increment for 100 identical event_ids"
+    );
+    assert_eq!(dups, HUNDRED - 1);
 
     // Control: a fresh namespace with a single event, and a distinct event
     // on the storm namespace. Both prove the storm state moved by exactly
@@ -390,22 +419,22 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
         .observe(&common::observation(
             RiskEventKind::PreIssue,
             0,
-            [0xAA; 16],
-            [0xBB; 16],
+            hex::encode([0xAA; 16]),
+            hex::encode([0xBB; 16]),
             None,
             None,
             common::event_id(78),
             common::T0,
         ))
         .expect("observe");
-    assert_eq!(control_vector.source_fast, 125);
+    assert_eq!(control_vector.vector.source_fast, 125);
 
     let after = storm_store
         .observe(&common::observation(
             RiskEventKind::PreIssue,
             0,
-            [0xAA; 16],
-            [0xBB; 16],
+            hex::encode([0xAA; 16]),
+            hex::encode([0xBB; 16]),
             None,
             None,
             common::event_id(78),
@@ -413,8 +442,8 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
         ))
         .expect("observe");
     assert_eq!(
-        after.source_fast,
-        2 * control_vector.source_fast,
+        after.vector.source_fast,
+        2 * control_vector.vector.source_fast,
         "the storm must have moved the state by exactly one unit"
     );
 }

@@ -13,6 +13,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskNoRedisTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskTestKernel;
+use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -28,11 +29,15 @@ use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Storage\ArrayStorage;
+use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Processor;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpKernel\KernelInterface;
+use Symfony\Component\Validator\ConstraintValidatorFactory;
+use Symfony\Component\Validator\Validation;
 
 /**
  * Adaptive risk engine integration: full-stack (engine + gateway + resolver +
@@ -57,7 +62,7 @@ final class RiskIntegrationTest extends TestCase
         $classifier = new CidrNetworkClassifier([]);
         $scorer = new RiskScorer();
         $policy = RiskPolicy::fromConfig([
-            'version' => 1,
+            'version' => RiskPolicy::CONTRACT_VERSION,
             'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
@@ -65,7 +70,7 @@ final class RiskIntegrationTest extends TestCase
             ],
         ]);
         $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, $scorer, $policy, $keys);
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $gateway = new RiskGateway($engine, $classifier, $resolver, $scopeIds);
         $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
 
@@ -158,10 +163,12 @@ final class RiskIntegrationTest extends TestCase
         $response = $stack['controller']->challenge($this->challengeRequest());
         self::assertSame(200, $response->getStatusCode(), 'a risk backend outage must never break issuance (degraded allow)');
 
-        // Two failed observations (pre-issue assessment + post-issue signal),
-        // both degraded.
+        // The PRE-ISSUE assessment degraded (store failure -> degraded
+        // allow); the post-issue feedback (record_feedback) degrades
+        // SILENTLY (zero signals, no decision, no metric) — one degraded
+        // decision per request.
         $metrics = $stack['gateway']->metricsSnapshot();
-        self::assertSame(2, $metrics['counters']['degraded:store'] ?? 0);
+        self::assertSame(1, $metrics['counters']['degraded:store'] ?? 0);
     }
 
     public function testInvalidClientIpSkipsRiskWithoutErroring(): void
@@ -224,15 +231,28 @@ final class RiskIntegrationTest extends TestCase
 
     public function testProfileResolverEscalatesWithinAlgorithmFamily(): void
     {
-        // SHA app, floor 8: sha actions escalate, argon actions approximate
-        // with the strongest SHA profile, step_up = sha20.
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 8);
+        // SHA app, floor 8: sha actions escalate; argon actions map to the
+        // AUDITED Argon2id profiles (16/32/64 MiB, t=3, p=1, target bits 1 —
+        // memory is the economic control) regardless of the app algorithm:
+        // the core's issueWithProfile accepts a profile directly.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         self::assertNull($resolver->profileFor(RiskAction::Allow));
         self::assertSame(16, $resolver->profileFor(RiskAction::Sha16)?->targetBits);
         self::assertSame(18, $resolver->profileFor(RiskAction::Sha18)?->targetBits);
         self::assertSame(20, $resolver->profileFor(RiskAction::Sha20)?->targetBits);
-        self::assertSame(20, $resolver->profileFor(RiskAction::Argon32)?->targetBits, 'argon action on a sha app = sha20');
-        self::assertSame(PoWAlgorithm::Sha256, $resolver->profileFor(RiskAction::Argon32)?->algorithm);
+        $argon16 = $resolver->profileFor(RiskAction::Argon16);
+        self::assertSame(PoWAlgorithm::Argon2id, $argon16?->algorithm);
+        self::assertSame(1, $argon16?->targetBits, 'argon profiles must carry target bits 1, not the app argon2_difficulty_bits');
+        self::assertSame(16384, $argon16?->mKib);
+        self::assertSame(3, $argon16?->t);
+        self::assertSame(1, $argon16?->p);
+        $argon32 = $resolver->profileFor(RiskAction::Argon32);
+        self::assertSame(PoWAlgorithm::Argon2id, $argon32?->algorithm);
+        self::assertSame(32768, $argon32?->mKib);
+        self::assertSame(1, $argon32?->targetBits);
+        $argon64 = $resolver->profileFor(RiskAction::Argon64);
+        self::assertSame(65536, $argon64?->mKib);
+        self::assertSame(1, $argon64?->targetBits);
         // StepUp is application-defined and handled by the controller
         // (403 STEP_UP_REQUIRED) — it must NEVER map to a challenge profile.
         try {
@@ -242,20 +262,17 @@ final class RiskIntegrationTest extends TestCase
             self::assertTrue(true);
         }
 
-        // Escalation-only: a floor already at 20 never weakens or repeats.
-        $maxed = new RiskProfileResolver(PoWAlgorithm::Sha256, 20, 8);
+        // Escalation-only: a floor already at 20 never weakens or repeats,
+        // but an argon action still maps to a real argon profile (a sha-only
+        // deployment can still issue argon work via the risk ladder).
+        $maxed = new RiskProfileResolver(PoWAlgorithm::Sha256, 20);
         self::assertNull($maxed->profileFor(RiskAction::Sha20));
-        self::assertNull($maxed->profileFor(RiskAction::Argon64));
-        // StepUp always throws (controller-handled), even at the max floor.
+        self::assertSame(PoWAlgorithm::Argon2id, $maxed->profileFor(RiskAction::Argon64)?->algorithm);
 
-        // Argon app: argon actions map to real memory-hard profiles carrying
-        // the app's argon2 difficulty; sha actions are no-ops (argon is
-        // already at least as strong).
-        $argon = new RiskProfileResolver(PoWAlgorithm::Argon2id, 20, 6);
-        $argon32 = $argon->profileFor(RiskAction::Argon32);
-        self::assertSame(PoWAlgorithm::Argon2id, $argon32?->algorithm);
-        self::assertSame(32768, $argon32?->mKib);
-        self::assertSame(6, $argon32?->targetBits);
+        // Argon app: argon actions map to the audited profiles; sha actions
+        // are no-ops (argon is already at least as strong).
+        $argon = new RiskProfileResolver(PoWAlgorithm::Argon2id, 20);
+        self::assertSame(1, $argon->profileFor(RiskAction::Argon32)?->targetBits, 'the app argon2 difficulty must NOT leak into risk profiles');
         self::assertNull($argon->profileFor(RiskAction::Sha16));
         self::assertSame(65536, $argon->profileFor(RiskAction::Argon64)?->mKib);
         // StepUp always throws (controller-handled).
@@ -305,7 +322,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(900, $risk['source_epoch_secs']);
         self::assertSame(1800, $risk['state_ttl_secs']);
         self::assertSame(60, $risk['dedupe_ttl_secs']);
-        self::assertSame(1, $risk['policy_version']);
+        self::assertSame(RiskPolicy::CONTRACT_VERSION, $risk['policy_version']);
         self::assertSame(8000, $risk['saturations']['src_fast']);
         self::assertSame(70000, $risk['saturations']['global']);
         self::assertSame(190, $risk['weights']['source_fast']);
@@ -323,12 +340,26 @@ final class RiskIntegrationTest extends TestCase
         self::assertTrue($risk['global_pressure']['enabled']);
         self::assertTrue($risk['argon_capacity']['enabled']);
         self::assertSame(100, $risk['hard_limits']['source_per_second']);
+        self::assertSame(10000, $risk['hard_limits']['global_per_second']);
         self::assertFalse($risk['calibration']['enabled']);
         self::assertNull($risk['network_classifier_file']);
         self::assertSame('__Host-kiwi-session', $risk['continuity_cookie']['name']);
         self::assertSame(1800, $risk['continuity_cookie']['ttl_secs']);
         self::assertNull($risk['continuity_cookie']['secure']);
         self::assertNull($risk['network_classifier_file']);
+        self::assertSame('reject', $risk['unknown_scope']['mode']);
+        self::assertSame('strict', $risk['continuity_cookie']['samesite'], 'samesite is defined exactly once, default strict');
+        self::assertTrue($risk['continuity_cookie']['http_only']);
+    }
+
+    public function testUnknownScopeModeMinimumIsAccepted(): void
+    {
+        $processed = (new Processor())->processConfiguration(new Configuration(), [[
+            'secret_key' => str_repeat('a', 32),
+            'risk' => ['unknown_scope' => ['mode' => 'minimum']],
+        ]]);
+
+        self::assertSame('minimum', $processed['risk']['unknown_scope']['mode']);
     }
 
     public function testRiskEnabledKernelBootsIssuesAndDegrades(): void
@@ -357,7 +388,7 @@ final class RiskIntegrationTest extends TestCase
 
         $gateway = $container->get(RiskGateway::class);
         $metrics = $gateway->metricsSnapshot();
-        self::assertSame(2, $metrics['counters']['degraded:store'] ?? 0, 'the fake backend must trigger the degraded path');
+        self::assertSame(1, $metrics['counters']['degraded:store'] ?? 0, 'the fake backend must trigger the degraded path (the feedback path degrades silently)');
         $kernel->shutdown();
     }
 
@@ -387,8 +418,20 @@ final class RiskIntegrationTest extends TestCase
 
         // Real RedisRiskStateStore + full bundle stack: an idle source stays
         // on the allow path across repeated issuances, and every request is
-        // actually observed in Redis (source/debt counters).
-        $store = new RedisRiskStateStore($client, 'ci-risk-bundle', 900, 900, 1800, 86400, 60, 60000);
+        // actually observed in Redis (source/debt counters). Named arguments
+        // after stateTtlSecs so the sessionTtlSecs position in the package
+        // constructor cannot drift from this construction.
+        $store = new RedisRiskStateStore(
+            $client,
+            'ci-risk-bundle',
+            900,
+            900,
+            1800,
+            principalTtlSecs: 86400,
+            sessionTtlSecs: 1800,
+            dedupeTtlSecs: 60,
+            hysteresisMs: 60000,
+        );
         $stack = $this->stack($store);
         $controller = $stack['controller'];
 
@@ -428,5 +471,180 @@ final class RiskIntegrationTest extends TestCase
             $client->del($key);
         }
         $client->disconnect();
+    }
+
+    public function testUnknownScopeRejectModeIssuesDefaultProfileWithoutRisk(): void
+    {
+        // unknown_scope.mode=reject (the default): the gateway throws
+        // UnknownScopeException, the controller catches it and issues the
+        // DEFAULT challenge profile — the adaptive engine is never touched.
+        $stack = $this->stack(new FakeRiskStateStore());
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
+
+        $response = $stack['controller']->challenge($request);
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode((string) $response->getContent(), true);
+        self::assertSame(8, $data['targetBits'], 'an unknown scope in reject mode must issue the default profile');
+        self::assertSame([], $stack['store']->observations, 'the adaptive engine must never be consulted for an unknown scope in reject mode');
+    }
+
+    public function testUnknownScopeMinimumModeUsesSyntheticPolicy(): void
+    {
+        // unknown_scope.mode=minimum: unknown scopes are assessed under the
+        // synthetic policy (base_risk 100, minimum sha20, degraded sha20)
+        // via a reserved scope id.
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+                // The synthetic unknown-scope entry the extension reserves.
+                42 => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, new RiskScorer(), $policy, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $gateway = new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42);
+        $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
+
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
+        $response = $controller->challenge($request);
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode((string) $response->getContent(), true);
+        self::assertSame(20, $data['targetBits'], 'the synthetic minimum sha20 must escalate the issued challenge');
+        self::assertSame([42, 42], array_map(static fn ($o): int => $o->scope, $store->observations ?? []), 'unknown scopes must be observed under the synthetic scope id');
+    }
+
+    /**
+     * The gateway's decision ids must flow into the post-issue feedback:
+     * preIssue returns a decisionId, challengeIssued passes it on.
+     */
+    public function testDecisionIdFlowsFromAssessToFeedback(): void
+    {
+        $stack = $this->stack(new FakeRiskStateStore());
+        $response = $stack['controller']->challenge($this->challengeRequest());
+        self::assertSame(200, $response->getStatusCode());
+        // The gateway ran assess (PreIssue) then record_feedback
+        // (ChallengeIssued) — both against the fake store.
+        self::assertCount(2, $stack['store']->observations);
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ChallengeIssued], $events);
+    }
+
+    public function testPostSolveCheckDenyRejectsValidSolve(): void
+    {
+        // post_solve_check scope: a VALID solve whose SolveSuccess
+        // re-assessment denies must fail the validation with the distinct
+        // POST_SOLVE_REJECTED_ERROR, and the outcome must be recorded as
+        // ConfirmedAbuse with the post-solve decision id.
+        $store = new FakeRiskStateStore(SignalVector::fromArray(['replay' => 700]));
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $verifier = new Verifier($storage);
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, new RiskScorer(), $policy, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $gateway = new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, ['login' => true]);
+
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $token = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engineValidator->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engineValidator->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode());
+
+        // SolveSuccess assessment + ConfirmedAbuse feedback (with the
+        // post-solve decision id) — and NO plain SolveSuccess signal (the
+        // post-solve path replaces it for post_solve_check scopes).
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::SolveSuccess, RiskEventKind::ConfirmedAbuse], $events);
+    }
+
+    public function testPostSolveCheckPassRecordsConfirmedLegitimate(): void
+    {
+        // A VALID solve on a post_solve_check scope whose re-assessment
+        // allows must pass validation and record ConfirmedLegitimate.
+        $store = new FakeRiskStateStore();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $verifier = new Verifier($storage);
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], null, null, ['login' => true]);
+
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $token = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engineValidator->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engineValidator->validate($dto);
+        self::assertCount(0, $violations);
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::SolveSuccess, RiskEventKind::ConfirmedLegitimate], $events);
+    }
+
+    /**
+     * Solve a sha256 challenge in pure PHP (fast 8-bit difficulty).
+     */
+    private function solve(string $prefix, string $salt, int $targetBits, string $nonce): string
+    {
+        $saltBytes = base64_decode($salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $targetBits);
+        --$counter;
+
+        return \KiwiCaptcha\SolutionToken::create($nonce, $counter, 5000, [])->encode();
     }
 }

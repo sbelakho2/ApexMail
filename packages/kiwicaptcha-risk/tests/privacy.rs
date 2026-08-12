@@ -39,44 +39,71 @@ fn no_raw_pii_anywhere_in_redis_state() {
     // Issue real observations derived from the raw values under test.
     let keys = RiskKeys::from_master(&[0x42; 32]);
     let ip: std::net::IpAddr = IP.parse().unwrap();
-    let epoch = (common::T0 / 1000) / 900;
-    let source_id = pseudonym(&keys.source, b"src", epoch, &canonical_ip(ip));
-    let subnet_id = pseudonym(&keys.subnet, b"net", epoch, &masked_network(ip, 24, 56));
+    let epoch = ((common::T0 / 1000) / 900) as i64;
+    // Epoch-correct pseudonyms: each ±1 key uses ITS OWN epoch's id.
+    let source_id = hex::encode(pseudonym(&keys.source, b"src", epoch, &canonical_ip(ip)));
+    let source_id_prev = hex::encode(pseudonym(
+        &keys.source,
+        b"src",
+        epoch - 1,
+        &canonical_ip(ip),
+    ));
+    let source_id_next = hex::encode(pseudonym(
+        &keys.source,
+        b"src",
+        epoch + 1,
+        &canonical_ip(ip),
+    ));
+    let subnet_id = hex::encode(pseudonym(
+        &keys.subnet,
+        b"net",
+        epoch,
+        &masked_network(ip, 24, 56),
+    ));
+    let subnet_id_prev = hex::encode(pseudonym(
+        &keys.subnet,
+        b"net",
+        epoch - 1,
+        &masked_network(ip, 24, 56),
+    ));
+    let subnet_id_next = hex::encode(pseudonym(
+        &keys.subnet,
+        b"net",
+        epoch + 1,
+        &masked_network(ip, 24, 56),
+    ));
     let principal_id = pseudonym(&keys.principal, b"prin", 0, PRINCIPAL);
     let session_ua = pseudonym(&keys.session, b"sess", 0, UA);
     let session_email = pseudonym(&keys.session, b"sess", 0, EMAIL);
 
+    let observation = |event: RiskEventKind, session: Option<[u8; 16]>, event_id: u64| {
+        kiwicaptcha_risk::event::RiskObservation {
+            event,
+            scope: 1,
+            source_epoch: epoch,
+            source_id_prev: source_id_prev.clone(),
+            source_id: source_id.clone(),
+            source_id_next: source_id_next.clone(),
+            subnet_epoch: epoch,
+            subnet_id_prev: subnet_id_prev.clone(),
+            subnet_id: subnet_id.clone(),
+            subnet_id_next: subnet_id_next.clone(),
+            session_id: session,
+            principal_id: Some(principal_id),
+            event_id: common::event_id(event_id),
+            network_risk: 0,
+            now_ms: common::T0,
+        }
+    };
+
     let observations = [
-        common::observation(
-            RiskEventKind::PreIssue,
-            1,
-            source_id,
-            subnet_id,
-            Some(session_ua),
-            Some(principal_id),
-            common::event_id(1),
-            common::T0,
-        ),
-        common::observation(
+        observation(RiskEventKind::PreIssue, Some(session_ua), 1),
+        observation(
             RiskEventKind::ProtectedActionFailure,
-            1,
-            source_id,
-            subnet_id,
             Some(session_email),
-            Some(principal_id),
-            common::event_id(2),
-            common::T0,
+            2,
         ),
-        common::observation(
-            RiskEventKind::ConfirmedAbuse,
-            1,
-            source_id,
-            subnet_id,
-            Some(session_ua),
-            Some(principal_id),
-            common::event_id(3),
-            common::T0,
-        ),
+        observation(RiskEventKind::ConfirmedAbuse, Some(session_ua), 3),
     ];
     for o in &observations {
         store.observe(o).expect("observation applies");
@@ -88,19 +115,44 @@ fn no_raw_pii_anywhere_in_redis_state() {
     let scanned: Vec<String> = conn.scan_match(pattern).expect("scan").collect();
     assert!(!scanned.is_empty(), "scan must find the issued keys");
 
-    let source_hex = hex::encode(source_id);
+    // The CURRENT source pseudonym is what got stored (the current-epoch
+    // key). The ±1 boundary keys are OBSERVER-ONLY in risk.lua (HMGET,
+    // never saved), so the epoch-scoped prev/next pseudonyms never even
+    // enter the key space at the boundary.
     assert!(
-        scanned.iter().any(|k| k.contains(&source_hex)),
+        scanned
+            .iter()
+            .any(|k| k.ends_with(&format!(":risk:src:{epoch}:{source_id}"))),
         "source pseudonym must be what got stored"
     );
-    // Session/principal keys are OBSERVER-ONLY in risk.lua (HMGET, never
-    // saved), so their pseudonyms never even enter the key space — the raw
-    // principal id exists nowhere, in any form.
-    let principal_hex = hex::encode(principal_id);
     assert!(
-        !scanned.iter().any(|k| k.contains(&principal_hex)),
-        "principal state is observer-only: its pseudonym must not be persisted"
+        !scanned.iter().any(|k| k.contains(&source_id_prev)),
+        "epoch-1 pseudonym must not be persisted (observer-only boundary key)"
     );
+    assert!(
+        !scanned.iter().any(|k| k.contains(&source_id_next)),
+        "epoch+1 pseudonym must not be persisted (observer-only boundary key)"
+    );
+    // Session/principal state IS persisted when the observation carries
+    // them (has_session/has_principal), but ONLY under their HMAC
+    // pseudonyms — the key shape is `:risk:principal:<32-hex>` and the raw
+    // principal id exists nowhere, in any form (asserted by the blob scan
+    // below).
+    let principal_hex = hex::encode(principal_id);
+    let principal_keys: Vec<&String> = scanned
+        .iter()
+        .filter(|k| k.contains(":risk:principal:"))
+        .collect();
+    assert!(
+        !principal_keys.is_empty(),
+        "principal state must be persisted under its pseudonym"
+    );
+    for key in principal_keys {
+        assert!(
+            key.ends_with(&format!(":risk:principal:{principal_hex}")),
+            "principal key must be the pure pseudonym, got {key}"
+        );
+    }
 
     let mut blob = String::new();
     let mut read_conn = client().get_connection().expect("connection");

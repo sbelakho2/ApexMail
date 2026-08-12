@@ -1,339 +1,423 @@
 //! Outcome-feedback calibration: records whether scored requests were
 //! legitimate (post-hoc, e.g. from support flags) and produces a bounded
 //! bias adjustment per scope, added to the raw risk score.
+//!
+//! The store is Redis-backed and BOUNDED (identical design to PHP):
+//!
+//! - Hourly aggregate buckets `{kiwi:<ns>}:cal:<scope>:<hour>` (hour =
+//!   `now_ms / 3600000`, integer) — a hash of
+//!   `b<band>a<action>:legit` / `b<band>a<action>:abuse` counters,
+//!   `HINCRBY` + `EXPIRE 48h`. At most 24 keys per scope are ever read.
+//! - Decision receipts `{kiwi:<ns>}:cal:receipt:<decision_id>` — HSET
+//!   scope/band/action, EXPIRE 300 s, consumed with GETDEL.
+//!
+//! Bias (byte-identical integer math with PHP, ALL i64 truncating division):
+//!
+//! ```text
+//! total = legit + abuse            (summed over the last 24 hourly buckets)
+//! bias  = 0                        when total == 0
+//! bias  = clamp(((abuse - legit) * 1000 / total) * 2 / 10, -200, 200)
+//! ```
+//!
+//! The engine applies `clamp(base + bias, 0, 1000)` BEFORE band mapping.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use redis::Commands;
+use thiserror::Error;
 
 use crate::action::RiskAction;
 
-/// One calibration sample.
+/// Calibration backend error; the engine treats any failure as a silent
+/// no-op (never breaks issuance).
+#[derive(Debug, Error)]
+pub enum CalibrationError {
+    #[error("calibration backend unavailable: {0}")]
+    Backend(String),
+}
+
+/// The receipt stored for one decision, consumed when the outcome is
+/// confirmed (GETDEL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CalibrationEntry {
-    pub scope: u16,
+pub struct CalibrationReceipt {
+    pub scope: u32,
     pub band: u8,
     pub action: RiskAction,
-    pub legitimate: bool,
-    /// Epoch milliseconds.
-    pub ts_ms: u64,
 }
 
 /// Outcome-feedback calibration store.
-pub trait CalibrationStore {
-    fn record(&self, entry: CalibrationEntry);
+pub trait CalibrationStore: Send + Sync {
+    /// Records one confirmed outcome into the current hourly bucket.
+    fn record(
+        &self,
+        scope: u32,
+        band: u8,
+        action: RiskAction,
+        legitimate: bool,
+    ) -> Result<(), CalibrationError>;
+
     /// Bias adjustment for a scope at `now_ms` (epoch milliseconds).
-    fn bias_for_scope(&self, scope: u16, now_ms: u64) -> i16;
+    fn bias_for_scope(&self, scope: u32, now_ms: i64) -> i32;
+
+    /// Registers the calibration receipt of one issued decision.
+    fn record_receipt(
+        &self,
+        decision_id: &str,
+        scope: u32,
+        band: u8,
+        action: RiskAction,
+    ) -> Result<(), CalibrationError>;
+
+    /// Consumes (GETDEL) the receipt for a decision_id, if it is still
+    /// alive. `None` when absent or expired.
+    fn consume_receipt(&self, decision_id: &str) -> Option<CalibrationReceipt>;
 }
 
-/// Aggregate calibrator implementing the bounded adjustment rules:
-///
-/// - retention: 24 h (samples are pruned on every record/bias read)
-/// - minimum sample gate: 1000 per scope before any bias is computed
-/// - bias range: -100..+150
-/// - max change: 10 points per elapsed minute of application
-/// - hysteresis: a new direction must hold for 10 minutes before it applies
-///
-/// Raw bias is derived from the legitimate rate:
-/// `raw = round((0.5 - rate) * 300)`, clamped to the bias range (rate 0 ->
-/// +150, rate 1 -> -100, rate 0.5 -> 0).
-pub struct AggregateCalibrator {
-    state: Mutex<CalibrationState>,
+/// Maps a risk score to its band (`score / 100`) and records the outcome
+/// with the action that was taken (PHP `CalibrationRecorder` equivalent).
+pub struct CalibrationRecorder<'a> {
+    store: &'a dyn CalibrationStore,
 }
 
-impl Default for AggregateCalibrator {
-    fn default() -> AggregateCalibrator {
-        AggregateCalibrator::new()
+impl<'a> CalibrationRecorder<'a> {
+    pub fn new(store: &'a dyn CalibrationStore) -> CalibrationRecorder<'a> {
+        CalibrationRecorder { store }
+    }
+
+    pub fn record(
+        &self,
+        scope: u32,
+        score: u16,
+        action: RiskAction,
+        legitimate: bool,
+    ) -> Result<(), CalibrationError> {
+        let band = (score.clamp(0, 1000) / 100) as u8;
+        self.store.record(scope, band, action, legitimate)
     }
 }
 
-impl AggregateCalibrator {
-    pub const RETENTION_MS: u64 = 86_400_000;
-    pub const MIN_SAMPLES: usize = 1000;
-    pub const BIAS_MIN: i16 = -100;
-    pub const BIAS_MAX: i16 = 150;
-    pub const MAX_CHANGE_PER_MIN: i16 = 10;
-    pub const HYSTERESIS_MS: u64 = 600_000;
+/// Redis-backed bounded aggregator implementing the calibration contract.
+pub struct RedisCalibrationStore {
+    client: redis::Client,
+    namespace: String,
+    conn: Mutex<Option<redis::Connection>>,
+}
 
-    pub fn new() -> AggregateCalibrator {
-        AggregateCalibrator {
-            state: Mutex::new(CalibrationState::default()),
+impl RedisCalibrationStore {
+    /// Bucket retention (48 h; 24 buckets per scope are ever read).
+    pub const BUCKET_EXPIRE_S: u64 = 48 * 3600;
+    /// Receipt lifetime.
+    pub const RECEIPT_EXPIRE_S: u64 = 300;
+    /// Bias clamp range.
+    pub const BIAS_MIN: i32 = -200;
+    pub const BIAS_MAX: i32 = 200;
+    /// Hourly buckets considered by `bias_for_scope` (current + 23 back).
+    pub const BUCKET_WINDOW_HOURS: i64 = 24;
+
+    /// Builds a store on a fresh connection (lazy).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the namespace is empty or contains `{`/`}`.
+    pub fn new(client: redis::Client, namespace: &str) -> RedisCalibrationStore {
+        assert!(
+            !namespace.is_empty() && !namespace.contains(['{', '}']),
+            "Calibration namespace must be non-empty and free of braces"
+        );
+        RedisCalibrationStore {
+            client,
+            namespace: namespace.to_string(),
+            conn: Mutex::new(None),
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Sample {
-    ts_ms: u64,
-    legitimate: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Applied {
-    ts_ms: u64,
-    bias: i16,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Direction {
-    ts_ms: u64,
-    dir: std::cmp::Ordering,
-}
-
-#[derive(Default)]
-struct CalibrationState {
-    samples: HashMap<u16, Vec<Sample>>,
-    applied: HashMap<u16, Applied>,
-    direction: HashMap<u16, Direction>,
-}
-
-impl CalibrationStore for AggregateCalibrator {
-    fn record(&self, entry: CalibrationEntry) {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        prune(&mut state, entry.ts_ms);
-        state.samples.entry(entry.scope).or_default().push(Sample {
-            ts_ms: entry.ts_ms,
-            legitimate: entry.legitimate,
-        });
+    /// The deployment namespace inside the `{kiwi:<ns>}` hash tag.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
     }
 
-    fn bias_for_scope(&self, scope: u16, now_ms: u64) -> i16 {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        prune(&mut state, now_ms);
-        let samples = match state.samples.get(&scope) {
-            Some(s) if s.len() >= Self::MIN_SAMPLES => s.clone(),
-            _ => return 0,
+    /// Records into an EXPLICIT hourly bucket (`now_ms` injected — used by
+    /// tests; `record` uses the current clock).
+    pub fn record_at(
+        &self,
+        scope: u32,
+        band: u8,
+        action: RiskAction,
+        legitimate: bool,
+        now_ms: i64,
+    ) -> Result<(), CalibrationError> {
+        let hour = now_ms / 3_600_000;
+        let key = self.bucket_key(scope, hour);
+        let field = format!(
+            "b{band}a{}:{}",
+            action.as_str(),
+            if legitimate { "legit" } else { "abuse" }
+        );
+        let mut guard = self.connection()?;
+        let conn = guard.as_mut().ok_or_else(|| {
+            CalibrationError::Backend("calibration connection vanished".to_string())
+        })?;
+        conn.hincr::<_, _, _, ()>(&key, field, 1).map_err(backend)?;
+        conn.expire::<_, ()>(&key, Self::BUCKET_EXPIRE_S as i64)
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn bucket_key(&self, scope: u32, hour: i64) -> String {
+        format!("{{kiwi:{}}}:cal:{scope}:{hour}", self.namespace)
+    }
+
+    fn receipt_key(&self, decision_id: &str) -> String {
+        format!("{{kiwi:{}}}:cal:receipt:{decision_id}", self.namespace)
+    }
+
+    /// Lazy single connection.
+    fn connection(&self) -> Result<MutexGuard<'_, Option<redis::Connection>>, CalibrationError> {
+        let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_none() {
+            let conn = self
+                .client
+                .get_connection()
+                .map_err(|e| CalibrationError::Backend(e.to_string()))?;
+            *guard = Some(conn);
+        }
+        Ok(guard)
+    }
+}
+
+fn backend(e: redis::RedisError) -> CalibrationError {
+    CalibrationError::Backend(e.to_string())
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+impl CalibrationStore for RedisCalibrationStore {
+    fn record(
+        &self,
+        scope: u32,
+        band: u8,
+        action: RiskAction,
+        legitimate: bool,
+    ) -> Result<(), CalibrationError> {
+        self.record_at(scope, band, action, legitimate, now_ms())
+    }
+
+    fn bias_for_scope(&self, scope: u32, now_ms: i64) -> i32 {
+        let hour = now_ms / 3_600_000;
+        let mut legit_total: i64 = 0;
+        let mut abuse_total: i64 = 0;
+        let mut guard = match self.connection() {
+            Ok(guard) => guard,
+            Err(_) => return 0, // fail-open: never break issuance
         };
-
-        let legit = samples.iter().filter(|s| s.legitimate).count();
-        let rate = legit as f64 / samples.len() as f64;
-        let raw = (((0.5 - rate) * 300.0).round() as i64)
-            .clamp(Self::BIAS_MIN as i64, Self::BIAS_MAX as i64) as i16;
-
-        let prev = state.applied.get(&scope).map_or(0, |a| a.bias);
-        let dir = raw.cmp(&prev);
-
-        if dir == std::cmp::Ordering::Equal {
-            return prev;
-        }
-
-        let current = state.direction.get(&scope).copied();
-        match current {
-            None => {
-                state
-                    .direction
-                    .insert(scope, Direction { ts_ms: now_ms, dir });
-                return prev;
-            }
-            Some(cur) if cur.dir != dir => {
-                state
-                    .direction
-                    .insert(scope, Direction { ts_ms: now_ms, dir });
-                return prev;
-            }
-            Some(cur) => {
-                if now_ms.saturating_sub(cur.ts_ms) < Self::HYSTERESIS_MS {
-                    return prev;
+        let conn = guard.as_mut().expect("connection set by connection()");
+        for h in (hour - (Self::BUCKET_WINDOW_HOURS - 1))..=hour {
+            let key = self.bucket_key(scope, h);
+            let fields: HashMap<String, i64> = match conn.hgetall::<_, HashMap<String, i64>>(&key) {
+                Ok(fields) => fields,
+                Err(_) => return 0,
+            };
+            for (field, value) in fields {
+                if field.ends_with(":legit") {
+                    legit_total += value;
+                } else if field.ends_with(":abuse") {
+                    abuse_total += value;
                 }
             }
         }
-
-        let last_applied_ts = state
-            .applied
-            .get(&scope)
-            .map_or(now_ms.saturating_sub(Self::HYSTERESIS_MS), |a| a.ts_ms);
-        let elapsed_min = ((now_ms.saturating_sub(last_applied_ts) as f64) / 60_000.0).max(1.0);
-        let allowed = (Self::MAX_CHANGE_PER_MIN as f64 * elapsed_min) as i64;
-        let delta = ((raw as i64 - prev as i64).clamp(-allowed, allowed)) as i16;
-        let next = prev
-            .saturating_add(delta)
-            .clamp(Self::BIAS_MIN, Self::BIAS_MAX);
-
-        state.applied.insert(
-            scope,
-            Applied {
-                ts_ms: now_ms,
-                bias: next,
-            },
-        );
-        next
+        let total = legit_total + abuse_total;
+        if total == 0 {
+            return 0;
+        }
+        let bias = ((abuse_total - legit_total) * 1000 / total) * 2 / 10;
+        bias.clamp(Self::BIAS_MIN as i64, Self::BIAS_MAX as i64) as i32
     }
-}
 
-fn prune(state: &mut CalibrationState, now_ms: u64) {
-    let cutoff = now_ms.saturating_sub(AggregateCalibrator::RETENTION_MS);
-    state.samples.retain(|_scope, list| {
-        list.retain(|s| s.ts_ms > cutoff);
-        !list.is_empty()
-    });
+    fn record_receipt(
+        &self,
+        decision_id: &str,
+        scope: u32,
+        band: u8,
+        action: RiskAction,
+    ) -> Result<(), CalibrationError> {
+        let key = self.receipt_key(decision_id);
+        let mut guard = self.connection()?;
+        let conn = guard.as_mut().ok_or_else(|| {
+            CalibrationError::Backend("calibration connection vanished".to_string())
+        })?;
+        // Wire format shared with PHP: a JSON string
+        // {"scope":..,"band":..,"action":".."} with EXPIRE 300 s, consumed
+        // once, atomically, via GETDEL (GETDEL is STRING-only in Redis).
+        let json = serde_json::json!({
+            "scope": scope,
+            "band": band,
+            "action": action.as_str(),
+        })
+        .to_string();
+        redis::cmd("SET")
+            .arg(&key)
+            .arg(&json)
+            .arg("EX")
+            .arg(Self::RECEIPT_EXPIRE_S)
+            .query::<()>(conn)
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn consume_receipt(&self, decision_id: &str) -> Option<CalibrationReceipt> {
+        let key = self.receipt_key(decision_id);
+        let mut guard = self.connection().ok()?;
+        let conn = guard.as_mut()?;
+        let json: Option<String> = redis::cmd("GETDEL").arg(&key).query(conn).ok()?;
+        let json = json?;
+        let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+        Some(CalibrationReceipt {
+            scope: value.get("scope")?.as_u64()?.try_into().ok()?,
+            band: value.get("band")?.as_u64()?.try_into().ok()?,
+            action: value.get("action")?.as_str()?.parse().ok()?,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
-    fn entry(scope: u16, ts_ms: u64, legitimate: bool) -> CalibrationEntry {
-        CalibrationEntry {
-            scope,
-            band: 0,
-            action: RiskAction::Allow,
-            legitimate,
-            ts_ms,
+    const T0: i64 = 1_700_000_000_000;
+
+    fn redis_url() -> Option<String> {
+        match std::env::var("RISK_REDIS_URL") {
+            Ok(url) if !url.is_empty() => Some(if let Some(rest) = url.strip_prefix("tcp://") {
+                format!("redis://{rest}")
+            } else {
+                url
+            }),
+            _ => None,
         }
     }
 
-    fn fill(cal: &AggregateCalibrator, scope: u16, ts_ms: u64, legit: bool, n: usize) {
-        for i in 0..n {
-            cal.record(entry(scope, ts_ms + i as u64, legit));
+    fn client() -> redis::Client {
+        redis::Client::open(redis_url().expect("RISK_REDIS_URL set")).expect("url parses")
+    }
+
+    fn unique_namespace(prefix: &str) -> String {
+        let mut suffix = [0u8; 4];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut suffix);
+        format!("{prefix}{}", hex::encode(suffix))
+    }
+
+    fn store(prefix: &str) -> RedisCalibrationStore {
+        RedisCalibrationStore::new(client(), &unique_namespace(prefix))
+    }
+
+    fn fill(
+        store: &RedisCalibrationStore,
+        scope: u32,
+        band: u8,
+        action: RiskAction,
+        legit: i64,
+        abuse: i64,
+        at: i64,
+    ) {
+        for _ in 0..legit {
+            store.record_at(scope, band, action, true, at).unwrap();
+        }
+        for _ in 0..abuse {
+            store.record_at(scope, band, action, false, at).unwrap();
         }
     }
 
     #[test]
-    fn sample_gate() {
-        let cal = AggregateCalibrator::new();
-        fill(&cal, 1, 1_000_000, false, 999);
-        assert_eq!(cal.bias_for_scope(1, 1_000_000), 0);
-        fill(&cal, 1, 1_000_000, false, 1);
-        // 1000 samples arm the direction; the value still needs the
-        // hysteresis window and the per-minute change cap.
-        assert_eq!(cal.bias_for_scope(1, 1_000_000), 0);
-        assert_ne!(
-            cal.bias_for_scope(1, 1_000_000 + AggregateCalibrator::HYSTERESIS_MS),
-            0
-        );
+    fn bias_formula_matches_contract() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store("bias");
+
+        // All abuse -> ((n*1000/n)*2)/10 = 200 -> clamp 200.
+        fill(&s, 1, 3, RiskAction::Sha20, 0, 10, T0);
+        assert_eq!(s.bias_for_scope(1, T0), 200);
+
+        // All legit -> -200.
+        fill(&s, 2, 3, RiskAction::Sha20, 10, 0, T0);
+        assert_eq!(s.bias_for_scope(2, T0), -200);
+
+        // 60% abuse / 40% legit: ((20*1000)/100)*2/10 = 40.
+        fill(&s, 3, 3, RiskAction::Sha20, 40, 60, T0);
+        assert_eq!(s.bias_for_scope(3, T0), 40);
+
+        // No samples -> 0.
+        assert_eq!(s.bias_for_scope(99, T0), 0);
+
+        // Truncation toward zero, byte-identical with PHP intdiv:
+        // abuse 2 / legit 1 (total 3): (1*1000/3)*2/10 = 333*2/10 = 66.
+        fill(&s, 4, 3, RiskAction::Sha20, 1, 2, T0);
+        assert_eq!(s.bias_for_scope(4, T0), 66);
     }
 
     #[test]
-    fn bias_bounds() {
-        let t0 = 1_000_000u64;
-        // All-abuse: rate 0 -> raw +150 (capped by BIAS_MAX).
-        let cal = AggregateCalibrator::new();
-        fill(&cal, 1, t0, false, 1000);
-        assert_eq!(cal.bias_for_scope(1, t0), 0); // arm
-                                                  // First jump capped at 100 (10/min x 10 min), then +10/min to 150.
-        assert_eq!(
-            cal.bias_for_scope(1, t0 + AggregateCalibrator::HYSTERESIS_MS),
-            100
-        );
-        assert_eq!(
-            cal.bias_for_scope(1, t0 + AggregateCalibrator::HYSTERESIS_MS + 5 * 60_000),
-            150
-        );
+    fn bias_sums_across_hourly_buckets() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store("buckets");
+        // Same scope, three hours: 30 abuse + 30 legit -> bias 0.
+        fill(&s, 1, 2, RiskAction::Sha18, 10, 0, T0);
+        fill(&s, 1, 2, RiskAction::Sha18, 10, 10, T0 - 3_600_000);
+        fill(&s, 1, 2, RiskAction::Sha18, 10, 20, T0 - 7_200_000);
+        assert_eq!(s.bias_for_scope(1, T0), 0);
 
-        // All-legit: rate 1 -> raw -150 -> clamped to -100.
-        let cal = AggregateCalibrator::new();
-        fill(&cal, 2, t0, true, 1000);
-        assert_eq!(cal.bias_for_scope(2, t0), 0); // arm
-        assert_eq!(
-            cal.bias_for_scope(2, t0 + AggregateCalibrator::HYSTERESIS_MS),
-            -100
-        );
+        // Buckets older than 24 hours are out of the window.
+        fill(&s, 1, 2, RiskAction::Sha18, 0, 100, T0 - 25 * 3_600_000);
+        assert_eq!(s.bias_for_scope(1, T0), 0);
     }
 
     #[test]
-    fn direction_must_hold_for_hysteresis_window() {
-        let cal = AggregateCalibrator::new();
-        let t0 = 1_000_000u64;
-        fill(&cal, 1, t0, false, 1000); // raw = +150
+    fn receipts_round_trip_and_consume_once() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store("receipts");
+        s.record_receipt("decision-1", 7, 4, RiskAction::Argon16)
+            .unwrap();
 
-        // First read arms the direction but does not apply.
-        assert_eq!(cal.bias_for_scope(1, t0), 0);
-        // Inside the window: still held.
+        let receipt = s.consume_receipt("decision-1");
         assert_eq!(
-            cal.bias_for_scope(1, t0 + AggregateCalibrator::HYSTERESIS_MS - 1),
-            0
+            receipt,
+            Some(CalibrationReceipt {
+                scope: 7,
+                band: 4,
+                action: RiskAction::Argon16,
+            })
         );
-        // Window passed: applies with the max-change cap (10 * 10 min = 100).
-        assert_eq!(
-            cal.bias_for_scope(1, t0 + AggregateCalibrator::HYSTERESIS_MS),
-            100
-        );
+        // GETDEL: consumed exactly once.
+        assert_eq!(s.consume_receipt("decision-1"), None);
+
+        // Unknown id -> None (never errors).
+        assert_eq!(s.consume_receipt("decision-missing"), None);
     }
 
     #[test]
-    fn max_change_per_minute() {
-        let cal = AggregateCalibrator::new();
-        let t0 = 1_000_000u64;
-        fill(&cal, 1, t0, false, 1000); // raw = +150
-
-        assert_eq!(cal.bias_for_scope(1, t0), 0); // arm
-                                                  // Apply at t0 + 10 min: allowed = 10 * 10 = 100.
-        assert_eq!(
-            cal.bias_for_scope(1, t0 + AggregateCalibrator::HYSTERESIS_MS),
-            100
-        );
-        // One minute later: allowed = 10 -> 110.
-        assert_eq!(
-            cal.bias_for_scope(1, t0 + AggregateCalibrator::HYSTERESIS_MS + 60_000),
-            110
-        );
-        // Two more minutes: 10/min -> 120, 130.
-        assert_eq!(
-            cal.bias_for_scope(1, t0 + AggregateCalibrator::HYSTERESIS_MS + 120_000),
-            120
-        );
-        assert_eq!(
-            cal.bias_for_scope(1, t0 + AggregateCalibrator::HYSTERESIS_MS + 180_000),
-            130
-        );
-
-        // Bias never exceeds the +150 cap.
-        let mut t = t0 + AggregateCalibrator::HYSTERESIS_MS + 180_000;
-        let mut bias = 130;
-        for _ in 0..10 {
-            t += 60_000;
-            bias = cal.bias_for_scope(1, t);
-        }
-        assert_eq!(bias, 150);
-    }
-
-    #[test]
-    fn direction_reversal_restarts_hysteresis() {
-        let cal = AggregateCalibrator::new();
-        let t0 = 1_000_000u64;
-        // 1000 abuse-only samples: raw +150.
-        fill(&cal, 2, t0, false, 1000);
-        assert_eq!(cal.bias_for_scope(2, t0), 0); // arm
-                                                  // Apply after the window (capped at 100).
-        assert_eq!(
-            cal.bias_for_scope(2, t0 + AggregateCalibrator::HYSTERESIS_MS),
-            100
-        );
-        // Add 1000 legit samples -> rate 0.5 -> raw 0, direction flips down.
-        let flip = t0 + AggregateCalibrator::HYSTERESIS_MS + 1;
-        fill(&cal, 2, flip, true, 1000);
-        // Flip arms a new direction window; no change yet.
-        assert_eq!(cal.bias_for_scope(2, flip), 100);
-        // Inside the new window: still held at 100.
-        assert_eq!(
-            cal.bias_for_scope(2, flip + AggregateCalibrator::HYSTERESIS_MS - 1),
-            100
-        );
-        // After the window the direction applies: raw 0 from prev 100 ->
-        // delta -100 (allowed = 10/min x 10 min).
-        assert_eq!(
-            cal.bias_for_scope(2, flip + AggregateCalibrator::HYSTERESIS_MS),
-            0
-        );
-    }
-
-    #[test]
-    fn retention_prunes_old_samples() {
-        let cal = AggregateCalibrator::new();
-        let t0 = 1_000_000u64;
-        fill(&cal, 1, t0, false, 1000);
-        assert_eq!(cal.bias_for_scope(1, t0), 0); // arm
-        assert_eq!(
-            cal.bias_for_scope(1, t0 + AggregateCalibrator::HYSTERESIS_MS),
-            100
-        );
-        // 25 hours later everything is pruned: back below the gate.
-        let late = t0 + 25 * 3_600_000;
-        assert_eq!(cal.bias_for_scope(1, late), 0);
-        // Recording one fresh sample keeps only the fresh one.
-        cal.record(entry(1, late + 1, false));
-        assert_eq!(cal.bias_for_scope(1, late + 1), 0);
-        // And the retained sample list is small again.
-        let state = cal.state.lock().unwrap();
-        assert!(state.samples.get(&1).map_or(0, |s| s.len()) <= 2);
+    fn recorder_maps_score_to_band() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let store: Arc<dyn CalibrationStore> = Arc::new(store("recorder"));
+        let recorder = CalibrationRecorder::new(store.as_ref());
+        // Band from score, engine-side: recorded into the current hour.
+        let _ = recorder.record(1, 555, RiskAction::Sha20, true);
+        assert_eq!((555u16).clamp(0, 1000) / 100, 5);
     }
 }

@@ -1,6 +1,6 @@
 /* KiwiCaptcha worker solver — standalone same-origin asset.
  *
- * Served next to kiwicaptacha-wasm.js and imported via importScripts, OR
+ * Served next to kiwicaptcha-wasm.js and imported via importScripts, OR
  * embedded: the widget driver (widget-driver.js) embeds the identical
  * worker logic as the KIWI_WORKER_SRC string constant and builds a Blob URL
  * worker from it (prepending the wasm glue source), so no network request
@@ -22,7 +22,7 @@
   "use strict";
 
   var loader = null;
-  try { importScripts("kiwicaptacha-wasm.js"); } catch (e) {}
+  try { importScripts("kiwicaptcha-wasm.js"); } catch (e) {}
   if (typeof self !== "undefined" && self.__kiwiCaptchaWasm) {
     loader = self.__kiwiCaptchaWasm;
   }

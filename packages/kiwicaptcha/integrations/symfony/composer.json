@@ -83,11 +83,6 @@
             "dev-main": "1.0.x-dev"
         }
     },
-    "scripts": {
-        "post-autoload-dump": [
-            "@php bin/install-risk-protocol.php"
-        ]
-    },
     "minimum-stability": "dev",
     "prefer-stable": true
 }

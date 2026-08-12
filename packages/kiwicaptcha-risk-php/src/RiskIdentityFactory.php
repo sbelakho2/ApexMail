@@ -98,7 +98,7 @@ final class RiskIdentityFactory
     public function sourceId(string $ip, int $nowSecs): string
     {
         $epoch = intdiv($nowSecs, $this->sourceEpochSecs);
-        return $this->pseudonym($this->keys->source, 'src', $epoch, $this->canonicalIp($ip));
+        return $this->sourceIdForEpochIp($ip, $epoch);
     }
 
     /**
@@ -108,6 +108,38 @@ final class RiskIdentityFactory
     public function subnetId(string $ip, int $nowSecs): string
     {
         $epoch = intdiv($nowSecs, $this->subnetEpochSecs);
+        return $this->subnetIdForEpochIp($ip, $epoch);
+    }
+
+    /**
+     * Source pseudonym for an EXPLICIT epoch (same canonical HMAC
+     * construction as sourceId(), with the epoch passed in): the epoch±1
+     * boundary keys must use their own epochs' pseudonyms, never the
+     * current-epoch one.
+     */
+    public function sourceIdForEpoch(RiskContext $c, int $epoch): string
+    {
+        return $this->sourceIdForEpochIp($c->sourceIp, $epoch);
+    }
+
+    /**
+     * Subnet pseudonym for an EXPLICIT epoch (same canonical HMAC
+     * construction as subnetId(), with the epoch passed in).
+     */
+    public function subnetIdForEpoch(RiskContext $c, int $epoch): string
+    {
+        return $this->subnetIdForEpochIp($c->sourceIp, $epoch);
+    }
+
+    /** @internal string-IP variant shared by the epoch-parameterized derivations */
+    private function sourceIdForEpochIp(string $ip, int $epoch): string
+    {
+        return $this->pseudonym($this->keys->source, 'src', $epoch, $this->canonicalIp($ip));
+    }
+
+    /** @internal string-IP variant shared by the epoch-parameterized derivations */
+    private function subnetIdForEpochIp(string $ip, int $epoch): string
+    {
         return $this->pseudonym($this->keys->subnet, 'net', $epoch, $this->maskIp($ip, $this->ipv4Prefix, $this->ipv6Prefix));
     }
 
