@@ -206,7 +206,14 @@ final class VerifierHardeningTest extends TestCase
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
 
-        $wrongToken = SolutionToken::create($record->nonce, 1, 5000, ['wd' => false])->encode();
+        // Provably-failing counter (a counter of 1 can coincidentally meet
+        // the target — a flake seen in CI).
+        $wrongCounter = 1;
+        $saltBytes = base64_decode($record->salt, true);
+        while (Verifier::leadingZeroBits(hash('sha256', $record->prefix.$wrongCounter.$saltBytes, true)) >= $record->targetBits) {
+            ++$wrongCounter;
+        }
+        $wrongToken = SolutionToken::create($record->nonce, $wrongCounter, 5000, ['wd' => false])->encode();
 
         $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify(
@@ -407,7 +414,15 @@ final class VerifierHardeningTest extends TestCase
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
 
-        $wrongToken = SolutionToken::create($record->nonce, 1, 5000, [])->encode();
+        // The wrong counter must be PROVABLY wrong: at the issued difficulty
+        // a random counter coincidentally meets the target with p=1/2^bits
+        // (a flake seen in CI). Search upward until the hash provably misses.
+        $wrongCounter = 1;
+        $saltBytes = base64_decode($record->salt, true);
+        while (Verifier::leadingZeroBits(hash('sha256', $record->prefix.$wrongCounter.$saltBytes, true)) >= $record->targetBits) {
+            ++$wrongCounter;
+        }
+        $wrongToken = SolutionToken::create($record->nonce, $wrongCounter, 5000, [])->encode();
 
         $verifier = new Verifier($storage, acceptLegacyV1: true);
         $first = $verifier->verify($wrongToken, Vectors::SECRET, 'login', '198.51.100.77');
