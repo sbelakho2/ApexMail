@@ -708,6 +708,16 @@ impl Config {
         let kiwi_min_duration_ms = env::var("KIWI_MIN_DURATION_MS")
             .ok()
             .and_then(|v| v.parse().ok());
+        // Same protocol invariant as the core issuers: a floor at or above
+        // the TTL leaves no acceptable submission time (TooFast before
+        // expiry, Expired after). Fail fast at startup.
+        if let Some(ms) = kiwi_min_duration_ms {
+            if ms >= (kiwi_challenge_ttl_secs as u64).saturating_mul(1000) {
+                panic!(
+                    "KIWI_MIN_DURATION_MS ({ms}) must be < KIWI_CHALLENGE_TTL_SECS ({kiwi_challenge_ttl_secs}) * 1000"
+                );
+            }
+        }
         let kiwi_argon2_max_concurrent = env::var("KIWI_ARGON2_MAX_CONCURRENT")
             .ok()
             .and_then(|v| v.parse().ok())

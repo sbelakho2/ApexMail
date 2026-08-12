@@ -44,7 +44,21 @@ use Psr\Cache\CacheItemPoolInterface;
  */
 final class IssuanceRateLimiter
 {
-    private const CACHE_KEY_PREFIX = 'kiwi_rate_';
+    // PSR-6 only REQUIRES keys up to 64 chars: 'kr_' + 60 hex = 63 chars.
+    // The identity is already a keyed 256-bit HMAC, so truncating to 240
+    // bits is more than sufficient.
+    private const CACHE_KEY_PREFIX = 'kr_';
+
+    /**
+     * PSR-6 cache key for a client identity: 'kr_' + the first 60 hex chars
+     * of the identity (which is already a keyed 256-bit HMAC — truncating to
+     * 240 bits is more than sufficient). Total: 63 characters, within the
+     * 64-character floor that PSR-6 REQUIRES implementations to support.
+     */
+    private static function cacheKey(string $identity): string
+    {
+        return self::CACHE_KEY_PREFIX.substr($identity, 0, 60);
+    }
 
     /**
      * Atomic per-client + global sliding window (exact audit semantics):
@@ -129,6 +143,16 @@ LUA;
         string $namespace = '',
         private readonly int $rateLimitRotationSecs = 0,
     ) {
+        // A sliding window can cross at most ONE rotation boundary, so the
+        // two-epoch (current + previous) accounting is only exact when the
+        // rotation period is >= the window: otherwise live hits from epochs
+        // older than (current - 1) silently vanish from the cap.
+        if ($rateLimitRotationSecs > 0 && $rateLimitRotationSecs < $windowSecs) {
+            throw new \InvalidArgumentException(
+                'rate_limit_rotation_secs must be 0 or >= rate_limit_window_secs — '.
+                'a rotation shorter than the window would drop live hits from older epochs'
+            );
+        }
         $this->namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: '';
     }
 
@@ -155,7 +179,19 @@ LUA;
         // An unknown client IP must never bypass the limit: bucket it with
         // the other unidentifiable clients instead (conservative, shared
         // budget). The IP itself is never used as a key — only the HMAC.
-        $identity = $clientIp === '' ? 'unknown' : $clientIp;
+        // The identity is derived from CANONICAL IP BYTES (inet_pton with
+        // IPv4-mapped-IPv6 normalization), so two textual spellings of the
+        // same address (e.g. "2001:db8::1" vs "2001:0db8:0:0:0:0:0:1")
+        // produce the SAME pseudonym — matching the challenge binding tag.
+        if ($clientIp === '') {
+            $identity = 'unknown';
+        } else {
+            try {
+                $identity = \KiwiCaptcha\Issuer::canonicalIpFamily($clientIp);
+            } catch (\InvalidArgumentException) {
+                $identity = 'unknown';
+            }
+        }
 
         if ($this->rateLimitRotationSecs > 0) {
             // Epoch-rotated pseudonym: HMAC(pepper, "kiwi-rate-v2|epoch|
@@ -191,6 +227,13 @@ LUA;
         $key = hash_hmac('sha256', $identity, $this->pepper);
 
         if ($this->redis !== null) {
+            if ($this->maxChallenges <= 0) {
+                // Global-only: no client key or pseudonym is created at all
+                // (data minimization — per-client control is explicitly
+                // disabled, so no client identifier should exist).
+                return $this->checkRedisGlobalOnly();
+            }
+
             return $this->checkRedis($key);
         }
 
@@ -219,6 +262,38 @@ LUA;
 
         $result = $this->eval(self::LIMIT_SCRIPT_ROTATED, [$clientPrev, $clientCur, $global], [
             (string) $clientMax,
+            (string) $globalMax,
+            (string) $windowMs,
+            $requestId,
+        ]);
+
+        return (int) $result;
+    }
+
+    /**
+     * Atomic global-only window: ONE stable deployment-global ZSET and
+     * nothing else — used when the per-client limit is disabled, so no
+     * client pseudonym ever exists in Redis.
+     */
+    private const LIMIT_SCRIPT_GLOBAL_ONLY = <<<'LUA'
+local time = redis.call('TIME')
+local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
+local cutoff = now - tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
+if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return -1 end
+redis.call('ZADD', KEYS[1], now, ARGV[3])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]) + 1000)
+return 1
+LUA;
+
+    private function checkRedisGlobalOnly(): int
+    {
+        $globalKey = 'kiwi:rl:global:'.$this->namespace;
+        $windowMs = $this->windowSecs * 1000;
+        $requestId = bin2hex(random_bytes(16));
+        $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
+
+        $result = $this->eval(self::LIMIT_SCRIPT_GLOBAL_ONLY, [$globalKey], [
             (string) $globalMax,
             (string) $windowMs,
             $requestId,
@@ -259,8 +334,8 @@ LUA;
     private function allowSharedTwoEpoch(string $identityPrev, string $identityCur): bool
     {
         $now = $this->now();
-        $cacheKeyPrev = self::CACHE_KEY_PREFIX.$identityPrev;
-        $cacheKeyCur = self::CACHE_KEY_PREFIX.$identityCur;
+        $cacheKeyPrev = self::cacheKey($identityPrev);
+        $cacheKeyCur = self::cacheKey($identityCur);
 
         $itemPrev = $this->pool->getItem($cacheKeyPrev);
         $itemCur = $this->pool->getItem($cacheKeyCur);
@@ -327,7 +402,7 @@ LUA;
 
     private function allowShared(string $key): bool
     {
-        $cacheKey = self::CACHE_KEY_PREFIX.$key;
+        $cacheKey = self::cacheKey($key);
 
         $item = $this->pool->getItem($cacheKey);
         $state = $item->isHit() ? $item->get() : null;

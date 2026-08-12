@@ -303,7 +303,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 0c. Counter bound: the official solvers never search beyond
     //     SOLVER_MAX_HASHES; a larger counter is not a legitimate solution
     //     and must not reach hash derivation (deterministic rejection).
-    if ctx.counter > crate::challenge::SOLVER_MAX_HASHES {
+    if ctx.counter >= crate::challenge::SOLVER_MAX_HASHES {
         return VerifyOutcome::Invalid(VerifyError::CounterTooLarge);
     }
 
@@ -754,6 +754,39 @@ mod tests {
                 "Argon2id t={t} must be rejected at issuance"
             );
         }
+    }
+
+    #[test]
+    fn issuance_rejects_min_duration_at_or_above_ttl() {
+        // A floor >= ttl*1000 makes every submission either TooFast or
+        // Expired — no acceptable submission time exists (verification
+        // checks expiry before the floor).
+        let base = ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            ttl_secs: 10,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
+        };
+        for ms in [10_000u64, 20_000, 100_000] {
+            let mut cfg = base.clone();
+            cfg.min_duration_ms = Some(ms);
+            assert!(
+                issue_challenge(&cfg, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
+                "min_duration_ms={ms} with ttl 10s must be rejected"
+            );
+        }
+        let mut ok = base.clone();
+        ok.min_duration_ms = Some(9_999);
+        assert!(issue_challenge(&ok, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
     }
 
     #[test]
@@ -1726,11 +1759,12 @@ mod tests {
             VerifyOutcome::Invalid(VerifyError::CounterTooLarge)
         );
 
-        // Exactly at the cap is verified normally (never CounterTooLarge —
-        // the hash outcome itself is probabilistic and irrelevant here).
+        // EXACTLY at the cap is also rejected: the official decoder rejects
+        // counter >= 5,000,000 (the JS solver searches 0..4,999,999), so the
+        // direct verifier must match (protocol parity).
         let mut record2 = make_record(4);
         let outcome = verify(&mut record2, crate::challenge::SOLVER_MAX_HASHES, 5000);
-        assert_ne!(
+        assert_eq!(
             outcome,
             VerifyOutcome::Invalid(VerifyError::CounterTooLarge)
         );

@@ -157,6 +157,25 @@ final class Issuer
      */
     public static function bindingTag(string $nonce, string $ip, string $secret): string
     {
+        $family = self::canonicalIpFamily($ip);
+        $message = "kiwicaptcha/ip-bind/v2\0".$nonce."\0".$family;
+
+        return hash_hmac('sha256', $message, $secret);
+    }
+
+    /**
+     * Canonical family byte + packed bytes for an IP: inet_pton() output
+     * (4 or 16 bytes) with IPv4-mapped IPv6 (::ffff:a.b.c.d) normalized to
+     * the 4-byte IPv4 form. Two textual spellings of the same address (e.g.
+     * "2001:db8::1" and "2001:0db8:0:0:0:0:0:1") therefore produce the same
+     * bytes — used by the challenge binding tag AND the rate-limiter
+     * pseudonym so identity is exact.
+     *
+     * @throws \InvalidArgumentException when the IP is not a valid IPv4 or
+     *                                   IPv6 address
+     */
+    public static function canonicalIpFamily(string $ip): string
+    {
         $canonical = inet_pton($ip);
         if ($canonical === false) {
             throw new \InvalidArgumentException('Invalid IP address');
@@ -170,10 +189,7 @@ final class Issuer
             throw new \InvalidArgumentException('Invalid IP address');
         }
 
-        $family = $len === 4 ? "\x04" : "\x06";
-        $message = "kiwicaptcha/ip-bind/v2\0".$nonce."\0".$family.$canonical;
-
-        return hash_hmac('sha256', $message, $secret);
+        return ($len === 4 ? "\x04" : "\x06").$canonical;
     }
 
     /**

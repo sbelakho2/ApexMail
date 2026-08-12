@@ -106,26 +106,75 @@ final class RateLimiterTest extends TestCase
         self::assertTrue($first->allow('198.51.100.8'), 'other IPs are independent');
     }
 
-    public function testRawIpIsNeverUsedAsAKey(): void
+    public function testRawIpIsNeverUsedAsAKeyAndKeyStaysWithinPsr6Length(): void
     {
         $pool = new ArrayAdapter();
         $pepper = 'rate-limit-pepper-for-tests';
         $limiter = new IssuanceRateLimiter(1, 60, $pool, null, $pepper);
         $limiter->allow('198.51.100.7');
 
-        // The shared cache key is the peppered HMAC of the IP (hex digest) —
-        // never the IP itself.
-        $expectedKey = 'kiwi_rate_'.hash_hmac('sha256', '198.51.100.7', $pepper);
-        self::assertTrue($pool->getItem($expectedKey)->isHit(), 'the state must live under the HMAC key');
-
+        // The shared cache key is 'kr_' + 60 hex of the peppered HMAC — 63
+        // chars total, within the 64-character PSR-6 portability floor (the
+        // previous 'kiwi_rate_' + 64 hex = 74 chars exceeded it).
         foreach (array_keys($pool->getValues()) as $key) {
             self::assertMatchesRegularExpression(
-                '/^kiwi_rate_[0-9a-f]{64}$/',
+                '/^kr_[0-9a-f]{60}$/',
                 (string) $key,
-                'rate-limit keys must be 64-hex HMAC digests of the client IP',
+                'rate-limit keys must be kr_ + 60 hex (63 chars, PSR-6 portable)',
             );
+            self::assertLessThanOrEqual(64, strlen((string) $key), 'rate-limit keys must fit the PSR-6 64-char floor');
             self::assertStringNotContainsString('198.51.100.7', (string) $key, 'raw IPs must never appear in stored keys');
         }
+    }
+
+    public function testCanonicalIpPseudonymUnifiesEquivalentSpellings(): void
+    {
+        // The pseudonym is derived from CANONICAL IP BYTES: two textual
+        // spellings of the same address must produce the SAME HMAC identity,
+        // and IPv4-mapped IPv6 must equal the plain IPv4 form.
+        $pool = new ArrayAdapter();
+        $limiter = new IssuanceRateLimiter(1, 60, $pool, null, 'pepper');
+
+        $limiter->allow('2001:db8::1');
+        $keys1 = array_keys($pool->getValues());
+        $pool->clear();
+
+        $limiter->allow('2001:0db8:0:0:0:0:0:1');
+        $keys2 = array_keys($pool->getValues());
+
+        self::assertSame($keys1, $keys2, 'equivalent IPv6 spellings must map to the same pseudonym');
+
+        $pool->clear();
+        $limiter->allow('::ffff:192.168.1.5');
+        $mapped = array_keys($pool->getValues());
+        $pool->clear();
+        $limiter->allow('192.168.1.5');
+        self::assertSame($mapped, array_keys($pool->getValues()), 'IPv4-mapped IPv6 must equal the plain IPv4 pseudonym');
+    }
+
+    public function testGlobalOnlyModeCreatesNoClientKeys(): void
+    {
+        // maxChallenges = 0 disables the per-client control: with Redis, only
+        // the deployment-global ZSET may exist — no client pseudonym at all.
+        $client = new FakePredisClient();
+        $limiter = new IssuanceRateLimiter(0, 60, redis: $client, globalMax: 2, namespace: 'global-only', pepper: 'p');
+        self::assertSame(1, $limiter->check('203.0.113.1'));
+        self::assertSame(1, $limiter->check('203.0.113.2'));
+        self::assertSame(-1, $limiter->check('203.0.113.3'));
+
+        foreach (array_keys($client->zsets) as $key) {
+            self::assertStringStartsWith('kiwi:rl:global:', (string) $key, 'no client key may exist in global-only mode');
+            self::assertStringNotContainsString('client', (string) $key);
+        }
+    }
+
+    public function testRotationShorterThanWindowIsRejected(): void
+    {
+        // A rotation < window would drop live hits from epochs older than
+        // (current - 1) from the two-epoch accounting.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('rate_limit_rotation_secs');
+        new IssuanceRateLimiter(10, 120, rateLimitRotationSecs: 30);
     }
 
     public function testInMemoryWindowIsSlidingNotFixed(): void
@@ -403,8 +452,11 @@ final class RateLimiterTest extends TestCase
         $limiter = new IssuanceRateLimiter(5, 60, null, null, $pepper, $client, 5, 'deployment-x');
         $limiter->check('198.51.100.7');
 
-        $identity = hash_hmac('sha256', '198.51.100.7', $pepper);
-        self::assertArrayHasKey('kiwi:rl:client:deployment-x:'.$identity, $client->zsets, 'the per-client ZSET must live under the namespaced HMAC key');
+        // The identity is the peppered HMAC of the CANONICAL IP BYTES
+        // (inet_pton with IPv4-mapped normalization) — the same
+        // canonicalization used for challenge binding.
+        $identity = hash_hmac('sha256', \KiwiCaptcha\Issuer::canonicalIpFamily('198.51.100.7'), $pepper);
+        self::assertArrayHasKey('kiwi:rl:client:deployment-x:'.$identity, $client->zsets, 'the per-client ZSET must live under the namespaced canonical-HMAC key');
         self::assertArrayHasKey('kiwi:rl:global:deployment-x', $client->zsets);
 
         foreach (array_keys($client->zsets) as $key) {

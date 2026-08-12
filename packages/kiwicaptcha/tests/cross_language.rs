@@ -66,3 +66,72 @@ fn rust_verifies_php_issued_record() {
     );
     println!("RUST_VERIFIES_PHP: OK (counter={counter})");
 }
+
+#[test]
+fn rust_issues_record_for_php() {
+    // Reverse direction: Rust issues a record (KC_RUST_ALGO=sha256|argon2id),
+    // writes the language-neutral JSON to KC_RUST_RECORD for the PHP job to
+    // solve + verify. Skips when the env var is unset.
+    let Ok(path) = std::env::var("KC_RUST_RECORD") else {
+        eprintln!("KC_RUST_RECORD unset — reverse cross-language test skipped");
+        return;
+    };
+    let algo_name = std::env::var("KC_RUST_ALGO").unwrap_or_else(|_| "sha256".to_string());
+    let (algorithm, m_kib, t, p, target_bits, argon2_target_bits) = if algo_name == "argon2id" {
+        (
+            kiwicaptcha::challenge::PoWAlgorithm::Argon2id,
+            64u32,
+            3u32,
+            1u32,
+            4u32,
+            4u32,
+        )
+    } else {
+        (
+            kiwicaptcha::challenge::PoWAlgorithm::Sha256,
+            0u32,
+            1u32,
+            1u32,
+            8u32,
+            8u32,
+        )
+    };
+    let config = kiwicaptcha::challenge::ChallengeConfig {
+        secret_key: "0123456789abcdef0123456789abcdef".into(),
+        algorithm,
+        m_kib,
+        t,
+        p,
+        target_bits,
+        argon2_target_bits,
+        ttl_secs: 120,
+        min_duration_ms: None,
+        auto_tune: false,
+        auto_tune_min_bits: 8,
+        auto_tune_max_bits: 20,
+        binding_mode: kiwicaptcha::challenge::BindingMode::Bound,
+    };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    let issued = kiwicaptcha::challenge::issue_challenge(
+        &config,
+        "login",
+        "198.51.100.7",
+        now_unix,
+        now_ns,
+        0,
+    )
+    .expect("issue");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&issued.record).expect("serialize"),
+    )
+    .expect("write");
+    println!("RUST_ISSUED {}", algo_name);
+}

@@ -149,7 +149,11 @@
       }
       if (algorithm === "argon2id") {
         if (!w || !w.solve_argon2_chunk || !wasmAllocatorPresent() || m_kib < 8 * p) { resolve(null); return; }
-        var argMax = Math.min(MAX_SHA_HASHES, Math.max(1024, expectedHashes * 8)), CHUNK = 16;
+        var argMax = Math.min(MAX_SHA_HASHES, Math.max(1024, expectedHashes * 8));
+        // CHUNK = 1: each Argon2id hash is a single synchronous WASM call, so
+        // the main thread yields between every memory-hard hash — at the
+        // documented 64 MiB desktop profile, a batch of 16 would otherwise
+        // block the UI for a noticeable period (responsiveness fix).
         // No pure-JS Argon2id fallback exists: an allocation failure means the
         // challenge cannot be solved (wasm is disabled permanently).
         if (!ensureBuffers()) { resolve(null); return; }

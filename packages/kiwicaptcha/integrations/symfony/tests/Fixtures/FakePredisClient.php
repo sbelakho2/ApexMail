@@ -197,9 +197,27 @@ final class FakePredisClient extends \Predis\Client
             return $this->fakeZrem([$keys[0], $rest[0]]);
         }
 
-        // TIME-based scripts: semaphore acquire (1 key) or rate limiter
-        // (2 keys). The `now` mirrors the Lua TIME read.
+        // TIME-based scripts: semaphore acquire (1 key), global-only rate
+        // limiter (1 key) or the full rate limiter (2/3 keys). The `now`
+        // mirrors the Lua TIME read.
         $now = $this->timeMs();
+
+        if (str_contains($script, 'ZADD", KEYS[1], now, ARGV[3]') || str_contains($script, "ZADD', KEYS[1], now, ARGV[3]")) {
+            // Global-only rate limiter: prune, global cap -> -1, add at now.
+            $key = (string) $keys[0];
+            $globalMax = (int) $rest[0];
+            $windowMs = (int) $rest[1];
+            $requestId = (string) $rest[2];
+            $cutoff = $now - $windowMs;
+            $this->fakeZremrangebyscore([$key, '-inf', (string) $cutoff]);
+            if ($this->zcard($key) >= $globalMax) {
+                return -1;
+            }
+            $this->fakeZadd([$key, (string) $now, $requestId]);
+            $this->fakePexpire([$key, (string) ($windowMs + 1000)]);
+
+            return 1;
+        }
 
         if ($numKeys === 1) {
             // Acquire: prune expired leases, admit below the cap.

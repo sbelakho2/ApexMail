@@ -104,6 +104,26 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             );
         }
 
+        // Cross-option invariants (validated here, after the config tree):
+        // - a rotation shorter than the sliding window would drop live hits
+        //   from epochs older than (current - 1) from the two-epoch
+        //   accounting (the limiter constructor enforces the same rule)
+        // - a min_duration_ms at or above the TTL leaves no acceptable
+        //   submission time (TooFast before expiry, Expired after) — the
+        //   core Config validates the same relation.
+        if ($config['rate_limit_rotation_secs'] > 0 && $config['rate_limit_rotation_secs'] < $config['rate_limit_window_secs']) {
+            throw new \InvalidArgumentException(
+                'kiwi_captcha.rate_limit_rotation_secs must be 0 or >= rate_limit_window_secs — '.
+                'a rotation shorter than the window would drop live hits from older epochs'
+            );
+        }
+        if ($config['min_duration_ms'] !== null && $config['min_duration_ms'] >= $config['challenge_ttl_secs'] * 1000) {
+            throw new \InvalidArgumentException(
+                'kiwi_captcha.min_duration_ms must be < challenge_ttl_secs * 1000 — '.
+                'a floor at or above the TTL leaves no acceptable submission time'
+            );
+        }
+
         $container->setParameter('kiwi_captcha.secret_key', $config['secret_key']);
         $container->setParameter('kiwi_captcha.route_prefix', $config['route_prefix']);
         $container->setParameter('kiwi_captcha.privacy_mode', $config['privacy_mode']);

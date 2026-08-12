@@ -119,6 +119,22 @@ final class Config
                 )
             );
         }
+        // min_duration_ms must be 0 <= ms < ttl*1000: a floor at or above
+        // the TTL makes every solution either TooFast or Expired — no
+        // submission can ever be accepted (verification checks expiry
+        // before the floor). The Rust schema is unsigned, so negatives are
+        // rejected for cross-language record parity too.
+        if (
+            $minDurationMs !== null
+            && (
+                $minDurationMs < 0
+                || $minDurationMs >= $ttlSecs * 1000
+            )
+        ) {
+            throw new \InvalidArgumentException(
+                'min_duration_ms must be >= 0 and less than the challenge TTL in ms (ttlSecs * 1000)'
+            );
+        }
         if ($ttlSecs < 1 || $ttlSecs > self::MAX_TTL_SECS) {
             throw new \InvalidArgumentException(
                 sprintf('challenge TTL must be within 1..%d seconds (got %d) — the verifier rejects longer lifetimes as malformed', self::MAX_TTL_SECS, $ttlSecs)

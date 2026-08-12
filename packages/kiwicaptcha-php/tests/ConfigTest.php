@@ -225,6 +225,34 @@ final class ConfigTest extends TestCase
         new Config(...$this->base(['secretKey' => 'tooshort']));
     }
 
+    public function testMinDurationMustBeBelowTtlInMs(): void
+    {
+        // A floor >= ttl*1000 leaves no acceptable submission time
+        // (TooFast before expiry, Expired after).
+        $this->expectException(\InvalidArgumentException::class);
+        new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', ttlSecs: 10, minDurationMs: 20_000);
+    }
+
+    public function testMinDurationEqualToTtlInMsIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', ttlSecs: 10, minDurationMs: 10_000);
+    }
+
+    public function testMinDurationJustBelowTtlInMsIsAccepted(): void
+    {
+        $config = new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', ttlSecs: 10, minDurationMs: 9_999);
+        self::assertSame(9_999, $config->minDurationMs);
+    }
+
+    public function testNegativeMinDurationIsRejected(): void
+    {
+        // The Rust schema is unsigned — a negative floor would not be
+        // representable in the language-neutral record.
+        $this->expectException(\InvalidArgumentException::class);
+        new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', minDurationMs: -5000);
+    }
+
     public function testTtlMustBeWithin1And300(): void
     {
         $this->expectException(\InvalidArgumentException::class);

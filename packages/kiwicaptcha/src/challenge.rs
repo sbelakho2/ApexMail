@@ -695,6 +695,24 @@ pub fn issue_challenge(
     if config.ttl_secs == 0 || config.ttl_secs > MAX_TTL_SECS {
         return Err(SignError::InvalidTtl);
     }
+    // min_duration_ms must be < ttl*1000: a floor at or above the TTL makes
+    // every submission either TooFast or Expired — no valid solution time
+    // exists (verification checks expiry before the floor).
+    if let Some(ms) = config.min_duration_ms {
+        if ms >= config.ttl_secs.saturating_mul(1000) {
+            return Err(SignError::InvalidMinDuration);
+        }
+    }
+
+    // Static difficulty must be valid as configured — clamping is NOT
+    // acceptable for parity with PHP (which rejects target_bits > 20 at
+    // construction). Auto-tune may still normalize its bounds at runtime,
+    // but a static configuration is validated here.
+    if algorithm == PoWAlgorithm::Sha256
+        && (config.target_bits == 0 || config.target_bits > SOLVER_MAX_TARGET_BITS)
+    {
+        return Err(SignError::InvalidDifficulty);
+    }
 
     // Nonce-bound IP binding tag (v2) — or empty when binding is disabled.
     let binding = match config.binding_mode {
@@ -794,6 +812,8 @@ pub enum SignError {
     InvalidDifficulty,
     #[error("challenge TTL must be 1..=MAX_TTL_SECS (300) — the verifier rejects longer lifetimes as malformed")]
     InvalidTtl,
+    #[error("min_duration_ms must be < ttl_secs * 1000 — a floor at or above the TTL leaves no acceptable submission time")]
+    InvalidMinDuration,
 }
 
 // Minimal hex encode/decode to avoid pulling in a `hex` crate dependency —
@@ -1071,7 +1091,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_tune_never_exceeds_solver_cap_even_without_tuning() {
+    fn static_target_bits_above_solver_cap_rejected_at_issuance() {
+        // PHP rejects target_bits > 20 at construction; Rust must NOT clamp
+        // a static configuration — issuance rejects it (parity).
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             algorithm: PoWAlgorithm::Sha256,
@@ -1087,10 +1109,10 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
         };
-        let issued =
-            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
-        assert_eq!(issued.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
-        assert_eq!(issued.record.target_bits, SOLVER_MAX_TARGET_BITS);
+        assert!(
+            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).is_err(),
+            "a STATIC target_bits above the solver cap must be rejected, not clamped (PHP parity)"
+        );
     }
 
     #[test]

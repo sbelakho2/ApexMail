@@ -92,13 +92,12 @@ kiwi_captcha:
     #                                       # forced 'off' under strict
     # binding_mode: nonce_ip_hmac | none    # challenge IP binding; stored
     #                                       # tag is nonce-bound, never a
-    #                                       # stable IP identifier. NOTE:
-    #                                       # 'none' is accepted by the
-    #                                       # config tree but the current
-    #                                       # kiwicaptcha-php core Issuer
-    #                                       # always emits a binding tag —
-    #                                       # full support awaits a core
-    #                                       # capability (see Limitations).
+    #                                       # stable IP identifier; 'none'
+    #                                       # issues challenges with an
+    #                                       # EMPTY binding tag (maximum
+    #                                       # privacy; relay protection
+    #                                       # off) — fully wired through
+    #                                       # to the core BindingMode.
     # same_origin_only: true                # reject cross-origin challenge
     #                                       # POSTs with 403
     #                                       # CROSS_ORIGIN_DENIED; forced
@@ -400,18 +399,15 @@ bin/sync-assets.sh
    client spent CPU time — not that a human did. Any automated client that
    pays the same cost passes.
 2. **Telemetry is client-controlled and forgeable.** Input events and
-   whatever the widget reports, a custom client can omit or fake; a
-   custom client can omit or fake them. Treat telemetry as a supplementary
+   whatever the widget reports, a custom client can omit or fake. Treat
+   telemetry as a supplementary
    signal, never the security boundary. Under strict privacy mode the widget
    collects nothing (`telemetry: off`).
 3. **IP binding is best-effort.** IPs legitimately change behind NAT/proxies,
    so a strict binding would reject real users. Operators can disable the
-   check entirely; it is a relay mitigation, not a guarantee. `binding_mode:
-   none` is accepted by the config tree, but the current kiwicaptcha-php
-   core `Issuer` always emits a nonce-bound binding tag — issuing challenges
-   with binding fully disabled awaits a core capability
-   (`ChallengeConfig`/`Issuer` binding option); the coordinator wires it.
-   Until then, `nonce_ip_hmac` is the effective behavior.
+   check entirely (`binding_mode: none` issues challenges with an EMPTY
+   binding tag — the core BindingMode is fully wired through the DI layer);
+   it is a relay mitigation, not a guarantee.
 4. **Server-side timing is a heuristic, off by default.** The
    minimum-duration floor is measured by your server, so a client cannot buy
    its way out of it — but the server clock must be correct, and strict
