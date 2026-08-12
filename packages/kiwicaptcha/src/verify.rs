@@ -1001,7 +1001,9 @@ mod tests {
     fn server_measured_duration_cannot_be_bypassed_with_forged_client_duration() {
         // An adversarial client submits duration_ms=5000; the server measures
         // sub-millisecond elapsed time. The client's claim must be ignored.
-        let mut record = make_record(20);
+        // Deterministic setup: 8-bit record (solve guaranteed below the 5M
+        // counter cap) + explicit 60 s floor.
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         // Elapsed: 0 µs (immediately after issuance) — impossibly fast.
         let mut ctx = VerifyContext {
@@ -1465,7 +1467,7 @@ mod tests {
         // == 0) are rejected as MalformedRecord — the legacy client-duration
         // fallback was removed (XV): the floor can only be enforced with a
         // server-measured elapsed time.
-        let mut record = make_record(20);
+        let mut record = make_record(8);
         record.issued_at_ns = 0;
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
@@ -1494,7 +1496,7 @@ mod tests {
         // Issuer host ahead of verifier host by 1 s (within the 5 s
         // SKEW_TOLERANCE_US): the floor heuristic is skipped and a correct
         // PoW passes.
-        let mut record = make_record(20); // non-trivial floor
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         assert!(record.min_duration_ms > 0, "record floor must be positive");
         let mut ctx = VerifyContext {
@@ -1519,7 +1521,7 @@ mod tests {
     fn clock_skew_beyond_tolerance_is_rejected() {
         // Issuer host ahead by 6 s (> SKEW_TOLERANCE_US): clocks are broken —
         // the timing guarantee is void and the solution is rejected.
-        let mut record = make_record(20);
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
