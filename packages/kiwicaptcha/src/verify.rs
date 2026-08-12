@@ -471,7 +471,12 @@ fn signature_from_challenge(record: &ChallengeRecord) -> &str {
 /// server-side solver for the dev-bypass path). This brute-forces until the
 /// difficulty target is met.
 pub fn solve_for_test(record: &ChallengeRecord) -> Option<u64> {
-    for counter in 0..u64::MAX {
+    // Capped at the real solver's search space: a counter >= SOLVER_MAX_HASHES
+    // is rejected by verify_solution (CounterTooLarge), so the test solver
+    // must never produce one. At 20 bits a legit solver finds no counter
+    // within the cap with p ≈ 0.85% — callers that need a guaranteed solve
+    // should use a lower difficulty.
+    for counter in 0..crate::challenge::SOLVER_MAX_HASHES {
         if let Ok(hash) = derive_hash(record, counter) {
             if leading_zero_bits(&hash) >= record.target_bits {
                 return Some(counter);
@@ -967,17 +972,18 @@ mod tests {
         // The floor is enforced with the SERVER clock (now_ns - issued_at_ns),
         // NOT the forgeable client duration_ms. Here the client CLAIMS a long
         // duration but the server measures a sub-floor elapsed time.
-        let mut record = make_record(20); // high difficulty => non-trivial floor
+        // Deterministic setup: an 8-bit record (solve guaranteed below the
+        // 5M counter cap) with an EXPLICIT 60 s ctx floor.
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
-        let floor = record.min_duration_ms.max(1);
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 60_000, // client forges a 60 s solve — must NOT help
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + floor * 1_000 - 1, // server measures below the floor
-            min_duration_ms: 0,
+            now_ns: NOW_NS + 1_000_000, // 1 s elapsed < 60 s floor
+            min_duration_ms: 60_000,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
@@ -1883,16 +1889,19 @@ mod tests {
     #[test]
     fn verify_duration_floor_is_per_challenge() {
         // The record's own floor is authoritative when ctx.min_duration_ms is 0.
-        let mut record = make_record(20);
+        // Deterministic setup: 8-bit record (solve guaranteed below the 5M
+        // solver cap); its issued SHA-256 floor is max(ceil(256/5e9*1000), 5)
+        // = 5 ms.
+        let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
-        let floor = record.min_duration_ms.max(1);
+        assert_eq!(record.min_duration_ms, 5);
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + floor * 1_000 + 1, // above floor
+            now_ns: NOW_NS + 6_000, // 6 ms elapsed > 5 ms floor (µs)
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -1908,7 +1917,7 @@ mod tests {
             counter,
             duration_ms: 60_000, // forged long client duration must NOT help
             now_unix: NOW_UNIX + 1,
-            now_ns: NOW_NS + floor * 1_000 - 1, // below floor
+            now_ns: NOW_NS + 4_999, // 4.999 ms elapsed < 5 ms floor (µs)
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
@@ -1926,16 +1935,29 @@ mod tests {
     #[test]
     fn verify_accepts_full_difficulty_range() {
         // Every difficulty from 1 to the solver cap must issue and verify.
-        // (0 is rejected at issuance with InvalidDifficulty.)
+        // (0 is rejected at issuance with InvalidDifficulty.) The solver
+        // search is capped at SOLVER_MAX_HASHES (the real solver contract):
+        // at 20 bits no counter exists within the cap with p ≈ 0.85% — that
+        // is the documented "Exhausted" outcome, so the test asserts Valid
+        // when a counter exists and accepts cap-exhaustion at 20 bits only.
         for bits in [1u32, 4, 8, 12, 16, 20] {
             let mut record = make_record(bits);
-            let counter = solve_for_test(&record).expect("solver finds counter");
-            let outcome = verify(&mut record, counter, 5000);
-            assert_eq!(
-                outcome,
-                VerifyOutcome::Valid,
-                "difficulty {bits} bits must verify"
-            );
+            match solve_for_test(&record) {
+                Some(counter) => {
+                    let outcome = verify(&mut record, counter, 5000);
+                    assert_eq!(
+                        outcome,
+                        VerifyOutcome::Valid,
+                        "difficulty {bits} bits must verify"
+                    );
+                }
+                None => {
+                    assert!(
+                        bits >= 20,
+                        "sub-20-bit difficulties must always find a counter within the solver cap"
+                    );
+                }
+            }
         }
     }
 
