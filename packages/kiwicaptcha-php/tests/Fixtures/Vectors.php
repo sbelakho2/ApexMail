@@ -51,7 +51,7 @@ final class Vectors
         't' => 3,
         'p' => 1,
         'target_bits' => 4,
-        'counter' => 4,
+        'counter' => 21,
         'outcome' => 'Valid',
     ];
 }

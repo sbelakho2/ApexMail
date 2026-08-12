@@ -160,10 +160,10 @@ pub fn solve_argon2_chunk(
     let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) };
     let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
 
-    // m_kib is MIBIBYTES per the protocol (PHP verifier: memory_cost =
-    // mKib * 1024); the argon2 crate takes KIBIBYTES. The solver MUST use
-    // the exact parameters the server verifier uses.
-    let params = match Params::new(m_kib * 1024, t, p, Some(32)) {
+    // Protocol unit: m_kib is KIBIBYTES (65536 = 64 MiB); the argon2
+    // crate takes the same 1 KiB blocks. The solver MUST use the exact
+    // parameters the server verifier uses.
+    let params = match Params::new(m_kib, t, p, Some(32)) {
         Ok(p) => p,
         Err(_) => return -1,
     };

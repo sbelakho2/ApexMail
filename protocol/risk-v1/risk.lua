@@ -1,4 +1,4 @@
--- Risk Protocol v1 — canonical production state script (v2 semantics).
+-- Risk Protocol v1 — canonical production state script (v3 semantics).
 --
 -- One atomic assessment: read → decay → apply event → aggregate → normalize,
 -- across (all keys share the hash tag {kiwi:<deployment>} — Redis Cluster safe):
@@ -62,6 +62,16 @@
 --
 -- Only PreIssue counts as a REQUEST for velocity purposes; feedback events
 -- mutate only their own channels.
+--
+-- Aggregation (v3):
+--   Rotated pseudonyms belong to the same identity, so their decayed
+--   pressure SUMS (sum3) before normalization (the cap keeps the signal in
+--   0..1000); splitting a burst across an epoch boundary can no longer
+--   halve the observed pressure.
+--   Different identity DIMENSIONS (source vs session vs principal) observe
+--   the same request, so they MAX — never double-count one request.
+--   trust_credit covers source+session trust; principal_credit is the
+--   principal's own trust (no double subtraction).
 
 local function num(v)
     if not v then return 0 end
@@ -82,10 +92,22 @@ local function normalize(value, saturation)
     return scaled
 end
 
+local function sum3(a, b, c)
+    return a + b + c
+end
+
 local function max3(a, b, c)
     local m = a
     if b > m then m = b end
     if c > m then m = c end
+    return m
+end
+
+local function max4(a, b, c, d)
+    local m = a
+    if b > m then m = b end
+    if c > m then m = c end
+    if d > m then m = d end
     return m
 end
 
@@ -280,23 +302,34 @@ end
 g.scope = level
 save(KEYS[9], g, 0)
 
--- ── Aggregate + normalize (SignalVector order). ──
-local trust = max3(src.trust, sess.trust, prin.trust)
+-- ── Aggregate (v3) + normalize (SignalVector order). ──
+-- Rotated-epoch pseudonyms of one identity SUM (decay already applied);
+-- different identity dimensions (source/session/principal) MAX.
+local src_rf = sum3(src.rf, src_prev.rf, src_next.rf)
+local src_rs = sum3(src.rs, src_prev.rs, src_next.rs)
+local src_iss = sum3(src.iss, src_prev.iss, src_next.iss)
+local src_bad = sum3(src.bad, src_prev.bad, src_next.bad)
+local src_mal = sum3(src.mal, src_prev.mal, src_next.mal)
+local src_rep = sum3(src.rep, src_prev.rep, src_next.rep)
+local src_af = sum3(src.af, src_prev.af, src_next.af)
+local src_sw = sum3(src.sw, src_prev.sw, src_next.sw)
+local src_trust = sum3(src.trust, src_prev.trust, src_next.trust)
+local net_rf = sum3(net.rf, net_prev.rf, net_next.rf)
 
 return {
-    normalize(max3(src.rf, src_prev.rf, src_next.rf),   tonumber(ARGV[8])),
-    normalize(max3(src.rs, src_prev.rs, src_next.rs),   tonumber(ARGV[9])),
-    normalize(max3(net.rf, net_prev.rf, net_next.rf),   tonumber(ARGV[8])),
-    normalize(max3(src.iss, src_prev.iss, src_next.iss), tonumber(ARGV[10])),
-    normalize(max3(src.bad, src_prev.bad, src_next.bad), tonumber(ARGV[11])),
-    normalize(max3(src.mal, src_prev.mal, src_next.mal), tonumber(ARGV[12])),
-    normalize(max3(src.rep, src_prev.rep, src_next.rep), tonumber(ARGV[13])),
-    normalize(max3(src.af, src_prev.af, src_next.af),    tonumber(ARGV[14])),
-    normalize(max3(src.sw, src_prev.sw, src_next.sw),    tonumber(ARGV[15])),
-    normalize(gp,                                        tonumber(ARGV[16])),
-    0,                                                             -- network_risk (classifier side-channel)
-    normalize(trust,                                     tonumber(ARGV[17])),
-    normalize(prin.trust,                                tonumber(ARGV[18])),
+    normalize(max3(src_rf, sess.rf, 0),              tonumber(ARGV[8])),
+    normalize(max3(src_rs, sess.rs, 0),              tonumber(ARGV[9])),
+    normalize(net_rf,                                tonumber(ARGV[8])),
+    normalize(max3(src_iss, sess.iss, 0),            tonumber(ARGV[10])),
+    normalize(max4(src_bad, sess.bad, prin.bad, 0),  tonumber(ARGV[11])),
+    normalize(max4(src_mal, sess.mal, prin.mal, 0),  tonumber(ARGV[12])),
+    normalize(max3(src_rep, sess.rep, 0),            tonumber(ARGV[13])),
+    normalize(max4(src_af, sess.af, prin.af, 0),     tonumber(ARGV[14])),
+    normalize(max3(src_sw, sess.sw, 0),              tonumber(ARGV[15])),
+    normalize(gp,                                    tonumber(ARGV[16])),
+    0,                                                         -- network_risk (classifier side-channel)
+    normalize(max3(src_trust, sess.trust, 0),        tonumber(ARGV[17])),
+    normalize(prin.trust,                            tonumber(ARGV[18])),
     level,
     g.cool,
     is_duplicate and 1 or 0

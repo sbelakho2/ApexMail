@@ -139,7 +139,7 @@ final class InProcessArgonGateTest extends TestCase
                 $prefix.$counter,
                 base64_decode($salt, true),
                 3,
-                64 * 1024 * 1024,
+                64 * 1024,
                 SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13,
             );
             $counter++;

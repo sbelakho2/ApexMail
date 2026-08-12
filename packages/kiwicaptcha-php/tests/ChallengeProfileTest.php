@@ -272,7 +272,7 @@ final class ChallengeProfileTest extends TestCase
         $salt = base64_decode($saltB64, true);
         $counter = 0;
         do {
-            $h = sodium_crypto_pwhash(32, $prefix.$counter, $salt, $t, $mKib * 1024 * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13);
+            $h = sodium_crypto_pwhash(32, $prefix.$counter, $salt, $t, $mKib * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13);
             ++$counter;
         } while (Verifier::leadingZeroBits((string) $h) < $targetBits);
 
