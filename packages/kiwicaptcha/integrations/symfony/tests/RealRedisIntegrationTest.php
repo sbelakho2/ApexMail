@@ -146,6 +146,27 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(1, $limiter2->check('10.0.0.1'), 'window expiry must release the cap');
     }
 
+    public function testRotatedGlobalLimitIsSharedAcrossClients(): void
+    {
+        // REGRESSION (release blocker): with rotation ENABLED (the default
+        // 3600s), the global budget must still be deployment-wide — the
+        // global key contains no client identity and must never be rotated.
+        // Three DIFFERENT clients with globalMax 2: the third is rejected.
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 100,
+            windowSecs: 60,
+            redis: $this->client,
+            globalMax: 2,
+            namespace: 'rotated-global',
+            pepper: 'test-secret',
+            rateLimitRotationSecs: 3600,
+        );
+
+        self::assertSame(1, $limiter->check('203.0.113.1'));
+        self::assertSame(1, $limiter->check('203.0.113.2'));
+        self::assertSame(-1, $limiter->check('203.0.113.3'), 'global cap must hold across DIFFERENT clients with rotation enabled');
+    }
+
     public function testEndToEndOneShotReplayRejected(): void
     {
         $storage = new RedisStorage($this->client, 'ci:e2e:');

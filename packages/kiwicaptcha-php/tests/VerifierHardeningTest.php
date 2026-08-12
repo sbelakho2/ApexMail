@@ -107,7 +107,7 @@ final class VerifierHardeningTest extends TestCase
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         // Receipt 1ms before the 1000ms floor elapsed: rejected, even though
         // the client forged duration_ms = 5000. issuedAtNs and nowNs are in
         // the epoch-microsecond domain.
@@ -127,7 +127,7 @@ final class VerifierHardeningTest extends TestCase
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify(
             $token,
             Vectors::SECRET,
@@ -148,7 +148,7 @@ final class VerifierHardeningTest extends TestCase
 
         self::assertSame(5000, SolutionToken::decode($token)->durationMs, 'precondition: forged duration');
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify(
             $token,
             Vectors::SECRET,
@@ -168,7 +168,7 @@ final class VerifierHardeningTest extends TestCase
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify(
             $token,
             Vectors::SECRET,
@@ -187,7 +187,7 @@ final class VerifierHardeningTest extends TestCase
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify(
             $token,
             Vectors::SECRET,
@@ -208,7 +208,7 @@ final class VerifierHardeningTest extends TestCase
 
         $wrongToken = SolutionToken::create($record->nonce, 1, 5000, ['wd' => false])->encode();
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify(
             $wrongToken,
             Vectors::SECRET,
@@ -227,7 +227,7 @@ final class VerifierHardeningTest extends TestCase
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 1000);
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify(
             $token,
             Vectors::SECRET,
@@ -269,7 +269,7 @@ final class VerifierHardeningTest extends TestCase
 
         $storage = new ArrayStorage();
         $storage->store($untimed);
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
 
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'untimed records must not fall back to client duration');
@@ -283,7 +283,7 @@ final class VerifierHardeningTest extends TestCase
 
         $botToken = SolutionToken::create($record->nonce, SolutionToken::decode($token)->counter, 5000, ['wd' => true])->encode();
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $storage->store($record);
         $outcome = $verifier->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertTrue($outcome->isOk(), 'telemetry must be ignored when enforcement is off');
@@ -302,7 +302,7 @@ final class VerifierHardeningTest extends TestCase
 
         $emptyToken = SolutionToken::create($record->nonce, SolutionToken::decode($token)->counter, 5000, [])->encode();
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify($emptyToken, Vectors::SECRET, 'login', '198.51.100.77', enforceTelemetry: true);
         self::assertSame(VerifyError::TelemetryRejected, $outcome->error);
     }
@@ -314,7 +314,7 @@ final class VerifierHardeningTest extends TestCase
 
         $emptyToken = SolutionToken::create($record->nonce, SolutionToken::decode($token)->counter, 5000, [])->encode();
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $outcome = $verifier->verify($emptyToken, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertTrue($outcome->isOk(), sprintf('empty telemetry must pass when enforcement is off, got %s', $outcome->code()));
     }
@@ -372,7 +372,7 @@ final class VerifierHardeningTest extends TestCase
             'wd' => false, 'me' => 20, 'ke' => 0, 'et' => $uniform,
         ])->encode();
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $storage->store($record);
         $outcome = $verifier->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77', enforceTelemetry: true);
         self::assertSame(VerifyError::TelemetryRejected, $outcome->error);
@@ -391,7 +391,7 @@ final class VerifierHardeningTest extends TestCase
             'wd' => false, 'me' => 20, 'ke' => 0, 'et' => $jittered,
         ])->encode();
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $storage->store($record);
         $outcome = $verifier->verify($humanToken, Vectors::SECRET, 'login', '198.51.100.77', enforceTelemetry: true);
         self::assertTrue($outcome->isOk(), sprintf('human-like telemetry must pass, got %s', $outcome->code()));
@@ -409,7 +409,7 @@ final class VerifierHardeningTest extends TestCase
 
         $wrongToken = SolutionToken::create($record->nonce, 1, 5000, [])->encode();
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $first = $verifier->verify($wrongToken, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertSame(VerifyError::InsufficientWork, $first->error);
         self::assertNull($storage->find($record->nonce), 'the failed verify must have consumed the record');
@@ -428,7 +428,7 @@ final class VerifierHardeningTest extends TestCase
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
 
-        $verifier = new Verifier($storage);
+        $verifier = new Verifier($storage, acceptLegacyV1: true);
         $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertTrue($first->isOk(), sprintf('first verify must succeed, got %s', $first->code()));
 

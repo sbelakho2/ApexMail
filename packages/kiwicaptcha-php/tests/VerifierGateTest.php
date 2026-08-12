@@ -481,6 +481,44 @@ final class VerifierGateTest extends TestCase
         self::assertNull($storage->find($record->nonce));
     }
 
+    public function testV1RecordRejectedByDefault(): void
+    {
+        // The v1 migration window is closed by default: no legitimate v1
+        // record can outlive the 300 s maximum challenge lifetime.
+        $nonce = $this->validNonce();
+        $scope = 'login';
+        $ipHash = Issuer::hashIp('198.51.100.77', Vectors::SECRET);
+        $payload = sprintf('%s|%s|%s|%d', $nonce, $scope, $ipHash, self::ISSUED_AT);
+        $challenge = base64_encode($payload).'.'.Issuer::signPayload($payload, Vectors::SECRET);
+        $salt = $this->validSalt();
+        $record = new ChallengeRecord(
+            nonce: $nonce,
+            scope: $scope,
+            bindingTag: $ipHash,
+            issuedAt: self::ISSUED_AT,
+            expiresAt: self::ISSUED_AT + 120,
+            algorithm: PoWAlgorithm::Sha256,
+            mKib: 0,
+            t: 1,
+            p: 1,
+            targetBits: 8,
+            salt: $salt,
+            prefix: $challenge.'|'.$salt.'|',
+            challenge: $challenge,
+            minDurationMs: 0,
+            issuedAtNs: self::ISSUED_AT * 1_000_000,
+            protocolVersion: 1,
+        );
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->verify($this->tokenFor($nonce, $counter), Vectors::SECRET, 'login', '198.51.100.77');
+
+        self::assertSame(VerifyError::MalformedRecord->value, $outcome->code(), 'v1 must be rejected unless acceptLegacyV1 is set');
+    }
+
     public function testV1RecordVerifiesEndToEnd(): void
     {
         // Legacy protocol v1: canonical "nonce|scope|ip_hash|issued_at" and
@@ -513,10 +551,10 @@ final class VerifierGateTest extends TestCase
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
-        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT, acceptLegacyV1: true);
         $outcome = $verifier->verify($this->tokenFor($nonce, $counter), Vectors::SECRET, 'login', '198.51.100.77');
 
-        self::assertTrue($outcome->isOk(), sprintf('v1 record must verify, got %s', $outcome->code()));
+        self::assertTrue($outcome->isOk(), sprintf('v1 record must verify with the migration flag, got %s', $outcome->code()));
     }
 
     public function testV2RecordVerifiesEndToEnd(): void

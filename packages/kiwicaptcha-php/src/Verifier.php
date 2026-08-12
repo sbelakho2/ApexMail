@@ -96,6 +96,13 @@ final class Verifier
         private readonly StorageInterface $storage,
         $argonGate = null,
         ?\Closure $now = null,
+        /**
+         * Accept protocol-v1 (legacy) challenges. v2 has been the issuance
+         * format for longer than the maximum challenge lifetime (300 s), so
+         * no legitimate v1 record can still exist — v1 is rejected by
+         * default. Set this ONLY during a coordinated migration window.
+         */
+        private readonly bool $acceptLegacyV1 = false,
     ) {
         // BC shim: pre-gate callers passed the clock override positionally
         // as the second argument. A Closure in that slot is $now, not an
@@ -161,33 +168,22 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::MalformedRecord);
         }
 
+        // 1b. Protocol version gate: v1 (legacy, less comprehensively
+        //     signed) is only accepted during an explicit migration window —
+        //     v2 has been the issuance format longer than the maximum
+        //     challenge lifetime, so any surviving v1 record is stale or
+        //     foreign.
+        if ($peek->protocolVersion === 1 && !$this->acceptLegacyV1) {
+            $this->storage->delete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
+
         // 2. Signature re-check: reconstruct the payload from the record and
         //    compare against the signature embedded in the challenge string.
         //    Protocol v1 uses the legacy canonical form; protocol v2 uses the
         //    full-parameter canonical payload.
-        $expectedSignature = $peek->protocolVersion === 1
-            ? Issuer::signPayload(sprintf(
-                '%s|%s|%s|%d',
-                $peek->nonce,
-                $peek->scope,
-                $peek->ipHash(),
-                $peek->issuedAt,
-            ), $secretKey)
-            : Issuer::signPayload(Issuer::canonicalPayload(
-                $peek->nonce,
-                $peek->scope,
-                $peek->bindingTag,
-                $peek->issuedAt,
-                $peek->expiresAt,
-                $peek->algorithm,
-                $peek->mKib,
-                $peek->t,
-                $peek->p,
-                $peek->targetBits,
-                $peek->salt,
-                $peek->minDurationMs,
-            ), $secretKey);
-        if (!hash_equals($expectedSignature, self::signatureFromChallenge($peek->challenge))) {
+        if (!$this->verifyRecordSignature($peek, $secretKey)) {
             $this->storage->delete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::BadSignature);
@@ -291,10 +287,17 @@ final class Verifier
             if ($record === null) {
                 return VerifyOutcome::invalid(VerifyError::RecordNotFound);
             }
-            // TOCTOU guard: the peeked record must be the consumed record.
-            // A swapped/racing record fails closed instead of verifying
+            // TOCTOU guard: the consumed instance must be the SAME challenge
+            // we validated and HMAC-checked via peek. Because the v2 HMAC
+            // signs EVERY immutable parameter, full re-validation + signature
+            // re-verification on the consumed instance is the robust check —
+            // a swapped/racing record fails closed instead of verifying
             // against bytes that were never validated.
-            if (!hash_equals($peek->challenge, $record->challenge)) {
+            if (
+                !hash_equals($peek->challenge, $record->challenge)
+                || !$this->validateRecord($record)
+                || !$this->verifyRecordSignature($record, $secretKey)
+            ) {
                 return VerifyOutcome::invalid(VerifyError::MalformedRecord);
             }
 
@@ -416,6 +419,42 @@ final class Verifier
         );
 
         return $hash === false ? null : $hash;
+    }
+
+    /**
+     * Recompute the expected HMAC signature for a record (per its protocol
+     * version) and compare it constant-time against the signature embedded
+     * in the challenge string. Because the v2 canonical payload covers EVERY
+     * immutable parameter, a valid signature proves the whole record is
+     * authentic — used in the cheap phase AND re-applied to the CONSUMED
+     * instance (TOCTOU guard).
+     */
+    private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool
+    {
+        $expected = $record->protocolVersion === 1
+            ? Issuer::signPayload(sprintf(
+                '%s|%s|%s|%d',
+                $record->nonce,
+                $record->scope,
+                $record->ipHash(),
+                $record->issuedAt,
+            ), $secretKey)
+            : Issuer::signPayload(Issuer::canonicalPayload(
+                $record->nonce,
+                $record->scope,
+                $record->bindingTag,
+                $record->issuedAt,
+                $record->expiresAt,
+                $record->algorithm,
+                $record->mKib,
+                $record->t,
+                $record->p,
+                $record->targetBits,
+                $record->salt,
+                $record->minDurationMs,
+            ), $secretKey);
+
+        return hash_equals($expected, self::signatureFromChallenge($record->challenge));
     }
 
     /**

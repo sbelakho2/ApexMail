@@ -141,6 +141,11 @@ pub struct VerifyContext<'a> {
     /// enforcement (score-only logging is performed by `score_telemetry`
     /// callers). Default off: telemetry must never be the security boundary.
     pub enforce_telemetry: bool,
+    /// Accept protocol-v1 (legacy) challenges. v2 has been the issuance
+    /// format for longer than the maximum challenge lifetime (300 s), so no
+    /// legitimate v1 record can still exist — v1 is rejected by default.
+    /// Set this ONLY during a coordinated migration window.
+    pub accept_legacy_v1: bool,
     /// Maximum number of verification attempts against this record
     /// (`record.attempts_used`). 0 = unlimited. Attempts are counted on every
     /// verification call (correct or not), bounding the server-side cost of
@@ -268,7 +273,9 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
 /// 6. Check the IP binding: for v2 records, recompute the nonce-bound
 ///    `binding_tag` from `client_ip` + record nonce + secret and compare in
 ///    constant time; for v1 records, compare the legacy `hash_ip`. An empty
-///    `binding_tag` skips the check; a `None` `client_ip` also skips it.
+///    `binding_tag` skips the check. A `None` `client_ip` with a NON-EMPTY
+///    tag fails closed with [`VerifyError::MissingClientIp`] — only records
+///    issued with `BindingMode::None` (empty tag) verify without an IP.
 /// 7. Check the minimum duration with the SERVER clock (see
 ///    [`SKEW_TOLERANCE_US`] for the clock-skew policy). The client-reported
 ///    duration is forgeable and is never trusted for this check. Records
@@ -300,7 +307,15 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(VerifyError::CounterTooLarge);
     }
 
-    // 1. Signature re-check over the protocol-appropriate canonical input.
+    // 1. Protocol version gate: v1 (legacy, less comprehensively signed) is
+    //    only accepted during an explicit migration window — v2 has been the
+    //    issuance format longer than the maximum challenge lifetime, so any
+    //    surviving v1 record is stale or foreign.
+    if ctx.record.protocol_version == 1 && !ctx.accept_legacy_v1 {
+        return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
+    }
+
+    // 1b. Signature re-check over the protocol-appropriate canonical input.
     let sig = signature_from_challenge(ctx.record);
     let sig_ok = match ctx.record.protocol_version {
         // Legacy v1 records: `nonce|scope|ip_hash|issued_at` (the binding
@@ -667,6 +682,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         verify_solution(&mut ctx)
     }
@@ -936,6 +952,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -964,6 +981,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -991,6 +1009,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1028,6 +1047,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1055,6 +1075,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1082,6 +1103,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1109,6 +1131,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1149,6 +1172,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(verify_solution(&mut ctx2), VerifyOutcome::Valid);
     }
@@ -1172,6 +1196,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1191,6 +1216,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx2),
@@ -1218,6 +1244,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
+            accept_legacy_v1: false,
         };
         verify_solution(&mut ctx); // wrong counter
         let attempts = record.attempts_used;
@@ -1235,6 +1262,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
+            accept_legacy_v1: false,
         };
         assert_eq!(verify_solution(&mut ctx2), VerifyOutcome::Valid);
         assert_eq!(record.attempts_used, 2);
@@ -1260,6 +1288,7 @@ mod tests {
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: true,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1286,6 +1315,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: true,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1315,6 +1345,7 @@ mod tests {
             telemetry: Some(&json!({})),
             enforce_telemetry: true,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1322,8 +1353,19 @@ mod tests {
         );
         // An empty array is equally empty.
         let mut ctx_array = VerifyContext {
+            accept_legacy_v1: false,
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
             telemetry: Some(&json!([])),
-            ..ctx
+            enforce_telemetry: true,
+            max_attempts: 0,
         };
         assert_eq!(
             verify_solution(&mut ctx_array),
@@ -1351,6 +1393,7 @@ mod tests {
             telemetry: Some(&json!(null)),
             enforce_telemetry: true,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1380,6 +1423,7 @@ mod tests {
             })),
             enforce_telemetry: true,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
     }
@@ -1402,6 +1446,7 @@ mod tests {
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
     }
@@ -1428,6 +1473,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1456,6 +1502,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
     }
@@ -1479,6 +1526,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1710,6 +1758,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1735,6 +1784,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -1760,6 +1810,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
     }
@@ -1826,6 +1877,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
         let mut ctx_fast = VerifyContext {
@@ -1841,6 +1893,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx_fast),
@@ -2050,6 +2103,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
     }
@@ -2071,6 +2125,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2132,7 +2187,7 @@ mod tests {
         }
     }
 
-    fn verify_fixture(record: &mut ChallengeRecord) -> VerifyOutcome {
+    fn verify_fixture(record: &mut ChallengeRecord, accept_legacy_v1: bool) -> VerifyOutcome {
         let counter = solve_for_test(record).expect("fixture counter found");
         let mut ctx = VerifyContext {
             record,
@@ -2147,6 +2202,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1,
         };
         verify_solution(&mut ctx)
     }
@@ -2173,24 +2229,37 @@ mod tests {
         let b64 = FIXTURE_CHALLENGE_V2.split('.').next().unwrap();
         assert_eq!(B64.decode(b64).unwrap(), FIXTURE_CANONICAL_V2.as_bytes());
         assert_eq!(
-            verify_fixture(&mut record),
+            verify_fixture(&mut record, false),
             VerifyOutcome::Valid,
             "v2 shared fixture vector must verify with client_ip 192.168.1.5"
         );
     }
 
     #[test]
-    fn v1_fixture_record_still_verifies() {
+    fn v1_fixture_record_rejected_by_default() {
+        // The v1 migration window is closed by default: v2 has been the
+        // issuance format longer than the maximum challenge lifetime, so no
+        // legitimate v1 record can still exist.
+        let mut record = fixture_record(1);
+        assert_eq!(
+            verify_fixture(&mut record, false),
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+            "v1 must be rejected unless accept_legacy_v1 is set"
+        );
+    }
+
+    #[test]
+    fn v1_fixture_record_still_verifies_with_migration_flag() {
         // protocol_version 1 + legacy canonical + legacy ip_hash binding —
-        // kept verifiable during the migration window.
+        // verifiable ONLY during an explicit migration window.
         let mut record = fixture_record(1);
         assert_eq!(record.challenge, FIXTURE_CHALLENGE_V1);
         let b64 = FIXTURE_CHALLENGE_V1.split('.').next().unwrap();
         assert_eq!(B64.decode(b64).unwrap(), FIXTURE_CANONICAL_V1.as_bytes());
         assert_eq!(
-            verify_fixture(&mut record),
+            verify_fixture(&mut record, true),
             VerifyOutcome::Valid,
-            "v1 shared fixture vector must still verify"
+            "v1 shared fixture vector must verify with the migration flag"
         );
     }
 
@@ -2211,6 +2280,7 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            accept_legacy_v1: false,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2244,9 +2314,9 @@ mod tests {
         assert_eq!(decoded.protocol_version, 1);
         assert_eq!(decoded.challenge, FIXTURE_CHALLENGE_V1);
         assert_eq!(
-            verify_fixture(&mut decoded),
+            verify_fixture(&mut decoded, true),
             VerifyOutcome::Valid,
-            "v1 record read via the ip_hash alias must still verify"
+            "v1 record read via the ip_hash alias must verify with the migration flag"
         );
     }
 }

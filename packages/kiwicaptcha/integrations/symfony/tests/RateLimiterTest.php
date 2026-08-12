@@ -304,6 +304,54 @@ final class RateLimiterTest extends TestCase
         self::assertSame(0, $limiter->check('203.0.113.7'), 'previous-epoch hits still count inside the window');
     }
 
+    public function testRotatedGlobalLimitIsSharedAcrossClients(): void
+    {
+        // REGRESSION (release blocker): with rotation ENABLED, the global
+        // budget must still be deployment-wide — the global key contains no
+        // client identity and must never be rotated. Three DIFFERENT
+        // clients with globalMax 2: the third is rejected.
+        $client = new FakePredisClient();
+        $client->setTimeMs(1_700_000_000_000);
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 100,
+            windowSecs: 60,
+            redis: $client,
+            globalMax: 2,
+            namespace: 'rotated-global',
+            pepper: 'test-secret',
+            rateLimitRotationSecs: 3600,
+            now: static fn (): float => 1_700_000_000.0,
+        );
+
+        self::assertSame(1, $limiter->check('203.0.113.1'));
+        self::assertSame(1, $limiter->check('203.0.113.2'));
+        self::assertSame(-1, $limiter->check('203.0.113.3'), 'global cap must hold across DIFFERENT clients with rotation enabled');
+    }
+
+    public function testRotatedPsr6DenialRetainsState(): void
+    {
+        // REGRESSION: the rotated PSR-6 fallback must NOT clear the window
+        // on denial — clearing lets a denied request reset the state and
+        // pass on the next call (deterministic every-other-request bypass).
+        $pool = new \Symfony\Component\Cache\Adapter\ArrayAdapter();
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 3,
+            windowSecs: 60,
+            pool: $pool,
+            pepper: 'pepper',
+            rateLimitRotationSecs: 100,
+            now: static fn (): float => $clock,
+        );
+
+        self::assertTrue($limiter->allow('203.0.113.9'));
+        self::assertTrue($limiter->allow('203.0.113.9'));
+        self::assertTrue($limiter->allow('203.0.113.9'));
+        self::assertFalse($limiter->allow('203.0.113.9'), '4th request within the window must be denied');
+        self::assertFalse($limiter->allow('203.0.113.9'), '5th request must STILL be denied (state retained, no reset)');
+        self::assertFalse($limiter->allow('203.0.113.9'), '6th request must STILL be denied');
+    }
+
     public function testEpochRotationReleasesAfterWindowSlides(): void
     {
         $client = new FakePredisClient();

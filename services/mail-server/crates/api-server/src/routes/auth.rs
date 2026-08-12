@@ -246,6 +246,9 @@ pub async fn verify_kiwi_token(
         expected_scope: scope,
         // IP binding is enforced inside verify_solution (intrinsic).
         client_ip: Some(client_ip),
+        // v1 challenges are rejected by default (the migration window is
+        // closed); the api-server only ever issues v2.
+        accept_legacy_v1: false,
         telemetry: Some(&solution.telemetry),
         // Telemetry is client-controlled and forgeable — supplementary only.
         // The per-nonce Lua INCR is the authoritative attempt cap (20); the

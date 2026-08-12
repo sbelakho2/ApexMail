@@ -35,6 +35,7 @@ fn rust_verifies_php_issued_record() {
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,
+        accept_legacy_v1: false,
     };
     assert_eq!(
         verify_solution(&mut ctx),
@@ -57,6 +58,7 @@ fn rust_verifies_php_issued_record() {
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,
+        accept_legacy_v1: false,
     };
     assert_eq!(
         verify_solution(&mut ctx2),

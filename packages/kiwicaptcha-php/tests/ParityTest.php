@@ -42,7 +42,7 @@ final class ParityTest extends TestCase
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::SHA));
 
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
         $token = $this->tokenFor(Vectors::SHA);
 
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP);
@@ -55,7 +55,7 @@ final class ParityTest extends TestCase
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::ARGON2));
 
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
         $token = $this->tokenFor(Vectors::ARGON2);
 
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP);
@@ -68,7 +68,7 @@ final class ParityTest extends TestCase
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::SHA));
 
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
         $token = $this->tokenFor(Vectors::SHA, counter: Vectors::SHA['counter'] + 1);
 
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP);
@@ -81,7 +81,7 @@ final class ParityTest extends TestCase
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::SHA));
 
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
 
         $outcome = $verifier->verify($this->tokenFor(Vectors::SHA), Vectors::SECRET, 'signup', Vectors::CLIENT_IP);
 
@@ -93,7 +93,7 @@ final class ParityTest extends TestCase
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::SHA));
 
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::ISSUED_AT + 121);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::ISSUED_AT + 121, acceptLegacyV1: true);
 
         $outcome = $verifier->verify($this->tokenFor(Vectors::SHA), Vectors::SECRET, 'login', Vectors::CLIENT_IP);
 
@@ -105,7 +105,7 @@ final class ParityTest extends TestCase
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::SHA));
 
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
 
         $outcome = $verifier->verify($this->tokenFor(Vectors::SHA), Vectors::SECRET, 'login', '198.51.100.9');
 
@@ -117,7 +117,7 @@ final class ParityTest extends TestCase
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::SHA));
 
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
         $token = $this->tokenFor(Vectors::SHA);
 
         self::assertTrue($verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP)->isOk());
@@ -159,7 +159,7 @@ final class ParityTest extends TestCase
             protocolVersion: 1,
         ));
 
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
 
         $outcome = $verifier->verify($this->tokenFor(Vectors::SHA), Vectors::SECRET, 'login', Vectors::CLIENT_IP);
 
@@ -171,7 +171,7 @@ final class ParityTest extends TestCase
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::SHA));
 
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
 
         $outcome = $verifier->verify($this->tokenFor(Vectors::SHA), str_repeat('f', 32), 'login', Vectors::CLIENT_IP);
 
@@ -206,7 +206,7 @@ final class ParityTest extends TestCase
         );
         $storage = new ArrayStorage();
         $storage->store($recordWithFloor);
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
         $token = $this->tokenFor(Vectors::SHA, durationMs: 50);
 
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issuedAtNs + 50_000);
@@ -275,7 +275,7 @@ final class ParityTest extends TestCase
 
         // End-to-end: the issued v2 record + solved token verify through the
         // v2 verifier (receipt 1s after the record's server-side issuance).
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
         $outcome = $verifier->verify(
             $token,
             Vectors::SECRET,
@@ -334,7 +334,7 @@ final class ParityTest extends TestCase
         );
         $storage = new ArrayStorage();
         $storage->store($record);
-        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW);
+        $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
 
         // Solve in PHP with the sodium-representable path — impossible for t=1,
         // so deriveHash must return null => MalformedRecord.

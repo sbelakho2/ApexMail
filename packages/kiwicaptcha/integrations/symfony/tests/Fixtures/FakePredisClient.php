@@ -55,6 +55,14 @@ final class FakePredisClient extends \Predis\Client
         return $this->clockMs;
     }
 
+    /** Redis TIME emulation: [seconds, microseconds]. */
+    public function time(): array
+    {
+        $secs = (int) floor($this->clockMs / 1000);
+
+        return [$secs, (int) (($this->clockMs - $secs * 1000) * 1000)];
+    }
+
     /** Number of live members (leases/hits) in a sorted set. */
     public function zcard(string $key): int
     {
@@ -235,30 +243,29 @@ final class FakePredisClient extends \Predis\Client
             return 1;
         }
 
-        // Epoch-rotated limiter (4 keys): clientPrev, clientCur,
-        // globalPrev, globalCur. Both epochs are pruned and summed; new
-        // hits go to the CURRENT epoch keys only.
+        // Epoch-rotated limiter (3 keys): clientPrev, clientCur, and ONE
+        // STABLE global ZSET. Only the CLIENT keys are per-epoch; the
+        // global budget is shared by every client regardless of epoch.
         $clientPrev = (string) $keys[0];
         $clientCur = (string) $keys[1];
-        $globalPrev = (string) $keys[2];
-        $globalCur = (string) $keys[3];
+        $global = (string) $keys[2];
         $clientMax = (int) $rest[0];
         $globalMax = (int) $rest[1];
         $windowMs = (int) $rest[2];
         $requestId = (string) $rest[3];
         $cutoff = $now - $windowMs;
-        foreach ([$clientPrev, $clientCur, $globalPrev, $globalCur] as $k) {
+        foreach ([$clientPrev, $clientCur, $global] as $k) {
             $this->fakeZremrangebyscore([$k, '-inf', (string) $cutoff]);
         }
         if ($this->zcard($clientPrev) + $this->zcard($clientCur) >= $clientMax) {
             return 0;
         }
-        if ($this->zcard($globalPrev) + $this->zcard($globalCur) >= $globalMax) {
+        if ($this->zcard($global) >= $globalMax) {
             return -1;
         }
         $this->fakeZadd([$clientCur, (string) $now, $requestId]);
-        $this->fakeZadd([$globalCur, (string) $now, $requestId]);
-        foreach ([$clientPrev, $clientCur, $globalPrev, $globalCur] as $k) {
+        $this->fakeZadd([$global, (string) $now, $requestId]);
+        foreach ([$clientPrev, $clientCur, $global] as $k) {
             $this->fakePexpire([$k, (string) ($windowMs + 1000)]);
         }
 

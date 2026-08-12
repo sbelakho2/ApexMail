@@ -73,13 +73,16 @@ return 1
 LUA;
 
     /**
-     * Epoch-rotated variant of LIMIT_SCRIPT (4 keys): KEYS[1..2] = client
-     * ZSETs (previous epoch, current epoch), KEYS[3..4] = global ZSETs
-     * (previous, current). The identity is HMAC(secret, "kiwi-rate-v2|epoch|
-     * canonical-ip"), so the same IP produces a DIFFERENT keyed pseudonym in
-     * every epoch — an observer of old Redis snapshots cannot correlate one
-     * IP across time periods. Checking the previous-epoch key keeps the
-     * sliding window exact across a rotation boundary.
+     * Epoch-rotated variant of LIMIT_SCRIPT (3 keys): KEYS[1] = previous
+     * client pseudonym, KEYS[2] = current client pseudonym, KEYS[3] = ONE
+     * STABLE deployment-global ZSET (no client identity — it must never be
+     * rotated, or the "global" budget would silently become per-client).
+     * The client identity is HMAC(secret, "kiwi-rate-v2|epoch|canonical-ip"),
+     * so the same IP yields a DIFFERENT keyed pseudonym in every epoch — an
+     * observer of old Redis snapshots cannot correlate one IP across time
+     * periods. Checking the previous-epoch key keeps the per-client sliding
+     * window exact across a rotation boundary. The global budget is shared
+     * by ALL clients regardless of epoch.
      */
     private const LIMIT_SCRIPT_ROTATED = <<<'LUA'
 local time = redis.call('TIME')
@@ -88,15 +91,13 @@ local cutoff = now - tonumber(ARGV[3])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
 redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', cutoff)
-redis.call('ZREMRANGEBYSCORE', KEYS[4], '-inf', cutoff)
 if redis.call('ZCARD', KEYS[1]) + redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[1]) then return 0 end
-if redis.call('ZCARD', KEYS[3]) + redis.call('ZCARD', KEYS[4]) >= tonumber(ARGV[2]) then return -1 end
+if redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[2]) then return -1 end
 redis.call('ZADD', KEYS[2], now, ARGV[4])
-redis.call('ZADD', KEYS[4], now, ARGV[4])
+redis.call('ZADD', KEYS[3], now, ARGV[4])
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 1000)
 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
 redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[3]) + 1000)
-redis.call('PEXPIRE', KEYS[4], tonumber(ARGV[3]) + 1000)
 return 1
 LUA;
 
@@ -163,7 +164,17 @@ LUA;
             // rotation boundary; new hits are written to the current epoch
             // only. The same IP therefore yields different keys in different
             // epochs — no correlation across time periods from Redis keys.
-            $now = $this->now();
+            //
+            // The epoch is derived from the REDIS SERVER clock when Redis is
+            // the backend (a single TIME read): the Lua window pruning uses
+            // Redis TIME, so using the same clock for the epoch keeps both
+            // domains consistent around rotation boundaries even when an
+            // application host's wall clock drifts.
+            if ($this->redis !== null) {
+                $now = $this->redisTimeSecs();
+            } else {
+                $now = $this->now();
+            }
             $epoch = (int) floor($now / $this->rateLimitRotationSecs);
             $identityCur = $this->epochIdentity($identity, $epoch);
             $identityPrev = $this->epochIdentity($identity, $epoch - 1);
@@ -195,16 +206,18 @@ LUA;
 
     private function checkRedisRotated(string $identityPrev, string $identityCur): int
     {
+        // Only the CLIENT keys are epoch-rotated. The global key contains NO
+        // client identity and is shared by every client — rotating it would
+        // silently turn the deployment-wide budget into per-client budgets.
         $clientPrev = 'kiwi:rl:client:'.$this->namespace.':'.$identityPrev;
         $clientCur = 'kiwi:rl:client:'.$this->namespace.':'.$identityCur;
-        $globalPrev = 'kiwi:rl:global:'.$this->namespace.':'.$identityPrev;
-        $globalCur = 'kiwi:rl:global:'.$this->namespace.':'.$identityCur;
+        $global = 'kiwi:rl:global:'.$this->namespace;
         $windowMs = $this->windowSecs * 1000;
         $requestId = bin2hex(random_bytes(16));
         $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;
         $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
 
-        $result = $this->eval(self::LIMIT_SCRIPT_ROTATED, [$clientPrev, $clientCur, $globalPrev, $globalCur], [
+        $result = $this->eval(self::LIMIT_SCRIPT_ROTATED, [$clientPrev, $clientCur, $global], [
             (string) $clientMax,
             (string) $globalMax,
             (string) $windowMs,
@@ -251,23 +264,24 @@ LUA;
 
         $itemPrev = $this->pool->getItem($cacheKeyPrev);
         $itemCur = $this->pool->getItem($cacheKeyCur);
-        $hits = $this->pruneTwo(
-            \is_array($itemPrev->isHit() ? $itemPrev->get() : null) ? $this->timestamps($itemPrev->get()) : [],
-            \is_array($itemCur->isHit() ? $itemCur->get() : null) ? $this->timestamps($itemCur->get()) : [],
-            $now,
-        );
+        $prevHits = $this->prune($this->timestamps(\is_array($itemPrev->isHit() ? $itemPrev->get() : null) ? $itemPrev->get() : []), $now);
+        $curHits = $this->prune($this->timestamps(\is_array($itemCur->isHit() ? $itemCur->get() : null) ? $itemCur->get() : []), $now);
 
-        if (\count($hits) >= $this->maxChallenges) {
-            $itemPrev->set(['t' => []]);
+        if (\count($prevHits) + \count($curHits) >= $this->maxChallenges) {
+            // RETAIN the pruned state on denial — clearing it would let a
+            // denied request reset the window and pass on the next call
+            // (a deterministic every-other-request bypass).
+            $itemPrev->set(['t' => $prevHits]);
             $itemPrev->expiresAfter($this->windowSecs + 1);
             $this->pool->save($itemPrev);
-            $itemCur->set(['t' => []]);
+            $itemCur->set(['t' => $curHits]);
             $itemCur->expiresAfter($this->windowSecs + 1);
             $this->pool->save($itemCur);
 
             return false;
         }
-        $itemCur->set(['t' => array_merge($this->timestamps(\is_array($itemCur->get()) ? $itemCur->get() : []), [$now])]);
+        $curHits[] = $now;
+        $itemCur->set(['t' => $curHits]);
         $itemCur->expiresAfter($this->windowSecs + 1);
         $this->pool->save($itemCur);
 
@@ -372,6 +386,25 @@ LUA;
     private function now(): float
     {
         return $this->now !== null ? (float) ($this->now)() : microtime(true);
+    }
+
+    /**
+     * Read the Redis server clock (seconds since epoch). TIME is atomic and
+     * shared by all workers — the rotation epoch and the Lua window pruning
+     * must use the SAME clock so an application-host clock drift cannot
+     * select a mismatched epoch right at a rotation boundary.
+     */
+    private function redisTimeSecs(): float
+    {
+        $time = $this->redis instanceof \Redis
+            ? $this->redis->time()
+            : $this->redis->time();
+
+        if (!\is_array($time) || !isset($time[0])) {
+            return $this->now();
+        }
+
+        return (float) $time[0];
     }
 
     /**

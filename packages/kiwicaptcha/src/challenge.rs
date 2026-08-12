@@ -545,7 +545,7 @@ impl ChallengeCache {
     /// fail nondeterministically).
     #[cfg(test)]
     fn age_entries_for_test(&mut self, by: Duration) {
-        for (_, (_, ts)) in self.entries.iter_mut() {
+        for (_, ts) in self.entries.values_mut() {
             *ts = ts.checked_sub(by).unwrap_or(*ts);
         }
     }
