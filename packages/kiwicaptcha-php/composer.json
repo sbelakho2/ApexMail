@@ -1,5 +1,6 @@
 {
     "name": "kiwicaptcha/kiwicaptcha-php",
+    "version": "1.0.0",
     "description": "KiwiCaptcha: privacy-first, self-hosted proof-of-work anti-abuse engine for PHP. Zero third-party services or tracking; optional first-party telemetry; pure-PHP verification.",
     "type": "library",
     "license": "MIT",
