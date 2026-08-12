@@ -170,14 +170,22 @@ final class ChallengeProfileTest extends TestCase
 
     public function testIssueWithProfileSha20SolvesAndVerifies(): void
     {
-        [$issuer, $storage, $profile] = $this->issuerWith(ChallengeProfile::sha(20));
-        $challenge = $issuer->issueWithProfile('login', Vectors::CLIENT_IP, $profile, now: Vectors::ISSUED_AT);
-        $record = $storage->find($challenge->nonce);
-
-        self::assertSame(20, $record?->targetBits);
-
-        $counter = $this->solveSha($challenge->prefix, $challenge->salt, $challenge->targetBits);
-        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+        // 20 bits needs ~1M hashes; a counter above the solver cap (5M)
+        // makes the token malformed, so retry on a fresh challenge when an
+        // unlucky solve exceeds it (~0.7% per attempt).
+        $token = null;
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            [$issuer, $storage, $profile] = $this->issuerWith(ChallengeProfile::sha(20));
+            $challenge = $issuer->issueWithProfile('login', Vectors::CLIENT_IP, $profile, now: Vectors::ISSUED_AT);
+            $record = $storage->find($challenge->nonce);
+            self::assertSame(20, $record?->targetBits);
+            $counter = $this->solveSha($challenge->prefix, $challenge->salt, $challenge->targetBits);
+            if ($counter <= SolutionToken::maxSolverCounter()) {
+                $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+                break;
+            }
+        }
+        self::assertNotNull($token, 'a sha-20 solve within the solver cap must be found');
         $outcome = (new Verifier($storage))->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, (int) (microtime(true) * 1_000_000) + 1_000_000);
         self::assertTrue($outcome->isOk(), sprintf('expected Valid, got %s', $outcome->code()));
     }

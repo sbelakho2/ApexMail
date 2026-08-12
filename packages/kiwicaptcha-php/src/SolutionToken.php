@@ -30,6 +30,12 @@ final class SolutionToken
      */
     private const MAX_SOLVER_COUNTER = 5_000_000;
 
+    /** The solver-cap ceiling (5M), exposed for tests. */
+    public static function maxSolverCounter(): int
+    {
+        return self::MAX_SOLVER_COUNTER;
+    }
+
     /** Hard ceiling for the client-reported duration (telemetry only): 1 hour. */
     public const MAX_DURATION_MS = 3_600_000;
 
