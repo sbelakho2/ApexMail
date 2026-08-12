@@ -22,14 +22,14 @@ namespace KiwiCaptcha;
  * - Argon2id: targetBits within 1..MAX_ARGON2_TARGET_BITS (10),
  *   t within 3..MAX_ARGON_T (6), p === 1, mKib within 8..65536.
  */
-final readonly class ChallengeProfile
+final class ChallengeProfile
 {
     public function __construct(
-        public PoWAlgorithm $algorithm,
-        public int $targetBits,
-        public int $mKib = 0,
-        public int $t = 0,
-        public int $p = 1,
+        public readonly PoWAlgorithm $algorithm,
+        public readonly int $targetBits,
+        public readonly int $mKib = 0,
+        public readonly int $t = 0,
+        public readonly int $p = 1,
     ) {
     }
 
