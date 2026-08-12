@@ -1837,9 +1837,29 @@ mod tests {
         let sha_record = make_record(8);
         let mut argon_record = make_argon2_record(8, 128);
         let sha_counter = solve_for_test(&sha_record).unwrap();
-        // Feed the SHA counter into the Argon2 record: hashes differ.
+
+        // Deterministic core assertion: the two algorithms derive DIFFERENT
+        // hashes for the same counter (the algorithm is part of the input).
+        let sha_hash = derive_hash(&sha_record, sha_counter).unwrap();
+        let argon_hash = derive_hash(&argon_record, sha_counter).unwrap();
+        assert_ne!(
+            sha_hash, argon_hash,
+            "SHA-256 and Argon2id must derive different hashes for the same counter"
+        );
+
+        // Outcome assertion with a PROVABLY-failing counter: at 8 bits a
+        // random counter meets the target with p=1/256 (a flake seen in
+        // CI), so search upward until the Argon hash provably misses.
+        let target = argon_record.target_bits;
+        let mut wrong = sha_counter;
+        while derive_hash(&argon_record, wrong)
+            .map(|h| leading_zero_bits(&h) >= target)
+            .unwrap_or(true)
+        {
+            wrong = wrong.wrapping_add(1);
+        }
         assert_eq!(
-            verify(&mut argon_record, sha_counter, 5000),
+            verify(&mut argon_record, wrong, 5000),
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         );
     }

@@ -266,12 +266,19 @@ final class RedisStorageTest extends TestCase
 
         $challenge = $issuer->issue('login', '198.51.100.77');
 
-        $wrong = \KiwiCaptcha\SolutionToken::create($challenge->nonce, 1, 5000, [])->encode();
+        // A WRONG counter must be PROVABLY wrong: at 8 bits a random counter
+        // coincidentally meets the target with p=1/256 (a flake seen in CI).
+        // Search upward until the hash provably misses the target.
+        $wrongCounter = 1;
+        $saltBytes = base64_decode($challenge->salt, true);
+        while (Verifier::leadingZeroBits(hash('sha256', $challenge->prefix.$wrongCounter.$saltBytes, true)) >= $challenge->targetBits) {
+            ++$wrongCounter;
+        }
+        $wrong = \KiwiCaptcha\SolutionToken::create($challenge->nonce, $wrongCounter, 5000, [])->encode();
         $outcome = $verifier->verify($wrong, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertSame(VerifyError::InsufficientWork, $outcome->error);
 
         $counter = 0;
-        $saltBytes = base64_decode($challenge->salt, true);
         do {
             $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
             $counter++;

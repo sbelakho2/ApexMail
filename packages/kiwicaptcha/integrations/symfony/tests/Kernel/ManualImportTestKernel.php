@@ -22,7 +22,7 @@ final class ManualImportTestKernel extends TestKernel
                 'secret' => 'test-secret',
                 'test' => true,
                 'router' => [
-                    'resource' => __DIR__.'/fixtures/app_routes.php',
+                    'resource' => __DIR__.'/Fixtures/app_routes.php',
                 ],
             ]);
             $container->loadFromExtension('twig', [
