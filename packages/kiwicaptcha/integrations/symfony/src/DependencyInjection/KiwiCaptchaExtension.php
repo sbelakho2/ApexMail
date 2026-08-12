@@ -6,6 +6,9 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
+use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
 use BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
@@ -17,6 +20,13 @@ use KiwiCaptcha\BindingMode;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
+use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
+use KiwiCaptcha\Risk\RiskIdentityFactory;
+use KiwiCaptcha\Risk\RiskKeys;
+use KiwiCaptcha\Risk\RiskPolicy;
+use KiwiCaptcha\Risk\RiskScorer;
+use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\StorageInterface;
@@ -232,10 +242,104 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ]))->setPublic(true));
             $rateLimiterRef = new Reference('kiwi_captcha.rate_limiter');
         }
+
+        // ── Adaptive risk engine (kiwicaptcha/kiwicaptcha-risk-php) ────────
+        // Off by default. When enabled, a Predis\Client is REQUIRED for the
+        // canonical risk-v1 state script (risk.redis_service, or the bundle's
+        // own Redis client when it is a Predis client) — fail fast at compile
+        // time otherwise. The engine runs PRE-ISSUE (decide difficulty or
+        // deny), records issuances, and receives POST-SOLVE outcome feedback
+        // from the validator.
+        $riskConfig = $config['risk'];
+        $riskGatewayRef = null;
+        $riskCookieRef = null;
+        if ($riskConfig['enabled']) {
+            [$policyConfig, $scopeIds] = $this->buildRiskPolicy($riskConfig);
+            $riskRedis = $this->resolveRiskRedisClient($riskConfig, $redisRef, $container);
+            $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
+
+            $container->setDefinition('kiwi_captcha.risk.keys', (new Definition(RiskKeys::class))
+                ->setFactory([RiskKeys::class, 'fromMaster'])
+                ->setArguments([$config['secret_key']])
+                ->setPublic(true));
+            $container->setDefinition('kiwi_captcha.risk.identity_factory', new Definition(RiskIdentityFactory::class, [
+                new Reference('kiwi_captcha.risk.keys'),
+                $riskConfig['source_epoch_secs'],
+                $riskConfig['subnet_epoch_secs'],
+            ]));
+            if ($riskConfig['network_classifier_file'] !== null) {
+                $container->setDefinition('kiwi_captcha.risk.classifier', (new Definition(CidrNetworkClassifier::class))
+                    ->setFactory([CidrNetworkClassifier::class, 'fromFile'])
+                    ->setArguments([$riskConfig['network_classifier_file']]));
+            } else {
+                $container->setDefinition('kiwi_captcha.risk.classifier', new Definition(CidrNetworkClassifier::class, [[]]));
+            }
+            $container->setDefinition('kiwi_captcha.risk.scorer', new Definition(RiskScorer::class));
+            $container->setDefinition('kiwi_captcha.risk.policy', (new Definition(RiskPolicy::class))
+                ->setFactory([RiskPolicy::class, 'fromConfig'])
+                ->setArguments([$policyConfig])
+                ->setPublic(true));
+            $container->setDefinition('kiwi_captcha.risk.store', new Definition(RedisRiskStateStore::class, [
+                $riskRedis,
+                $namespace,
+                $riskConfig['source_epoch_secs'],
+                $riskConfig['subnet_epoch_secs'],
+                $riskConfig['state_ttl_secs'],
+                $riskConfig['principal_ttl_secs'],
+                $riskConfig['dedupe_ttl_secs'],
+                $riskConfig['hysteresis_ms'],
+                $riskConfig['saturations'],
+            ]));
+            // The engine is public so applications can read risk metrics
+            // (RiskGateway::metricsSnapshot) or record their own
+            // confirmed-legitimate/abuse signals.
+            $container->setDefinition('kiwi_captcha.risk.engine', (new Definition(AdaptiveRiskEngine::class, [
+                new Reference('kiwi_captcha.risk.store'),
+                new Reference('kiwi_captcha.risk.classifier'),
+                new Reference('kiwi_captcha.risk.identity_factory'),
+                new Reference('kiwi_captcha.risk.scorer'),
+                new Reference('kiwi_captcha.risk.policy'),
+                new Reference('kiwi_captcha.risk.keys'),
+                $riskConfig['source_epoch_secs'],
+                $riskConfig['subnet_epoch_secs'],
+                $riskConfig['state_ttl_secs'],
+                $riskConfig['principal_ttl_secs'],
+                $riskConfig['dedupe_ttl_secs'],
+                $riskConfig['saturations'],
+            ]))->setPublic(true));
+            $container->setDefinition('kiwi_captcha.risk.resolver', new Definition(RiskProfileResolver::class, [
+                PoWAlgorithm::from($config['algorithm']),
+                $config['difficulty_bits'],
+                $config['argon2_difficulty_bits'],
+            ]));
+            $loggerRef = $container->hasDefinition('logger') || $container->hasAlias('logger')
+                ? new Reference('logger')
+                : null;
+            $container->setDefinition(RiskGateway::class, (new Definition(RiskGateway::class, [
+                new Reference('kiwi_captcha.risk.engine'),
+                new Reference('kiwi_captcha.risk.classifier'),
+                new Reference('kiwi_captcha.risk.resolver'),
+                $scopeIds,
+                $loggerRef,
+            ]))->setPublic(true));
+            $cookie = $riskConfig['continuity_cookie'];
+            $container->setDefinition(ContinuityCookie::class, (new Definition(ContinuityCookie::class, [
+                $cookie['name'],
+                $cookie['ttl_secs'],
+                $cookie['path'],
+                $cookie['secure'],
+                $cookie['samesite'],
+                $cookie['http_only'],
+            ]))->setPublic(true));
+            $riskGatewayRef = new Reference(RiskGateway::class);
+            $riskCookieRef = new Reference(ContinuityCookie::class);
+        }
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
             $rateLimiterRef,
             $config['same_origin_only'],
+            $riskGatewayRef,
+            $riskCookieRef,
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──
@@ -260,6 +364,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             new Reference('request_stack'),
             $config['secret_key'],
             $config['enforce_telemetry'],
+            $riskGatewayRef,
+            $riskCookieRef,
         ]))->addTag('validator.constraint_validator'));
 
         // ── Twig widget runtime + twig function (embeds the shared widget assets) ──
@@ -345,5 +451,122 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return 'dev';
+    }
+
+    /**
+     * Build the risk-v1 policy config (int-keyed scopes) and the
+     * scope-name => int-id map from the bundle's string-keyed scopes node.
+     *
+     * Scope ids must be unique and stable across deploys: an explicit `id`
+     * wins, otherwise the id is crc32(scope name) & 0x7fffffff. Two scopes
+     * with the same id would silently share risk state — refuse the config.
+     *
+     * @return array{0: array<string, mixed>, 1: array<string, int>}
+     */
+    private function buildRiskPolicy(array $riskConfig): array
+    {
+        $policyConfig = [
+            'version' => $riskConfig['policy_version'],
+            'weights' => $riskConfig['weights'],
+            'scopes' => [],
+            'global_floors' => $riskConfig['global_floors'],
+        ];
+        $scopeIds = [];
+        foreach ($riskConfig['scopes'] as $name => $spec) {
+            $id = $spec['id'] ?? (crc32($name) & 0x7fffffff);
+            if ($id < 1) {
+                throw new \InvalidArgumentException(sprintf(
+                    'kiwi_captcha.risk.scopes[%s].id must be >= 1 (got %d)',
+                    $name,
+                    $id,
+                ));
+            }
+            if (isset($scopeIds[$name]) || \in_array($id, $scopeIds, true)) {
+                throw new \InvalidArgumentException(sprintf(
+                    'kiwi_captcha.risk.scopes[%s]: risk scope id %d collides with another scope — set explicit, unique "id" values',
+                    $name,
+                    $id,
+                ));
+            }
+            $scopeIds[$name] = $id;
+            $policyConfig['scopes'][$id] = [
+                'base_risk' => $spec['base_risk'],
+                'minimum' => $spec['minimum'],
+                'post_solve_check' => $spec['post_solve_check'],
+                'degraded' => $spec['degraded'],
+            ];
+        }
+        ksort($policyConfig['scopes']);
+
+        return [$policyConfig, $scopeIds];
+    }
+
+    /**
+     * Resolve the Predis\Client for the risk state store.
+     *
+     * Priority: the explicit risk.redis_service, then the bundle's own Redis
+     * client (redis_service / RedisStorage) when it is a Predis client. A
+     * phpredis (\Redis) client cannot drive the risk-v1 EVALSHA store (its
+     * constructor is typed Predis\Client) — refuse with an actionable
+     * message instead of failing at request time.
+     *
+     * @throws \LogicException when risk is enabled but no Predis client is
+     *                         resolvable
+     */
+    private function resolveRiskRedisClient(array $riskConfig, ?Reference $bundleRedis, ContainerBuilder $container): Reference
+    {
+        if ($riskConfig['redis_service'] !== null) {
+            $ref = new Reference($riskConfig['redis_service']);
+            $class = $this->definitionClass((string) $ref, $container);
+            if ($class !== null && !is_a($class, \Predis\Client::class, true)) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha.risk.redis_service ("%s", class %s) must be a Predis\Client — '.
+                    'the risk-v1 state store is typed Predis\Client (phpredis \Redis is not supported by the risk engine)',
+                    $riskConfig['redis_service'],
+                    $class,
+                ));
+            }
+
+            return $ref;
+        }
+
+        if ($bundleRedis !== null) {
+            $class = $this->definitionClass((string) $bundleRedis, $container);
+            if ($class === null) {
+                throw new \LogicException(
+                    'kiwi_captcha.risk.enabled cannot reuse the bundle Redis client: its service class is not visible to the '.
+                    'extension. Set risk.redis_service explicitly to a Predis\Client service id.'
+                );
+            }
+            if (is_a($class, \Predis\Client::class, true)) {
+                return $bundleRedis;
+            }
+            throw new \LogicException(sprintf(
+                'kiwi_captcha.risk.enabled requires a Predis\Client, but the bundle Redis client (%s) is %s — '.
+                'the risk-v1 state store is typed Predis\Client (phpredis \Redis is not supported by the risk engine). '.
+                'Configure risk.redis_service with a Predis\Client service id.',
+                (string) $bundleRedis,
+                $class,
+            ));
+        }
+
+        throw new \LogicException(
+            'kiwi_captcha.risk.enabled requires a Redis client for the canonical risk-v1 state script. '.
+            'Set risk.redis_service to a Predis\Client service id (or configure redis_service / RedisStorage '.
+            'with a Predis\Client so the extension can reuse it).'
+        );
+    }
+
+    /** The class of a service id (following aliases), or null when invisible. */
+    private function definitionClass(string $id, ContainerBuilder $container): ?string
+    {
+        if ($container->hasAlias($id)) {
+            $id = (string) $container->getAlias($id);
+        }
+        if (!$container->hasDefinition($id)) {
+            return null;
+        }
+
+        return $container->getDefinition($id)->getClass();
     }
 }

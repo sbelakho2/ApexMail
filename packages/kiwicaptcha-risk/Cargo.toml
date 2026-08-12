@@ -1,0 +1,21 @@
+[package]
+name = "kiwicaptcha-risk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Bel-Consulting-OU/kiwicaptcha"
+description = "KiwiCaptcha Adaptive Risk Engine: fixed-point risk scoring, ephemeral identity derivation and Redis-backed adaptive state (risk-v1 protocol)"
+
+[dependencies]
+sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+thiserror = "2"
+redis = "0.27"
+hex = "0.4"
+kiwicaptcha = { path = "../kiwicaptcha" }
+
+[dev-dependencies]

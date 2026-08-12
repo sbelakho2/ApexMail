@@ -138,6 +138,54 @@ final class Issuer
     }
 
     /**
+     * Issue a challenge from an adaptive-risk difficulty profile.
+     *
+     * Builds a Config clone from the profile (the issuer's own Config is
+     * NEVER mutated): algorithm, m_kib, t, p, target_bits and
+     * argon2_target_bits come from the profile (argon2_target_bits = the
+     * profile's targetBits for Argon2id), while ttlSecs and minDurationMs
+     * stay owned by the issuer Config. The profile is validated first
+     * ({@see ChallengeProfile::validate()}); an invalid profile throws
+     * \InvalidArgumentException before anything is issued.
+     *
+     * Delegates to the normal {@see self::issue()} path, so the wire format,
+     * signing, and storage are IDENTICAL to a regular issue — only the
+     * parameters differ.
+     *
+     * @throws \InvalidArgumentException when the profile is invalid (or the
+     *                                   scope is invalid, per issue())
+     */
+    public function issueWithProfile(
+        string $scope,
+        string $clientIp,
+        ChallengeProfile $profile,
+        ?int $now = null,
+    ): Challenge {
+        $profile->validate();
+
+        $config = new Config(
+            secretKey: $this->config->secretKey,
+            algorithm: $profile->algorithm,
+            mKib: $profile->algorithm === PoWAlgorithm::Argon2id ? $profile->mKib : 0,
+            // Profile t defaults to 0 (unused for SHA-256); Config requires
+            // t >= 1 for every algorithm, so the clone normalizes it.
+            t: $profile->t > 0 ? $profile->t : 1,
+            p: $profile->p,
+            targetBits: $profile->targetBits,
+            argon2TargetBits: $profile->algorithm === PoWAlgorithm::Argon2id
+                ? $profile->targetBits
+                : $this->config->argon2TargetBits,
+            ttlSecs: $this->config->ttlSecs,
+            minDurationMs: $this->config->minDurationMs,
+            solverMaxHashes: $this->config->solverMaxHashes,
+            bindingMode: $this->config->bindingMode,
+        );
+        $nowFn = $now !== null ? static fn (): int => $now : $this->now;
+
+        return (new self($config, $this->storage, $nowFn))->issue($scope, $clientIp);
+    }
+
+    /**
      * Protocol v2 nonce-bound IP binding tag.
      *
      * HMAC-SHA256 over the CANONICAL form of the client IP, keyed by the

@@ -20,6 +20,7 @@ use rand::{thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::profile::{ChallengeProfile, ProfileError};
 use crate::token::IssuedChallenge;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -778,6 +779,44 @@ pub fn issue_challenge(
     })
 }
 
+/// Issue a challenge from an adaptive-risk difficulty profile.
+///
+/// Builds a clone of `config` (the caller's config is NEVER mutated):
+/// `algorithm`, `m_kib`, `t`, `p`, and `target_bits` come from the profile,
+/// and `argon2_target_bits` equals the profile's `target_bits` for Argon2id
+/// profiles (SHA-256 profiles leave it as configured). `ttl_secs`,
+/// `min_duration_ms`, auto-tuning, and `binding_mode` stay owned by `config`.
+///
+/// The profile is validated first ([`ChallengeProfile::validate`]);
+/// an invalid profile is rejected before anything is issued. Delegates to
+/// [`issue_challenge`], so the wire format, signing, and storage are
+/// IDENTICAL to a regular issue — only the parameters differ.
+pub fn issue_challenge_with_profile(
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    profile: &ChallengeProfile,
+) -> Result<Issued, SignError> {
+    profile.validate().map_err(|e| match e {
+        ProfileError::InvalidShaTargetBits(_) => SignError::InvalidDifficulty,
+        _ => SignError::InvalidArgon2Params,
+    })?;
+
+    let mut effective = config.clone();
+    effective.algorithm = profile.algorithm;
+    effective.target_bits = profile.target_bits as u32;
+    if profile.algorithm == PoWAlgorithm::Argon2id {
+        effective.m_kib = profile.m_kib;
+        effective.t = profile.t;
+        effective.p = profile.p;
+        effective.argon2_target_bits = profile.target_bits as u32;
+    }
+    issue_challenge(&effective, scope, client_ip, now_unix, now_ns, active_solves)
+}
+
 /// Reconstruct a [`ChallengePayload`] from a stored record, for signature
 /// re-verification during solution validation.
 pub fn payload_from_record(record: &ChallengeRecord) -> ChallengePayload {
@@ -1260,5 +1299,230 @@ mod tests {
         let mut cache = ChallengeCache::new();
         cache.put("hash1", "login", issued);
         assert!(cache.get("hash1", "signup").is_none());
+    }
+
+    fn profile_base_config() -> ChallengeConfig {
+        ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            min_duration_ms: None,
+            ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 10,
+            auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
+        }
+    }
+
+    #[test]
+    fn issue_with_profile_sha_overrides_difficulty() {
+        for bits in [16u8, 20] {
+            let issued = issue_challenge_with_profile(
+                &profile_base_config(),
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                &ChallengeProfile::sha(bits),
+            )
+            .unwrap();
+            assert_eq!(issued.challenge.algorithm, PoWAlgorithm::Sha256);
+            assert_eq!(issued.challenge.target_bits, bits as u32);
+            assert_eq!(issued.challenge.m_kib, 0);
+            assert_eq!(issued.record.target_bits, bits as u32);
+            // Profile issuance keeps the config's TTL/min-duration policy.
+            assert_eq!(issued.challenge.ttl_secs, 120);
+            assert_eq!(issued.record.min_duration_ms, 5);
+        }
+    }
+
+    #[test]
+    fn issue_with_profile_sha_solves_and_verifies() {
+        let config = profile_base_config();
+        for bits in [16u8, 20] {
+            let issued = issue_challenge_with_profile(
+                &config,
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                &ChallengeProfile::sha(bits),
+            )
+            .unwrap();
+            let mut record = issued.record.clone();
+            let counter = crate::verify::solve_for_test(&record)
+                .expect("solver finds a profile counter");
+            let mut ctx = crate::verify::VerifyContext {
+                record: &mut record,
+                secret_key: "test-key-16-bytes!",
+                counter,
+                duration_ms: 5000,
+                now_unix: 1_000_001,
+                now_ns: 1_700_000_005_000_000,
+                min_duration_ms: 0,
+                expected_scope: None,
+                client_ip: Some("1.2.3.4"),
+                telemetry: None,
+                enforce_telemetry: false,
+                max_attempts: 0,
+                accept_legacy_v1: false,
+            };
+            assert_eq!(
+                crate::verify::verify_solution(&mut ctx),
+                crate::verify::VerifyOutcome::Valid,
+                "sha({bits}) profile must verify"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_with_profile_argon16_solves_and_verifies() {
+        let issued = issue_challenge_with_profile(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            &ChallengeProfile::argon16(),
+        )
+        .unwrap();
+        assert_eq!(issued.challenge.algorithm, PoWAlgorithm::Argon2id);
+        assert_eq!(issued.challenge.target_bits, 1);
+        assert_eq!(issued.challenge.m_kib, 16 * 1024);
+        assert_eq!(issued.challenge.t, 3);
+        assert_eq!(issued.challenge.p, 1);
+        assert_eq!(issued.record.target_bits, 1);
+
+        let mut record = issued.record.clone();
+        let counter = crate::verify::solve_for_test(&record).expect("argon solve finds a counter");
+        let mut ctx = crate::verify::VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: 1_000_001,
+            now_ns: 1_700_000_005_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            crate::verify::verify_solution(&mut ctx),
+            crate::verify::VerifyOutcome::Valid
+        );
+    }
+
+    #[test]
+    fn issue_with_profile_does_not_mutate_config() {
+        let config = profile_base_config();
+        issue_challenge_with_profile(
+            &config,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            &ChallengeProfile::sha(16),
+        )
+        .unwrap();
+        assert_eq!(config.target_bits, 8, "the caller's config must not be mutated");
+        assert_eq!(config.algorithm, PoWAlgorithm::Sha256);
+    }
+
+    #[test]
+    fn issue_with_profile_rejects_invalid_profiles() {
+        let config = profile_base_config();
+        // SHA-256 out of range -> InvalidDifficulty.
+        assert!(matches!(
+            issue_challenge_with_profile(
+                &config,
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                &ChallengeProfile::sha(21),
+            ),
+            Err(SignError::InvalidDifficulty)
+        ));
+        assert!(matches!(
+            issue_challenge_with_profile(
+                &config,
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                &ChallengeProfile::sha(0),
+            ),
+            Err(SignError::InvalidDifficulty)
+        ));
+        // Argon2id out of range -> InvalidArgon2Params (t=7, m_kib=7,
+        // target 11, p=2, m_kib above ceiling).
+        for profile in [
+            ChallengeProfile {
+                algorithm: PoWAlgorithm::Argon2id,
+                target_bits: 1,
+                m_kib: 16 * 1024,
+                t: 7,
+                p: 1,
+            },
+            ChallengeProfile {
+                algorithm: PoWAlgorithm::Argon2id,
+                target_bits: 1,
+                m_kib: 7,
+                t: 3,
+                p: 1,
+            },
+            ChallengeProfile {
+                algorithm: PoWAlgorithm::Argon2id,
+                target_bits: 11,
+                m_kib: 16 * 1024,
+                t: 3,
+                p: 1,
+            },
+            ChallengeProfile {
+                algorithm: PoWAlgorithm::Argon2id,
+                target_bits: 1,
+                m_kib: 65_536 + 1,
+                t: 3,
+                p: 1,
+            },
+            ChallengeProfile {
+                algorithm: PoWAlgorithm::Argon2id,
+                target_bits: 1,
+                m_kib: 16 * 1024,
+                t: 3,
+                p: 2,
+            },
+        ] {
+            assert!(
+                matches!(
+                    issue_challenge_with_profile(
+                        &config,
+                        "login",
+                        "1.2.3.4",
+                        1_000_000,
+                        1_700_000_000_000_000,
+                        0,
+                        &profile,
+                    ),
+                    Err(SignError::InvalidArgon2Params)
+                ),
+                "profile {profile:?} must be rejected"
+            );
+        }
     }
 }

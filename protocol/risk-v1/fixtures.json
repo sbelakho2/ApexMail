@@ -1,0 +1,432 @@
+{
+  "protocol": "risk-v1",
+  "base_risk": 100,
+  "weights": {
+    "source_fast": 190,
+    "source_slow": 110,
+    "subnet_fast": 80,
+    "issue_debt": 150,
+    "bad_proof": 220,
+    "malformed": 260,
+    "replay": 320,
+    "action_failure": 120,
+    "scope_switch": 60,
+    "global_pressure": 170,
+    "network_risk": 100,
+    "trust_credit": 130,
+    "principal_credit": 100
+  },
+  "field_order": [
+    "source_fast",
+    "source_slow",
+    "subnet_fast",
+    "issue_debt",
+    "bad_proof",
+    "malformed",
+    "replay",
+    "action_failure",
+    "scope_switch",
+    "global_pressure",
+    "network_risk",
+    "trust_credit",
+    "principal_credit"
+  ],
+  "fixtures": [
+    {
+      "signals": {
+        "source_fast": 700,
+        "source_slow": 300,
+        "subnet_fast": 500,
+        "issue_debt": 800,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 100,
+        "scope_switch": 200,
+        "global_pressure": 250,
+        "network_risk": 0,
+        "trust_credit": 100,
+        "principal_credit": 0
+      },
+      "expected_score": 479
+    },
+    {
+      "signals": {
+        "source_fast": 0,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "expected_score": 100
+    },
+    {
+      "signals": {
+        "source_fast": 1000,
+        "source_slow": 1000,
+        "subnet_fast": 1000,
+        "issue_debt": 1000,
+        "bad_proof": 1000,
+        "malformed": 1000,
+        "replay": 1000,
+        "action_failure": 1000,
+        "scope_switch": 1000,
+        "global_pressure": 1000,
+        "network_risk": 1000,
+        "trust_credit": 1000,
+        "principal_credit": 1000
+      },
+      "expected_score": 1000
+    },
+    {
+      "signals": {
+        "source_fast": 1000,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "expected_score": 290
+    },
+    {
+      "signals": {
+        "source_fast": 0,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 1000,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "expected_score": 320
+    },
+    {
+      "signals": {
+        "source_fast": 0,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 1000,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "expected_score": 420
+    },
+    {
+      "signals": {
+        "source_fast": 0,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 1000,
+        "network_risk": 0,
+        "trust_credit": 0,
+        "principal_credit": 0
+      },
+      "expected_score": 270
+    },
+    {
+      "signals": {
+        "source_fast": 0,
+        "source_slow": 0,
+        "subnet_fast": 0,
+        "issue_debt": 0,
+        "bad_proof": 0,
+        "malformed": 0,
+        "replay": 0,
+        "action_failure": 0,
+        "scope_switch": 0,
+        "global_pressure": 0,
+        "network_risk": 0,
+        "trust_credit": 1000,
+        "principal_credit": 0
+      },
+      "expected_score": 0
+    },
+    {
+      "signals": {
+        "source_fast": 300,
+        "source_slow": 700,
+        "subnet_fast": 200,
+        "issue_debt": 500,
+        "bad_proof": 100,
+        "malformed": 200,
+        "replay": 50,
+        "action_failure": 400,
+        "scope_switch": 300,
+        "global_pressure": 600,
+        "network_risk": 100,
+        "trust_credit": 200,
+        "principal_credit": 300
+      },
+      "expected_score": 537
+    },
+    {
+      "signals": {
+        "source_fast": 150,
+        "source_slow": 150,
+        "subnet_fast": 150,
+        "issue_debt": 150,
+        "bad_proof": 150,
+        "malformed": 150,
+        "replay": 150,
+        "action_failure": 150,
+        "scope_switch": 150,
+        "global_pressure": 150,
+        "network_risk": 150,
+        "trust_credit": 150,
+        "principal_credit": 150
+      },
+      "expected_score": 331
+    },
+    {
+      "signals": {
+        "source_fast": 654,
+        "source_slow": 114,
+        "subnet_fast": 25,
+        "issue_debt": 759,
+        "bad_proof": 281,
+        "malformed": 250,
+        "replay": 228,
+        "action_failure": 142,
+        "scope_switch": 754,
+        "global_pressure": 104,
+        "network_risk": 692,
+        "trust_credit": 758,
+        "principal_credit": 913
+      },
+      "expected_score": 508
+    },
+    {
+      "signals": {
+        "source_fast": 558,
+        "source_slow": 89,
+        "subnet_fast": 604,
+        "issue_debt": 432,
+        "bad_proof": 32,
+        "malformed": 30,
+        "replay": 95,
+        "action_failure": 223,
+        "scope_switch": 238,
+        "global_pressure": 517,
+        "network_risk": 616,
+        "trust_credit": 27,
+        "principal_credit": 574
+      },
+      "expected_score": 499
+    },
+    {
+      "signals": {
+        "source_fast": 203,
+        "source_slow": 733,
+        "subnet_fast": 665,
+        "issue_debt": 718,
+        "bad_proof": 558,
+        "malformed": 429,
+        "replay": 225,
+        "action_failure": 459,
+        "scope_switch": 603,
+        "global_pressure": 284,
+        "network_risk": 828,
+        "trust_credit": 890,
+        "principal_credit": 6
+      },
+      "expected_score": 789
+    },
+    {
+      "signals": {
+        "source_fast": 777,
+        "source_slow": 825,
+        "subnet_fast": 163,
+        "issue_debt": 714,
+        "bad_proof": 432,
+        "malformed": 348,
+        "replay": 284,
+        "action_failure": 159,
+        "scope_switch": 220,
+        "global_pressure": 980,
+        "network_risk": 781,
+        "trust_credit": 344,
+        "principal_credit": 104
+      },
+      "expected_score": 954
+    },
+    {
+      "signals": {
+        "source_fast": 94,
+        "source_slow": 389,
+        "subnet_fast": 99,
+        "issue_debt": 367,
+        "bad_proof": 867,
+        "malformed": 352,
+        "replay": 618,
+        "action_failure": 270,
+        "scope_switch": 826,
+        "global_pressure": 44,
+        "network_risk": 747,
+        "trust_credit": 470,
+        "principal_credit": 549
+      },
+      "expected_score": 746
+    },
+    {
+      "signals": {
+        "source_fast": 127,
+        "source_slow": 996,
+        "subnet_fast": 944,
+        "issue_debt": 387,
+        "bad_proof": 80,
+        "malformed": 565,
+        "replay": 300,
+        "action_failure": 849,
+        "scope_switch": 643,
+        "global_pressure": 633,
+        "network_risk": 906,
+        "trust_credit": 882,
+        "principal_credit": 370
+      },
+      "expected_score": 810
+    },
+    {
+      "signals": {
+        "source_fast": 591,
+        "source_slow": 196,
+        "subnet_fast": 721,
+        "issue_debt": 71,
+        "bad_proof": 46,
+        "malformed": 677,
+        "replay": 233,
+        "action_failure": 791,
+        "scope_switch": 296,
+        "global_pressure": 81,
+        "network_risk": 875,
+        "trust_credit": 238,
+        "principal_credit": 887
+      },
+      "expected_score": 653
+    },
+    {
+      "signals": {
+        "source_fast": 103,
+        "source_slow": 389,
+        "subnet_fast": 284,
+        "issue_debt": 464,
+        "bad_proof": 650,
+        "malformed": 854,
+        "replay": 373,
+        "action_failure": 166,
+        "scope_switch": 379,
+        "global_pressure": 363,
+        "network_risk": 214,
+        "trust_credit": 686,
+        "principal_credit": 273
+      },
+      "expected_score": 743
+    },
+    {
+      "signals": {
+        "source_fast": 718,
+        "source_slow": 959,
+        "subnet_fast": 699,
+        "issue_debt": 663,
+        "bad_proof": 73,
+        "malformed": 623,
+        "replay": 650,
+        "action_failure": 175,
+        "scope_switch": 546,
+        "global_pressure": 746,
+        "network_risk": 250,
+        "trust_credit": 167,
+        "principal_credit": 473
+      },
+      "expected_score": 1000
+    },
+    {
+      "signals": {
+        "source_fast": 388,
+        "source_slow": 276,
+        "subnet_fast": 947,
+        "issue_debt": 655,
+        "bad_proof": 704,
+        "malformed": 570,
+        "replay": 224,
+        "action_failure": 701,
+        "scope_switch": 332,
+        "global_pressure": 863,
+        "network_risk": 786,
+        "trust_credit": 794,
+        "principal_credit": 57
+      },
+      "expected_score": 968
+    },
+    {
+      "signals": {
+        "source_fast": 234,
+        "source_slow": 841,
+        "subnet_fast": 32,
+        "issue_debt": 824,
+        "bad_proof": 323,
+        "malformed": 410,
+        "replay": 274,
+        "action_failure": 67,
+        "scope_switch": 216,
+        "global_pressure": 935,
+        "network_risk": 965,
+        "trust_credit": 580,
+        "principal_credit": 897
+      },
+      "expected_score": 735
+    },
+    {
+      "signals": {
+        "source_fast": 735,
+        "source_slow": 322,
+        "subnet_fast": 217,
+        "issue_debt": 671,
+        "bad_proof": 511,
+        "malformed": 405,
+        "replay": 905,
+        "action_failure": 936,
+        "scope_switch": 658,
+        "global_pressure": 469,
+        "network_risk": 146,
+        "trust_credit": 271,
+        "principal_credit": 142
+      },
+      "expected_score": 1000
+    }
+  ]
+}

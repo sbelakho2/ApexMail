@@ -35,6 +35,7 @@
 
 pub mod challenge;
 pub mod logo;
+pub mod profile;
 pub mod token;
 pub mod verify;
 pub mod widget;
@@ -46,6 +47,7 @@ pub use challenge::{
     SOLVER_MAX_ARGON2_TARGET_BITS, SOLVER_MAX_HASHES, SOLVER_MAX_TARGET_BITS,
 };
 pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg, kiwi_shield_svg};
+pub use profile::{ChallengeProfile, ProfileError};
 pub use token::{DecodeError, IssuedChallenge, SolutionToken};
 pub use verify::{
     score_telemetry, solve_for_test, validate_record, verify_solution, VerifyContext, VerifyError,

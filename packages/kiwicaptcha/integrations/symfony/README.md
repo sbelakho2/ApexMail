@@ -45,6 +45,13 @@ DIFFERENT keyed pseudonym in every epoch and Redis snapshots cannot
 correlate one source across time periods. Linkability within one epoch is
 unavoidable for rate limiting.
 
+The optional adaptive risk engine (OFF by default) follows the same rule:
+its Redis state is keyed by 128-bit keyed pseudonyms of the source
+(rotating every epoch) and subnet, and by a keyed pseudonym of the first-party
+continuity cookie's random nonce — never raw IPs, never stable identifiers.
+Enabling risk adds one HttpOnly first-party cookie carrying a fresh random
+nonce (see the risk section below).
+
 ## Installation
 
 1. Require the bundle (from this repository, or once published to Packagist):
@@ -174,6 +181,111 @@ kiwi_captcha:
 `binding_mode` is NOT forced under strict: IP binding is a relay mitigation,
 and the stored tag is a per-challenge, nonce-bound HMAC — never a stable
 identifier that follows the client.
+
+## Adaptive risk engine
+
+The bundle can run the **KiwiCaptcha Adaptive Risk Engine**
+(`kiwicaptcha/kiwicaptcha-risk-php`, the cross-language risk-v1 contract,
+byte-identical with the Rust implementation) **before every challenge is
+minted**:
+
+- **Pre-issue assessment** — one `PreIssue` observation per request updates
+  leaky fixed-point counters (per-source, per-/24 subnet, per-session, plus a
+  deployment-global pressure level, all in Redis via the canonical `risk.lua`
+  script) and returns a decision: `allow` (issue with the configured
+  difficulty), `sha16/18/20` (raise SHA-256 difficulty), `argon16/32/64`
+  (issue memory-hard Argon2id profiles), `step_up`, or **`deny`** (HTTP 429
+  `{"error":{"code":"RISK_DENIED"}}` before any challenge is written).
+- **Post-issue signal** — every minted challenge records `ChallengeIssued`
+  (issue-debt).
+- **Post-solve feedback** — the validator feeds every verification outcome
+  back into the engine (`SolveSuccess`, `InvalidProof`, `MalformedToken`,
+  `ExpiredChallenge`, `ReplayAttempt`; `CapacityExceeded` is never recorded
+  as client abuse), so repeated failed solves raise the source's score.
+- **Degraded operation** — a risk-backend outage (Redis down, script errors)
+  trips the circuit breaker and the engine returns the scope's `degraded`
+  action (default `allow`): challenges are still issued with the bundle's
+  configured difficulty. The risk layer is a hardening layer, never a
+  single point of failure.
+
+**Opt-in and off by default** (privacy posture — enabling it adds a
+first-party continuity cookie, see below):
+
+```yaml
+kiwi_captcha:
+    risk:
+        enabled: true
+        # The risk-v1 state lives in Redis (EVALSHA of the canonical Lua).
+        # Required: risk.redis_service (a Predis\Client service id) — or the
+        # bundle's redis_service / RedisStorage client when it is a Predis
+        # client. phpredis (\Redis) is NOT supported by the risk engine, and
+        # risk.enabled without any Predis client fails at container compile.
+        # redis_service: kiwicaptcha.risk.redis
+        namespace: '%kernel.project_dir%'   # {kiwi:<namespace>} hash tag
+        # source_epoch_secs: 900            # source identity rotation
+        # subnet_epoch_secs: 900            # subnet (/24, /56) rotation
+        # state_ttl_secs: 1800              # live counter TTL
+        # principal_ttl_secs: 86400
+        # dedupe_ttl_secs: 60               # identical event_id applied once
+        # hysteresis_ms: 60000              # global-level hysteresis window
+        # network_classifier_file: null     # optional "cidr,flag" file
+        policy_version: 1
+        # weights: { ... }                  # 13 risk-v1 weights (defaults = contract)
+        # global_floors:                    # minimum action per global level
+        #     1: sha16
+        #     2: sha18
+        #     3: sha20
+        #     4: sha20
+        scopes:
+            login:                         # the app scope string
+                # id: 1                     # int scope in Redis state; MUST
+                #                           # stay stable once deployed
+                #                           # (defaults to crc32(scope name))
+                base_risk: 100
+                minimum: allow              # floor: never weaker than this
+                degraded: allow             # action while the backend is down
+                # post_solve_check: false   # reserved (risk-v1 contract)
+            signup:
+                base_risk: 200
+        continuity_cookie:
+            name: kiwi_risk_session
+            ttl_secs: 15552000              # 180 days; 0 = session cookie
+            # secure: null                  # null = follow the request scheme
+            # samesite: lax
+            # http_only: true
+```
+
+**Scope ids are part of the Redis state identity.** The `id` (or the
+crc32-derived default) must stay stable once deployed — renaming a scope or
+reordering ids silently fragments its risk history. Two scopes sharing an id
+collide and are refused at compile time.
+
+**Continuity cookie.** The risk-v1 "session" signal links observations from
+the same browser across requests, so repeated failed solves are attributable
+to one source. The link material is a **random 16-byte nonce** (hex) in a
+first-party, HttpOnly, SameSite=Lax cookie (`kiwi_risk_session` by default)
+— no IP-derived or device-derived identity, no PII; the engine only ever
+stores the keyed pseudonym of the value. Browsers that reject cookies simply
+fall back to a session-less identity (availability is never coupled to
+cookie acceptance).
+
+**Escalation stays within your algorithm family** (the app's configured
+difficulty is the floor, decisions can only raise it): on a sha256
+deployment `sha16/18/20` raise the target bits and `argon16/32/64` map to
+the strongest SHA profile (sha20); on an argon2id deployment the argon
+actions map to 16/32/64 MiB profiles at your `argon2_difficulty_bits` and
+sha actions are no-ops. `step_up` issues the strongest profile of the
+configured family — the bundle cannot perform application-level step-up
+(MFA), so applications may also react to the decision themselves.
+
+**Application hooks.** `kiwi_captcha.risk.engine` (public) exposes the
+`KiwiCaptcha\Risk\AdaptiveRiskEngine`, including
+`confirmedLegitimate()` / `confirmedAbuse()` for explicit human/moderator
+feedback, and `RiskGateway` (public) exposes `metricsSnapshot()` (aggregate
+decision counters, global level, store latency — no identity labels).
+Decisions are logged through the app's `logger` (info for decisions, warning
+for denials) with scope/action/score/reasons only — never an IP or cookie
+value.
 
 ## Usage
 

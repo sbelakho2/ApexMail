@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
+use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use KiwiCaptcha\Issuer;
+use KiwiCaptcha\Risk\RiskAction;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -29,8 +32,11 @@ use Symfony\Component\HttpFoundation\Response;
  * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
  *
  * Hardening order: same-origin check first (cheap, no state written), then
- * issuance rate limiting (per-client and deployment-global), then scope
- * validation.
+ * issuance rate limiting (per-client and deployment-global), then — when the
+ * adaptive risk engine is enabled — the PRE-ISSUE risk assessment (a Deny
+ * decision returns 429 RISK_DENIED before any challenge is minted, an
+ * escalated action raises the difficulty of the issued challenge), then
+ * scope validation.
  */
 final class ChallengeController
 {
@@ -38,6 +44,8 @@ final class ChallengeController
         private readonly Issuer $issuer,
         private readonly ?IssuanceRateLimiter $rateLimiter = null,
         private readonly bool $sameOriginOnly = true,
+        private readonly ?RiskGateway $risk = null,
+        private readonly ?ContinuityCookie $continuityCookie = null,
     ) {
     }
 
@@ -69,16 +77,58 @@ final class ChallengeController
         $payload = json_decode((string) $request->getContent(), true);
         $scope = \is_array($payload) && isset($payload['scope']) ? (string) $payload['scope'] : 'default';
 
+        // Adaptive risk: read (or mint) the continuity session, assess the
+        // source BEFORE any challenge is written, and act on the decision.
+        // An invalid client IP (no risk signal available) or a store outage
+        // (the engine degrades internally) never blocks issuance.
+        $riskSession = null;
+        $mintedCookie = false;
+        $profile = null;
+        if ($this->risk !== null) {
+            $riskSession = $this->continuityCookie?->read($request);
+            if ($riskSession === null) {
+                $riskSession = $this->continuityCookie?->mint();
+                $mintedCookie = $riskSession !== null;
+            }
+
+            try {
+                $decision = $this->risk->preIssue($scope, $clientIp, $riskSession);
+            } catch (\InvalidArgumentException) {
+                $decision = null;
+            }
+
+            if ($decision !== null) {
+                if ($decision->action === RiskAction::Deny) {
+                    $body = ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']];
+                    if ($decision->retryAfterMs !== null) {
+                        $body['error']['retry_after_ms'] = $decision->retryAfterMs;
+                    }
+
+                    return $this->privateJson($body, Response::HTTP_TOO_MANY_REQUESTS, $request, $riskSession, $mintedCookie);
+                }
+                $profile = $this->risk->decisionProfile($decision);
+            }
+        }
+
         try {
-            $challenge = $this->issuer->issue($scope, $clientIp);
+            $challenge = $profile !== null
+                ? $this->issuer->issueWithProfile($scope, $clientIp, $profile)
+                : $this->issuer->issue($scope, $clientIp);
         } catch (\InvalidArgumentException $e) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
+                $request,
+                $riskSession,
+                $mintedCookie,
             );
         }
 
-        return $this->privateJson($challenge->toArray(), Response::HTTP_OK);
+        if ($this->risk !== null) {
+            $this->risk->challengeIssued($scope, $clientIp, $riskSession);
+        }
+
+        return $this->privateJson($challenge->toArray(), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
     }
 
     /**
@@ -111,15 +161,23 @@ final class ChallengeController
      *   X-Content-Type-Options: nosniff               (JSON must never be
      *                                                 re-sniffed as HTML)
      *
+     * When a NEW risk continuity session was minted for this request, the
+     * cookie is attached here — on every response path (success, deny, 422),
+     * so the session the assessment keyed on is what the client carries.
+     *
      * @param array<string, mixed> $data
      */
-    private function privateJson(array $data, int $status = Response::HTTP_OK): JsonResponse
+    private function privateJson(array $data, int $status = Response::HTTP_OK, ?Request $request = null, ?string $riskSession = null, bool $mintedCookie = false): JsonResponse
     {
         $response = new JsonResponse($data, $status);
         $response->headers->set('Cache-Control', 'no-store, private, max-age=0');
         $response->headers->set('Pragma', 'no-cache');
         $response->headers->set('Referrer-Policy', 'no-referrer');
         $response->headers->set('X-Content-Type-Options', 'nosniff');
+
+        if ($mintedCookie && $request !== null && $riskSession !== null && $this->continuityCookie !== null) {
+            $response->headers->setCookie($this->continuityCookie->cookie($request, $riskSession));
+        }
 
         return $response;
     }
