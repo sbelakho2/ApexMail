@@ -33,6 +33,9 @@ final class FakePredisClient extends \Predis\Client
     /** @var array<string, int> PEXPIRE/EXPIRE deadlines in ms */
     public array $expirations = [];
 
+    /** @var array<string, int> plain INCR counters (issuance-rate signal) */
+    public array $counters = [];
+
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
 
@@ -92,8 +95,27 @@ final class FakePredisClient extends \Predis\Client
             'EXPIRE' => $this->fakePexpire($arguments),
             'DEL' => $this->fakeDel($arguments),
             'EVAL' => $this->fakeEval($arguments),
+            'INCR' => $this->fakeIncr($arguments),
+            'GET' => $this->fakeGet($arguments),
             default => null,
         };
+    }
+
+    /** INCR: bump the plain counter and return the new value. */
+    private function fakeIncr(array $arguments): int
+    {
+        $key = (string) $arguments[0];
+        $this->counters[$key] = ($this->counters[$key] ?? 0) + 1;
+
+        return $this->counters[$key];
+    }
+
+    /** GET: the plain counter value, or null when the key does not exist. */
+    private function fakeGet(array $arguments): ?string
+    {
+        $key = (string) $arguments[0];
+
+        return isset($this->counters[$key]) ? (string) $this->counters[$key] : null;
     }
 
     /** @return array{0: int, 1: int} [seconds, microseconds] */
@@ -178,6 +200,7 @@ final class FakePredisClient extends \Predis\Client
                 $removed++;
             }
             unset($this->expirations[(string) $key]);
+            unset($this->counters[(string) $key]);
         }
 
         return $removed;

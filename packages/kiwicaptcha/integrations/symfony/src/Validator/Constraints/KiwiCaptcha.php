@@ -34,9 +34,21 @@ class KiwiCaptcha extends Constraint
      */
     public const POST_SOLVE_REJECTED_ERROR = 'kiwi.post_solve_rejected';
 
+    /**
+     * The token verified correctly, but the scope's post_solve_check
+     * re-assessment returned a StepUp: the adaptive engine considers
+     * proof-of-work alone insufficient for this request and demands
+     * additional application-level verification (MFA, passkey, email
+     * confirmation). Distinct from NOT_SOLVED_ERROR and
+     * POST_SOLVE_REJECTED_ERROR so applications can route the user to the
+     * step-up flow instead of forcing a silent re-solve loop.
+     */
+    public const POST_SOLVE_STEP_UP_REQUIRED = 'kiwi.post_solve_step_up_required';
+
     protected const ERROR_NAMES = [
         self::NOT_SOLVED_ERROR => 'NOT_SOLVED_ERROR',
         self::POST_SOLVE_REJECTED_ERROR => 'POST_SOLVE_REJECTED_ERROR',
+        self::POST_SOLVE_STEP_UP_REQUIRED => 'POST_SOLVE_STEP_UP_REQUIRED',
     ];
 
     public string $message = 'The security check failed. Please try again.';

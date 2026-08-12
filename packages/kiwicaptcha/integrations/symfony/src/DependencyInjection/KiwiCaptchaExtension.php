@@ -12,6 +12,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
 use BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate;
+use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaExtension as TwigExtension;
@@ -31,7 +32,7 @@ use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
 use KiwiCaptcha\Risk\Calibration\AggregateCalibrator;
 use KiwiCaptcha\Risk\Metrics\RiskMetrics;
 use KiwiCaptcha\Risk\RiskScorer;
-use KiwiCaptcha\Risk\Storage\LocalEmergencyLimiter;
+use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\RedisStorage;
@@ -259,6 +260,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $riskConfig = $config['risk'];
         $riskGatewayRef = null;
         $riskCookieRef = null;
+        $issuanceCounterRef = null;
         if ($riskConfig['enabled']) {
             [$policyConfig, $scopeIds, $postSolveScopes, $unknownScopeId] = $this->buildRiskPolicy($riskConfig);
             $riskRedis = $this->resolveRiskRedisClient($riskConfig, $redisRef, $container);
@@ -309,24 +311,34 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // In-process emergency limiter (cheap admission BEFORE the risk
             // engine): fixed per-process windows from hard_limits — source
             // AND global (assess() runs both before any state backend).
-            $container->setDefinition('kiwi_captcha.risk.emergency_limiter', new Definition(LocalEmergencyLimiter::class, [
+            $container->setDefinition('kiwi_captcha.risk.emergency_limiter', new Definition(ProcessEmergencyCap::class, [
                 max(1, $riskConfig['hard_limits']['source_per_second']),
                 max(1, $riskConfig['hard_limits']['global_per_second']),
             ]));
 
             // Redis-backed aggregate calibration (score-bucket statistics,
-            // no identity): adjusts only the per-scope bias. Receipts are
-            // keyed on decision ids, so the same Predis client + namespace
-            // as the risk state store keeps every calibration key in one
-            // hash-tag family.
+            // no identity): adjusts only the per-scope bias, bounded by the
+            // configured min_samples / max_adjustment / max_change_per_minute
+            // knobs. Receipts are keyed on decision ids, so the same Predis
+            // client + namespace as the risk state store keeps every
+            // calibration key in one hash-tag family.
             $calibrationRef = null;
             if ($riskConfig['calibration']['enabled']) {
                 $container->setDefinition('kiwi_captcha.risk.calibration', new Definition(AggregateCalibrator::class, [
                     $riskRedis,
                     $namespace,
+                    $riskConfig['calibration']['min_samples'],
+                    $riskConfig['calibration']['max_adjustment'],
+                    $riskConfig['calibration']['max_change_per_minute'],
                 ]));
                 $calibrationRef = new Reference('kiwi_captcha.risk.calibration');
             }
+
+            // Shared circuit breaker: the engine records every store
+            // success/failure on it, and the resource-pressure provider reads
+            // its state as the risk backend health signal (no per-request
+            // PING — the breaker state IS the last-operation result).
+            $container->setDefinition('kiwi_captcha.risk.breaker', new Definition(CircuitBreaker::class));
 
             // The engine is public so applications can read risk metrics
             // (RiskGateway::metricsSnapshot) or record their own
@@ -350,19 +362,33 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$principalTtlSecs', $riskConfig['principal_ttl_secs'])
                 ->setArgument('$dedupeTtlSecs', $riskConfig['dedupe_ttl_secs'])
                 ->setArgument('$saturations', $riskConfig['saturations'])
-                ->setArgument('$breaker', new Definition(CircuitBreaker::class))
+                ->setArgument('$breaker', new Reference('kiwi_captcha.risk.breaker'))
                 ->setArgument('$limiter', new Reference('kiwi_captcha.risk.emergency_limiter'))
                 ->setArgument('$metrics', new Reference('kiwi_captcha.risk.metrics'))
                 ->setArgument('$calibration', $calibrationRef)
+                ->setArgument('$enableGlobalPressure', $riskConfig['global_pressure']['enabled'])
                 ->setPublic(true));
             $container->setDefinition('kiwi_captcha.risk.resolver', new Definition(RiskProfileResolver::class, [
                 PoWAlgorithm::from($config['algorithm']),
                 $config['difficulty_bits'],
             ]));
 
+            // Atomic issuance-rate signal: the controller increments
+            // {kiwi:<ns>}:issuance:<second> (INCR + EXPIRE 1) on every minted
+            // challenge; the resource-pressure provider reads it for the
+            // real issuanceCapacity headroom.
+            $issuanceKeyPrefix = sprintf('{kiwi:%s}:issuance:', $namespace);
+            $container->setDefinition('kiwi_captcha.risk.issuance_counter', new Definition(IssuanceCounter::class, [
+                $riskRedis,
+                $issuanceKeyPrefix,
+            ]));
+            $issuanceCounterRef = new Reference('kiwi_captcha.risk.issuance_counter');
+
             // Live resource pressure: remaining Redis admission-semaphore
-            // slots (argon_capacity.enabled gate), risk Redis health.
-            // Unobservable sources stay nominal (1000).
+            // slots (argon_capacity.enabled gate), real per-second issuance
+            // headroom (hard_limits.global_per_second vs the live counter),
+            // and risk backend health from the shared circuit breaker (no
+            // PING). Unobservable sources stay nominal (1000).
             $container->setDefinition('kiwi_captcha.risk.resource_pressure', new Definition(RedisRiskHealthProvider::class, [
                 $riskConfig['argon_capacity']['enabled']
                     ? ($container->hasDefinition('kiwi_captcha.argon2_redis_semaphore')
@@ -370,6 +396,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         : null)
                     : null,
                 $riskRedis,
+                $issuanceKeyPrefix,
+                $riskConfig['hard_limits']['global_per_second'],
+                new Reference('kiwi_captcha.risk.breaker'),
             ]));
             $loggerRef = $container->hasDefinition('logger') || $container->hasAlias('logger')
                 ? new Reference('logger')
@@ -404,6 +433,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['same_origin_only'],
             $riskGatewayRef,
             $riskCookieRef,
+            $issuanceCounterRef,
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──
@@ -531,9 +561,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      *    every floor is Allow — the global controller is off.
      *  - unknown_scope.mode "minimum" adds a synthetic scope entry
      *    (base_risk 100, minimum/degraded sha20) under a reserved id
-     *    (1..u32::MAX, never colliding with a configured id); "reject"
-     *    leaves the policy without it and the gateway declines unknown
-     *    scopes with UnknownScopeException.
+     *    (1..u32::MAX, never colliding with a configured id); "reject" and
+     *    "baseline" leave the policy without it and the gateway declines
+     *    unknown scopes with UnknownScopeException (the controller turns
+     *    "reject" into the risk-denied 429 and "baseline" into the default
+     *    challenge).
      *
      * @return array{0: array<string, mixed>, 1: array<string, int>, 2: array<string, bool>, 3: ?int}
      *         [policy config, scope-name => scope-id, scope-name => post_solve_check, synthetic unknown-scope id]

@@ -5,13 +5,14 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk\Tests;
 
 use KiwiCaptcha\Risk\Storage\LocalEmergencyLimiter;
+use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use PHPUnit\Framework\TestCase;
 
-final class LocalEmergencyLimiterTest extends TestCase
+final class ProcessEmergencyCapTest extends TestCase
 {
     public function testAllowsExactlyOneHundredPerWindow(): void
     {
-        $limiter = new LocalEmergencyLimiter();
+        $limiter = new ProcessEmergencyCap();
         for ($i = 0; $i < 100; $i++) {
             self::assertTrue($limiter->allow(), "allow #" . ($i + 1));
         }
@@ -21,7 +22,7 @@ final class LocalEmergencyLimiterTest extends TestCase
 
     public function testWindowSlides(): void
     {
-        $limiter = new LocalEmergencyLimiter();
+        $limiter = new ProcessEmergencyCap();
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
         }
@@ -34,9 +35,18 @@ final class LocalEmergencyLimiterTest extends TestCase
 
     public function testIsOpenFalseWhenIdle(): void
     {
-        $limiter = new LocalEmergencyLimiter();
+        $limiter = new ProcessEmergencyCap();
         self::assertFalse($limiter->isOpen());
         $limiter->allow();
         self::assertFalse($limiter->isOpen());
+    }
+
+    public function testBcAliasStillResolves(): void
+    {
+        self::assertTrue(class_exists(LocalEmergencyLimiter::class));
+        $limiter = new LocalEmergencyLimiter();
+        self::assertInstanceOf(ProcessEmergencyCap::class, $limiter);
+        self::assertTrue($limiter->allow());
+        self::assertTrue($limiter->allowGlobal());
     }
 }

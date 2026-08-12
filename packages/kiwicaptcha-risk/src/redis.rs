@@ -722,6 +722,117 @@ mod tests {
     }
 
     #[test]
+    fn epoch_boundary_burst_sums_across_pseudonyms() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping Redis test: RISK_REDIS_URL not set");
+            return;
+        };
+        // Saturations far above the burst so the SUM is visible: 20 * 1000
+        // raw -> normalize(20000, 10_000_000) = 2 (the old max3 over the two
+        // halves would have read 1).
+        let mut sats = DEFAULT_SATURATIONS;
+        sats[0] = 10_000_000; // src_fast
+        sats[1] = 10_000_000; // src_slow
+        let store = RedisRiskStateStore::with_options(
+            client(),
+            &unique_namespace("sum3"),
+            1800,
+            60,
+            60_000,
+            1800,
+            86_400,
+            sats,
+        );
+        let (epoch, _prev, _cur, next) = epoch_ids("aa");
+        // Half 1: 10 events on the current-epoch pseudonym.
+        for i in 0..10u64 {
+            store.observe(&observation(&event_id(i), 0, T0, 0)).unwrap();
+        }
+        // Half 2: 10 events one epoch LATER, whose current pseudonym is the
+        // probe's NEXT-epoch boundary key.
+        for i in 10..20u64 {
+            let mut o = observation(&event_id(i), 0, T0, 0);
+            o.source_epoch = epoch + 1;
+            o.source_id = next.clone();
+            store.observe(&o).unwrap();
+        }
+        // The probe (current pseudonym, epoch E) reads prev (0) + current
+        // (10 events) + next (10 events): the split burst SUMS to 20 events
+        // (20000 raw) instead of maxing to one half.
+        let vector = store
+            .observe(&observation(&event_id(100), 0, T0, 0))
+            .unwrap()
+            .vector;
+        assert_eq!(vector.source_fast, 2, "sum3 across the rotated epochs");
+        assert_eq!(vector.source_slow, 2, "sum3 across the rotated epochs");
+    }
+
+    #[test]
+    fn principal_reputation_raises_bad_proof_but_not_trust_credit() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping Redis test: RISK_REDIS_URL not set");
+            return;
+        };
+        // Distinct saturations so the principal's HIGHER bad/mal pressure
+        // shows through the max4 dimension (source ConfirmedAbuse adds
+        // 5000/2500; the principal adds 6000/3000).
+        let mut sats = DEFAULT_SATURATIONS;
+        sats[3] = 60_000; // bad
+        sats[4] = 60_000; // mal
+        let store = RedisRiskStateStore::with_options(
+            client(),
+            &unique_namespace("prinneg"),
+            1800,
+            60,
+            60_000,
+            1800,
+            86_400,
+            sats,
+        );
+
+        // ConfirmedAbuse with a principal: bad_proof/malformed take the
+        // PRINCIPAL dimension (max over source/session/principal), and no
+        // trust exists anywhere.
+        let mut o = observation(&event_id(1), 0, T0, 0);
+        o.event = RiskEventKind::ConfirmedAbuse;
+        o.principal_id = Some([0xEE; 16]);
+        let with_principal = store.observe(&o).unwrap().vector;
+        assert_eq!(with_principal.bad_proof, 100); // max(src 5000, prin 6000) -> 6000 -> 100
+        assert_eq!(with_principal.malformed, 50); // max(src 2500, prin 3000) -> 3000 -> 50
+        assert_eq!(with_principal.trust_credit, 0);
+        assert_eq!(with_principal.principal_credit, 0);
+
+        // Control without a principal (fresh source pseudonym): only the
+        // source's own 5000/2500 remain.
+        let mut o2 = observation(&event_id(2), 0, T0, 0);
+        o2.event = RiskEventKind::ConfirmedAbuse;
+        o2.source_id = hex::encode([0x11; 16]);
+        let without = store.observe(&o2).unwrap().vector;
+        assert_eq!(without.bad_proof, 83); // 5000 * 1000 / 60000
+        assert_eq!(without.malformed, 41); // 2500 * 1000 / 60000
+
+        // trust_credit NEVER includes principal trust (source+session only)
+        // while principal_credit is the principal's own trust: the two
+        // channels are disjoint (no double subtraction).
+        let mut a = observation(&event_id(3), 0, T0, 0);
+        a.event = RiskEventKind::AuthenticationSuccess;
+        a.principal_id = Some([0xEE; 16]);
+        let va = store.observe(&a).unwrap().vector;
+        let mut b = observation(&event_id(4), 0, T0, 0);
+        b.event = RiskEventKind::AuthenticationSuccess;
+        b.source_id = hex::encode([0x22; 16]);
+        let vb = store.observe(&b).unwrap().vector;
+        assert_eq!(va.principal_credit, 200); // prin trust 2000 / 10000
+        assert_eq!(vb.principal_credit, 0);
+        assert_eq!(va.trust_credit, 150); // source trust 1500 / 10000
+        assert_eq!(vb.trust_credit, 150);
+        assert_eq!(
+            va.trust_credit, vb.trust_credit,
+            "principal trust must not leak into trust_credit"
+        );
+    }
+
+    #[test]
     fn pool_size_round_robin() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping Redis test: RISK_REDIS_URL not set");

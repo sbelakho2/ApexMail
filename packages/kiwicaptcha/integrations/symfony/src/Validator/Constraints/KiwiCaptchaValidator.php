@@ -66,19 +66,24 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // POST-SOLVE feedback: feed the outcome into the adaptive risk
         // engine (SolveSuccess / InvalidProof / MalformedToken / Expired /
         // Replay), keyed on the continuity session when the client carries
-        // one. The scope string is never validated against the policy map —
-        // unknown scopes are still observed (crc32 fallback id). An
-        // unavailable client IP is not a risk signal and must never break
-        // the form submit (RiskGateway skips it internally).
+        // one. The scope string is never validated against the policy map
+        // here — unknown scopes are handled by the gateway (minimum mode
+        // observes under the synthetic scope id; baseline/reject modes skip
+        // the signal with a debug log, never an exception). An unavailable
+        // client IP is not a risk signal and must never break the form
+        // submit (RiskGateway skips it internally).
         //
         // POST-SOLVE CHECK: when the scope opts in (post_solve_check), a
         // VALID solve additionally runs a fresh SolveSuccess assessment with
         // the same context. A Deny there fails the validation with the
         // distinct POST_SOLVE_REJECTED_ERROR (the security context changed
-        // while the client was solving); the outcome is recorded as
-        // ConfirmedLegitimate / ConfirmedAbuse feedback with the post-solve
-        // decision id (which replaces the plain SolveSuccess signal for
-        // these scopes — one signal per solve, never both).
+        // while the client was solving); a StepUp fails it with
+        // POST_SOLVE_STEP_UP_REQUIRED (PoW alone is insufficient — the
+        // application routes the user to MFA/passkey/email confirmation).
+        // The gateway does NOT confirm its own post-solve decision:
+        // ConfirmedLegitimate / ConfirmedAbuse are application-only signals
+        // (they require a decision id), so a valid solve that passes the
+        // re-assessment is recorded as plain SolveSuccess feedback.
         if ($this->risk !== null) {
             $session = $request !== null ? $this->continuityCookie?->read($request) : null;
             $ip = (string) ($clientIp ?? '');
@@ -93,6 +98,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 if ($postSolve !== null && $postSolve->action === RiskAction::Deny) {
                     $this->context->buildViolation($constraint->message)
                         ->setCode(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR)
+                        ->addViolation();
+
+                    return;
+                }
+                if ($postSolve !== null && $postSolve->action === RiskAction::StepUp) {
+                    $this->context->buildViolation($constraint->message)
+                        ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED)
                         ->addViolation();
 
                     return;

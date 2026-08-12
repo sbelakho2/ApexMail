@@ -7,9 +7,13 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\ResourcePressureProviderInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskFeedback;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
+use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskNoRedisTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskTestKernel;
@@ -19,7 +23,9 @@ use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\EventReceipt;
 use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
+use KiwiCaptcha\Risk\ResourcePressure;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
@@ -136,8 +142,10 @@ final class RiskIntegrationTest extends TestCase
         $body = json_decode((string) $response->getContent(), true);
         self::assertSame('RISK_DENIED', $body['error']['code']);
 
+        // The refusal is recorded as RateLimitHit feedback BEFORE the 429;
+        // no challenge is ever minted.
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
-        self::assertSame([RiskEventKind::PreIssue], $events, 'a denied request must never mint a challenge');
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::RateLimitHit], $events, 'a denied request must never mint a challenge');
     }
 
     public function testEscalatedActionRaisesShaDifficulty(): void
@@ -347,9 +355,29 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(1800, $risk['continuity_cookie']['ttl_secs']);
         self::assertNull($risk['continuity_cookie']['secure']);
         self::assertNull($risk['network_classifier_file']);
-        self::assertSame('reject', $risk['unknown_scope']['mode']);
+        self::assertSame('baseline', $risk['unknown_scope']['mode']);
         self::assertSame('strict', $risk['continuity_cookie']['samesite'], 'samesite is defined exactly once, default strict');
         self::assertTrue($risk['continuity_cookie']['http_only']);
+    }
+
+    public function testUnknownScopeModeBaselineIsTheDefault(): void
+    {
+        $processed = (new Processor())->processConfiguration(new Configuration(), [[
+            'secret_key' => str_repeat('a', 32),
+            'risk' => ['unknown_scope' => ['mode' => 'baseline']],
+        ]]);
+
+        self::assertSame('baseline', $processed['risk']['unknown_scope']['mode']);
+    }
+
+    public function testUnknownScopeModeRejectIsAccepted(): void
+    {
+        $processed = (new Processor())->processConfiguration(new Configuration(), [[
+            'secret_key' => str_repeat('a', 32),
+            'risk' => ['unknown_scope' => ['mode' => 'reject']],
+        ]]);
+
+        self::assertSame('reject', $processed['risk']['unknown_scope']['mode']);
     }
 
     public function testUnknownScopeModeMinimumIsAccepted(): void
@@ -473,19 +501,66 @@ final class RiskIntegrationTest extends TestCase
         $client->disconnect();
     }
 
-    public function testUnknownScopeRejectModeIssuesDefaultProfileWithoutRisk(): void
+    public function testUnknownScopeRejectModeDeniesWithoutIssuing(): void
     {
-        // unknown_scope.mode=reject (the default): the gateway throws
+        // unknown_scope.mode=reject: TRUE rejection — the controller returns
+        // the risk-denied 429 (same as a Deny decision) WITHOUT issuing any
+        // challenge and WITHOUT falling back to a baseline profile. The
+        // rateLimitHit feedback for the refusal is skipped inside the
+        // gateway (unknown scope — never an exception).
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, new RiskScorer(), $policy, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $gateway = new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'reject');
+        $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
+
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
+        $response = $controller->challenge($request);
+        self::assertSame(429, $response->getStatusCode());
+        $data = json_decode((string) $response->getContent(), true);
+        self::assertSame('RISK_DENIED', $data['error']['code']);
+        self::assertSame([], $store->observations, 'an unknown scope in reject mode must never touch the adaptive engine');
+    }
+
+    public function testUnknownScopeBaselineModeIssuesDefaultProfileWithoutRisk(): void
+    {
+        // unknown_scope.mode=baseline (the default): the gateway throws
         // UnknownScopeException, the controller catches it and issues the
         // DEFAULT challenge profile — the adaptive engine is never touched.
-        $stack = $this->stack(new FakeRiskStateStore());
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, new RiskScorer(), $policy, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $gateway = new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'baseline');
+        $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
 
-        $response = $stack['controller']->challenge($request);
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
+        $response = $controller->challenge($request);
         self::assertSame(200, $response->getStatusCode());
         $data = json_decode((string) $response->getContent(), true);
-        self::assertSame(8, $data['targetBits'], 'an unknown scope in reject mode must issue the default profile');
-        self::assertSame([], $stack['store']->observations, 'the adaptive engine must never be consulted for an unknown scope in reject mode');
+        self::assertSame(8, $data['targetBits'], 'an unknown scope in baseline mode must issue the default profile');
+        self::assertSame([], $store->observations, 'the adaptive engine must never be consulted for an unknown scope in baseline mode');
     }
 
     public function testUnknownScopeMinimumModeUsesSyntheticPolicy(): void
@@ -540,8 +615,11 @@ final class RiskIntegrationTest extends TestCase
     {
         // post_solve_check scope: a VALID solve whose SolveSuccess
         // re-assessment denies must fail the validation with the distinct
-        // POST_SOLVE_REJECTED_ERROR, and the outcome must be recorded as
-        // ConfirmedAbuse with the post-solve decision id.
+        // POST_SOLVE_REJECTED_ERROR. The gateway does NOT self-train: the
+        // post-solve outcome is NOT recorded as ConfirmedAbuse by the
+        // bundle (confirmation is an application-only signal that requires
+        // a decision id), so the only observation is the SolveSuccess
+        // assessment itself.
         $store = new FakeRiskStateStore(SignalVector::fromArray(['replay' => 700]));
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
@@ -581,17 +659,18 @@ final class RiskIntegrationTest extends TestCase
         self::assertCount(1, $violations);
         self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode());
 
-        // SolveSuccess assessment + ConfirmedAbuse feedback (with the
-        // post-solve decision id) — and NO plain SolveSuccess signal (the
-        // post-solve path replaces it for post_solve_check scopes).
+        // Only the SolveSuccess assessment itself — no self-confirmation.
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
-        self::assertSame([RiskEventKind::SolveSuccess, RiskEventKind::ConfirmedAbuse], $events);
+        self::assertSame([RiskEventKind::SolveSuccess], $events);
     }
 
-    public function testPostSolveCheckPassRecordsConfirmedLegitimate(): void
+    public function testPostSolveCheckPassRecordsPlainSolveSuccess(): void
     {
         // A VALID solve on a post_solve_check scope whose re-assessment
-        // allows must pass validation and record ConfirmedLegitimate.
+        // allows must pass validation. The outcome is recorded as the plain
+        // SolveSuccess signal — the gateway no longer self-confirms as
+        // ConfirmedLegitimate (application-only signal, requires a decision
+        // id).
         $store = new FakeRiskStateStore();
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
@@ -629,7 +708,259 @@ final class RiskIntegrationTest extends TestCase
         $violations = $engineValidator->validate($dto);
         self::assertCount(0, $violations);
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
-        self::assertSame([RiskEventKind::SolveSuccess, RiskEventKind::ConfirmedLegitimate], $events);
+        self::assertSame([RiskEventKind::SolveSuccess], $events);
+    }
+
+    public function testPostSolveDecisionDoesNotSelfTrain(): void
+    {
+        // The gateway's own post-solve decision must NOT be converted into
+        // ConfirmedLegitimate / ConfirmedAbuse feedback (those are
+        // application-only signals requiring a decision id) — even for a
+        // denying re-assessment. The only observation is the SolveSuccess
+        // assessment.
+        $store = new FakeRiskStateStore(SignalVector::fromArray(['replay' => 700]));
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], null, null, ['login' => true]);
+
+        $decision = $gateway->postSolveDecision('login', '198.51.100.7', null);
+        self::assertNotNull($decision);
+        self::assertSame(RiskAction::Deny, $decision->action);
+
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::SolveSuccess], $events, 'postSolveDecision must not record its own confirmation');
+        self::assertCount(1, $store->observations);
+    }
+
+    public function testPostSolveStepUpFailsValidationWithStepUpError(): void
+    {
+        // post_solve_check scope: a VALID solve whose SolveSuccess
+        // re-assessment escalates to StepUp (an Argon band action while
+        // Argon capacity is saturated) must fail the validation with the
+        // distinct POST_SOLVE_STEP_UP_REQUIRED error — the application
+        // routes the user to MFA/passkey/email confirmation instead of a
+        // silent re-solve loop.
+        // Score: base 100 + source_fast 900 (171) + subnet_fast 1000 (80) +
+        // issue_debt 1000 (150) + bad_proof 1000 (220) = 721 -> Argon16
+        // band (600-749); argonCapacity 0 (< 300) escalates Argon to StepUp.
+        $store = new FakeRiskStateStore(SignalVector::fromArray(['source_fast' => 900, 'subnet_fast' => 1000, 'issue_debt' => 1000, 'bad_proof' => 1000]));
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $verifier = new Verifier($storage);
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, new RiskScorer(), $policy, $keys);
+        $saturatedArgon = new class implements ResourcePressureProviderInterface {
+            public function snapshot(): ResourcePressure
+            {
+                return new ResourcePressure(0, 1000, 1000);
+            }
+        };
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], null, $saturatedArgon, ['login' => true]);
+
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $token = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engineValidator->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engineValidator->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations[0]->getCode());
+    }
+
+    /**
+     * confirmedLegitimate / confirmedAbuse REQUIRE the decisionId: the
+     * engine enforces it with InvalidArgumentException and the gateway lets
+     * that enforcement surface (application-only signals, never inferred by
+     * the bundle).
+     */
+    public function testConfirmedSignalsRequireDecisionId(): void
+    {
+        $stack = $this->stack(new FakeRiskStateStore());
+        $gateway = $stack['gateway'];
+
+        try {
+            $gateway->confirmedLegitimate('login', '198.51.100.7');
+            self::fail('confirmedLegitimate without a decisionId must throw InvalidArgumentException');
+        } catch (\InvalidArgumentException) {
+            self::assertTrue(true);
+        }
+        try {
+            $gateway->confirmedAbuse('login', '198.51.100.7');
+            self::fail('confirmedAbuse without a decisionId must throw InvalidArgumentException');
+        } catch (\InvalidArgumentException) {
+            self::assertTrue(true);
+        }
+
+        // With a decisionId the confirmation is recorded normally.
+        $receipt = $gateway->confirmedAbuse('login', '198.51.100.7', null, null, 'dec-1');
+        self::assertInstanceOf(EventReceipt::class, $receipt);
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
+        self::assertSame([RiskEventKind::ConfirmedAbuse], $events);
+    }
+
+    /**
+     * The gateway's server-derived event methods must record their
+     * corresponding RiskEventKind through record_feedback and return the
+     * EventReceipt.
+     */
+    public function testServerDerivedEventMethodsRecordTheRightEvents(): void
+    {
+        $stack = $this->stack(new FakeRiskStateStore());
+        $gateway = $stack['gateway'];
+
+        $receipts = [
+            $gateway->protectedActionSuccess('login', '198.51.100.7', null),
+            $gateway->protectedActionFailure('login', '198.51.100.7', null),
+            $gateway->authenticationSuccess('login', '198.51.100.7', null),
+            $gateway->authenticationFailure('login', '198.51.100.7', null),
+            $gateway->rateLimitHit('login', '198.51.100.7', null),
+            $gateway->expiredChallenge('login', '198.51.100.7', null),
+        ];
+        foreach ($receipts as $receipt) {
+            self::assertInstanceOf(EventReceipt::class, $receipt, 'each event method must return the engine EventReceipt');
+        }
+
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
+        self::assertSame([
+            RiskEventKind::ProtectedActionSuccess,
+            RiskEventKind::ProtectedActionFailure,
+            RiskEventKind::AuthenticationSuccess,
+            RiskEventKind::AuthenticationFailure,
+            RiskEventKind::RateLimitHit,
+            RiskEventKind::ExpiredChallenge,
+        ], $events);
+    }
+
+    /**
+     * Every feedback path must survive an unknown scope in baseline/reject
+     * modes (the engine declines to evaluate): the signal is skipped with a
+     * debug log, never an exception, and the engine is never touched.
+     */
+    public function testFeedbackPathsSkipUnknownScopesWithoutThrowing(): void
+    {
+        $store = new FakeRiskStateStore();
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], null, null, [], 'baseline');
+
+        self::assertNull($gateway->postSolveDecision('weird_unconfigured_scope', '198.51.100.7'));
+        $gateway->challengeIssued('weird_unconfigured_scope', '198.51.100.7', null, 'did-x');
+        $gateway->solveOutcome('weird_unconfigured_scope', '198.51.100.7', null, VerifyError::Expired);
+        self::assertNull($gateway->confirmedLegitimate('weird_unconfigured_scope', '198.51.100.7', null, null, 'did-x'));
+        self::assertNull($gateway->confirmedAbuse('weird_unconfigured_scope', '198.51.100.7', null, null, 'did-x'));
+        self::assertNull($gateway->protectedActionSuccess('weird_unconfigured_scope', '198.51.100.7'));
+        self::assertNull($gateway->protectedActionFailure('weird_unconfigured_scope', '198.51.100.7'));
+        self::assertNull($gateway->authenticationSuccess('weird_unconfigured_scope', '198.51.100.7'));
+        self::assertNull($gateway->authenticationFailure('weird_unconfigured_scope', '198.51.100.7'));
+        self::assertNull($gateway->rateLimitHit('weird_unconfigured_scope', '198.51.100.7'));
+        self::assertNull($gateway->expiredChallenge('weird_unconfigured_scope', '198.51.100.7'));
+
+        self::assertSame([], $store->observations, 'no feedback may reach the engine for an unknown scope');
+    }
+
+    public function testRateLimitHitRecordedOnRiskDenied429(): void
+    {
+        // A Deny decision returns 429 RISK_DENIED and the refusal is
+        // recorded as RateLimitHit feedback BEFORE the response.
+        $stack = $this->stack(new FakeRiskStateStore(SignalVector::fromArray(['replay' => 700])));
+
+        $response = $stack['controller']->challenge($this->challengeRequest());
+        self::assertSame(429, $response->getStatusCode());
+
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::RateLimitHit], $events);
+    }
+
+    public function testRateLimitHitRecordedOnIssuerRateLimit429(): void
+    {
+        // The issuer's hard rate limit (per-client) returns 429 and the
+        // refusal is recorded as RateLimitHit feedback BEFORE the response.
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+        $limiter = new IssuanceRateLimiter(1, 60, null, null, 'test-pepper', null, 100, 'test-ns', 0);
+        $controller = new ChallengeController($issuer, $limiter, true, $gateway, new ContinuityCookie());
+
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        self::assertSame(200, $controller->challenge($request)->getStatusCode());
+
+        $response = $controller->challenge($request);
+        self::assertSame(429, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('RATE_LIMITED', $body['error']['code']);
+
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ChallengeIssued, RiskEventKind::RateLimitHit], $events, 'the issuer rate-limit 429 must record RateLimitHit before responding');
+    }
+
+    public function testIssuanceCounterIncrementsOnEveryIssuedChallenge(): void
+    {
+        // Every minted challenge increments the atomic per-second issuance
+        // counter (INCR + EXPIRE 1) that the resource-pressure provider
+        // reads for issuanceCapacity.
+        $client = new FakePredisClient();
+        $counter = new IssuanceCounter($client, '{kiwi:test}:issuance:');
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
+        $controller = new ChallengeController($issuer, null, true, null, null, $counter);
+
+        $response = $controller->challenge($this->challengeRequest());
+        self::assertSame(200, $response->getStatusCode());
+        $controller->challenge($this->challengeRequest());
+
+        $key = IssuanceCounter::rateKey('{kiwi:test}:issuance:');
+        $incr = array_filter($client->calls, static fn (array $call): bool => $call[0] === 'INCR' && $call[1][0] === $key);
+        self::assertCount(2, $incr, 'one INCR per issued challenge');
+        self::assertSame(2, $client->counters[$key], 'the counter must reflect both issuances');
+
+        $expire = array_filter($client->calls, static fn (array $call): bool => $call[0] === 'EXPIRE' && $call[1][0] === $key && $call[1][1] === 1);
+        self::assertCount(2, $expire, 'every INCR must be followed by EXPIRE 1 so the signal reflects the live second');
     }
 
     /**

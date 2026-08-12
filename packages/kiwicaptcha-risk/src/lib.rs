@@ -1,8 +1,9 @@
 //! KiwiCaptcha Adaptive Risk Engine (risk-v1 protocol).
 //!
 //! One pipeline turns a [`RiskContext`] into a [`RiskDecision`]:
-//! emergency limiter (per-process source window + optional Redis global
-//! window) → observation (epoch-scoped ephemeral pseudonyms) → circuit
+//! emergency caps (per-process source window + optional per-process global
+//! window; the distributed Redis source limiter handles per-source limits)
+//! → observation (epoch-scoped ephemeral pseudonyms) → circuit
 //! breaker → state store (canonical Lua via EVALSHA) → scorer (with
 //! calibration bias) → policy → top contributor reasons. Backend failure
 //! degrades instead of failing the request.
@@ -161,29 +162,30 @@ impl Saturations {
     }
 }
 
-/// In-process emergency guard: a fixed-window limiter of 100 observations
-/// per second per process, enforced BEFORE any state backend is touched.
+/// In-process emergency guard: a fixed-window cap of 100 observations per
+/// second PER PROCESS, enforced BEFORE any state backend is touched.
 ///
-/// The contract is deliberately per-process (a `VecDeque` of timestamps in
-/// this process's memory); no cross-process synchronization is performed.
-/// When the window is saturated the engine denies immediately
+/// This is deliberately a PER-PROCESS cap (a `VecDeque` of timestamps in
+/// this process's memory); no cross-process synchronization is performed —
+/// the distributed Redis source limiter handles per-source limits across
+/// processes. When the window is saturated the engine denies immediately
 /// (HardRateLimit) instead of spending time/state on the request.
-pub struct LocalEmergencyLimiter {
+pub struct ProcessEmergencyCap {
     stamps: Mutex<VecDeque<u64>>,
     max_per_second: usize,
 }
 
-impl Default for LocalEmergencyLimiter {
-    fn default() -> LocalEmergencyLimiter {
-        LocalEmergencyLimiter::new()
+impl Default for ProcessEmergencyCap {
+    fn default() -> ProcessEmergencyCap {
+        ProcessEmergencyCap::new()
     }
 }
 
-impl LocalEmergencyLimiter {
+impl ProcessEmergencyCap {
     pub const MAX_PER_SECOND: usize = 100;
 
-    pub fn new() -> LocalEmergencyLimiter {
-        LocalEmergencyLimiter {
+    pub fn new() -> ProcessEmergencyCap {
+        ProcessEmergencyCap {
             stamps: Mutex::new(VecDeque::new()),
             max_per_second: Self::MAX_PER_SECOND,
         }
@@ -218,42 +220,42 @@ fn prune(stamps: &mut VecDeque<u64>, now: u64) {
     }
 }
 
-/// Cross-process global admission cap: a leaky window at
 /// In-process GLOBAL emergency window: `max_per_second` admissions per
 /// second for THIS process (mirrors the PHP implementation's
 /// `LocalEmergencyLimiter::allowGlobal()` exactly — same fixed-window math,
-/// `t > now - 1.0` pruning, `count >= cap` denies). Per the contract it is
-/// deliberately per-process: no cross-process synchronization. It NEVER
-/// touches Redis, so it keeps working when the backend is down; the
-/// per-process source window is the primary guard and this is the
-/// deployment-scale coarse cap.
-pub struct GlobalEmergencyLimiter {
+/// `t > now - 1.0` pruning, `count >= cap` denies). Deliberately a
+/// PER-PROCESS cap by contract: no cross-process synchronization is
+/// performed; the distributed Redis source limiter handles per-source
+/// limits across processes. It NEVER touches Redis, so it keeps working
+/// when the backend is down; the per-process source window is the primary
+/// guard and this is the deployment-scale coarse cap.
+pub struct GlobalEmergencyCap {
     max_per_second: u64,
     stamps: Mutex<Vec<f64>>,
     start: std::time::Instant,
 }
 
-impl GlobalEmergencyLimiter {
+impl GlobalEmergencyCap {
     pub const DEFAULT_MAX_PER_SECOND: u64 = 10_000;
 
-    /// Builds a limiter with the default cap (10000 admissions per second,
+    /// Builds a cap with the default rate (10000 admissions per second,
     /// per process).
-    pub fn new() -> GlobalEmergencyLimiter {
-        GlobalEmergencyLimiter {
+    pub fn new() -> GlobalEmergencyCap {
+        GlobalEmergencyCap {
             max_per_second: Self::DEFAULT_MAX_PER_SECOND,
             stamps: Mutex::new(Vec::new()),
             start: std::time::Instant::now(),
         }
     }
 
-    /// Builds a limiter with an explicit admissions-per-second cap.
+    /// Builds a cap with an explicit admissions-per-second rate.
     ///
     /// # Panics
     ///
     /// Panics if `max_per_second < 1`.
-    pub fn with_capacity(max_per_second: u64) -> GlobalEmergencyLimiter {
+    pub fn with_capacity(max_per_second: u64) -> GlobalEmergencyCap {
         assert!(max_per_second >= 1, "max_per_second must be >= 1");
-        GlobalEmergencyLimiter {
+        GlobalEmergencyCap {
             max_per_second,
             stamps: Mutex::new(Vec::new()),
             start: std::time::Instant::now(),
@@ -284,7 +286,7 @@ impl GlobalEmergencyLimiter {
     }
 }
 
-impl Default for GlobalEmergencyLimiter {
+impl Default for GlobalEmergencyCap {
     fn default() -> Self {
         Self::new()
     }
@@ -311,19 +313,21 @@ pub struct RiskEngine<S: RiskStateStore, N: NetworkClassifier> {
     pub principal_ttl_secs: u64,
     pub dedupe_ttl_secs: u64,
     pub saturations: Saturations,
-    limiter: LocalEmergencyLimiter,
-    global_limiter: Option<GlobalEmergencyLimiter>,
+    limiter: ProcessEmergencyCap,
+    global_limiter: Option<GlobalEmergencyCap>,
     calibration: Option<Arc<dyn CalibrationStore>>,
     metrics: Metrics,
     current_global_level: AtomicU8,
+    enable_global_pressure: bool,
 }
 
 impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     /// Builds an engine with the contract defaults (900 s epochs, 1800 s
     /// session TTL, 86400 s principal TTL, 60 s dedupe TTL, default
-    /// saturations, 2-failure/1000 ms breaker, 100 req/s source limiter).
-    /// No global limiter and no calibration store (both optional via
-    /// [`RiskEngine::with_global_limiter`] / [`RiskEngine::with_calibration`]).
+    /// saturations, 2-failure/1000 ms breaker, 100 req/s source cap).
+    /// No global cap and no calibration store (both optional via
+    /// [`RiskEngine::with_global_cap`] / [`RiskEngine::with_calibration`]).
+    /// Global pressure is enabled (see [`RiskEngine::with_global_pressure`]).
     pub fn new(
         store: S,
         classifier: N,
@@ -343,22 +347,23 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             principal_ttl_secs: 86400,
             dedupe_ttl_secs: 60,
             saturations: Saturations::default(),
-            limiter: LocalEmergencyLimiter::default(),
+            limiter: ProcessEmergencyCap::default(),
             global_limiter: None,
             calibration: None,
             metrics: Metrics::new(),
             current_global_level: AtomicU8::new(0),
+            enable_global_pressure: true,
         }
     }
 
-    /// Builds an engine with explicit breaker and limiter (tests).
+    /// Builds an engine with explicit breaker and caps (tests).
     pub fn with_components(
         store: S,
         classifier: N,
         policy: Arc<RiskPolicy>,
         keys: RiskKeys,
         breaker: breaker::CircuitBreaker,
-        limiter: LocalEmergencyLimiter,
+        limiter: ProcessEmergencyCap,
     ) -> RiskEngine<S, N> {
         let mut engine = RiskEngine::new(store, classifier, policy, keys);
         engine.breaker = breaker;
@@ -366,10 +371,20 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         engine
     }
 
-    /// Attaches the cross-process global admission cap (checked AFTER the
+    /// Attaches the per-process global admission cap (checked AFTER the
     /// per-process source window in [`RiskEngine::assess`]).
-    pub fn with_global_limiter(mut self, limiter: GlobalEmergencyLimiter) -> RiskEngine<S, N> {
-        self.global_limiter = Some(limiter);
+    pub fn with_global_cap(mut self, cap: GlobalEmergencyCap) -> RiskEngine<S, N> {
+        self.global_limiter = Some(cap);
+        self
+    }
+
+    /// Toggles the global-pressure signal, level and cooldown (default:
+    /// enabled). When disabled, `assess()` zeroes `global_pressure` on the
+    /// returned vector and reports level 0 / no cooldown to the policy —
+    /// the global-pressure channel and its floors/cooldown are entirely
+    /// inert, while per-source signals keep working.
+    pub fn with_global_pressure(mut self, enable: bool) -> RiskEngine<S, N> {
+        self.enable_global_pressure = enable;
         self
     }
 
@@ -398,9 +413,9 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
 
     /// Assesses ONE PreIssue request and returns a [`RiskDecision`].
     ///
-    /// The emergency limiter is checked FIRST (per-process source window,
-    /// then the optional Redis global window); on a limit hit the engine
-    /// returns a HardRateLimit decision without touching the store.
+    /// The emergency caps are checked FIRST (per-process source window,
+    /// then the optional per-process global window); on a cap hit the
+    /// engine returns a HardRateLimit decision without touching the store.
     /// `idempotency_key` becomes the event_id (dedupe key); `None` draws a
     /// random 16-byte hex id. Every decision gets a fresh `decision_id`
     /// and registers a calibration receipt.
@@ -450,10 +465,23 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                 self.metrics
                     .add_latency_us("store:observe", start.elapsed().as_micros() as u64);
                 self.breaker.record_success();
-                let global_level = observed.global_level;
+                // When global pressure is disabled, the signal, the level
+                // and the cooldown are ALL zeroed before any policy or
+                // cooldown-deny check: the global channel is inert (the
+                // per-source signals keep flowing).
+                let mut vector = observed.vector;
+                let global_level;
+                let cooldown_until_ms;
+                if self.enable_global_pressure {
+                    global_level = observed.global_level;
+                    cooldown_until_ms = observed.cooldown_until_ms;
+                } else {
+                    vector.global_pressure = 0;
+                    global_level = 0;
+                    cooldown_until_ms = 0;
+                }
                 self.current_global_level
                     .store(global_level, Ordering::Relaxed);
-                let cooldown_until_ms = observed.cooldown_until_ms;
                 let mut base = self.policy.base_risk(ctx.scope);
                 if let Some(calibration) = &self.calibration {
                     // Bounded automatic calibration: clamp(base + bias,
@@ -462,17 +490,17 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                     let bias = calibration.bias_for_scope(ctx.scope, now_ms as i64);
                     base = (base as i32 + bias).clamp(0, 1000) as u16;
                 }
-                let score = compute_score(base, &observed.vector, &self.policy.weights);
+                let score = compute_score(base, &vector, &self.policy.weights);
                 let mut decision = self.policy.decide(
                     ctx.scope,
                     score,
-                    &observed.vector,
+                    &vector,
                     &ctx.resources,
                     global_level,
                     now_ms,
                     cooldown_until_ms,
                 );
-                self.merge_contributor_reasons(&mut decision, &observed.vector);
+                self.merge_contributor_reasons(&mut decision, &vector);
                 self.record_decision_metrics(ctx.scope, &decision);
                 self.finalize_decision(ctx.scope, decision)
             }
@@ -747,6 +775,7 @@ mod tests {
     struct MockStore {
         level: u8,
         vector: SignalVector,
+        cooldown_until_ms: u64,
         calls: AtomicUsize,
         fail: bool,
         fail_calls: usize,
@@ -757,6 +786,18 @@ mod tests {
             MockStore {
                 level,
                 vector,
+                cooldown_until_ms: 0,
+                calls: AtomicUsize::new(0),
+                fail: false,
+                fail_calls: 0,
+            }
+        }
+
+        fn with_cooldown(vector: SignalVector, level: u8, cooldown_until_ms: u64) -> MockStore {
+            MockStore {
+                level,
+                vector,
+                cooldown_until_ms,
                 calls: AtomicUsize::new(0),
                 fail: false,
                 fail_calls: 0,
@@ -767,6 +808,7 @@ mod tests {
             MockStore {
                 level: 0,
                 vector: SignalVector::zero(),
+                cooldown_until_ms: 0,
                 calls: AtomicUsize::new(0),
                 fail: true,
                 fail_calls: usize::MAX,
@@ -780,6 +822,7 @@ mod tests {
                     source_fast: 500,
                     ..Default::default()
                 },
+                cooldown_until_ms: 0,
                 calls: AtomicUsize::new(0),
                 fail: true,
                 fail_calls,
@@ -796,7 +839,7 @@ mod tests {
             Ok(Observed {
                 vector: self.vector,
                 global_level: self.level,
-                cooldown_until_ms: 0,
+                cooldown_until_ms: self.cooldown_until_ms,
                 is_duplicate: false,
             })
         }
@@ -885,7 +928,7 @@ mod tests {
 
     #[test]
     fn emergency_limiter_denies_with_retry_after() {
-        let limiter = LocalEmergencyLimiter::new();
+        let limiter = ProcessEmergencyCap::new();
         for _ in 0..100 {
             assert!(limiter.allow());
         }
@@ -919,7 +962,7 @@ mod tests {
             policy(),
             keys(),
             breaker::CircuitBreaker::new(2, 60_000),
-            LocalEmergencyLimiter::new(),
+            ProcessEmergencyCap::new(),
         );
 
         let d1 = engine.assess(context(), None);
@@ -950,7 +993,7 @@ mod tests {
             policy(),
             keys(),
             breaker::CircuitBreaker::new(2, 50),
-            LocalEmergencyLimiter::new(),
+            ProcessEmergencyCap::new(),
         );
 
         engine.assess(context(), None);
@@ -1197,7 +1240,7 @@ mod tests {
     // ── End-to-end with the Redis store (skipped unless RISK_REDIS_URL) ──
 
     #[test]
-    fn global_limiter_caps_admissions_per_process() {
+    fn global_cap_caps_admissions_per_process() {
         // In-process fixed-window cap (mirrors the PHP implementation):
         // 5 admissions fit the window, the 6th and 7th must be denied
         // with HardRateLimit. Needs Redis for the store backend; skipped
@@ -1222,7 +1265,7 @@ mod tests {
             &namespace,
         );
         let engine = RiskEngine::new(store, classifier(), policy(), keys())
-            .with_global_limiter(GlobalEmergencyLimiter::with_capacity(5));
+            .with_global_cap(GlobalEmergencyCap::with_capacity(5));
 
         let mut allowed = 0;
         let mut denied = 0;
@@ -1236,6 +1279,46 @@ mod tests {
         }
         assert_eq!(allowed, 5, "exactly the window capacity is allowed");
         assert_eq!(denied, 2, "the overflow admissions are denied");
+    }
+
+    #[test]
+    fn global_pressure_disabled_zeroes_signal_level_and_cooldown() {
+        let now = now_ms();
+        let vector = SignalVector {
+            global_pressure: 500,
+            ..Default::default()
+        };
+        // Disabled: the signal is zeroed (score stays at base 100 despite
+        // the 170-weight channel), the level is 0 (no floor, no cooldown
+        // deny even though the store reported level 4 + a future hold).
+        let engine = RiskEngine::new(
+            MockStore::with_cooldown(vector, 4, now + 5_000),
+            classifier(),
+            policy(),
+            keys(),
+        )
+        .with_global_pressure(false);
+        let decision = engine.assess(context(), None);
+        assert_eq!(decision.global_level, 0);
+        assert_eq!(decision.score, 100);
+        assert!(!decision.has_reason(RiskReason::Cooldown));
+        assert_ne!(decision.action, RiskAction::Deny);
+        assert_eq!(engine.current_global_level(), 0);
+
+        // Enabled (the default): level 4 + a future cooldown is a Cooldown
+        // deny, and the pressure signal contributes to the score.
+        let engine = RiskEngine::new(
+            MockStore::with_cooldown(vector, 4, now + 5_000),
+            classifier(),
+            policy(),
+            keys(),
+        );
+        let decision = engine.assess(context(), None);
+        assert_eq!(decision.global_level, 4);
+        assert_eq!(decision.score, 185); // 100 + 500 * 170 / 1000
+        assert!(decision.has_reason(RiskReason::Cooldown));
+        assert_eq!(decision.action, RiskAction::Deny);
+        assert_eq!(engine.current_global_level(), 4);
     }
 
     #[test]

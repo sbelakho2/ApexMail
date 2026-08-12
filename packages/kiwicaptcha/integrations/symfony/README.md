@@ -197,16 +197,27 @@ minted**:
   (issue memory-hard Argon2id profiles), `step_up`, or **`deny`** (HTTP 429
   `{"error":{"code":"RISK_DENIED"}}` before any challenge is written).
 - **Post-issue signal** — every minted challenge records `ChallengeIssued`
-  (issue-debt).
+  (issue-debt) and increments the atomic per-second issuance counter that
+  feeds the resource-pressure provider's `issuanceCapacity`
+  (`{kiwi:<ns>}:issuance:<second>`, INCR + EXPIRE 1).
 - **Post-solve feedback** — the validator feeds every verification outcome
   back into the engine (`SolveSuccess`, `InvalidProof`, `MalformedToken`,
   `ExpiredChallenge`, `ReplayAttempt`; `CapacityExceeded` is never recorded
   as client abuse), so repeated failed solves raise the source's score.
+- **Post-solve check** — when a scope opts in (`post_solve_check`), a VALID
+  solve additionally runs a fresh `SolveSuccess` re-assessment. A `deny`
+  there fails the form with `kiwi.post_solve_rejected`; a `step_up` fails it
+  with `kiwi.post_solve_step_up_required` (the application routes the user
+  to MFA/passkey/email confirmation). The bundle never confirms its own
+  post-solve decision — `confirmedLegitimate` / `confirmedAbuse` are
+  application-only signals that REQUIRE the decision id being confirmed.
 - **Degraded operation** — a risk-backend outage (Redis down, script errors)
   trips the circuit breaker and the engine returns the scope's `degraded`
   action (default `allow`): challenges are still issued with the bundle's
   configured difficulty. The risk layer is a hardening layer, never a
-  single point of failure.
+  single point of failure. The resource-pressure provider derives its
+  `riskBackendHealth` from that same circuit breaker (no per-request PING)
+  and caches snapshots in-process (~100 ms).
 
 **Opt-in and off by default** (privacy posture — enabling it adds a
 first-party continuity cookie, see below):
@@ -244,9 +255,26 @@ kiwi_captcha:
                 base_risk: 100
                 minimum: allow              # floor: never weaker than this
                 degraded: allow             # action while the backend is down
-                # post_solve_check: false   # reserved (risk-v1 contract)
+                # post_solve_check: true    # valid solves re-assessed after
+                #                           # the proof (deny -> 422
+                #                           # kiwi.post_solve_rejected,
+                #                           # step_up -> 422
+                #                           # kiwi.post_solve_step_up_required)
             signup:
                 base_risk: 200
+        # unknown_scope:                    # scopes NOT configured above
+        #     mode: baseline                # baseline (default): engine
+        #                                   # declines, default challenge is
+        #                                   # issued; reject: TRUE rejection
+        #                                   # (HTTP 429 RISK_DENIED, no
+        #                                   # challenge); minimum: synthetic
+        #                                   # policy (base_risk 100, min/
+        #                                   # degraded sha20)
+        # calibration:
+        #     enabled: false                # Redis score-bucket bias
+        #     min_samples: 1000             # passed to the AggregateCalibrator
+        #     max_adjustment: 150           #   (bias clamp bound)
+        #     max_change_per_minute: 10     #   (adjustment rate bound)
         continuity_cookie:
             name: kiwi_risk_session
             ttl_secs: 15552000              # 180 days; 0 = session cookie
@@ -279,13 +307,20 @@ configured family — the bundle cannot perform application-level step-up
 (MFA), so applications may also react to the decision themselves.
 
 **Application hooks.** `kiwi_captcha.risk.engine` (public) exposes the
-`KiwiCaptcha\Risk\AdaptiveRiskEngine`, including
-`confirmedLegitimate()` / `confirmedAbuse()` for explicit human/moderator
-feedback, and `RiskGateway` (public) exposes `metricsSnapshot()` (aggregate
-decision counters, global level, store latency — no identity labels).
-Decisions are logged through the app's `logger` (info for decisions, warning
-for denials) with scope/action/score/reasons only — never an IP or cookie
-value.
+`KiwiCaptcha\Risk\AdaptiveRiskEngine`, and `RiskGateway` (public) exposes
+first-class feedback methods for the remaining server-derived events —
+`protectedActionSuccess()` / `protectedActionFailure()`,
+`authenticationSuccess()` / `authenticationFailure()`, `rateLimitHit()`
+(called automatically by the challenge controller before every 429,
+including the risk-denied responses) and `expiredChallenge()` (the verifier
+path already covers expiry via `solveOutcome`). Application-level
+confirmations go through `confirmedLegitimate()` / `confirmedAbuse()` —
+both REQUIRE the `decisionId` of the decision being confirmed (the engine
+throws `InvalidArgumentException` without it; the gateway passes it
+through). `metricsSnapshot()` returns aggregate decision counters, global
+level, store latency — no identity labels. Decisions are logged through the
+app's `logger` (info for decisions, warning for denials) with
+scope/action/score/reasons only — never an IP or cookie value.
 
 ## Usage
 

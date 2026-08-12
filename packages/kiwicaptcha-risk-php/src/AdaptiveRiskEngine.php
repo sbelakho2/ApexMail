@@ -8,7 +8,7 @@ use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
 use KiwiCaptcha\Risk\Calibration\CalibrationStore;
 use KiwiCaptcha\Risk\Metrics\RiskMetrics;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
-use KiwiCaptcha\Risk\Storage\LocalEmergencyLimiter;
+use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use KiwiCaptcha\Risk\Storage\RiskStoreException;
 
@@ -23,6 +23,11 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
  * assess() is the PRE-ISSUE path (request velocity + decision);
  * record_feedback() is the FEEDBACK path (no limiter, no decision — a
  * plain EventReceipt). record() is a deprecated alias of record_feedback.
+ *
+ * enableGlobalPressure=false zeroes the global-pressure signal, the global
+ * level and the cooldown deadline after observe(), so the policy can never
+ * escalate or cooldown-deny on global pressure (the bundle must also floor
+ * the policy to Allow when disabled).
  *
  * The epoch/ttl/saturation parameters are the engine-level configuration
  * and are expected to match the injected RedisRiskStateStore (which carries
@@ -59,9 +64,10 @@ final class AdaptiveRiskEngine
         private readonly int $dedupeTtlSecs = 60,
         private readonly array $saturations = self::DEFAULT_SATURATIONS,
         private readonly CircuitBreaker $breaker = new CircuitBreaker(),
-        private readonly LocalEmergencyLimiter $limiter = new LocalEmergencyLimiter(),
+        private readonly ProcessEmergencyCap $limiter = new ProcessEmergencyCap(),
         private readonly RiskMetrics $metrics = new RiskMetrics(),
         private readonly ?CalibrationStore $calibration = null,
+        private readonly bool $enableGlobalPressure = true,
     ) {
     }
 
@@ -123,12 +129,20 @@ final class AdaptiveRiskEngine
         $this->metrics->recordLatency('store:observe', (microtime(true) - $start) * 1000);
         $this->breaker->recordSuccess();
 
+        if (!$this->enableGlobalPressure) {
+            // Global pressure disabled: zero the signal so the scorer and
+            // the policy never see it (the level/cooldown are zeroed by
+            // storeGlobalLevel()/storeCooldownUntilMs() below).
+            $vector = SignalVector::fromArray(array_replace($vector->toArray(), ['global_pressure' => 0]));
+        }
+
         $base = $this->policy->baseRisk($c->scope);
         if ($this->calibration !== null) {
             // Bounded automatic calibration: adjust ONLY the scope bias
-            // (-200..+200) from the Redis aggregate score-bucket
-            // statistics; never rewrite weights autonomously. A failing
-            // calibration backend is silent — it never breaks issuance.
+            // (clamped to the calibrator's maxAdjustment, rate-limited,
+            // cached 30 s) from the Redis aggregate score-bucket statistics;
+            // never rewrite weights autonomously. A failing calibration
+            // backend is silent — it never breaks issuance.
             try {
                 $bias = $this->calibration->biasForScope($c->scope, $nowMs);
             } catch (\Throwable) {
@@ -212,26 +226,36 @@ final class AdaptiveRiskEngine
         ));
     }
 
-    public function confirmedLegitimate(string $scope, string $ip, ?string $principalId = null): void
+    /**
+     * Confirmed-legitimate outcome: REQUIRES the id of the decision being
+     * confirmed so the outcome is recorded against the ORIGINAL decision's
+     * scope/band/action (calibration receipt). Delegates EXCLUSIVELY
+     * through record_feedback() — there is no band-0/Allow fallback.
+     *
+     * @throws \InvalidArgumentException when $decisionId is null or empty
+     */
+    public function confirmedLegitimate(RiskContext $ctx, ?string $decisionId, ?string $idempotencyKey = null): EventReceipt
     {
-        try {
-            $this->calibration?->record($this->scopeId($scope), 0, RiskAction::Allow, true);
-        } catch (\Throwable) {
-            // calibration must never break feedback
+        if ($decisionId === null || $decisionId === '') {
+            throw new \InvalidArgumentException('confirmedLegitimate requires the decision id being confirmed');
         }
-
-        $this->record(RiskEventKind::ConfirmedLegitimate, $this->scopeId($scope), $ip, null, $principalId);
+        return $this->record_feedback(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey, $decisionId);
     }
 
-    public function confirmedAbuse(string $scope, string $ip, ?string $principalId = null): void
+    /**
+     * Confirmed-abuse outcome: REQUIRES the id of the decision being
+     * confirmed so the outcome is recorded against the ORIGINAL decision's
+     * scope/band/action (calibration receipt). Delegates EXCLUSIVELY
+     * through record_feedback() — there is no band-10/Deny fallback.
+     *
+     * @throws \InvalidArgumentException when $decisionId is null or empty
+     */
+    public function confirmedAbuse(RiskContext $ctx, ?string $decisionId, ?string $idempotencyKey = null): EventReceipt
     {
-        try {
-            $this->calibration?->record($this->scopeId($scope), 10, RiskAction::Deny, false);
-        } catch (\Throwable) {
-            // calibration must never break feedback
+        if ($decisionId === null || $decisionId === '') {
+            throw new \InvalidArgumentException('confirmedAbuse requires the decision id being confirmed');
         }
-
-        $this->record(RiskEventKind::ConfirmedAbuse, $this->scopeId($scope), $ip, null, $principalId);
+        return $this->record_feedback(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey, $decisionId);
     }
 
     private function buildObservation(RiskContext $c, int $nowMs, ?string $idempotencyKey = null, ?RiskEventKind $event = null): RiskObservation
@@ -261,6 +285,9 @@ final class AdaptiveRiskEngine
 
     private function storeGlobalLevel(): int
     {
+        if (!$this->enableGlobalPressure) {
+            return 0;
+        }
         if (method_exists($this->store, 'lastGlobalLevel')) {
             return $this->store->lastGlobalLevel();
         }
@@ -269,16 +296,13 @@ final class AdaptiveRiskEngine
 
     private function storeCooldownUntilMs(): int
     {
+        if (!$this->enableGlobalPressure) {
+            return 0;
+        }
         if (method_exists($this->store, 'lastCooldownUntilMs')) {
             return $this->store->lastCooldownUntilMs();
         }
         return 0;
-    }
-
-    /** Stable scope-name -> int id (crc32 & 0x7fffffff), for the label helpers. */
-    private function scopeId(string $scope): int
-    {
-        return crc32($scope) & 0x7fffffff;
     }
 
     /**

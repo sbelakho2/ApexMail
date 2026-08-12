@@ -90,8 +90,10 @@ final class RedisRiskStateStoreTest extends TestCase
 
     public function testPrincipalCreditIsReal(): void
     {
-        // AuthenticationSuccess (10) against a PRESENT principal: +2000 raw
-        // principal trust -> 2000*1000/10000 = 200.
+        // AuthenticationSuccess (10) against a PRESENT principal: +1500 raw
+        // source trust and +2000 raw principal trust. The trust split means
+        // NO double subtraction: trust_credit covers source+session only
+        // (1500 -> 150), principal_credit is the principal's own (2000 -> 200).
         $store = $this->store();
         $vector = $store->observe($this->observation(
             str_repeat('a', 32),
@@ -103,7 +105,7 @@ final class RedisRiskStateStoreTest extends TestCase
             str_repeat('f', 32),
         ));
         self::assertSame(200, $vector->principalCredit);
-        self::assertSame(200, $vector->trustCredit); // max3(src, sess, prin) = prin
+        self::assertSame(150, $vector->trustCredit); // source trust only, never the principal's
 
         // SolveSuccess (3) against a PRESENT session on a FRESH store:
         // session trust +150 -> 150*1000/10000 = 15.
@@ -125,6 +127,95 @@ final class RedisRiskStateStoreTest extends TestCase
         $vector = $store->observe($this->observation(str_repeat('c', 32)));
         self::assertSame(0, $vector->principalCredit);
         self::assertSame(0, $vector->trustCredit);
+    }
+
+    public function testRotatedEpochPseudonymsSumNotMax(): void
+    {
+        // A burst split across an epoch boundary: the first request writes
+        // epoch 12345's bucket, the second (at epoch 12346) writes the NEXT
+        // epoch and reads 12345 as its PREV bucket. v3 SUMs the rotated
+        // pseudonyms of one identity (2000 raw rf), so the second
+        // observation sees sourceFast 250 — under a max it would be 125.
+        $store = $this->store();
+        $store->observe(new RiskObservation(
+            event: RiskEventKind::PreIssue,
+            scope: 1,
+            sourceEpoch: 12345,
+            sourceIdPrev: str_repeat('a', 32),
+            sourceId: str_repeat('b', 32),
+            sourceIdNext: str_repeat('c', 32),
+            subnetEpoch: 12345,
+            subnetIdPrev: str_repeat('d', 32),
+            subnetId: str_repeat('e', 32),
+            subnetIdNext: str_repeat('f', 32),
+            sessionId: null,
+            principalId: null,
+            eventId: str_repeat('1', 32),
+            networkRisk: 0,
+            nowMs: self::T0,
+        ));
+        $vector = $store->observe(new RiskObservation(
+            event: RiskEventKind::PreIssue,
+            scope: 1,
+            sourceEpoch: 12346,
+            sourceIdPrev: str_repeat('b', 32), // the identity's epoch-12345 pseudonym
+            sourceId: str_repeat('c', 32),
+            sourceIdNext: str_repeat('d', 32),
+            subnetEpoch: 12346,
+            subnetIdPrev: str_repeat('e', 32), // the identity's epoch-12345 pseudonym
+            subnetId: str_repeat('f', 32),
+            subnetIdNext: str_repeat('d', 32),
+            sessionId: null,
+            principalId: null,
+            eventId: str_repeat('2', 32),
+            networkRisk: 0,
+            nowMs: self::T0,
+        ));
+
+        self::assertSame(250, $vector->sourceFast, 'sum3: 2000 raw rf across epochs');   // 2000*1000/8000
+        self::assertSame(20, $vector->sourceSlow, 'sum3: 2000 raw rs across epochs');    // 2000*1000/100000
+        self::assertSame(250, $vector->subnetFast);                                       // 2000*1000/8000
+        self::assertSame(57, $vector->globalPressure);                                    // 4000*1000/70000
+        self::assertSame(0, $store->lastGlobalLevel());
+    }
+
+    public function testSourceAndSessionMaxNotSum(): void
+    {
+        // One PreIssue increments BOTH the source and the session velocity.
+        // They are DIFFERENT identity dimensions observing the same request,
+        // so the aggregate MAXes — never double-counts.
+        $store = $this->store();
+        $vector = $store->observe($this->observation(
+            str_repeat('1', 32),
+            1,
+            self::T0,
+            0,
+            RiskEventKind::PreIssue,
+            str_repeat('a', 32),
+        ));
+        self::assertSame(125, $vector->sourceFast, 'source 1000 vs session 1000 -> max 1000, not 2000');
+        self::assertSame(10, $vector->sourceSlow);
+        self::assertSame(125, $vector->subnetFast);
+    }
+
+    public function testPrincipalDimensionMaxesWithSource(): void
+    {
+        // AuthenticationFailure adds source af +2000 AND principal af +2500.
+        // bad/mal/af aggregate with max4(src, sess, prin): 2500 -> 416,
+        // never 4500 (sum would be 750).
+        $store = $this->store();
+        $vector = $store->observe($this->observation(
+            str_repeat('1', 32),
+            0,
+            self::T0,
+            0,
+            RiskEventKind::AuthenticationFailure,
+            null,
+            str_repeat('b', 32),
+        ));
+        self::assertSame(416, $vector->actionFailure); // 2500*1000/6000
+        self::assertSame(0, $vector->trustCredit);
+        self::assertSame(0, $vector->principalCredit, 'failures never credit');
     }
 
     public function testDuplicateEventIdReturnsCurrentSignalsWithDuplicateFlag(): void

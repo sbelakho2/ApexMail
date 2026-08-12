@@ -15,10 +15,17 @@ use KiwiCaptcha\Risk\RiskAction;
  *   - buckets: {kiwi:<ns>}:cal:<scope>:<hour> (hash, fields
  *     "b<band>a<action>:legit" / ":abuse", EXPIRE 48 h) — at most 24 keys
  *     per scope, no in-process sample arrays;
+ *   - bias state: {kiwi:<ns>}:cal:state:<scope> (hash, fields bias/ts) —
+ *     written atomically by the bias script (read prev -> rate-clamp ->
+ *     write), bounding how fast the bias may move per minute;
  *   - receipts: {kiwi:<ns>}:cal:receipt:<decision_id> (JSON string with
  *     scope/band/action, EXPIRE 300 s), consumed once via GETDEL — lets a
  *     later confirmed outcome be recorded against the ORIGINAL decision's
  *     scope/band/action.
+ *
+ * biasForScope() never returns a nonzero bias below the store's
+ * minSamples threshold and clamps the raw bias to its maxAdjustment; the
+ * final bias is rate-limited and cached in-process per scope for 30 s.
  */
 interface CalibrationStore
 {

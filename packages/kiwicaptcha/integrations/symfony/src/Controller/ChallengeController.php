@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Controller;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\UnknownScopeException;
+use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskAction;
@@ -32,12 +33,16 @@ use Symfony\Component\HttpFoundation\Response;
  * X-Content-Type-Options nosniff — challenge bytes and client identity must
  * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
  *
- * Hardening order: same-origin check first (cheap, no state written), then
- * issuance rate limiting (per-client and deployment-global), then — when the
- * adaptive risk engine is enabled — the PRE-ISSUE risk assessment (a Deny
- * decision returns 429 RISK_DENIED before any challenge is minted, an
- * escalated action raises the difficulty of the issued challenge), then
- * scope validation.
+ * Hardening order: same-origin check first (cheap, no state written), scope
+ * read, then issuance rate limiting (per-client and deployment-global; a 429
+ * here records RateLimitHit feedback), then — when the adaptive risk engine
+ * is enabled — the PRE-ISSUE risk assessment (a Deny decision returns 429
+ * RISK_DENIED before any challenge is minted, an escalated action raises the
+ * difficulty of the issued challenge, an unknown scope in 'reject' mode
+ * returns 429 RISK_DENIED without issuing), then issuance. Every 429 path
+ * records RateLimitHit against the risk engine BEFORE responding; every
+ * minted challenge increments the atomic issuance-rate counter used by the
+ * resource-pressure provider.
  */
 final class ChallengeController
 {
@@ -47,6 +52,7 @@ final class ChallengeController
         private readonly bool $sameOriginOnly = true,
         private readonly ?RiskGateway $risk = null,
         private readonly ?ContinuityCookie $continuityCookie = null,
+        private readonly ?IssuanceCounter $issuanceCounter = null,
     ) {
     }
 
@@ -60,9 +66,21 @@ final class ChallengeController
         }
 
         $clientIp = (string) ($request->getClientIp() ?? '');
+        $payload = json_decode((string) $request->getContent(), true);
+        $scope = \is_array($payload) && isset($payload['scope']) ? (string) $payload['scope'] : 'default';
+
+        // The continuity session is read up front (pure, no side effects) so
+        // the rate-limit-hit feedback can attribute the refusal to the same
+        // session signal the risk engine would key on. Minting stays in the
+        // risk block — a rate-limited request never receives a cookie.
+        $riskSession = $this->continuityCookie?->read($request);
+        $mintedCookie = false;
+
         if ($this->rateLimiter !== null) {
             $rate = $this->rateLimiter->check($clientIp);
             if ($rate !== 1) {
+                $this->risk?->rateLimitHit($scope, $clientIp, $riskSession);
+
                 $code = $rate === -1 ? 'GLOBAL_RATE_LIMITED' : 'RATE_LIMITED';
                 $message = $rate === -1
                     ? 'The global captcha issuance limit has been reached. Try again later.'
@@ -75,22 +93,17 @@ final class ChallengeController
             }
         }
 
-        $payload = json_decode((string) $request->getContent(), true);
-        $scope = \is_array($payload) && isset($payload['scope']) ? (string) $payload['scope'] : 'default';
-
         // Adaptive risk: read (or mint) the continuity session, assess the
         // source BEFORE any challenge is written, and act on the decision.
-        // An invalid client IP (no risk signal available), a store outage
-        // (the engine degrades internally), or an unknown scope in
-        // 'reject' mode (the adaptive engine declines to evaluate) never
-        // blocks issuance — the default profile is issued and the baseline
-        // Kiwi verification still applies.
-        $riskSession = null;
-        $mintedCookie = false;
+        // An invalid client IP (no risk signal available) or a store outage
+        // (the engine degrades internally) never blocks issuance — the
+        // default profile is issued and the baseline Kiwi verification still
+        // applies. An unknown scope depends on unknown_scope.mode:
+        // 'baseline' (default) issues the default profile, 'reject' returns
+        // the risk-denied 429 without issuing.
         $profile = null;
         $riskAssessed = false;
         if ($this->risk !== null) {
-            $riskSession = $this->continuityCookie?->read($request);
             if ($riskSession === null) {
                 $riskSession = $this->continuityCookie?->mint();
                 $mintedCookie = $riskSession !== null;
@@ -100,8 +113,21 @@ final class ChallengeController
                 $decision = $this->risk->preIssue($scope, $clientIp, $riskSession);
                 $riskAssessed = true;
             } catch (UnknownScopeException) {
-                // Scope not configured + unknown_scope.mode=reject: the
-                // adaptive engine declines — issue the default profile.
+                if ($this->risk->unknownScopeMode() === 'reject') {
+                    // TRUE rejection: no challenge, same response as a Deny
+                    // decision (429 RISK_DENIED), no baseline fallback.
+                    $this->risk->rateLimitHit($scope, $clientIp, $riskSession);
+
+                    return $this->privateJson(
+                        ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']],
+                        Response::HTTP_TOO_MANY_REQUESTS,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
+                    );
+                }
+                // 'baseline' mode: the adaptive engine declines — issue the
+                // default profile.
                 $decision = null;
             } catch (\InvalidArgumentException) {
                 $decision = null;
@@ -122,6 +148,8 @@ final class ChallengeController
                 }
 
                 if ($decision->action === RiskAction::Deny) {
+                    $this->risk->rateLimitHit($scope, $clientIp, $riskSession);
+
                     $body = ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']];
                     if ($decision->retryAfterMs !== null) {
                         $body['error']['retry_after_ms'] = $decision->retryAfterMs;
@@ -147,6 +175,9 @@ final class ChallengeController
             );
         }
 
+        // A challenge was actually minted: feed the atomic issuance-rate
+        // signal (resource-pressure headroom) and the risk issue-debt signal.
+        $this->issuanceCounter?->record();
         if ($this->risk !== null && $riskAssessed && $decision !== null) {
             $this->risk->challengeIssued($scope, $clientIp, $riskSession, $decision->decisionId);
         }

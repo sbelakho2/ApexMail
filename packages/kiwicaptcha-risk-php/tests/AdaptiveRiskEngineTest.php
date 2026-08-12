@@ -22,7 +22,7 @@ use KiwiCaptcha\Risk\RiskReason;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\RiskWeights;
 use KiwiCaptcha\Risk\SignalVector;
-use KiwiCaptcha\Risk\Storage\LocalEmergencyLimiter;
+use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use KiwiCaptcha\Risk\Storage\RiskStoreException;
 use PHPUnit\Framework\TestCase;
@@ -41,7 +41,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         ]);
     }
 
-    private function engine(RiskStateStoreInterface $store, ?CircuitBreaker $breaker = null, ?LocalEmergencyLimiter $limiter = null): AdaptiveRiskEngine
+    private function engine(RiskStateStoreInterface $store, ?CircuitBreaker $breaker = null, ?ProcessEmergencyCap $limiter = null, bool $enableGlobalPressure = true): AdaptiveRiskEngine
     {
         $keys = RiskKeys::fromMaster(str_repeat(chr(0x42), 32));
         $classifier = new CidrNetworkClassifier([
@@ -55,17 +55,18 @@ final class AdaptiveRiskEngineTest extends TestCase
             policy: $this->policy(),
             keys: $keys,
             breaker: $breaker ?? new CircuitBreaker(),
-            limiter: $limiter ?? new LocalEmergencyLimiter(),
+            limiter: $limiter ?? new ProcessEmergencyCap(),
+            enableGlobalPressure: $enableGlobalPressure,
         );
     }
 
-    private function context(int $scope = 1, RiskEventKind $event = RiskEventKind::PreIssue): RiskContext
+    private function context(int $scope = 1, RiskEventKind $event = RiskEventKind::PreIssue, ?string $principalId = null): RiskContext
     {
         return new RiskContext(
             scope: $scope,
             sourceIp: '203.0.113.27',
             sessionId: null,
-            principalId: null,
+            principalId: $principalId,
             event: $event,
             networkFlags: (new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]))->classify('203.0.113.27'),
             resources: new ResourcePressure(1000, 1000, 1000),
@@ -166,7 +167,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testEmergencyLimiterDeniesWithRetryAfter(): void
     {
-        $limiter = new LocalEmergencyLimiter();
+        $limiter = new ProcessEmergencyCap();
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
         }
@@ -189,7 +190,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testGlobalEmergencyLimiterDeniesWithRetryAfter(): void
     {
-        $limiter = new LocalEmergencyLimiter(globalPerSecond: 100);
+        $limiter = new ProcessEmergencyCap(globalPerSecond: 100);
         for ($i = 0; $i < 100; $i++) {
             $limiter->allowGlobal();
         }
@@ -213,7 +214,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testRecordFeedbackSkipsLimiterAndDecision(): void
     {
-        $limiter = new LocalEmergencyLimiter(globalPerSecond: 1, maxPerSecond: 1);
+        $limiter = new ProcessEmergencyCap(globalPerSecond: 1, maxPerSecond: 1);
         $limiter->allow();
         $limiter->allowGlobal();
 
@@ -326,7 +327,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame([[1, 1, RiskAction::Sha16, false]], $recorded);
 
         // A limiter-hit decision also registers a receipt (silently).
-        $limiter = new LocalEmergencyLimiter();
+        $limiter = new ProcessEmergencyCap();
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
         }
@@ -419,13 +420,79 @@ final class AdaptiveRiskEngineTest extends TestCase
         };
         $engine = $this->engine($store);
         $engine->record(RiskEventKind::ProtectedActionFailure, 1, '203.0.113.27', 'sess', null);
-        $engine->confirmedLegitimate('1', '203.0.113.27');
-        $engine->confirmedAbuse('1', '203.0.113.27', 'principal-1');
+        $engine->confirmedLegitimate(
+            $this->context(event: RiskEventKind::ConfirmedLegitimate),
+            str_repeat('a', 32),
+        );
+        $engine->confirmedAbuse(
+            $this->context(event: RiskEventKind::ConfirmedAbuse, principalId: 'principal-1'),
+            str_repeat('b', 32),
+        );
         self::assertSame([
             RiskEventKind::ProtectedActionFailure,
             RiskEventKind::ConfirmedLegitimate,
             RiskEventKind::ConfirmedAbuse,
         ], $captured);
+    }
+
+    public function testConfirmedFeedbackRequiresDecisionId(): void
+    {
+        $store = new class implements RiskStateStoreInterface {
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::zero();
+            }
+        };
+        $engine = $this->engine($store);
+        try {
+            $engine->confirmedLegitimate($this->context(event: RiskEventKind::ConfirmedLegitimate), null);
+            self::fail('confirmedLegitimate without a decision id must throw');
+        } catch (\InvalidArgumentException) {
+        }
+        try {
+            $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), '');
+            self::fail('confirmedAbuse with an empty decision id must throw');
+        } catch (\InvalidArgumentException) {
+        }
+        self::assertTrue(true);
+    }
+
+    public function testEnableGlobalPressureFalseZeroesSignalLevelAndCooldown(): void
+    {
+        $store = new class implements RiskStateStoreInterface {
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::fromArray(['global_pressure' => 1000]);
+            }
+
+            public function lastGlobalLevel(): int
+            {
+                return 4;
+            }
+
+            public function lastCooldownUntilMs(): int
+            {
+                return PHP_INT_MAX;
+            }
+        };
+
+        // Enabled (default): the global level 4 + cooldown fire the deny.
+        $enabled = $this->engine($store);
+        $d1 = $enabled->assess($this->context());
+        self::assertSame(4, $d1->globalLevel);
+        self::assertTrue($d1->hasReason(RiskReason::Cooldown));
+        self::assertSame(RiskAction::Deny, $d1->action);
+
+        // Disabled: the signal is zeroed, the level and the cooldown are
+        // zeroed, so the cooldown-deny branch can never fire.
+        $disabled = $this->engine($store, enableGlobalPressure: false);
+        $d2 = $disabled->assess($this->context());
+        self::assertSame(0, $d2->globalLevel);
+        self::assertFalse($d2->hasReason(RiskReason::Cooldown));
+        self::assertFalse($d2->hasReason(RiskReason::GlobalAttack));
+        self::assertNotSame(RiskAction::Deny, $d2->action);
+        $metrics = $disabled->metrics()->snapshot();
+        self::assertSame(0, $metrics['gauges']['global:level']);
     }
 
     public function testDecisionType(): void

@@ -27,8 +27,8 @@
         "psr-4": {
             "KiwiCaptcha\\Risk\\": "src/"
         },
-        "classmap": [
-            "src/Storage/LocalEmergencyStore.php"
+        "files": [
+            "src/Storage/ProcessEmergencyCap.php"
         ]
     },
     "autoload-dev": {
