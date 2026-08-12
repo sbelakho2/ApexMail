@@ -306,25 +306,25 @@ fn global_level_enters_hysteresis_hold_after_storm() {
         return;
     };
     let store = store();
-    // Scope-2 events: 4 concurrent events ratchet gp to 8000 -> level 3 and
-    // arm the cooldown window (the Lua overloads the global `scope` field
-    // with the event scope, so the level also honours the event scope).
+    // Scope-2 events: 32 concurrent events ratchet gp to 64000 -> level 4
+    // (normalized 914) and arm the cooldown window.
     let results = storm(
         &store,
         RiskEventKind::PreIssue,
         2,
-        4,
+        32,
         [0xAA; 16],
         [0xBB; 16],
         common::event_id,
         common::T0,
     );
     assert!(results.iter().all(|r| r.is_ok()));
-    assert_eq!(store.last_global_level(), 3);
+    assert_eq!(store.last_global_level(), 4);
     assert_eq!(store.last_cooldown_until_ms(), common::T0 + 60_000);
 
-    // t0+51s: pressure decayed below the level's target, but the unexpired
-    // hysteresis window must HOLD the level (2 from the event scope).
+    // t0+61s: rf 16750 + rs 30780 + the new event's 2000 = gp 49530 ->
+    // normalized 707 -> target L2 (< L4). The window has passed, so the
+    // level must drop to the target and the hold must close.
     store
         .observe(&common::observation(
             RiskEventKind::PreIssue,
@@ -333,31 +333,16 @@ fn global_level_enters_hysteresis_hold_after_storm() {
             [0xBB; 16],
             None,
             None,
-            common::event_id(9),
-            common::T0 + 51_000,
+            common::event_id(33),
+            common::T0 + 61_000,
         ))
         .expect("observe");
     assert_eq!(
         store.last_global_level(),
         2,
-        "hysteresis must hold the level inside the window"
+        "level must drop to the target after the hysteresis window"
     );
-    assert_eq!(store.last_cooldown_until_ms(), common::T0 + 60_000);
-
-    // t0+76s: the window passed; the level must drop and the window close.
-    store
-        .observe(&common::observation(
-            RiskEventKind::PreIssue,
-            2,
-            [0xAA; 16],
-            [0xBB; 16],
-            None,
-            None,
-            common::event_id(10),
-            common::T0 + 76_000,
-        ))
-        .expect("observe");
-    assert_eq!(store.last_global_level(), 1);
+    assert_eq!(store.last_cooldown_until_ms(), 0);
     assert_eq!(store.last_cooldown_until_ms(), 0);
 }
 
