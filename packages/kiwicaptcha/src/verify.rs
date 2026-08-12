@@ -347,7 +347,9 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     submission IP means the token was relayed. Enforced here (not just
     //     at the route layer) so the secure behavior cannot be forgotten.
     //     An empty binding_tag means binding is disabled (BindingMode::None)
-    //     and the check is skipped; a None client_ip also skips it.
+    //     the check is skipped; a `None` client_ip with a NON-EMPTY tag
+    //     fails closed with MissingClientIp (only BindingMode::None records
+    //     verify without an IP).
     // The stored record is AUTHORITATIVE: an empty binding tag means binding
     // is disabled (BindingMode::None); a NON-EMPTY tag means the challenge IS
     // bound, so a missing client IP fails closed (MissingClientIp) instead of

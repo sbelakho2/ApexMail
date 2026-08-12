@@ -400,7 +400,7 @@ bin/sync-assets.sh
    client spent CPU time — not that a human did. Any automated client that
    pays the same cost passes.
 2. **Telemetry is client-controlled and forgeable.** Input events and
-   hardware/screen signals are reported by the browser script itself; a
+   whatever the widget reports, a custom client can omit or fake; a
    custom client can omit or fake them. Treat telemetry as a supplementary
    signal, never the security boundary. Under strict privacy mode the widget
    collects nothing (`telemetry: off`).
