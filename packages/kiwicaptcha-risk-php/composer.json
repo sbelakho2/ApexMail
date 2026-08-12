@@ -1,6 +1,5 @@
 {
     "name": "kiwicaptcha/kiwicaptcha-risk-php",
-    "version": "0.1.0",
     "description": "KiwiCaptcha Adaptive Risk Engine for PHP: privacy-first, self-hosted risk scoring for proof-of-work challenge issuance decisions, byte-identical with the cross-language risk-v1 contract.",
     "type": "library",
     "license": "MIT",
