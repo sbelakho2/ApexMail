@@ -57,7 +57,7 @@ final class ValidatorTest extends TestCase
         $counter = 0;
         do {
             $h = $algorithm === 'argon2id'
-                ? sodium_crypto_pwhash(32, $prefix.$counter, $saltBytes, 3, 64 * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13)
+                ? sodium_crypto_pwhash(32, $prefix.$counter, $saltBytes, 3, 64 * 1024 * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13)
                 : hash('sha256', $prefix.$counter.$saltBytes, true);
             $counter++;
         } while (Verifier::leadingZeroBits($h) < $targetBits);

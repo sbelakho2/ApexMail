@@ -339,6 +339,21 @@ fn global_level_enters_hysteresis_hold_after_storm() {
         common::T0,
     );
     assert!(results.iter().all(|r| r.is_ok()));
+    // The cached level reflects whichever call COMPLETED last, which races
+    // with execution order; a settle-observe after the storm (all 32 events
+    // persisted by now) reads the ratcheted level deterministically.
+    store
+        .observe(&common::observation(
+            RiskEventKind::PreIssue,
+            2,
+            hex::encode([0xAA; 16]),
+            hex::encode([0xBB; 16]),
+            None,
+            None,
+            common::event_id(99),
+            common::T0,
+        ))
+        .expect("settle observe");
     assert_eq!(store.last_global_level(), 4);
     assert_eq!(store.last_cooldown_until_ms(), common::T0 + 60_000);
 

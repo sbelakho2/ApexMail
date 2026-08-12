@@ -139,7 +139,7 @@ final class ChallengeFlowTest extends TestCase
                 $challenge->prefix.$counter,
                 base64_decode($challenge->salt, true),
                 $challenge->t,
-                $challenge->mKib * 1024,
+                $challenge->mKib * 1024 * 1024,
                 SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13,
             );
             $counter++;
