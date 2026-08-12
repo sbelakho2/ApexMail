@@ -814,7 +814,14 @@ pub fn issue_challenge_with_profile(
         effective.p = profile.p;
         effective.argon2_target_bits = profile.target_bits as u32;
     }
-    issue_challenge(&effective, scope, client_ip, now_unix, now_ns, active_solves)
+    issue_challenge(
+        &effective,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+    )
 }
 
 /// Reconstruct a [`ChallengePayload`] from a stored record, for signature
@@ -1357,8 +1364,8 @@ mod tests {
             )
             .unwrap();
             let mut record = issued.record.clone();
-            let counter = crate::verify::solve_for_test(&record)
-                .expect("solver finds a profile counter");
+            let counter =
+                crate::verify::solve_for_test(&record).expect("solver finds a profile counter");
             let mut ctx = crate::verify::VerifyContext {
                 record: &mut record,
                 secret_key: "test-key-16-bytes!",
@@ -1437,7 +1444,10 @@ mod tests {
             &ChallengeProfile::sha(16),
         )
         .unwrap();
-        assert_eq!(config.target_bits, 8, "the caller's config must not be mutated");
+        assert_eq!(
+            config.target_bits, 8,
+            "the caller's config must not be mutated"
+        );
         assert_eq!(config.algorithm, PoWAlgorithm::Sha256);
     }
 

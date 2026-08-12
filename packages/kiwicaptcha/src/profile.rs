@@ -17,8 +17,8 @@
 //!   `m_kib` within `8..=SOLVER_MAX_ARGON2_M_KIB` (65536).
 
 use crate::challenge::{
-    MAX_ARGON_T, SOLVER_MAX_ARGON2_M_KIB, SOLVER_MAX_ARGON2_TARGET_BITS,
-    SOLVER_MAX_TARGET_BITS, PoWAlgorithm,
+    PoWAlgorithm, MAX_ARGON_T, SOLVER_MAX_ARGON2_M_KIB, SOLVER_MAX_ARGON2_TARGET_BITS,
+    SOLVER_MAX_TARGET_BITS,
 };
 
 /// A named difficulty profile for adaptive-risk issuance.
@@ -170,7 +170,10 @@ mod tests {
             ChallengeProfile::sha(21).validate(),
             Err(ProfileError::InvalidShaTargetBits(21))
         );
-        assert_eq!(ChallengeProfile::sha(0).validate(), Err(ProfileError::InvalidShaTargetBits(0)));
+        assert_eq!(
+            ChallengeProfile::sha(0).validate(),
+            Err(ProfileError::InvalidShaTargetBits(0))
+        );
         assert!(ChallengeProfile::sha(20).validate().is_ok());
         assert!(ChallengeProfile::sha(1).validate().is_ok());
     }
@@ -197,17 +200,34 @@ mod tests {
             (ChallengeProfile { m_kib: 7, ..base() }).validate(),
             Err(ProfileError::InvalidArgonMKib(7))
         );
-        assert!(ChallengeProfile { m_kib: 65536, ..base() }.validate().is_ok());
+        assert!(ChallengeProfile {
+            m_kib: 65536,
+            ..base()
+        }
+        .validate()
+        .is_ok());
         assert_eq!(
-            (ChallengeProfile { m_kib: 65537, ..base() }).validate(),
+            (ChallengeProfile {
+                m_kib: 65537,
+                ..base()
+            })
+            .validate(),
             Err(ProfileError::InvalidArgonMKib(65537))
         );
         assert_eq!(
-            (ChallengeProfile { target_bits: 11, ..base() }).validate(),
+            (ChallengeProfile {
+                target_bits: 11,
+                ..base()
+            })
+            .validate(),
             Err(ProfileError::InvalidArgonTargetBits(11))
         );
         assert_eq!(
-            (ChallengeProfile { target_bits: 0, ..base() }).validate(),
+            (ChallengeProfile {
+                target_bits: 0,
+                ..base()
+            })
+            .validate(),
             Err(ProfileError::InvalidArgonTargetBits(0))
         );
         assert_eq!(
