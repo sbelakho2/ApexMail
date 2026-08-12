@@ -21,6 +21,15 @@
 (function () {
   "use strict";
 
+  // The wasm glue exposes itself as `window.__kiwiCaptchaWasm`, so the
+  // worker establishes the `window` alias (same prelude the widget driver
+  // prepends for its Blob worker) BEFORE importing the glue. Without it a
+  // standalone same-origin worker (data-kiwi-worker-src) could not load
+  // the glue and silently lost its off-main-thread Argon2 solver.
+  if (typeof self !== "undefined" && typeof window === "undefined") {
+    self.window = self;
+  }
+
   var loader = null;
   try { importScripts("kiwicaptcha-wasm.js"); } catch (e) {}
   if (typeof self !== "undefined" && self.__kiwiCaptchaWasm) {

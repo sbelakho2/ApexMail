@@ -36,7 +36,7 @@ if ($record->algorithm === \KiwiCaptcha\PoWAlgorithm::Argon2id) {
             $record->prefix.$counter,
             base64_decode($record->salt, true),
             $record->t,
-            $record->mKib * 1024,
+            $record->mKib * 1024 * 1024,
             SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13,
         );
         $counter++;

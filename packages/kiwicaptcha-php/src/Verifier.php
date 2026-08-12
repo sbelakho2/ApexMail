@@ -404,7 +404,11 @@ final class Verifier
         if ($record->p !== 1 || $record->t < 3) {
             return null;
         }
-        $memlimit = $record->mKib * 1024;
+        // Protocol unit: m_kib is MIBIBYTES (64 = 64 MiB). sodium's memlimit
+        // is in BYTES, so convert twice (mKib * 1024 KiB * 1024 bytes).
+        // A single * 1024 here silently ran the verifier at mKib KiB —
+        // 1000x weaker than the documented profile.
+        $memlimit = $record->mKib * 1024 * 1024;
         if ($memlimit < 8192) {
             return null;
         }

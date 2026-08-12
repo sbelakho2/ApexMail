@@ -62,7 +62,7 @@ final class VerifierGateTest extends TestCase
                 $prefix.$counter,
                 $saltBytes,
                 3,
-                8 * 1024,
+                8 * 1024 * 1024,
                 SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13,
             );
             $counter++;

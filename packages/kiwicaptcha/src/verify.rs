@@ -48,7 +48,11 @@ fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], Verif
             {
                 return Err(VerifyError::MalformedRecord);
             }
-            let params = Params::new(record.m_kib, record.t, record.p, Some(32))
+            // Protocol unit: m_kib is MIBIBYTES (64 = 64 MiB, matching the
+            // PHP core's memory_cost = mKib * 1024 KiB); the argon2 crate's
+            // Params::new takes KIBIBYTES, so convert. A 1000x unit drift
+            // here would silently weaken the memory-hard guarantee.
+            let params = Params::new(record.m_kib * 1024, record.t, record.p, Some(32))
                 .map_err(|_| VerifyError::MalformedRecord)?;
             let hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
             let password = format!("{}{}", record.prefix, counter);
