@@ -26,15 +26,21 @@ use Predis\Client;
  * atomic (read prev -> clamp -> write) so concurrent processes never race.
  *
  * Rate of change: the previous bias and its timestamp live in the hash
- * {kiwi:<ns>}:cal:state:<scope> (fields bias/ts). The bias may move by at
- * most `maxChangePerMinute` per elapsed minute:
- *   jump = maxChangePerMinute * max(1, floor((now - prevTs) / 60000))
- *   bias = clamp(bias, prevBias - jump, prevBias + jump)
- * A first-ever value (no state) is stored without clamping.
+ * {kiwi:<ns>}:cal:state:<scope> (fields bias_mp/ts, bias in MILLI-POINTS
+ * so the allowance is proportional to the elapsed time):
+ *   allowed = maxChangePerMinute * 1000 * elapsedMs / 60000
+ *   bias    = clamp(raw, prevBias - allowed, prevBias + allowed)
+ * The first call ever seeds bias_mp = 0 / ts = now BEFORE the threshold
+ * check, so a fresh scope can never jump straight to ±maxAdjustment; the
+ * timestamp is refreshed on EVERY call (below threshold too), so a long
+ * below-threshold period cannot accumulate movement allowance. Below the
+ * threshold the returned bias is 0 and bias_mp is untouched.
  *
  * The final bias is cached in-process per scope for 30 s (bounded to
  * 1024 scopes, oldest evicted first); cache hits never touch Redis — the
- * 0-below-threshold result is cached too.
+ * 0-below-threshold result is cached too. record() invalidates the
+ * cached entry for the recorded scope so fresh outcomes are visible
+ * immediately.
  *
  * Receipts pair a decision_id with its scope/band/action so a later
  * confirmed outcome (legit/abuse) is recorded against the ORIGINAL
@@ -51,58 +57,21 @@ final class AggregateCalibrator implements CalibrationStore
     public const CACHE_CAP = 1024;
 
     /**
+     * The canonical cross-language calibration script, bundled with this
+     * package at resources/calibration.lua (self-contained — no monorepo
+     * paths), resolved via dirname(__DIR__, 2) . '/resources/calibration.lua'
+     * and loaded at construction like RedisRiskStateStore loads risk-v1.lua.
+     *
      * One atomic read->clamp->write:
      *   KEYS[1..24]  hourly score buckets (hash, fields b<band>a<action>:legit|:abuse)
-     *   KEYS[25]     rate-limit state (hash, fields bias/ts)
+     *   KEYS[25]     rate-limit state (hash, fields bias_mp/ts)
      *   ARGV[1]      now (epoch ms)
      *   ARGV[2]      minSamples
-     *   ARGV[3]      maxAdjustment
-     *   ARGV[4]      maxChangePerMinute
-     * Returns the final bias.
+     *   ARGV[3]      maxAdjustment (points)
+     *   ARGV[4]      maxChangePerMinute (points/minute)
+     * Returns the final integer bias (points).
      */
-    private const BIAS_SCRIPT = <<<'LUA'
-local function trunc_div(n, d)
-    local q = n / d
-    if q > 0 then return math.floor(q) end
-    return math.ceil(q)
-end
-
-local legit_total = 0
-local abuse_total = 0
-for i = 1, 24 do
-    local b = redis.call('HGETALL', KEYS[i])
-    for j = 1, #b, 2 do
-        local count = tonumber(b[j + 1]) or 0
-        if string.sub(b[j], -6) == ':legit' then
-            legit_total = legit_total + count
-        else
-            abuse_total = abuse_total + count
-        end
-    end
-end
-
-local bias = 0
-local total = legit_total + abuse_total
-if total >= tonumber(ARGV[2]) and total > 0 then
-    local raw = trunc_div((abuse_total - legit_total) * 1000, total)
-    raw = trunc_div(raw * 2, 10)
-    local max_adj = tonumber(ARGV[3])
-    if raw > max_adj then raw = max_adj end
-    if raw < -max_adj then raw = -max_adj end
-    local prev_bias = redis.call('HGET', KEYS[25], 'bias')
-    local prev_ts = redis.call('HGET', KEYS[25], 'ts')
-    if prev_bias and prev_ts then
-        local minutes = math.floor((tonumber(ARGV[1]) - tonumber(prev_ts)) / 60000)
-        if minutes < 1 then minutes = 1 end
-        local jump = tonumber(ARGV[4]) * minutes
-        if raw > tonumber(prev_bias) + jump then raw = tonumber(prev_bias) + jump end
-        if raw < tonumber(prev_bias) - jump then raw = tonumber(prev_bias) - jump end
-    end
-    bias = raw
-    redis.call('HSET', KEYS[25], 'bias', bias, 'ts', ARGV[1])
-end
-return bias
-LUA;
+    private readonly string $script;
 
     private readonly string $namespace;
 
@@ -115,14 +84,27 @@ LUA;
         private readonly int $minSamples = 1000,
         private readonly int $maxAdjustment = 150,
         private readonly int $maxChangePerMinute = 10,
+        private readonly int $receiptTtlSecs = self::RECEIPT_TTL_SECS,
     ) {
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Calibration namespace must be non-empty and free of braces');
         }
-        if ($minSamples < 1 || $maxAdjustment < 1 || $maxChangePerMinute < 1) {
-            throw new \InvalidArgumentException('minSamples, maxAdjustment and maxChangePerMinute must be >= 1');
+        if ($minSamples < 1 || $maxAdjustment < 1 || $maxChangePerMinute < 1 || $receiptTtlSecs < 1) {
+            throw new \InvalidArgumentException('minSamples, maxAdjustment, maxChangePerMinute and receiptTtlSecs must be >= 1');
         }
         $this->namespace = $namespace;
+        $path = dirname(__DIR__, 2) . '/resources/calibration.lua';
+        if (!is_file($path)) {
+            throw new \RuntimeException(
+                'Cannot locate the bundled calibration script at resources/calibration.lua ' .
+                '(resolved from ' . __DIR__ . '). The script ships with this package.'
+            );
+        }
+        $script = @file_get_contents($path);
+        if ($script === false) {
+            throw new \RuntimeException(sprintf('Cannot read the bundled calibration script at %s', $path));
+        }
+        $this->script = $script;
     }
 
     /**
@@ -146,6 +128,9 @@ LUA;
 
     public function record(int $scope, int $band, RiskAction $action, bool $legitimate): void
     {
+        // Invalidate the cached bias for this scope so a fresh outcome is
+        // visible immediately (Rust parity).
+        unset($this->biasCache[$scope]);
         $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
         $key = "{kiwi:{$this->namespace}}:cal:{$scope}:{$hour}";
         $field = sprintf('b%da%s:%s', $band, $action->value, $legitimate ? 'legit' : 'abuse');
@@ -169,7 +154,7 @@ LUA;
         $keys[] = "{kiwi:{$this->namespace}}:cal:state:{$scope}";
 
         $bias = (int) $this->client->eval(
-            self::BIAS_SCRIPT,
+            $this->script,
             count($keys),
             ...array_merge($keys, [$now, $this->minSamples, $this->maxAdjustment, $this->maxChangePerMinute]),
         );
@@ -190,7 +175,7 @@ LUA;
             $key,
             (string) json_encode(['scope' => $scope, 'band' => $band, 'action' => $action->value]),
             'EX',
-            self::RECEIPT_TTL_SECS
+            $this->receiptTtlSecs
         );
     }
 

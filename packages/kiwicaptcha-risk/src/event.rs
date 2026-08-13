@@ -5,6 +5,9 @@
 //! must be byte-identical across the PHP and Rust implementations.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::RiskError;
 
 /// The fixed risk event kinds of the risk-v1 contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -120,6 +123,37 @@ impl RiskObservation {
     }
 }
 
+/// Hard limit on caller-supplied idempotency keys (bytes), shared with PHP.
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
+
+/// Canonical idempotency-key prefix, shared with PHP. Every caller key is
+/// hashed with this prefix so a caller-controlled suffix can never collide
+/// with the engine's own random 32-hex event ids.
+const IDEMPOTENCY_PREFIX: &[u8] = b"kiwi-risk-event-v1\0";
+
+/// Normalizes a caller idempotency key into the canonical `event_id`
+/// representation BEFORE it becomes a Redis key suffix (byte-identical with
+/// PHP):
+///
+/// - `None` or empty → a fresh random 16-byte hex id
+///   ([`RiskObservation::new_event_id`]);
+/// - more than [`MAX_IDEMPOTENCY_KEY_BYTES`] bytes →
+///   [`RiskError::InvalidIdempotencyKey`];
+/// - otherwise → lowercase hex of
+///   `sha256("kiwi-risk-event-v1\0" + key)` (64 hex chars).
+pub fn normalize_idempotency_key(key: Option<&str>) -> Result<String, RiskError> {
+    let Some(key) = key.filter(|k| !k.is_empty()) else {
+        return Ok(RiskObservation::new_event_id());
+    };
+    if key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+        return Err(RiskError::InvalidIdempotencyKey(key.len()));
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(IDEMPOTENCY_PREFIX);
+    hasher.update(key.as_bytes());
+    Ok(hex::encode(hasher.finalize()))
+}
+
 impl Default for RiskObservation {
     fn default() -> Self {
         RiskObservation {
@@ -193,5 +227,65 @@ mod tests {
         assert_eq!(a.len(), 32);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn idempotency_normalization_hashes_verbatim_keys() {
+        let normalized = normalize_idempotency_key(Some("verbatim-key")).unwrap();
+        assert_eq!(normalized.len(), 64, "sha256 hex of a verbatim key");
+        assert!(normalized.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            normalized.chars().all(|c| !c.is_ascii_uppercase()),
+            "the hash is lowercase hex"
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"kiwi-risk-event-v1\0");
+        hasher.update(b"verbatim-key");
+        assert_eq!(normalized, hex::encode(hasher.finalize()));
+
+        // Deterministic: the same key maps to the same id (dedupe works).
+        assert_eq!(
+            normalize_idempotency_key(Some("verbatim-key")).unwrap(),
+            normalized
+        );
+        // Different keys map to different ids.
+        assert_ne!(
+            normalize_idempotency_key(Some("other-key")).unwrap(),
+            normalized
+        );
+        // Keys with an embedded NUL still hash as-is.
+        let mut with_nul = String::from("a");
+        with_nul.push('\0');
+        with_nul.push('b');
+        assert_eq!(
+            normalize_idempotency_key(Some(&with_nul)).unwrap().len(),
+            64
+        );
+    }
+
+    #[test]
+    fn idempotency_normalization_rejects_keys_over_4096_bytes() {
+        let long = "x".repeat(MAX_IDEMPOTENCY_KEY_BYTES + 1);
+        assert_eq!(
+            normalize_idempotency_key(Some(&long)),
+            Err(RiskError::InvalidIdempotencyKey(
+                MAX_IDEMPOTENCY_KEY_BYTES + 1
+            ))
+        );
+        // Exactly the limit is accepted.
+        let ok = "x".repeat(MAX_IDEMPOTENCY_KEY_BYTES);
+        assert_eq!(normalize_idempotency_key(Some(&ok)).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn idempotency_normalization_none_or_empty_draws_random_ids() {
+        for key in [None, Some("")] {
+            let a = normalize_idempotency_key(key).unwrap();
+            let b = normalize_idempotency_key(key).unwrap();
+            assert_eq!(a.len(), 32, "null/empty keys draw a random 16-byte id");
+            assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+            assert_ne!(a, b, "null/empty keys must never reuse an id");
+        }
     }
 }

@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisRiskHealthProvider;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
@@ -319,9 +320,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Redis-backed aggregate calibration (score-bucket statistics,
             // no identity): adjusts only the per-scope bias, bounded by the
             // configured min_samples / max_adjustment / max_change_per_minute
-            // knobs. Receipts are keyed on decision ids, so the same Predis
-            // client + namespace as the risk state store keeps every
-            // calibration key in one hash-tag family.
+            // knobs, with the receipt TTL passed through (also the TTL of the
+            // gateway's nonce->decision handles). Receipts are keyed on
+            // decision ids, so the same Predis client + namespace as the risk
+            // state store keeps every calibration key in one hash-tag family.
             $calibrationRef = null;
             if ($riskConfig['calibration']['enabled']) {
                 $container->setDefinition('kiwi_captcha.risk.calibration', new Definition(AggregateCalibrator::class, [
@@ -330,14 +332,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $riskConfig['calibration']['min_samples'],
                     $riskConfig['calibration']['max_adjustment'],
                     $riskConfig['calibration']['max_change_per_minute'],
+                    $riskConfig['calibration']['receipt_ttl_secs'],
                 ]));
                 $calibrationRef = new Reference('kiwi_captcha.risk.calibration');
             }
 
             // Shared circuit breaker: the engine records every store
-            // success/failure on it, and the resource-pressure provider reads
-            // its state as the risk backend health signal (no per-request
-            // PING — the breaker state IS the last-operation result).
+            // success/failure on it and consumes its state for the DEGRADED
+            // mode (backend unavailable -> the policy's degraded action) —
+            // no per-request PING, the breaker state IS the last-operation
+            // result.
             $container->setDefinition('kiwi_captcha.risk.breaker', new Definition(CircuitBreaker::class));
 
             // The engine is public so applications can read risk metrics
@@ -385,10 +389,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $issuanceCounterRef = new Reference('kiwi_captcha.risk.issuance_counter');
 
             // Live resource pressure: remaining Redis admission-semaphore
-            // slots (argon_capacity.enabled gate), real per-second issuance
-            // headroom (hard_limits.global_per_second vs the live counter),
-            // and risk backend health from the shared circuit breaker (no
-            // PING). Unobservable sources stay nominal (1000).
+            // slots (argon_capacity.enabled gate) and real per-second
+            // issuance headroom as the remaining FRACTION of
+            // hard_limits.global_per_second (fixed-point 0..1000). Risk
+            // backend health is NOT a snapshot field anymore — the engine's
+            // degraded mode consumes the shared circuit breaker directly.
+            // Unobservable sources stay nominal (1000).
             $container->setDefinition('kiwi_captcha.risk.resource_pressure', new Definition(RedisRiskHealthProvider::class, [
                 $riskConfig['argon_capacity']['enabled']
                     ? ($container->hasDefinition('kiwi_captcha.argon2_redis_semaphore')
@@ -398,7 +404,6 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $riskRedis,
                 $issuanceKeyPrefix,
                 $riskConfig['hard_limits']['global_per_second'],
-                new Reference('kiwi_captcha.risk.breaker'),
             ]));
             $loggerRef = $container->hasDefinition('logger') || $container->hasAlias('logger')
                 ? new Reference('logger')
@@ -414,7 +419,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$postSolveScopes', $postSolveScopes)
                 ->setArgument('$unknownScopeMode', $riskConfig['unknown_scope']['mode'])
                 ->setArgument('$unknownScopeId', $unknownScopeId)
+                ->setArgument('$requestStack', new Reference('request_stack'))
+                ->setArgument('$decisionRedis', $riskRedis)
+                ->setArgument('$decisionKeyPrefix', sprintf('{kiwi:%s}:decision:', $namespace))
+                ->setArgument('$decisionTtlSecs', $riskConfig['calibration']['receipt_ttl_secs'])
+                ->setArgument('$policy', new Reference('kiwi_captcha.risk.policy'))
                 ->setPublic(true));
+            if ($container->has(PrincipalResolverInterface::class)) {
+                // An application-registered principal resolver is OPT-IN:
+                // when a service for the interface exists, the raw principal
+                // of each request flows into every engine context (the
+                // engine HMAC-pseudonymizes it before Redis storage).
+                $container->getDefinition(RiskGateway::class)
+                    ->setArgument('$principalResolver', new Reference(PrincipalResolverInterface::class));
+            }
             $cookie = $riskConfig['continuity_cookie'];
             $container->setDefinition(ContinuityCookie::class, (new Definition(ContinuityCookie::class, [
                 $cookie['name'],

@@ -13,9 +13,11 @@ use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskContext;
 use KiwiCaptcha\Risk\RiskDecision;
 use KiwiCaptcha\Risk\RiskEventKind;
+use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskReason;
 use KiwiCaptcha\VerifyError;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpFoundation\RequestStack;
 
 /**
  * Bundle-side facade over the adaptive risk engine.
@@ -24,16 +26,21 @@ use Psr\Log\LoggerInterface;
  * the engine's identity derivation, network flags, live resource pressure)
  * for the challenge controller's PRE-ISSUE assessment and feeds the engine's
  * POST-SOLVE outcome signals, maps decisions to challenge profiles, and logs
- * decisions without ever logging an IP or cookie value.
+ * decisions without ever logging an IP, cookie value, principal or decision
+ * id.
  *
- * All engine calls go through the contract surface: `assess(ctx,
- * idempotencyKey)` for decisions and `record_feedback(event, ctx,
- * idempotencyKey, decisionId)` for outcome signals (no limits, no decision),
- * so decision ids flow end-to-end and the calibration receipts keyed on them
- * are consumed. ConfirmedLegitimate / ConfirmedAbuse are APPLICATION signals
- * only — the gateway never derives them from its own decisions (the engine
- * requires a decision id for them and throws InvalidArgumentException without
- * one).
+ * All engine calls go through the contract surface:
+ *  - `assessPreIssue(ctx, idempotencyKey)` for the PRE-ISSUE decision
+ *    (emergency limiter + observation + decision);
+ *  - `reassess(ctx, idempotencyKey)` for the POST-SOLVE decision (fresh
+ *    decision WITHOUT consuming the emergency admission budget — a low
+ *    limiter cap must never deny a valid solve);
+ *  - `record_feedback(event, ctx, idempotencyKey, decisionId)` for outcome
+ *    signals (no limits, no decision), so decision ids flow end-to-end and
+ *    the calibration receipts keyed on them are consumed.
+ * ConfirmedLegitimate / ConfirmedAbuse are APPLICATION signals only — the
+ * gateway never derives them from its own decisions (the engine requires a
+ * decision id for them and throws InvalidArgumentException without one).
  *
  * Every FEEDBACK path is guarded against unknown scopes: when the scope is
  * not configured and unknown_scope.mode is "reject"/"baseline" (the engine
@@ -43,14 +50,40 @@ use Psr\Log\LoggerInterface;
  * Resource pressure comes from the injected provider
  * ({@see ResourcePressureProviderInterface}); without one every dimension is
  * nominal (1000 = no pressure).
+ *
+ * PRINCIPAL reputation: when a {@see PrincipalResolverInterface} service is
+ * wired (and a RequestStack is available), the RAW principal of the current
+ * request flows into EVERY context built here — pre-issue, post-solve and
+ * all feedback signals — so the engine's principal counter is exercised. The
+ * raw principal exists only in process memory; the engine's
+ * RiskIdentityFactory HMAC-pseudonymizes it before Redis storage.
+ *
+ * DECISION HANDLES: {@see preIssue()} and {@see postSolveDecision()} record
+ * the decision id on the owned {@see RiskDecisionContext} (request-local,
+ * read via {@see decisionContext()}). For cross-request confirmation the
+ * controller pairs the minted challenge nonce to the decision id via
+ * {@see attachDecisionForNonce()} — a short-lived server-side mapping in the
+ * risk Redis ({kiwi:<ns>}:decision:<nonce>, TTL = the calibration receipt
+ * TTL, default 300) consumed once with GETDEL via
+ * {@see resolveDecisionForNonce()}. The mapping carries ONLY the decision id
+ * — no IP, no identity.
  */
 final class RiskGateway
 {
+    private readonly RiskDecisionContext $decisionContext;
+
     /**
      * @param array<string, int>                  $scopeIds         application scope string => risk-v1 int scope
      * @param array<string, bool>                 $postSolveScopes  application scope string => post_solve_check flag
      * @param 'reject'|'baseline'|'minimum'       $unknownScopeMode behavior for scopes absent from $scopeIds
      * @param int|null                            $unknownScopeId   synthetic policy scope id used in 'minimum' mode
+     * @param string                              $decisionKeyPrefix full nonce->decision key prefix including the
+     *                                                               hash tag, e.g. "{kiwi:prod}:decision:"
+     * @param int                                 $decisionTtlSecs  TTL of the nonce->decision mapping (defaults to
+     *                                                               the calibration receipt TTL, 300 s)
+     * @param RiskPolicy|null                     $policy           the risk-v1 policy, required for
+     *                                                               {@see degradedDecisionForScope()} (the extension
+     *                                                               wires it automatically)
      */
     public function __construct(
         private readonly AdaptiveRiskEngine $engine,
@@ -62,10 +95,17 @@ final class RiskGateway
         private readonly array $postSolveScopes = [],
         private readonly string $unknownScopeMode = 'reject',
         private readonly ?int $unknownScopeId = null,
+        private readonly ?PrincipalResolverInterface $principalResolver = null,
+        private readonly ?RequestStack $requestStack = null,
+        private readonly ?\Predis\Client $decisionRedis = null,
+        private readonly string $decisionKeyPrefix = '{kiwi:kiwi}:decision:',
+        private readonly int $decisionTtlSecs = 300,
+        private readonly ?RiskPolicy $policy = null,
     ) {
         if (!\in_array($unknownScopeMode, ['reject', 'baseline', 'minimum'], true)) {
             throw new \InvalidArgumentException(sprintf('unknownScopeMode must be "reject", "baseline" or "minimum" (got "%s")', $unknownScopeMode));
         }
+        $this->decisionContext = new RiskDecisionContext();
     }
 
     /** The configured unknown-scope mode ('reject' | 'baseline' | 'minimum'). */
@@ -113,40 +153,58 @@ final class RiskGateway
     }
 
     /**
-     * PRE-ISSUE assessment: one observation (event PreIssue) + decision.
+     * The decision id of the current request's decision (set by preIssue /
+     * postSolveDecision), or null when the risk engine was not consulted.
+     * Request-local: overwritten on every decision, never used for
+     * cross-request pairing.
+     */
+    public function decisionContext(): RiskDecisionContext
+    {
+        return $this->decisionContext;
+    }
+
+    /**
+     * PRE-ISSUE assessment: one observation (event PreIssue) + decision via
+     * {@see AdaptiveRiskEngine::assessPreIssue()} (emergency limiter +
+     * observation + decision). The decision id is recorded on the
+     * request-local {@see RiskDecisionContext}.
      *
      * @throws UnknownScopeException   when the scope is unknown in 'reject'/'baseline' mode
      * @throws \InvalidArgumentException when the client IP is not a valid
      *                                   IPv4/IPv6 address (the caller treats
-     *                                   this as "no risk signal" and issues
-     *                                   normally)
+     *                                   this as "no risk signal" and applies
+     *                                   the degraded decision)
      */
     public function preIssue(string $scope, string $ip, ?string $session, ?string $idempotencyKey = null): RiskDecision
     {
-        $decision = $this->engine->assess(
+        $decision = $this->engine->assessPreIssue(
             new RiskContext(
                 scope: $this->scopeId($scope),
                 sourceIp: $ip,
                 // The engine derives the keyed session pseudonym itself
                 // (buildObservation) — pass the raw cookie value.
                 sessionId: $session,
-                principalId: null,
+                principalId: $this->resolvePrincipal($scope),
                 event: RiskEventKind::PreIssue,
                 networkFlags: $this->classifier->classify($ip),
                 resources: $this->resources(),
             ),
             $idempotencyKey,
         );
+        $this->decisionContext->set($decision->decisionId);
         $this->logDecision($scope, $decision);
 
         return $decision;
     }
 
     /**
-     * POST-SOLVE decision: a fresh assessment with the SolveSuccess event,
-     * so a materially changed security context (e.g. a global attack storm
-     * while the client was solving) can demand DENY or STEP-UP even after a
-     * valid proof.
+     * POST-SOLVE decision: a fresh assessment with the SolveSuccess event
+     * via {@see AdaptiveRiskEngine::reassess()} — a full decision WITHOUT
+     * consuming the emergency admission budget, so a low limiter cap can
+     * never deny a valid solve. A materially changed security context (e.g.
+     * a global attack storm while the client was solving) can still demand
+     * DENY or STEP-UP even after a valid proof. The decision id is recorded
+     * on the request-local {@see RiskDecisionContext}.
      *
      * The outcome is NOT fed back by the gateway: ConfirmedLegitimate /
      * ConfirmedAbuse are application-only signals (they require a decision
@@ -168,12 +226,13 @@ final class RiskGateway
             scope: $scopeId,
             sourceIp: $ip,
             sessionId: $session,
-            principalId: $principal,
+            principalId: $principal ?? $this->resolvePrincipal($scope),
             event: RiskEventKind::SolveSuccess,
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
         );
-        $decision = $this->engine->assess($context, $idempotencyKey);
+        $decision = $this->engine->reassess($context, $idempotencyKey);
+        $this->decisionContext->set($decision->decisionId);
         $this->logDecision($scope, $decision);
 
         return $decision;
@@ -282,10 +341,79 @@ final class RiskGateway
         return $this->recordFeedback(RiskEventKind::ExpiredChallenge, $scope, $ip, $session, $idempotencyKey, null);
     }
 
-    /** The challenge profile the decision demands (null = issue as configured). */
+    /**
+     * The challenge profile the decision demands (null = issue as configured).
+     */
     public function decisionProfile(RiskDecision $decision): ?ChallengeProfile
     {
         return $this->resolver->profileFor($decision->action);
+    }
+
+    /**
+     * The DEGRADED decision for a scope: the policy's degraded action
+     * (clamped to the scope minimum; the global floor sits at the idle
+     * level 0 = Allow because a no-signal fallback consults no store state),
+     * WITHOUT touching the state store or the emergency limiter. Used when
+     * no usable risk signal exists (e.g. an unparseable client IP from a
+     * misconfigured proxy) so the configured degraded floor always applies
+     * and issuance can never silently drop below it.
+     *
+     * @throws \LogicException when the policy is not wired (the extension
+     *                         wires it automatically)
+     */
+    public function degradedDecisionForScope(int $scope): RiskDecision
+    {
+        if ($this->policy === null) {
+            throw new \LogicException('degradedDecisionForScope requires the RiskPolicy to be wired into the RiskGateway');
+        }
+
+        return $this->policy->degradedDecision($scope, 0);
+    }
+
+    /**
+     * Pair a challenge nonce to its decision id in the risk Redis:
+     * {kiwi:<ns>}:decision:<nonce> holds the JSON string {"decision_id": ...}
+     * with the calibration receipt TTL (default 300 s). Server-side handle
+     * only — the mapping carries NO IP and NO identity, and a Redis failure
+     * is silent (the mapping must never break issuance).
+     */
+    public function attachDecisionForNonce(string $nonce, string $decisionId): void
+    {
+        if ($this->decisionRedis === null) {
+            return;
+        }
+        try {
+            $this->decisionRedis->set(
+                $this->decisionKeyPrefix.$nonce,
+                (string) json_encode(['decision_id' => $decisionId], JSON_UNESCAPED_SLASHES),
+                'EX',
+                $this->decisionTtlSecs,
+            );
+        } catch (\Throwable) {
+            // Server-side handle only — never break issuance over it.
+        }
+    }
+
+    /**
+     * Consume the nonce -> decision mapping (GETDEL: atomic read + remove,
+     * at most one consumer wins). Returns the paired decision id or null.
+     */
+    public function resolveDecisionForNonce(string $nonce): ?string
+    {
+        if ($this->decisionRedis === null) {
+            return null;
+        }
+        try {
+            $raw = $this->decisionRedis->getdel($this->decisionKeyPrefix.$nonce);
+        } catch (\Throwable) {
+            return null;
+        }
+        if (!\is_string($raw) || $raw === '') {
+            return null;
+        }
+        $data = json_decode($raw, true);
+
+        return \is_array($data) && \is_string($data['decision_id'] ?? null) ? $data['decision_id'] : null;
     }
 
     /** Engine metrics snapshot (counters/gauges/latencies, no identity labels). */
@@ -308,7 +436,7 @@ final class RiskGateway
             scope: $scopeId,
             sourceIp: $ip,
             sessionId: $session,
-            principalId: null,
+            principalId: $this->resolvePrincipal($scope),
             event: $kind,
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
@@ -355,7 +483,7 @@ final class RiskGateway
                 scope: $scopeId,
                 sourceIp: $ip,
                 sessionId: $session,
-                principalId: null,
+                principalId: $this->resolvePrincipal($scope),
                 event: $event,
                 networkFlags: $this->classifier->classify($ip),
                 resources: $this->resources(),
@@ -363,6 +491,25 @@ final class RiskGateway
             $idempotencyKey,
             $decisionId,
         );
+    }
+
+    /**
+     * The RAW principal of the current request (process memory only), or
+     * null when no resolver is wired, no request is in scope, or the
+     * resolver declines. The engine HMAC-pseudonymizes the raw value before
+     * Redis storage.
+     */
+    private function resolvePrincipal(string $scope): ?string
+    {
+        if ($this->principalResolver === null || $this->requestStack === null) {
+            return null;
+        }
+        $request = $this->requestStack->getMainRequest();
+        if ($request === null) {
+            return null;
+        }
+
+        return $this->principalResolver->resolve($request, $scope);
     }
 
     private function tryScopeId(string $scope): ?int
@@ -378,9 +525,16 @@ final class RiskGateway
 
     private function resources(): ResourcePressure
     {
-        return $this->resources?->snapshot() ?? new ResourcePressure(1000, 1000, 1000);
+        return $this->resources?->snapshot() ?? new ResourcePressure(1000, 1000);
     }
 
+    /**
+     * Decision logging for operators. The decision id is deliberately NOT
+     * included (it is an internal handle that pairs calibration receipts —
+     * logging it would let log analysis correlate decisions across requests);
+     * decision ids are only ever carried in process memory or the
+     * short-lived server-side nonce mapping.
+     */
     private function logDecision(string $scope, RiskDecision $decision): void
     {
         if ($this->logger === null) {
@@ -391,7 +545,6 @@ final class RiskGateway
             'action' => $decision->action->value,
             'score' => $decision->score,
             'band' => $decision->band,
-            'decision_id' => $decision->decisionId,
             'global_level' => $decision->globalLevel,
             'policy_version' => $decision->policyVersion,
             'reasons' => array_map(static fn (RiskReason $r): string => $r->value, $decision->reasons),

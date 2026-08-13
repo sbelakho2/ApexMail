@@ -11,17 +11,23 @@
 //! - Decision receipts `{kiwi:<ns>}:cal:receipt:<decision_id>` — HSET
 //!   scope/band/action, EXPIRE 300 s, consumed with GETDEL.
 //!
-//! Bias (byte-identical integer math with PHP, ALL i64 truncating division):
+//! Bias (byte-identical integer math with PHP, ALL i64 truncating division,
+//! executed inside ONE canonical Lua invocation — the script at
+//! `resources/calibration.lua`, shared verbatim with PHP):
 //!
 //! ```text
 //! total = legit + abuse            (summed over the last 24 hourly buckets)
 //! bias  = 0                        when total < min_samples (default 1000)
 //! raw   = ((abuse - legit) * 1000 / total) * 2 / 10
 //! bias  = clamp(raw, -max_adjustment, +max_adjustment)   (default ±150)
-//! final = clamp(bias, prev - jump, prev + jump)   with
-//!         jump = max_change_per_minute * max(1, (now - ts) / 60000)
-//!         (prev/ts persisted at `{kiwi:<ns>}:cal:state:<scope>`; the FIRST
-//!          write stores the unclamped value, atomically in one Lua script)
+//! final = clamp(bias, prev - allowed, prev + allowed)     with
+//!         allowed = max_change_per_minute * 1000 * elapsed_ms / 60000
+//!         (bias is persisted in MILLI-POINTS at
+//!          `{kiwi:<ns>}:cal:state:<scope>`; the FIRST call ever seeds
+//!          bias_mp = 0 / ts = now BEFORE the sample threshold is evaluated,
+//!          ts is refreshed on EVERY call, and below the threshold the
+//!          result is 0 with bias_mp untouched — all atomically in the one
+//!          script)
 //! ```
 //!
 //! `bias_for_scope` caches the per-scope result in-process for 30 s (bounded
@@ -70,9 +76,10 @@ pub trait CalibrationStore: Send + Sync {
     /// Bias adjustment for a scope at `now_ms` (epoch milliseconds).
     ///
     /// Zero below `min_samples`; clamped to `max_adjustment`; rate-of-change
-    /// clamped (atomic Lua read→clamp→write). Results are cached in-process
-    /// for 30 s (hits make no backend calls; 0 is cached too). Any backend
-    /// failure returns 0 (fail-open).
+    /// clamped by the proportional allowance. Aggregation, state seeding and
+    /// clamping are ONE atomic canonical Lua invocation. Results are cached
+    /// in-process for 30 s (hits make no backend calls; 0 is cached too).
+    /// Any backend failure returns 0 (fail-open).
     fn bias_for_scope(&self, scope: u32, now_ms: i64) -> i32;
 
     /// Registers the calibration receipt of one issued decision.
@@ -120,9 +127,9 @@ pub struct RedisCalibrationStore {
     min_samples: i64,
     max_adjustment: i32,
     max_change_per_minute: i32,
+    receipt_ttl_secs: u64,
     cache: Mutex<BiasCache>,
-    aggregate_script: redis::Script,
-    state_script: redis::Script,
+    script: redis::Script,
     script_calls: AtomicUsize,
 }
 
@@ -173,53 +180,18 @@ impl BiasCache {
     }
 }
 
-/// One Lua script reads the 24 hourly buckets of a scope and returns ONLY
-/// `{ legit_total, abuse_total }` (the old hot path issued 24 HGETALLs).
-const AGGREGATE_SCRIPT: &str = r#"
-local legit = 0
-local abuse = 0
-for i = 1, #KEYS do
-    local fields = redis.call('HGETALL', KEYS[i])
-    for j = 1, #fields, 2 do
-        if fields[j]:sub(-6) == ':legit' then
-            legit = legit + tonumber(fields[j + 1])
-        elseif fields[j]:sub(-6) == ':abuse' then
-            abuse = abuse + tonumber(fields[j + 1])
-        end
-    end
-end
-return { legit, abuse }
-"#;
-
-/// One atomic Lua script: read previous bias/ts → allowed jump →
-/// clamp → write final + now. The FIRST write stores the unclamped value.
-const STATE_SCRIPT: &str = r#"
-local key = KEYS[1]
-local raw = tonumber(ARGV[1])
-local now = tonumber(ARGV[2])
-local mpm = tonumber(ARGV[3])
-local prev = redis.call('HGET', key, 'bias')
-local ts = redis.call('HGET', key, 'ts')
-if not prev or not ts then
-    redis.call('HSET', key, 'bias', raw, 'ts', now)
-    return raw
-end
-local minutes = math.floor((now - tonumber(ts)) / 60000)
-if minutes < 1 then minutes = 1 end
-local jump = mpm * minutes
-local final = raw
-local upper = tonumber(prev) + jump
-local lower = tonumber(prev) - jump
-if final > upper then final = upper end
-if final < lower then final = lower end
-redis.call('HSET', key, 'bias', final, 'ts', now)
-return final
-"#;
+/// The CANONICAL calibration script, shared verbatim with PHP
+/// (`protocol/risk-v1/calibration.lua`). One invocation replaces the old
+/// two-script round trip: it aggregates the 24 hourly buckets, seeds and
+/// refreshes the rate-limit state (milli-points), applies the proportional
+/// per-minute allowance and returns the final integer bias in points.
+const CALIBRATION_LUA: &str = include_str!("../resources/calibration.lua");
 
 impl RedisCalibrationStore {
     /// Bucket retention (48 h; 24 buckets per scope are ever read).
     pub const BUCKET_EXPIRE_S: u64 = 48 * 3600;
-    /// Receipt lifetime.
+    /// Default receipt lifetime (configurable via
+    /// [`RedisCalibrationStore::with_receipt_ttl`]).
     pub const RECEIPT_EXPIRE_S: u64 = 300;
     /// Hourly buckets considered by `bias_for_scope` (current + 23 back).
     pub const BUCKET_WINDOW_HOURS: i64 = 24;
@@ -251,7 +223,8 @@ impl RedisCalibrationStore {
         )
     }
 
-    /// Builds a store with explicit calibration safety knobs.
+    /// Builds a store with explicit calibration safety knobs (receipt TTL
+    /// stays at the 300 s default).
     ///
     /// # Panics
     ///
@@ -264,6 +237,32 @@ impl RedisCalibrationStore {
         max_adjustment: i32,
         max_change_per_minute: i32,
     ) -> RedisCalibrationStore {
+        RedisCalibrationStore::with_receipt_ttl(
+            client,
+            namespace,
+            min_samples,
+            max_adjustment,
+            max_change_per_minute,
+            Self::RECEIPT_EXPIRE_S,
+        )
+    }
+
+    /// Builds a store with explicit calibration safety knobs and an explicit
+    /// decision-receipt lifetime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the namespace is empty or contains `{`/`}`, if
+    /// `min_samples < 1` / `max_adjustment < 0` / `max_change_per_minute < 0`,
+    /// or if `receipt_ttl_secs < 1`.
+    pub fn with_receipt_ttl(
+        client: redis::Client,
+        namespace: &str,
+        min_samples: i64,
+        max_adjustment: i32,
+        max_change_per_minute: i32,
+        receipt_ttl_secs: u64,
+    ) -> RedisCalibrationStore {
         assert!(
             !namespace.is_empty() && !namespace.contains(['{', '}']),
             "Calibration namespace must be non-empty and free of braces"
@@ -274,6 +273,7 @@ impl RedisCalibrationStore {
             max_change_per_minute >= 0,
             "max_change_per_minute must be >= 0"
         );
+        assert!(receipt_ttl_secs >= 1, "receipt_ttl_secs must be >= 1");
         RedisCalibrationStore {
             client,
             namespace: namespace.to_string(),
@@ -281,12 +281,12 @@ impl RedisCalibrationStore {
             min_samples,
             max_adjustment,
             max_change_per_minute,
+            receipt_ttl_secs,
             cache: Mutex::new(BiasCache::new(
                 Self::CACHE_CAP,
                 Duration::from_secs(Self::CACHE_TTL_S),
             )),
-            aggregate_script: redis::Script::new(AGGREGATE_SCRIPT),
-            state_script: redis::Script::new(STATE_SCRIPT),
+            script: redis::Script::new(CALIBRATION_LUA),
             script_calls: AtomicUsize::new(0),
         }
     }
@@ -409,50 +409,33 @@ impl CalibrationStore for RedisCalibrationStore {
         };
         let conn = guard.as_mut().expect("connection set by connection()");
 
-        // HOT PATH: ONE Lua script reads all 24 hourly buckets and returns
-        // only { legit_total, abuse_total } (was 24 sequential HGETALLs).
+        // HOT PATH: ONE canonical script invocation (was two scripts). Keys
+        // are the 24 hourly buckets + the state key; ARGV is
+        // now_ms, min_samples, max_adjustment, max_change_per_minute. The
+        // script aggregates, seeds/refreshes the milli-point state, applies
+        // the proportional allowance and returns the integer bias.
         let hour = now_ms / 3_600_000;
-        let mut keys: Vec<String> = Vec::with_capacity(Self::BUCKET_WINDOW_HOURS as usize);
+        let mut keys: Vec<String> = Vec::with_capacity(Self::BUCKET_WINDOW_HOURS as usize + 1);
         for h in (hour - (Self::BUCKET_WINDOW_HOURS - 1))..=hour {
             keys.push(self.bucket_key(scope, h));
         }
-        let mut invoke = self.aggregate_script.prepare_invoke();
+        keys.push(self.state_key(scope));
+        let mut invoke = self.script.prepare_invoke();
         for key in &keys {
             invoke.key(key.as_str());
         }
-        let totals: Vec<i64> = match invoke.invoke(conn) {
-            Ok(totals) => totals,
-            Err(_) => return 0,
-        };
-        self.script_calls.fetch_add(1, Ordering::Relaxed);
-
-        let legit_total = totals.first().copied().unwrap_or(0);
-        let abuse_total = totals.get(1).copied().unwrap_or(0);
-        let total = legit_total + abuse_total;
-        // No nonzero bias below the minimum sample count.
-        if total < self.min_samples {
-            self.cache_insert(scope, 0, now);
-            return 0;
-        }
-        let raw = ((abuse_total - legit_total) * 1000 / total) * 2 / 10;
-        let bias = raw.clamp(-(self.max_adjustment as i64), self.max_adjustment as i64) as i32;
-
-        // Rate-of-change: one atomic Lua script reads the previous
-        // bias/ts, clamps to the allowed jump and persists final + now
-        // (first write stores the unclamped value).
-        let mut state_invoke = self.state_script.prepare_invoke();
-        state_invoke.key(self.state_key(scope).as_str());
-        state_invoke.arg(bias.to_string());
-        state_invoke.arg(now_ms.to_string());
-        state_invoke.arg(self.max_change_per_minute.to_string());
-        let final_bias: i64 = match state_invoke.invoke(conn) {
+        invoke.arg(now_ms.to_string());
+        invoke.arg(self.min_samples.to_string());
+        invoke.arg(self.max_adjustment.to_string());
+        invoke.arg(self.max_change_per_minute.to_string());
+        let bias: i64 = match invoke.invoke(conn) {
             Ok(bias) => bias,
             Err(_) => return 0,
         };
         self.script_calls.fetch_add(1, Ordering::Relaxed);
 
-        self.cache_insert(scope, final_bias as i32, now);
-        final_bias as i32
+        self.cache_insert(scope, bias as i32, now);
+        bias as i32
     }
 
     fn record_receipt(
@@ -468,8 +451,9 @@ impl CalibrationStore for RedisCalibrationStore {
             CalibrationError::Backend("calibration connection vanished".to_string())
         })?;
         // Wire format shared with PHP: a JSON string
-        // {"scope":..,"band":..,"action":".."} with EXPIRE 300 s, consumed
-        // once, atomically, via GETDEL (GETDEL is STRING-only in Redis).
+        // {"scope":..,"band":..,"action":".."} with EXPIRE `receipt_ttl_secs`
+        // (default 300 s), consumed once, atomically, via GETDEL (GETDEL is
+        // STRING-only in Redis).
         let json = serde_json::json!({
             "scope": scope,
             "band": band,
@@ -480,7 +464,7 @@ impl CalibrationStore for RedisCalibrationStore {
             .arg(&key)
             .arg(&json)
             .arg("EX")
-            .arg(Self::RECEIPT_EXPIRE_S)
+            .arg(self.receipt_ttl_secs)
             .query::<()>(conn)
             .map_err(backend)?;
         Ok(())
@@ -548,6 +532,23 @@ mod tests {
         )
     }
 
+    /// A fresh store (cold in-process cache) over an EXISTING namespace:
+    /// forces a re-aggregation against the persisted Redis state.
+    fn store_on(
+        namespace: &str,
+        min_samples: i64,
+        max_adjustment: i32,
+        max_change_per_minute: i32,
+    ) -> RedisCalibrationStore {
+        RedisCalibrationStore::with_limits(
+            client(),
+            namespace,
+            min_samples,
+            max_adjustment,
+            max_change_per_minute,
+        )
+    }
+
     fn fill(
         store: &RedisCalibrationStore,
         scope: u32,
@@ -571,28 +572,52 @@ mod tests {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
-        let s = store_limits("bias", 1, 150, 10);
+        // Huge max_change_per_minute: the proportional allowance never binds,
+        // so the raw formula is observable. Every scope's FIRST call seeds
+        // the state (bias_mp = 0, ts = now) and returns 0; one minute later
+        // the raw value is reached in full.
+        let s = store_limits("bias", 1, 150, 100_000);
 
         // All abuse -> ((n*1000/n)*2)/10 = 200 -> clamped to max_adjustment
-        // 150 (the old ±200 constants are gone; the clamp is knob-driven).
+        // 150 (the clamp is knob-driven).
         fill(&s, 1, 3, RiskAction::Sha20, 0, 10, T0);
-        assert_eq!(s.bias_for_scope(1, T0), 150);
+        assert_eq!(s.bias_for_scope(1, T0), 0, "first call seeds the state");
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, T0 + 60_000),
+            150
+        );
 
         // All legit -> -150.
         fill(&s, 2, 3, RiskAction::Sha20, 10, 0, T0);
-        assert_eq!(s.bias_for_scope(2, T0), -150);
+        assert_eq!(s.bias_for_scope(2, T0), 0);
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(2, T0 + 60_000),
+            -150
+        );
 
         // 60% abuse / 40% legit: ((20*1000)/100)*2/10 = 40.
         fill(&s, 3, 3, RiskAction::Sha20, 40, 60, T0);
-        assert_eq!(s.bias_for_scope(3, T0), 40);
+        assert_eq!(s.bias_for_scope(3, T0), 0);
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(3, T0 + 60_000),
+            40
+        );
 
         // No samples -> 0.
         assert_eq!(s.bias_for_scope(99, T0), 0);
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(99, T0 + 60_000),
+            0
+        );
 
         // Truncation toward zero, byte-identical with PHP intdiv:
         // abuse 2 / legit 1 (total 3): (1*1000/3)*2/10 = 333*2/10 = 66.
         fill(&s, 4, 3, RiskAction::Sha20, 1, 2, T0);
-        assert_eq!(s.bias_for_scope(4, T0), 66);
+        assert_eq!(s.bias_for_scope(4, T0), 0);
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(4, T0 + 60_000),
+            66
+        );
     }
 
     #[test]
@@ -603,73 +628,157 @@ mod tests {
         };
         let s = store_limits("mins", 1000, 150, 10);
         // 999 outcomes (all abuse): below the threshold -> exactly 0, no
-        // clamp, no rate state.
+        // bias (the state is still seeded: bias_mp = 0, ts = T0).
         fill(&s, 1, 3, RiskAction::Sha20, 0, 999, T0);
         assert_eq!(s.bias_for_scope(1, T0), 0);
         // The 1000th sample (record_at invalidates the cache) unlocks the
-        // bias: all-abuse raw 200 -> clamped to max_adjustment 150 (the
-        // FIRST rate write is unclamped).
+        // bias: raw 200 -> clamped to max_adjustment 150, but the
+        // proportional allowance started at the seeded ts (T0): one minute
+        // later it admits exactly max_change_per_minute = 10 points.
         fill(&s, 1, 3, RiskAction::Sha20, 0, 1, T0);
-        assert_eq!(s.bias_for_scope(1, T0), 150);
+        assert_eq!(
+            store_on(s.namespace(), 1000, 150, 10).bias_for_scope(1, T0 + 60_000),
+            10
+        );
     }
 
     #[test]
-    fn bias_rate_of_change_clamped_atomically() {
+    fn bias_rate_of_change_clamped_proportionally() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
-        let s = store_limits("roc", 1, 150, 10);
+        let s = store_limits("roc", 1, 150, 60);
         fill(&s, 1, 3, RiskAction::Sha20, 0, 10, T0);
-        // First write stores the UNCLAMPED value: raw 200 -> 150.
-        assert_eq!(s.bias_for_scope(1, T0), 150);
+        // First call seeds bias_mp = 0 / ts = T0: the raw 150 is clamped
+        // against 0 by a zero allowance.
+        assert_eq!(s.bias_for_scope(1, T0), 0);
 
-        // Flip to all-legit: raw -198 -> -150, but the rate-of-change allows
-        // only max_change_per_minute (10) per minute from the previous 150
-        // -> 140. A fresh store on the same namespace has a cold cache, so
-        // this call re-aggregates and hits the atomic clamp.
+        // 5 s elapsed -> at most mpm / 12 = 60/12 = 5 points (proportional:
+        // 60 * 1000 * 5000 / 60000 = 5000 milli-points).
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 60).bias_for_scope(1, T0 + 5_000),
+            5
+        );
+        // Another 5 s: +5 more -> 10.
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 60).bias_for_scope(1, T0 + 10_000),
+            10
+        );
+
+        // Flip to all-legit: raw -198 -> -150, but the allowance from the
+        // last ts (T0 + 10 s) over 50 s is 60 * 1000 * 50000 / 60000 =
+        // 50000 mp = 50 points: 10 - 50 = -40 (truncating division, byte
+        // identical with PHP).
         fill(&s, 1, 3, RiskAction::Sha20, 1000, 0, T0);
-        let s2 = RedisCalibrationStore::with_limits(client(), s.namespace(), 1, 150, 10);
-        assert_eq!(s2.bias_for_scope(1, T0 + 60_000), 140);
-
-        // One more minute: the allowed jump is 2 * 10 = 20 -> 130.
-        let s3 = RedisCalibrationStore::with_limits(client(), s.namespace(), 1, 150, 10);
-        assert_eq!(s3.bias_for_scope(1, T0 + 120_000), 130);
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 60).bias_for_scope(1, T0 + 60_000),
+            -40
+        );
     }
 
     #[test]
-    fn bias_cache_hits_make_zero_redis_calls_and_single_lua_aggregates() {
+    fn below_threshold_returns_zero_and_leaves_bias_untouched() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
-        let s = store_limits("cache", 1, 150, 10);
+        let s = store_limits("bthr", 1, 150, 60);
+        fill(&s, 1, 3, RiskAction::Sha20, 0, 10, T0);
+        assert_eq!(s.bias_for_scope(1, T0), 0);
+        // 60 s after the seed the allowance is exactly 60 points: raw 150 ->
+        // 60 (60 * 1000 * 60000 / 60000 milli-points).
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 60).bias_for_scope(1, T0 + 60_000),
+            60
+        );
+
+        // A below-threshold VIEW of the same data: returns 0, leaves
+        // bias_mp (60) untouched, but refreshes ts to T0 + 120 s.
+        let low = store_on(s.namespace(), 1_000_000, 150, 60);
+        assert_eq!(low.bias_for_scope(1, T0 + 120_000), 0);
+
+        // Back above the threshold: the bias resumes from the stored 60 and
+        // the allowance counts ONLY from the refreshed ts (T0 + 120 s):
+        // over 60 s that is 60 points -> final = min(150, 60 + 60) = 120.
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 60).bias_for_scope(1, T0 + 180_000),
+            120
+        );
+    }
+
+    #[test]
+    fn bias_cache_hits_make_zero_redis_calls_and_single_lua_invocation() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_limits("cache", 1, 150, 100_000);
         fill(&s, 7, 3, RiskAction::Sha20, 0, 10, T0);
-        assert_eq!(s.bias_for_scope(7, T0), 150);
-        // Exactly ONE aggregate script over all 24 bucket keys + ONE
-        // rate-of-change script (the old hot path issued 24 HGETALLs).
-        assert_eq!(s.script_calls(), 2);
+        assert_eq!(s.bias_for_scope(7, T0), 0);
+        // Exactly ONE canonical script invocation over 24 bucket keys + the
+        // state key (the old hot path issued TWO scripts).
+        assert_eq!(s.script_calls(), 1);
 
         // Cache hit: the second call issues ZERO scripts.
-        assert_eq!(s.bias_for_scope(7, T0), 150);
-        assert_eq!(s.script_calls(), 2);
+        assert_eq!(s.bias_for_scope(7, T0 + 60_000), 0);
+        assert_eq!(s.script_calls(), 1);
 
-        // Behavior: delete every bucket; the cache still serves 150 while a
-        // fresh store on the same namespace (cold cache) re-aggregates to 0.
+        // A fresh store (cold cache) re-aggregates: one minute after the
+        // seed the proportional allowance is huge (mpm 100_000), so the raw
+        // 150 is served in full.
         let ns = s.namespace().to_string();
+        assert_eq!(
+            store_on(&ns, 1, 150, 100_000).bias_for_scope(7, T0 + 60_000),
+            150
+        );
+
+        // Behavior: delete every bucket; the cache still serves 0 while a
+        // fresh store on the same namespace (cold cache) re-aggregates to 0
+        // (no samples left).
         let mut conn = client().get_connection().expect("connection");
         let pattern = format!("{{kiwi:{ns}}}:cal:7:*");
         let keys: Vec<String> = conn.scan_match(pattern).expect("scan").collect();
         assert!(!keys.is_empty(), "scan must find the hourly buckets");
         conn.del::<_, ()>(keys).expect("del");
         assert_eq!(
-            s.bias_for_scope(7, T0),
-            150,
+            s.bias_for_scope(7, T0 + 120_000),
+            0,
             "cache serves without Redis reads"
         );
+        assert_eq!(
+            store_on(&ns, 1, 150, 100_000).bias_for_scope(7, T0 + 120_000),
+            0,
+            "cold re-aggregation sees the deleted buckets"
+        );
+    }
 
-        let fresh = RedisCalibrationStore::with_limits(client(), &ns, 1, 150, 10);
-        assert_eq!(fresh.bias_for_scope(7, T0), 0);
+    #[test]
+    fn record_invalidates_the_cached_bias() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_limits("inval", 1, 150, 100_000);
+        fill(&s, 7, 3, RiskAction::Sha20, 0, 10, T0);
+        assert_eq!(s.bias_for_scope(7, T0), 0);
+        assert_eq!(s.script_calls(), 1);
+        // Cache hit: no backend call.
+        assert_eq!(s.bias_for_scope(7, T0 + 60_000), 0);
+        assert_eq!(s.script_calls(), 1);
+
+        // A fresh outcome (record_at/record) drops the scope's cache entry:
+        // the next call re-invokes the script and serves the new aggregate.
+        for _ in 0..10 {
+            s.record_at(7, 3, RiskAction::Sha20, true, T0 + 3_600_000)
+                .unwrap();
+        }
+        assert_eq!(s.bias_for_scope(7, T0 + 3_600_000), 0); // 10 legit vs 10 abuse -> raw 0
+        assert_eq!(
+            s.script_calls(),
+            2,
+            "record() must invalidate the cached bias"
+        );
     }
 
     #[test]
@@ -698,17 +807,66 @@ mod tests {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
-        let s = store_limits("buckets", 1, 150, 10);
-        // Same scope, three hours: 30 abuse + 30 legit -> bias 0.
+        let s = store_limits("buckets", 1, 150, 100_000);
+        // Same scope, three hours: 30 abuse + 30 legit -> raw 0 (the first
+        // call seeds; a cold store one minute later serves the raw 0).
         fill(&s, 1, 2, RiskAction::Sha18, 10, 0, T0);
         fill(&s, 1, 2, RiskAction::Sha18, 10, 10, T0 - 3_600_000);
         fill(&s, 1, 2, RiskAction::Sha18, 10, 20, T0 - 7_200_000);
         assert_eq!(s.bias_for_scope(1, T0), 0);
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, T0 + 60_000),
+            0
+        );
 
         // Buckets older than 24 hours are out of the window (the record_at
-        // fills invalidate the cache, so this re-aggregates).
+        // fills invalidate the cache, so this re-aggregates; the total is
+        // still 60 -> raw 0).
         fill(&s, 1, 2, RiskAction::Sha18, 0, 100, T0 - 25 * 3_600_000);
-        assert_eq!(s.bias_for_scope(1, T0), 0);
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, T0 + 120_000),
+            0
+        );
+    }
+
+    #[test]
+    fn receipt_ttl_knob_is_applied() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = RedisCalibrationStore::with_receipt_ttl(
+            client(),
+            &unique_namespace("ttl"),
+            1,
+            150,
+            10,
+            1,
+        );
+        s.record_receipt("decision-ttl", 7, 4, RiskAction::Argon16)
+            .unwrap();
+        let mut conn = client().get_connection().expect("connection");
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(format!(
+                "{{kiwi:{}}}:cal:receipt:decision-ttl",
+                s.namespace()
+            ))
+            .query(&mut conn)
+            .expect("ttl");
+        assert_eq!(ttl, 1, "with_receipt_ttl must drive the EXPIRE");
+
+        // The default knob stays 300 s.
+        let d = store("ttldef");
+        d.record_receipt("decision-def", 7, 4, RiskAction::Argon16)
+            .unwrap();
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(format!(
+                "{{kiwi:{}}}:cal:receipt:decision-def",
+                d.namespace()
+            ))
+            .query(&mut conn)
+            .expect("ttl");
+        assert_eq!(ttl, 300);
     }
 
     #[test]

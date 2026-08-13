@@ -20,9 +20,17 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
  * store (EVALSHA) -> scorer -> policy. Backend failure degrades instead of
  * failing the request.
  *
- * assess() is the PRE-ISSUE path (request velocity + decision);
- * record_feedback() is the FEEDBACK path (no limiter, no decision — a
- * plain EventReceipt). record() is a deprecated alias of record_feedback.
+ * assessPreIssue() is the PRE-ISSUE path (emergency limiter + request
+ * velocity + decision); reassess() is the POST-SOLVE recheck (identical
+ * pipeline WITHOUT any limiter gate — a solved challenge is never denied
+ * by the emergency caps); record_feedback() is the FEEDBACK path (no
+ * limiter, no decision — a plain EventReceipt). record() is a deprecated
+ * alias of record_feedback, assess() a deprecated alias of assessPreIssue.
+ *
+ * Every entry point NORMALIZES the caller-supplied idempotency key with
+ * sha256("kiwi-risk-event-v1\0" . $key) before it is used as the Redis
+ * dedupe suffix (a null/empty key becomes a fresh random 32-hex id); the
+ * store only ever receives the normalized value.
  *
  * enableGlobalPressure=false zeroes the global-pressure signal, the global
  * level and the cooldown deadline after observe(), so the policy can never
@@ -77,15 +85,26 @@ final class AdaptiveRiskEngine
     }
 
     /**
+     * @deprecated use assessPreIssue() (identical behavior)
+     */
+    public function assess(RiskContext $c, ?string $idempotencyKey = null): RiskDecision
+    {
+        return $this->assessPreIssue($c, $idempotencyKey);
+    }
+
+    /**
      * PRE-ISSUE assessment: emergency limiter (source window THEN global
      * window) -> PreIssue observation -> store -> scorer -> policy.
      *
-     * @param string|null $idempotencyKey caller-supplied event_id used
-     *                                    VERBATIM (retries with the same key
-     *                                    are deduped by the Lua); null =
+     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     *                                    (sha256 with the kiwi-risk-event-v1
+     *                                    domain prefix) before use as the
+     *                                    dedupe suffix — retries with the
+     *                                    same key hash identically and are
+     *                                    deduped by the Lua; null/empty =
      *                                    fresh random 16-byte hex
      */
-    public function assess(RiskContext $c, ?string $idempotencyKey = null): RiskDecision
+    public function assessPreIssue(RiskContext $c, ?string $idempotencyKey = null): RiskDecision
     {
         $nowMs = (int) floor(microtime(true) * 1000);
 
@@ -105,6 +124,31 @@ final class AdaptiveRiskEngine
             return $decision;
         }
 
+        return $this->runPipeline($c, $nowMs, $idempotencyKey);
+    }
+
+    /**
+     * POST-SOLVE reassessment: identical pipeline to assessPreIssue
+     * (observation with the context's event -> store -> scorer -> policy ->
+     * calibration -> reasons -> decision receipt) but WITHOUT any emergency
+     * limiter check — the admission caps apply only to pre-issue challenge
+     * assessments, never to the recheck of a challenge the caller already
+     * solved.
+     *
+     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     *                                    as in assessPreIssue
+     */
+    public function reassess(RiskContext $c, ?string $idempotencyKey = null): RiskDecision
+    {
+        return $this->runPipeline($c, (int) floor(microtime(true) * 1000), $idempotencyKey);
+    }
+
+    /**
+     * Shared assessment pipeline behind assessPreIssue() and reassess():
+     * build the observation -> circuit breaker -> store -> scorer -> policy.
+     */
+    private function runPipeline(RiskContext $c, int $nowMs, ?string $idempotencyKey): RiskDecision
+    {
         $observation = $this->buildObservation($c, $nowMs, $idempotencyKey);
 
         if ($this->breaker->isOpen()) {
@@ -180,8 +224,10 @@ final class AdaptiveRiskEngine
      * consumed and the outcome recorded against the ORIGINAL decision's
      * scope/band/action.
      *
-     * @param string|null $idempotencyKey caller-supplied event_id used
-     *                                    VERBATIM (dedupe), null = fresh
+     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     *                                    (sha256, kiwi-risk-event-v1 prefix)
+     *                                    before use as the dedupe suffix;
+     *                                    null/empty = fresh random id
      * @param string|null $decisionId     the RiskDecision::decisionId being
      *                                    confirmed (calibration pairing)
      */
@@ -222,7 +268,7 @@ final class AdaptiveRiskEngine
             principalId: $principalId,
             event: $kind,
             networkFlags: $this->classifier->classify($ip),
-            resources: new ResourcePressure(1000, 1000, 1000),
+            resources: new ResourcePressure(1000, 1000),
         ));
     }
 
@@ -277,10 +323,28 @@ final class AdaptiveRiskEngine
             subnetIdNext: $this->identityFactory->subnetIdForEpoch($c, $netEpoch + 1),
             sessionId: $c->sessionId !== null ? $this->identityFactory->sessionId($c->sessionId) : null,
             principalId: $c->principalId !== null ? $this->identityFactory->principalId($c->principalId) : null,
-            eventId: $idempotencyKey ?? RiskObservation::newEventId(),
+            eventId: self::normalizeEventId($idempotencyKey),
             networkRisk: $c->networkFlags->networkRisk(),
             nowMs: $nowMs,
         );
+    }
+
+    /**
+     * Normalizes a caller-supplied idempotency key before it is used as a
+     * Redis key suffix: the sha256 of the domain-prefixed key (64 hex),
+     * so keys never appear verbatim in Redis and retries hash identically.
+     * null/empty -> a fresh random 32-hex id; longer than 4096 bytes
+     * -> InvalidArgumentException. Rust mirrors this exactly.
+     */
+    private static function normalizeEventId(?string $input): string
+    {
+        if ($input === null || $input === '') {
+            return bin2hex(random_bytes(16));
+        }
+        if (strlen($input) > 4096) {
+            throw new \InvalidArgumentException('idempotency key too long');
+        }
+        return hash('sha256', "kiwi-risk-event-v1\0" . $input);
     }
 
     private function storeGlobalLevel(): int

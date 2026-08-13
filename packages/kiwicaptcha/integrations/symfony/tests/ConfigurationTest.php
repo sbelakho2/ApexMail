@@ -139,4 +139,23 @@ final class ConfigurationTest extends TestCase
         $config = $this->process(['challenge_ttl_secs' => 300]);
         self::assertSame(300, $config['challenge_ttl_secs']);
     }
+
+    public function testCalibrationReceiptTtlDefaultsAndBounds(): void
+    {
+        self::assertSame(300, $this->process()['risk']['calibration']['receipt_ttl_secs'], 'receipt_ttl_secs defaults to the audit receipt window (300)');
+        self::assertSame(60, $this->process(['risk' => ['calibration' => ['receipt_ttl_secs' => 60]]])['risk']['calibration']['receipt_ttl_secs']);
+        self::assertSame(86400, $this->process(['risk' => ['calibration' => ['receipt_ttl_secs' => 86400]]])['risk']['calibration']['receipt_ttl_secs']);
+    }
+
+    public function testCalibrationReceiptTtlBelowMinimumIsRejected(): void
+    {
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['risk' => ['calibration' => ['receipt_ttl_secs' => 59]]]);
+    }
+
+    public function testCalibrationReceiptTtlAboveMaximumIsRejected(): void
+    {
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['risk' => ['calibration' => ['receipt_ttl_secs' => 86401]]]);
+    }
 }

@@ -14,6 +14,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePrincipalResolver;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskNoRedisTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskTestKernel;
@@ -31,8 +32,10 @@ use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Risk\RiskPolicy;
+use KiwiCaptcha\Risk\RiskReason;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\SignalVector;
+use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Verifier;
@@ -77,7 +80,7 @@ final class RiskIntegrationTest extends TestCase
         ]);
         $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, $scorer, $policy, $keys);
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
-        $gateway = new RiskGateway($engine, $classifier, $resolver, $scopeIds);
+        $gateway = new RiskGateway($engine, $classifier, $resolver, $scopeIds, policy: $policy);
         $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
 
         return ['controller' => $controller, 'gateway' => $gateway, 'store' => $store, 'resolver' => $resolver];
@@ -184,8 +187,10 @@ final class RiskIntegrationTest extends TestCase
         $stack = $this->stack(new FakeRiskStateStore());
         $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => 'not-an-ip'], '{"scope":"login"}');
 
-        // The risk assessment is skipped (invalid IP), and issuance itself
-        // fails closed on the invalid binding IP with the existing 422.
+        // The risk assessment is skipped (invalid IP -> the scope's degraded
+        // decision applies instead of a live assessment; degraded=allow here
+        // so issuance proceeds), and issuance itself fails closed on the
+        // invalid binding IP with the existing 422.
         $response = $stack['controller']->challenge($request);
         self::assertSame(422, $response->getStatusCode());
         self::assertSame([], $stack['store']->observations, 'no risk observation may be recorded for an unparseable IP');
@@ -350,6 +355,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(100, $risk['hard_limits']['source_per_second']);
         self::assertSame(10000, $risk['hard_limits']['global_per_second']);
         self::assertFalse($risk['calibration']['enabled']);
+        self::assertSame(300, $risk['calibration']['receipt_ttl_secs'], 'the nonce->decision handle TTL follows the calibration receipt TTL (default 300)');
         self::assertNull($risk['network_classifier_file']);
         self::assertSame('__Host-kiwi-session', $risk['continuity_cookie']['name']);
         self::assertSame(1800, $risk['continuity_cookie']['ttl_secs']);
@@ -604,11 +610,282 @@ final class RiskIntegrationTest extends TestCase
         $stack = $this->stack(new FakeRiskStateStore());
         $response = $stack['controller']->challenge($this->challengeRequest());
         self::assertSame(200, $response->getStatusCode());
-        // The gateway ran assess (PreIssue) then record_feedback
+        // The gateway ran assessPreIssue (PreIssue) then record_feedback
         // (ChallengeIssued) — both against the fake store.
         self::assertCount(2, $stack['store']->observations);
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
         self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ChallengeIssued], $events);
+    }
+
+    /**
+     * A misconfigured proxy (unparseable client IP = no usable risk signal)
+     * must apply the scope's configured DEGRADED action — a degraded=deny
+     * scope still returns 429 RISK_DENIED, never a silent baseline drop.
+     */
+    public function testInvalidClientIpAppliesConfiguredDegradedAction(): void
+    {
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 300, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'deny'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['financial_action' => 1], policy: $policy);
+        $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
+
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => 'not-an-ip'], '{"scope":"financial_action"}');
+        $response = $controller->challenge($request);
+        self::assertSame(429, $response->getStatusCode(), 'the degraded=deny floor must hold even without a usable IP');
+        $data = json_decode((string) $response->getContent(), true);
+        self::assertSame('RISK_DENIED', $data['error']['code']);
+        self::assertSame([], $store->observations, 'the degraded fallback must never touch the state store');
+    }
+
+    /**
+     * The degraded decision for a scope must come from the POLICY only —
+     * neither the state store nor the emergency limiter may be touched, so a
+     * saturated process window or a backend outage can never distort the
+     * configured degraded floor.
+     */
+    public function testDegradedDecisionForScopeTouchesNeitherStoreNorLimiter(): void
+    {
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'sha20'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $store->throwing = true;
+
+        // Saturate BOTH limiter windows: any live assess() would now be a
+        // HardRateLimit deny.
+        $limiter = new ProcessEmergencyCap(1, 1);
+        self::assertTrue($limiter->allow(), 'window consumed');
+        self::assertTrue($limiter->allowGlobal(), 'window consumed');
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys, limiter: $limiter);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $policy);
+
+        $decision = $gateway->degradedDecisionForScope(1);
+        self::assertSame(RiskAction::Sha20, $decision->action, 'the degraded decision is the policy action, not a limiter deny');
+        self::assertSame([], $store->observations, 'the degraded decision must never observe the store');
+        self::assertSame(RiskReason::CapacityPressure, $decision->reasons[0]);
+
+        // Without a wired policy the helper must fail loudly, never guess.
+        $bare = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+        try {
+            $bare->degradedDecisionForScope(1);
+            self::fail('degradedDecisionForScope without a wired policy must throw LogicException');
+        } catch (\LogicException) {
+            self::assertTrue(true);
+        }
+    }
+
+    /**
+     * preIssue and postSolveDecision record their decision id on the
+     * request-local RiskDecisionContext.
+     */
+    public function testPreIssueAndPostSolvePopulateDecisionContext(): void
+    {
+        $stack = $this->stack(new FakeRiskStateStore());
+        $context = $stack['gateway']->decisionContext();
+
+        self::assertNull($context->current(), 'no decision yet');
+
+        $decision = $stack['gateway']->preIssue('login', '198.51.100.7', null);
+        self::assertSame($decision->decisionId, $context->current(), 'preIssue must set the context to its decision id');
+
+        $postSolve = $stack['gateway']->postSolveDecision('login', '198.51.100.7');
+        self::assertNotNull($postSolve);
+        self::assertSame($postSolve->decisionId, $context->current(), 'postSolveDecision must set the context to its decision id');
+    }
+
+    /**
+     * The nonce -> decision mapping: JSON {"decision_id": ...} at
+     * {kiwi:<ns>}:decision:<nonce> with the receipt TTL, consumed once via
+     * GETDEL (at most one winner).
+     */
+    public function testNonceToDecisionMappingRoundTripsWithTtlAndConsumesOnce(): void
+    {
+        $client = new FakePredisClient();
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway(
+            $engine,
+            $classifier,
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8),
+            ['login' => 1],
+            null,
+            null,
+            [],
+            'reject',
+            null,
+            null,
+            null,
+            $client,
+            '{kiwi:t}:decision:',
+            300,
+        );
+
+        $gateway->attachDecisionForNonce('nonce-1', 'dec-1');
+        $key = '{kiwi:t}:decision:nonce-1';
+        self::assertSame('{"decision_id":"dec-1"}', $client->strings[$key], 'the handle holds the JSON decision id only (no IP, no identity)');
+        self::assertSame(300_000, $client->expirations[$key], 'the handle TTL must be the calibration receipt TTL in ms');
+
+        self::assertSame('dec-1', $gateway->resolveDecisionForNonce('nonce-1'), 'GETDEL must return the paired decision id');
+        self::assertNull($gateway->resolveDecisionForNonce('nonce-1'), 'the handle is consumed once — a second resolve gets nothing');
+        self::assertArrayNotHasKey($key, $client->strings, 'the consumed handle must be gone');
+        self::assertNull($gateway->resolveDecisionForNonce('never-attached'));
+    }
+
+    /**
+     * The controller pairs the minted challenge nonce to the pre-issue
+     * decision id right after a successful preIssue, so a later solve can be
+     * confirmed back to the ORIGINAL decision.
+     */
+    public function testControllerAttachesNonceToDecisionMappingAfterPreIssue(): void
+    {
+        $client = new FakePredisClient();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway(
+            $engine,
+            $classifier,
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8),
+            ['login' => 1],
+            null,
+            null,
+            [],
+            'reject',
+            null,
+            null,
+            null,
+            $client,
+            '{kiwi:t}:decision:',
+            300,
+        );
+        $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
+
+        $response = $controller->challenge($this->challengeRequest());
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode((string) $response->getContent(), true);
+
+        $key = '{kiwi:t}:decision:'.$data['nonce'];
+        self::assertArrayHasKey($key, $client->strings, 'the controller must pair the minted nonce to the decision id');
+        $mapped = json_decode($client->strings[$key], true);
+        self::assertSame($gateway->decisionContext()->current(), $mapped['decision_id'], 'the mapped id is the pre-issue decision id');
+    }
+
+    /**
+     * A wired principal resolver must flow the RAW principal into EVERY
+     * engine context (pre-issue AND feedback signals); the engine
+     * HMAC-pseudonymizes it, so the recorded observation carries the derived
+     * pseudonym, never the raw value.
+     */
+    public function testPrincipalResolverFlowsIntoEveryContext(): void
+    {
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $gateway = new RiskGateway(
+            $engine,
+            $classifier,
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8),
+            ['login' => 1],
+            null,
+            null,
+            [],
+            'reject',
+            null,
+            new FakePrincipalResolver('user-42'),
+            $stack,
+        );
+
+        $gateway->preIssue('login', '198.51.100.7', null);
+        $gateway->authenticationSuccess('login', '198.51.100.7', null);
+        $gateway->rateLimitHit('login', '198.51.100.7', null);
+
+        $expected = (new RiskIdentityFactory($keys))->principalId('user-42');
+        self::assertSame([$expected, $expected, $expected], array_map(static fn ($o): ?string => $o->principalId, $store->observations), 'every context must carry the HMAC-pseudonymized principal');
+
+        // Without a resolver (or without a request) the principal stays null.
+        $store->observations = [];
+        $bare = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+        $bare->authenticationSuccess('login', '198.51.100.7', null);
+        self::assertSame([null], array_map(static fn ($o): ?string => $o->principalId, $store->observations), 'no resolver -> no principal signal');
+    }
+
+    /**
+     * reassess() must NOT consume the emergency admission budget: a
+     * saturated process window denies PRE-ISSUE assessments but can never
+     * deny a valid POST-SOLVE re-assessment.
+     */
+    public function testLowLimiterCapNeverDeniesPostSolve(): void
+    {
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $limiter = new ProcessEmergencyCap(1, 1);
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys, limiter: $limiter);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], null, null, ['login' => true]);
+
+        $first = $gateway->preIssue('login', '198.51.100.7', null);
+        self::assertSame(RiskAction::Allow, $first->action, 'the first pre-issue consumes the only limiter slot');
+
+        $saturated = $gateway->preIssue('login', '198.51.100.7', null);
+        self::assertSame(RiskAction::Deny, $saturated->action, 'a second pre-issue is denied by the saturated limiter');
+        self::assertTrue($saturated->hasReason(RiskReason::HardRateLimit));
+
+        $postSolve = $gateway->postSolveDecision('login', '198.51.100.7');
+        self::assertNotNull($postSolve);
+        self::assertSame(RiskAction::Allow, $postSolve->action, 'a valid solve must never be denied by the emergency limiter');
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::SolveSuccess], array_map(static fn ($o): RiskEventKind => $o->event, $store->observations), 'the limiter-denied pre-issue records no observation; the post-solve reassessment does');
     }
 
     public function testPostSolveCheckDenyRejectsValidSolve(): void

@@ -68,7 +68,7 @@ final class PrivacyScanTest extends TestCase
             principalId: null,
             event: RiskEventKind::PreIssue,
             networkFlags: new NetworkFlags(),
-            resources: new ResourcePressure(1000, 1000, 1000),
+            resources: new ResourcePressure(1000, 1000),
         );
         $sourceId = $factory->sourceIdForEpoch($ctx, $srcEpoch);
         $sourceIdPrev = $factory->sourceIdForEpoch($ctx, $srcEpoch - 1);

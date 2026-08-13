@@ -12,8 +12,10 @@ namespace KiwiCaptcha\Risk;
  * boundary) — every epoch key uses the pseudonym HMAC'd with ITS OWN
  * epoch, never the current-epoch pseudonym. sessionId/principalId are the
  * same 16-byte hex pseudonyms, or null when the request carries no
- * session/principal. eventId is 16 random bytes in hex and is the dedupe
- * key (an identical event_id never double-increments).
+ * session/principal. eventId is either 16 random bytes in hex (no caller
+ * idempotency key) or the 32-byte sha256 of the domain-prefixed caller
+ * idempotency key (64 hex) and is the dedupe key (an identical event_id
+ * never double-increments).
  */
 final class RiskObservation
 {
@@ -43,8 +45,8 @@ final class RiskObservation
             || ($principalId !== null && !preg_match('/^[0-9a-f]{32}$/', $principalId))) {
             throw new \InvalidArgumentException('sessionId/principalId must be 16-byte hex pseudonyms or null');
         }
-        if (!preg_match('/^[0-9a-f]{32}$/', $eventId)) {
-            throw new \InvalidArgumentException('eventId must be 16 random bytes in hex');
+        if (!preg_match('/^[0-9a-f]{32}$|^[0-9a-f]{64}$/', $eventId)) {
+            throw new \InvalidArgumentException('eventId must be 16 random bytes in hex or a normalized 32-byte sha256 in hex');
         }
         if ($networkRisk < 0 || $networkRisk > 1000) {
             throw new \InvalidArgumentException('networkRisk must be within 0..1000');

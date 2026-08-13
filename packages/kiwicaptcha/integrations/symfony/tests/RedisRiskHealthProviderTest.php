@@ -8,18 +8,19 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RedisRiskHealthProvider;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
-use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
 use PHPUnit\Framework\TestCase;
 
 /**
  * Live resource-pressure provider: remaining Redis admission-semaphore slots
- * (argonCapacity), real per-second issuance headroom from the atomic
- * issuance-rate counter (issuanceCapacity), and risk backend health from the
- * shared circuit breaker (riskBackendHealth — NO per-request PING). The
- * whole snapshot() is cached in-process for ~100 ms so the hot path does at
- * most one Redis read per 100 ms. Any unobservable source must report the
- * nominal 1000 — pressure is an availability signal and an unavailable
- * source must never fabricate artificial scarcity.
+ * (argonCapacity) and real per-second issuance headroom as the REMAINING
+ * FRACTION of the global cap (issuanceCapacity, fixed-point 0..1000: 100%
+ * remaining -> 1000, 50% -> 500, 10% -> 100, 0% -> 0). The whole snapshot()
+ * is cached in-process for ~100 ms so the hot path does at most one Redis
+ * read per 100 ms. Any unobservable source must report the nominal 1000 —
+ * pressure is an availability signal and an unavailable source must never
+ * fabricate artificial scarcity. Risk-backend health is NOT a snapshot field
+ * anymore: the engine's degraded mode consumes the shared circuit breaker
+ * directly.
  */
 final class RedisRiskHealthProviderTest extends TestCase
 {
@@ -42,7 +43,6 @@ final class RedisRiskHealthProviderTest extends TestCase
 
         self::assertSame(1000, $pressure->argonCapacity);
         self::assertSame(1000, $pressure->issuanceCapacity);
-        self::assertSame(1000, $pressure->riskBackendHealth);
     }
 
     public function testArgonCapacityTracksRemainingSemaphoreSlots(): void
@@ -72,55 +72,53 @@ final class RedisRiskHealthProviderTest extends TestCase
         self::assertSame(1000, $pressure->argonCapacity, 'a disabled cap (0) must report nominal, not zero');
     }
 
-    public function testBackendHealthComesFromTheCircuitBreakerNotPing(): void
-    {
-        $client = $this->requirePredis();
-        $breaker = new CircuitBreaker(2, 60000);
-
-        self::assertSame(1000, (new RedisRiskHealthProvider(null, $client, '{kiwi:t}:issuance:', 10000, $breaker))->snapshot()->riskBackendHealth, 'a closed breaker reports full health');
-
-        // Two consecutive failures open the breaker -> health drops to 0.
-        $breaker->recordFailure();
-        $breaker->recordFailure();
-        self::assertSame(0, (new RedisRiskHealthProvider(null, $client, '{kiwi:t}:issuance:', 10000, $breaker))->snapshot()->riskBackendHealth, 'an open breaker reports 0');
-
-        // A success closes it again.
-        $breaker->recordSuccess();
-        self::assertSame(1000, (new RedisRiskHealthProvider(null, $client, '{kiwi:t}:issuance:', 10000, $breaker))->snapshot()->riskBackendHealth);
-
-        // No PING may ever be issued on the hot path.
-        $client->calls = [];
-        (new RedisRiskHealthProvider(null, $client, '{kiwi:t}:issuance:', 10000, $breaker))->snapshot();
-        self::assertSame([], array_values(array_filter($client->calls, static fn (array $call): bool => $call[0] === 'PING')), 'snapshot() must never PING redis');
-    }
-
-    public function testBackendHealthNominalWithoutBreaker(): void
-    {
-        $pressure = (new RedisRiskHealthProvider(null, $this->requirePredis()))->snapshot();
-
-        self::assertSame(1000, $pressure->riskBackendHealth, 'no breaker wired -> no observability -> nominal');
-    }
-
-    public function testIssuanceHeadroomTracksTheLiveCounter(): void
+    public function testIssuanceHeadroomTracksTheLiveCounterAsFraction(): void
     {
         $client = $this->requirePredis();
         $counter = new IssuanceCounter($client, '{kiwi:t}:issuance:');
         $key = IssuanceCounter::rateKey('{kiwi:t}:issuance:');
         $provider = fn (): RedisRiskHealthProvider => new RedisRiskHealthProvider(null, $client, '{kiwi:t}:issuance:', 1000);
 
-        // Rate 0 -> full headroom (clamped to the nominal 1000 scale).
+        // Rate 0 -> full headroom (100% remaining -> 1000).
         self::assertSame(1000, $provider()->snapshot()->issuanceCapacity);
 
         $counter->record();
         $counter->record();
         self::assertSame(2, $client->counters[$key]);
-        self::assertSame(998, $provider()->snapshot()->issuanceCapacity, 'headroom = global_per_second - current rate');
+        self::assertSame(998, $provider()->snapshot()->issuanceCapacity, 'headroom = remaining fraction of global_per_second');
 
         $client->counters[$key] = 1000;
-        self::assertSame(0, $provider()->snapshot()->issuanceCapacity, 'rate at the global cap -> zero headroom');
+        self::assertSame(0, $provider()->snapshot()->issuanceCapacity, 'rate at the global cap -> 0% remaining');
 
         $client->counters[$key] = 5000;
         self::assertSame(0, $provider()->snapshot()->issuanceCapacity, 'a burst above the cap clamps to zero, never negative');
+    }
+
+    public function testIssuanceCapacityFixedPointBoundaries(): void
+    {
+        // 100% remaining -> 1000; 50% -> 500; 10% -> 100; 0% -> 0.
+        $client = $this->requirePredis();
+        $provider = fn (string $prefix, int $cap): RedisRiskHealthProvider => new RedisRiskHealthProvider(null, $client, $prefix, $cap);
+
+        self::assertSame(1000, $provider('{kiwi:b1}:issuance:', 500)->snapshot()->issuanceCapacity, 'rate 0 on cap 500 -> 100% remaining');
+
+        $key = IssuanceCounter::rateKey('{kiwi:b2}:issuance:');
+        $client->counters[$key] = 9500;
+        self::assertSame(50, $provider('{kiwi:b2}:issuance:', 10000)->snapshot()->issuanceCapacity, 'cap 10000 rate 9500 -> 500/10000 = 5% -> 50');
+
+        $key = IssuanceCounter::rateKey('{kiwi:b3}:issuance:');
+        $client->counters[$key] = 500;
+        self::assertSame(500, $provider('{kiwi:b3}:issuance:', 1000)->snapshot()->issuanceCapacity, 'half of the cap -> 50% -> 500');
+
+        $key = IssuanceCounter::rateKey('{kiwi:b4}:issuance:');
+        $client->counters[$key] = 900;
+        self::assertSame(100, $provider('{kiwi:b4}:issuance:', 1000)->snapshot()->issuanceCapacity, '90% consumed -> 10% -> 100');
+
+        // Sub-1% remaining rounds to 0 under the same formula (never
+        // negative, never above 1000).
+        $key = IssuanceCounter::rateKey('{kiwi:b5}:issuance:');
+        $client->counters[$key] = 9999;
+        self::assertSame(0, $provider('{kiwi:b5}:issuance:', 10000)->snapshot()->issuanceCapacity, '1/10000 remaining rounds to 0');
     }
 
     public function testIssuanceNominalWhenCounterUnobservable(): void

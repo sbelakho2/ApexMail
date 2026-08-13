@@ -36,6 +36,9 @@ final class FakePredisClient extends \Predis\Client
     /** @var array<string, int> plain INCR counters (issuance-rate signal) */
     public array $counters = [];
 
+    /** @var array<string, string> plain strings (SET / GETDEL decision handles) */
+    public array $strings = [];
+
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
 
@@ -97,8 +100,50 @@ final class FakePredisClient extends \Predis\Client
             'EVAL' => $this->fakeEval($arguments),
             'INCR' => $this->fakeIncr($arguments),
             'GET' => $this->fakeGet($arguments),
+            'GETDEL' => $this->fakeGetdel($arguments),
+            'SET' => $this->fakeSet($arguments),
             default => null,
         };
+    }
+
+    /**
+     * GET: the plain string value, then the plain INCR counter, or null when
+     * the key does not exist.
+     */
+    private function fakeGet(array $arguments): ?string
+    {
+        $key = (string) $arguments[0];
+
+        return $this->strings[$key] ?? (isset($this->counters[$key]) ? (string) $this->counters[$key] : null);
+    }
+
+    /**
+     * GETDEL: atomic read + remove of a plain string (null when absent) —
+     * the nonce->decision handle consumption.
+     */
+    private function fakeGetdel(array $arguments): ?string
+    {
+        $key = (string) $arguments[0];
+        $value = $this->strings[$key] ?? null;
+        unset($this->strings[$key], $this->expirations[$key]);
+
+        return $value;
+    }
+
+    /**
+     * SET with an optional EX (seconds) TTL: the nonce->decision handle
+     * write path.
+     */
+    private function fakeSet(array $arguments): string
+    {
+        $key = (string) $arguments[0];
+        $value = (string) $arguments[1];
+        $this->strings[$key] = $value;
+        if (($arguments[2] ?? null) === 'EX') {
+            $this->fakePexpire([$key, (int) $arguments[3] * 1000]);
+        }
+
+        return 'OK';
     }
 
     /** INCR: bump the plain counter and return the new value. */
@@ -108,14 +153,6 @@ final class FakePredisClient extends \Predis\Client
         $this->counters[$key] = ($this->counters[$key] ?? 0) + 1;
 
         return $this->counters[$key];
-    }
-
-    /** GET: the plain counter value, or null when the key does not exist. */
-    private function fakeGet(array $arguments): ?string
-    {
-        $key = (string) $arguments[0];
-
-        return isset($this->counters[$key]) ? (string) $this->counters[$key] : null;
     }
 
     /** @return array{0: int, 1: int} [seconds, microseconds] */
@@ -201,6 +238,7 @@ final class FakePredisClient extends \Predis\Client
             }
             unset($this->expirations[(string) $key]);
             unset($this->counters[(string) $key]);
+            unset($this->strings[(string) $key]);
         }
 
         return $removed;

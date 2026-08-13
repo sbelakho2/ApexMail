@@ -28,7 +28,7 @@ final class RiskIdentityFactoryTest extends TestCase
             principalId: null,
             event: RiskEventKind::PreIssue,
             networkFlags: new NetworkFlags(),
-            resources: new ResourcePressure(1000, 1000, 1000),
+            resources: new ResourcePressure(1000, 1000),
         );
     }
 

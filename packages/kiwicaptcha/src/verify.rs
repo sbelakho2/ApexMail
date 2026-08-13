@@ -33,7 +33,7 @@ pub const SKEW_TOLERANCE_US: u64 = 5_000_000;
 /// 1. [`PoWAlgorithm::Sha256`] — `SHA-256(prefix || counter || salt)`
 /// 2. [`PoWAlgorithm::Argon2id`] — `Argon2id(prefix || counter, salt)` with
 ///    the record's m_kib/t/p parameters.
-fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], VerifyError> {
+pub(crate) fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], VerifyError> {
     let salt = B64
         .decode(&record.salt)
         .map_err(|_| VerifyError::MalformedRecord)?;
@@ -74,7 +74,7 @@ fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], Verif
 }
 
 /// Count the number of leading zero bits in a byte slice (big-endian bit order).
-fn leading_zero_bits(hash: &[u8]) -> u32 {
+pub(crate) fn leading_zero_bits(hash: &[u8]) -> u32 {
     let mut count = 0u32;
     for &byte in hash {
         if byte == 0 {
@@ -190,6 +190,12 @@ pub enum VerifyError {
     MalformedRecord,
     #[error("automated or headless client detected via telemetry")]
     BotDetected,
+    #[error("solution token is malformed or undecodable")]
+    MalformedToken,
+    #[error("challenge record not found (already consumed, expired, or never issued)")]
+    RecordNotFound,
+    #[error("verification capacity exceeded — try again shortly")]
+    CapacityExceeded,
 }
 
 /// Comprehensive structural validation of a stored [`ChallengeRecord`].
@@ -446,7 +452,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 
 /// Constant-time byte comparison (equal-length inputs; both operands here are
 /// fixed-length hex digests).
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -461,7 +467,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// The challenge is `base64(payload).signature` (the base64 payload contains no
 /// dots, so `rsplit_once('.')` reliably isolates the hex HMAC signature).
-fn signature_from_challenge(record: &ChallengeRecord) -> &str {
+pub(crate) fn signature_from_challenge(record: &ChallengeRecord) -> &str {
     record
         .challenge
         .rsplit_once('.')

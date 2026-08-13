@@ -32,11 +32,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rand::{thread_rng, RngCore};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
+use thiserror::Error;
 
 use crate::action::RiskAction;
 use crate::calibration::CalibrationStore;
 use crate::context::RiskContext;
-use crate::event::{RiskEventKind, RiskObservation};
+use crate::event::{normalize_idempotency_key, RiskEventKind, RiskObservation};
 use crate::identity::RiskIdentityFactory;
 use crate::keys::RiskKeys;
 use crate::metrics::Metrics;
@@ -45,6 +46,18 @@ use crate::policy::{RiskPolicy, RiskReason};
 use crate::score::score as compute_score;
 use crate::signals::SignalVector;
 use crate::store::{Observed, RiskStateStore};
+
+/// Engine-level input error.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RiskError {
+    /// The caller idempotency key exceeds the 4096-byte contract limit.
+    #[error("idempotency key must not exceed 4096 bytes (got {0})")]
+    InvalidIdempotencyKey(usize),
+    /// A confirmed outcome requires the decision_id of the assessed
+    /// decision.
+    #[error("confirmed outcomes require the decision_id of the assessed decision")]
+    EmptyDecisionId,
+}
 
 /// Immutable risk decision produced by the engine.
 ///
@@ -81,7 +94,7 @@ impl RiskDecision {
 impl Serialize for RiskDecision {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let reasons: Vec<&str> = self.reasons.iter().flatten().map(|r| r.as_str()).collect();
-        let mut state = serializer.serialize_struct("RiskDecision", 8)?;
+        let mut state = serializer.serialize_struct("RiskDecision", 7)?;
         state.serialize_field("score", &self.score)?;
         state.serialize_field("action", self.action.as_str())?;
         state.serialize_field("reasons", &reasons)?;
@@ -89,7 +102,6 @@ impl Serialize for RiskDecision {
         state.serialize_field("global_level", &self.global_level)?;
         state.serialize_field("retry_after_ms", &self.retry_after_ms)?;
         state.serialize_field("band", &self.band)?;
-        state.serialize_field("decision_id", &self.decision_id)?;
         state.end()
     }
 }
@@ -372,14 +384,15 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     }
 
     /// Attaches the per-process global admission cap (checked AFTER the
-    /// per-process source window in [`RiskEngine::assess`]).
+    /// per-process source window in [`RiskEngine::assess_pre_issue`]).
     pub fn with_global_cap(mut self, cap: GlobalEmergencyCap) -> RiskEngine<S, N> {
         self.global_limiter = Some(cap);
         self
     }
 
     /// Toggles the global-pressure signal, level and cooldown (default:
-    /// enabled). When disabled, `assess()` zeroes `global_pressure` on the
+    /// enabled). When disabled, `assess_pre_issue()` zeroes
+    /// `global_pressure` on the
     /// returned vector and reports level 0 / no cooldown to the policy —
     /// the global-pressure channel and its floors/cooldown are entirely
     /// inert, while per-source signals keep working.
@@ -416,12 +429,20 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     /// The emergency caps are checked FIRST (per-process source window,
     /// then the optional per-process global window); on a cap hit the
     /// engine returns a HardRateLimit decision without touching the store.
-    /// `idempotency_key` becomes the event_id (dedupe key); `None` draws a
-    /// random 16-byte hex id. Every decision gets a fresh `decision_id`
-    /// and registers a calibration receipt.
-    pub fn assess(&self, ctx: RiskContext<'_>, idempotency_key: Option<String>) -> RiskDecision {
-        let now_ms = now_ms();
-
+    /// `idempotency_key` becomes the event_id (dedupe key) via
+    /// [`normalize_idempotency_key`]; `None` draws a random 16-byte hex id.
+    /// Every decision gets a fresh `decision_id` and registers a
+    /// calibration receipt.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
+    pub fn assess_pre_issue(
+        &self,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+    ) -> Result<RiskDecision, RiskError> {
         if !self.limiter.allow() || !self.global_limiter_allows() {
             self.metrics.incr("denied:limiter");
             let decision = RiskDecision {
@@ -435,10 +456,50 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                 decision_id: String::new(),
             };
             self.record_decision_metrics(ctx.scope, &decision);
-            return self.finalize_decision(ctx.scope, decision);
+            return Ok(self.finalize_decision(ctx.scope, decision));
         }
+        self.assess_inner(ctx, idempotency_key)
+    }
 
-        let observation = self.build_observation(&ctx, now_ms, idempotency_key);
+    /// Deprecated alias of [`RiskEngine::assess_pre_issue`].
+    #[deprecated(
+        note = "renamed to assess_pre_issue (the emergency caps apply only there); use reassess for limiter-free assessments"
+    )]
+    pub fn assess(
+        &self,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+    ) -> Result<RiskDecision, RiskError> {
+        self.assess_pre_issue(ctx, idempotency_key)
+    }
+
+    /// Re-assesses a request WITHOUT any emergency-cap check: identical
+    /// pipeline to [`RiskEngine::assess_pre_issue`] (observation, breaker,
+    /// store, scorer with calibration bias, policy, receipt) minus the
+    /// limiter gate — used for follow-up assessments of an already-admitted
+    /// flow, where the caps must not apply.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
+    pub fn reassess(
+        &self,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+    ) -> Result<RiskDecision, RiskError> {
+        self.assess_inner(ctx, idempotency_key)
+    }
+
+    /// The shared assessment pipeline (no limiter); only
+    /// [`RiskEngine::assess_pre_issue`] gates on the emergency caps.
+    fn assess_inner(
+        &self,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+    ) -> Result<RiskDecision, RiskError> {
+        let now_ms = now_ms();
+        let observation = self.build_observation(&ctx, now_ms, idempotency_key)?;
 
         if self.breaker.is_open() {
             self.metrics.incr("degraded:breaker");
@@ -446,7 +507,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                 .policy
                 .degraded_decision(ctx.scope, self.current_global_level());
             self.record_decision_metrics(ctx.scope, &decision);
-            return self.finalize_decision(ctx.scope, decision);
+            return Ok(self.finalize_decision(ctx.scope, decision));
         }
 
         let start = Instant::now();
@@ -459,7 +520,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                     .policy
                     .degraded_decision(ctx.scope, self.current_global_level());
                 self.record_decision_metrics(ctx.scope, &decision);
-                self.finalize_decision(ctx.scope, decision)
+                Ok(self.finalize_decision(ctx.scope, decision))
             }
             Ok(observed) => {
                 self.metrics
@@ -502,28 +563,33 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                 );
                 self.merge_contributor_reasons(&mut decision, &vector);
                 self.record_decision_metrics(ctx.scope, &decision);
-                self.finalize_decision(ctx.scope, decision)
+                Ok(self.finalize_decision(ctx.scope, decision))
             }
         }
     }
 
     /// Outcome feedback path (e.g. a post-solve protected action): stores
     /// the event and returns an [`EventReceipt`]. NEVER runs the limiter
-    /// and NEVER calls [`RiskEngine::assess`].
+    /// and NEVER calls [`RiskEngine::assess_pre_issue`].
     ///
     /// When the event is ConfirmedLegitimate/ConfirmedAbuse AND
     /// `decision_id` is given, the calibration receipt of that decision is
     /// consumed (GETDEL) and the outcome is recorded into the scope's
     /// hourly buckets.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
     pub fn record_feedback(
         &self,
         event: RiskEventKind,
         ctx: RiskContext<'_>,
         idempotency_key: Option<String>,
         decision_id: Option<String>,
-    ) -> EventReceipt {
+    ) -> Result<EventReceipt, RiskError> {
         let now_ms = now_ms();
-        let observation = self.build_observation(&ctx, now_ms, idempotency_key);
+        let observation = self.build_observation(&ctx, now_ms, idempotency_key)?;
         let observed = self
             .store
             .observe(&observation)
@@ -539,7 +605,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             RiskEventKind::ConfirmedLegitimate | RiskEventKind::ConfirmedAbuse
         );
         if confirmed {
-            if let Some(receipt_id) = decision_id {
+            if let Some(receipt_id) = decision_id.filter(|d| !d.is_empty()) {
                 if let Some(calibration) = &self.calibration {
                     if let Some(receipt) = calibration.consume_receipt(&receipt_id) {
                         let legitimate = event == RiskEventKind::ConfirmedLegitimate;
@@ -554,11 +620,11 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             }
         }
 
-        EventReceipt {
+        Ok(EventReceipt {
             event_id: observation.event_id,
             is_duplicate: observed.is_duplicate,
             signals: observed.vector,
-        }
+        })
     }
 
     /// Deprecated alias of [`RiskEngine::record_feedback`].
@@ -569,39 +635,59 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         idempotency_key: Option<String>,
         decision_id: Option<String>,
-    ) -> EventReceipt {
+    ) -> Result<EventReceipt, RiskError> {
         self.record_feedback(event, ctx, idempotency_key, decision_id)
     }
 
-    /// Records a confirmed-legitimate outcome (consumes the calibration
-    /// receipt when a decision_id is given).
+    /// Records a confirmed-legitimate outcome. `decision_id` is the id of
+    /// the assessed decision (required — the calibration receipt is
+    /// consumed under it).
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::EmptyDecisionId`] when `decision_id` is empty;
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
     pub fn confirmed_legitimate(
         &self,
         ctx: RiskContext<'_>,
         idempotency_key: Option<String>,
-        decision_id: Option<String>,
-    ) -> EventReceipt {
+        decision_id: &str,
+    ) -> Result<EventReceipt, RiskError> {
+        if decision_id.is_empty() {
+            return Err(RiskError::EmptyDecisionId);
+        }
         self.record_feedback(
             RiskEventKind::ConfirmedLegitimate,
             ctx,
             idempotency_key,
-            decision_id,
+            Some(decision_id.to_string()),
         )
     }
 
-    /// Records a confirmed-abuse outcome (consumes the calibration receipt
-    /// when a decision_id is given).
+    /// Records a confirmed-abuse outcome. `decision_id` is the id of the
+    /// assessed decision (required — the calibration receipt is consumed
+    /// under it).
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::EmptyDecisionId`] when `decision_id` is empty;
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
     pub fn confirmed_abuse(
         &self,
         ctx: RiskContext<'_>,
         idempotency_key: Option<String>,
-        decision_id: Option<String>,
-    ) -> EventReceipt {
+        decision_id: &str,
+    ) -> Result<EventReceipt, RiskError> {
+        if decision_id.is_empty() {
+            return Err(RiskError::EmptyDecisionId);
+        }
         self.record_feedback(
             RiskEventKind::ConfirmedAbuse,
             ctx,
             idempotency_key,
-            decision_id,
+            Some(decision_id.to_string()),
         )
     }
 
@@ -617,18 +703,18 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: &RiskContext<'_>,
         now_ms: u64,
         idempotency_key: Option<String>,
-    ) -> RiskObservation {
+    ) -> Result<RiskObservation, RiskError> {
         let now_secs = (now_ms / 1000) as i64;
         let src_epoch = now_secs / self.source_epoch_secs as i64;
         let net_epoch = now_secs / self.subnet_epoch_secs as i64;
         let session_id = ctx.session_id.map(|s| self.identity.session_id(s));
         let principal_id = ctx.principal_id.map(|p| self.identity.principal_id(p));
-        let event_id = match idempotency_key {
-            Some(key) if !key.is_empty() => key,
-            _ => RiskObservation::new_event_id(),
-        };
+        // Canonical idempotency normalization shared with PHP: verbatim keys
+        // become sha256 hex, empty/None draw a random 16-byte id, and keys
+        // over 4096 bytes are rejected.
+        let event_id = normalize_idempotency_key(idempotency_key.as_deref())?;
 
-        RiskObservation {
+        Ok(RiskObservation {
             event: ctx.event,
             scope: ctx.scope,
             source_epoch: src_epoch,
@@ -652,7 +738,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             event_id,
             network_risk: ctx.network_flags.network_risk(),
             now_ms,
-        }
+        })
     }
 
     /// Policy override reasons first, then top contributor reasons,
@@ -873,7 +959,7 @@ mod tests {
             2,
         );
         let engine = RiskEngine::new(store, classifier(), policy(), keys());
-        let decision = engine.assess(context(), None);
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(decision.score, 195); // 100 + weighted(500, 190)
         assert_eq!(decision.action, RiskAction::Sha18); // band Sha16 raised by global floor 2
         assert_eq!(decision.policy_version, 3);
@@ -890,7 +976,7 @@ mod tests {
     fn observation_carries_epoch_scoped_pseudonyms() {
         let store = CapturingStore(Mutex::new(Vec::new()));
         let engine = RiskEngine::new(store, classifier(), policy(), keys());
-        engine.assess(context(), None);
+        engine.assess_pre_issue(context(), None).unwrap();
 
         let captured = engine.store.0.lock().unwrap();
         let observation = &captured[0];
@@ -917,13 +1003,49 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_key_becomes_the_event_id() {
+    fn idempotency_key_becomes_the_normalized_event_id() {
         let store = CapturingStore(Mutex::new(Vec::new()));
         let engine = RiskEngine::new(store, classifier(), policy(), keys());
-        let decision = engine.assess(context(), Some("deadbeef".to_string()));
+        let decision = engine
+            .assess_pre_issue(context(), Some("deadbeef".to_string()))
+            .unwrap();
         assert_eq!(decision.decision_id.len(), 32);
         let captured = engine.store.0.lock().unwrap();
-        assert_eq!(captured[0].event_id, "deadbeef");
+        assert_eq!(
+            captured[0].event_id,
+            crate::event::normalize_idempotency_key(Some("deadbeef")).unwrap(),
+            "verbatim keys are sha256-hashed before they become Redis suffixes"
+        );
+        assert_eq!(captured[0].event_id.len(), 64);
+    }
+
+    #[test]
+    fn oversized_idempotency_key_errors() {
+        let store = MockStore::new(SignalVector::zero(), 0);
+        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let long = "x".repeat(4097);
+        assert_eq!(
+            engine.assess_pre_issue(context(), Some(long)),
+            Err(RiskError::InvalidIdempotencyKey(4097))
+        );
+        assert_eq!(
+            engine.reassess(context(), Some("y".repeat(4097))),
+            Err(RiskError::InvalidIdempotencyKey(4097))
+        );
+        assert_eq!(
+            engine.record_feedback(
+                RiskEventKind::ChallengeIssued,
+                context(),
+                Some("z".repeat(4097)),
+                None,
+            ),
+            Err(RiskError::InvalidIdempotencyKey(4097))
+        );
+        assert_eq!(
+            engine.store.calls.load(Ordering::Relaxed),
+            0,
+            "an invalid key must fail before the store is touched"
+        );
     }
 
     #[test]
@@ -941,7 +1063,7 @@ mod tests {
             breaker::CircuitBreaker::default(),
             limiter,
         );
-        let decision = engine.assess(context(), None);
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(decision.action, RiskAction::Deny);
         assert!(decision.has_reason(RiskReason::HardRateLimit));
         assert_eq!(decision.retry_after_ms, Some(1000));
@@ -951,6 +1073,38 @@ mod tests {
             0,
             "the store must not be touched when the limiter is open"
         );
+    }
+
+    #[test]
+    fn reassess_ignores_the_emergency_caps() {
+        let store = MockStore::new(
+            SignalVector {
+                source_fast: 500,
+                ..Default::default()
+            },
+            2,
+        );
+        // A saturated 1-admission global cap: the pre-issue path must deny...
+        let global = GlobalEmergencyCap::with_capacity(1);
+        assert!(global.allow(), "burn the single admission");
+        let engine = RiskEngine::new(store, classifier(), policy(), keys()).with_global_cap(global);
+
+        let denied = engine.assess_pre_issue(context(), None).unwrap();
+        assert!(denied.has_reason(RiskReason::HardRateLimit));
+        assert_eq!(
+            engine.store.calls.load(Ordering::Relaxed),
+            0,
+            "the limiter gate must fire before the store"
+        );
+
+        // ...but reassess NEVER consults the caps: the same saturated engine
+        // still runs the full pipeline and returns a real decision.
+        let decision = engine.reassess(context(), None).unwrap();
+        assert!(!decision.has_reason(RiskReason::HardRateLimit));
+        assert_eq!(decision.score, 195);
+        assert_eq!(decision.action, RiskAction::Sha18);
+        assert_eq!(decision.decision_id.len(), 32);
+        assert_eq!(engine.store.calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -965,17 +1119,17 @@ mod tests {
             ProcessEmergencyCap::new(),
         );
 
-        let d1 = engine.assess(context(), None);
+        let d1 = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(d1.action, RiskAction::Sha20); // degraded sha20
         assert!(d1.has_reason(RiskReason::CapacityPressure));
         assert_eq!(engine.store.calls.load(Ordering::Relaxed), 1);
 
-        let d2 = engine.assess(context(), None);
+        let d2 = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(d2.action, RiskAction::Sha20);
         assert_eq!(engine.store.calls.load(Ordering::Relaxed), 2);
 
         // Breaker is now open: the store is bypassed.
-        let d3 = engine.assess(context(), None);
+        let d3 = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(d3.action, RiskAction::Sha20);
         assert_eq!(
             engine.store.calls.load(Ordering::Relaxed),
@@ -996,12 +1150,12 @@ mod tests {
             ProcessEmergencyCap::new(),
         );
 
-        engine.assess(context(), None);
-        engine.assess(context(), None);
+        engine.assess_pre_issue(context(), None).unwrap();
+        engine.assess_pre_issue(context(), None).unwrap();
         assert!(engine.breaker.is_open());
 
         std::thread::sleep(std::time::Duration::from_millis(60));
-        let decision = engine.assess(context(), None);
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(decision.score, 195);
         assert_eq!(decision.action, RiskAction::Sha16);
         assert_eq!(engine.store.calls.load(Ordering::Relaxed), 3);
@@ -1024,27 +1178,36 @@ mod tests {
             )
         };
 
-        let receipt = engine.record_feedback(
-            RiskEventKind::ProtectedActionFailure,
-            ctx(RiskEventKind::ProtectedActionFailure),
-            Some("feedback-1".to_string()),
-            None,
+        let receipt = engine
+            .record_feedback(
+                RiskEventKind::ProtectedActionFailure,
+                ctx(RiskEventKind::ProtectedActionFailure),
+                Some("feedback-1".to_string()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.event_id,
+            crate::event::normalize_idempotency_key(Some("feedback-1")).unwrap()
         );
-        assert_eq!(receipt.event_id, "feedback-1");
         assert!(!receipt.is_duplicate);
 
-        engine.record_feedback(
-            RiskEventKind::ConfirmedLegitimate,
-            ctx(RiskEventKind::ConfirmedLegitimate),
-            None,
-            None,
-        );
-        engine.record_feedback(
-            RiskEventKind::ConfirmedAbuse,
-            ctx(RiskEventKind::ConfirmedAbuse),
-            None,
-            None,
-        );
+        engine
+            .record_feedback(
+                RiskEventKind::ConfirmedLegitimate,
+                ctx(RiskEventKind::ConfirmedLegitimate),
+                None,
+                None,
+            )
+            .unwrap();
+        engine
+            .record_feedback(
+                RiskEventKind::ConfirmedAbuse,
+                ctx(RiskEventKind::ConfirmedAbuse),
+                None,
+                None,
+            )
+            .unwrap();
 
         let events: Vec<RiskEventKind> = {
             let captured = engine.store.0.lock().unwrap();
@@ -1068,7 +1231,9 @@ mod tests {
             NetworkFlags::default(),
             ResourcePressure::default(),
         );
-        engine.record_feedback(RiskEventKind::ConfirmedAbuse, sess_ctx, None, None);
+        engine
+            .record_feedback(RiskEventKind::ConfirmedAbuse, sess_ctx, None, None)
+            .unwrap();
         let captured = engine.store.0.lock().unwrap();
         assert_eq!(
             captured[3].session_id,
@@ -1094,13 +1259,28 @@ mod tests {
     fn decision_json_serialization() {
         let store = MockStore::new(SignalVector::zero(), 0);
         let engine = RiskEngine::new(store, classifier(), policy(), keys());
-        let decision = engine.assess(context(), None);
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
         let json = serde_json::to_value(&decision).unwrap();
         assert_eq!(json["action"], "allow");
         assert_eq!(json["score"], 100);
         assert_eq!(json["band"], 1);
         assert_eq!(json["reasons"], serde_json::json!([]));
-        assert_eq!(json["decision_id"].as_str().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn serialization_omits_decision_id() {
+        let store = MockStore::new(SignalVector::zero(), 0);
+        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
+        // The struct still carries the id (used by record_receipt)...
+        assert_eq!(decision.decision_id.len(), 32);
+        // ...but the public JSON excludes it, mirroring PHP.
+        let json = serde_json::to_value(&decision).unwrap();
+        assert!(
+            json.get("decision_id").is_none(),
+            "decision_id must never leak into the serialized decision"
+        );
+        assert_eq!(json.as_object().unwrap().len(), 7);
     }
 
     #[test]
@@ -1115,7 +1295,7 @@ mod tests {
             0,
         );
         let engine = RiskEngine::new(store, classifier(), policy(), keys());
-        let decision = engine.assess(context(), None);
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(decision.action, RiskAction::Deny);
         let reasons = decision.reasons_vec();
         // Policy override first, then contributors, deduped.
@@ -1190,7 +1370,7 @@ mod tests {
         });
         let engine =
             RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
-        let decision = engine.assess(context(), None);
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
         // base 100 + bias 60 = 160 -> band 1, score 160.
         assert_eq!(decision.score, 160);
         assert_eq!(decision.band, 1);
@@ -1220,12 +1400,14 @@ mod tests {
             NetworkFlags::default(),
             ResourcePressure::default(),
         );
-        let receipt = engine.record_feedback(
-            RiskEventKind::ConfirmedLegitimate,
-            ctx,
-            None,
-            Some("decision-x".to_string()),
-        );
+        let receipt = engine
+            .record_feedback(
+                RiskEventKind::ConfirmedLegitimate,
+                ctx,
+                None,
+                Some("decision-x".to_string()),
+            )
+            .unwrap();
         assert!(!receipt.is_duplicate);
         assert!(cal
             .consumed
@@ -1235,6 +1417,36 @@ mod tests {
         let recorded = cal.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0], (1, 1, RiskAction::Sha16, true));
+    }
+
+    #[test]
+    fn confirmed_outcomes_require_a_decision_id() {
+        let store = MockStore::new(SignalVector::zero(), 0);
+        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let ctx = |event| {
+            RiskContext::new(
+                1,
+                "203.0.113.27".parse().unwrap(),
+                None,
+                None,
+                event,
+                NetworkFlags::default(),
+                ResourcePressure::default(),
+            )
+        };
+        assert_eq!(
+            engine.confirmed_legitimate(ctx(RiskEventKind::ConfirmedLegitimate), None, ""),
+            Err(RiskError::EmptyDecisionId)
+        );
+        assert_eq!(
+            engine.confirmed_abuse(ctx(RiskEventKind::ConfirmedAbuse), None, ""),
+            Err(RiskError::EmptyDecisionId)
+        );
+        // A real decision_id flows through to record_feedback.
+        let receipt = engine
+            .confirmed_legitimate(ctx(RiskEventKind::ConfirmedLegitimate), None, "decision-y")
+            .unwrap();
+        assert!(!receipt.is_duplicate);
     }
 
     // ── End-to-end with the Redis store (skipped unless RISK_REDIS_URL) ──
@@ -1270,7 +1482,9 @@ mod tests {
         let mut allowed = 0;
         let mut denied = 0;
         for i in 0..7u32 {
-            let decision = engine.assess(context(), Some(format!("gl-{i}")));
+            let decision = engine
+                .assess_pre_issue(context(), Some(format!("gl-{i}")))
+                .unwrap();
             if decision.has_reason(RiskReason::HardRateLimit) {
                 denied += 1;
             } else {
@@ -1298,7 +1512,7 @@ mod tests {
             keys(),
         )
         .with_global_pressure(false);
-        let decision = engine.assess(context(), None);
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(decision.global_level, 0);
         assert_eq!(decision.score, 100);
         assert!(!decision.has_reason(RiskReason::Cooldown));
@@ -1313,7 +1527,7 @@ mod tests {
             policy(),
             keys(),
         );
-        let decision = engine.assess(context(), None);
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert_eq!(decision.global_level, 4);
         assert_eq!(decision.score, 185); // 100 + 500 * 170 / 1000
         assert!(decision.has_reason(RiskReason::Cooldown));
@@ -1345,7 +1559,7 @@ mod tests {
 
         let mut ctx = context();
         ctx.network_flags = flags;
-        let first = engine.assess(ctx, None);
+        let first = engine.assess_pre_issue(ctx, None).unwrap();
         assert!(first.score <= 1000);
         assert_eq!(first.policy_version, 3);
         assert_eq!(first.decision_id.len(), 32);
@@ -1363,30 +1577,38 @@ mod tests {
                 ResourcePressure::default(),
             )
         };
-        let _ = engine.record_feedback(
-            RiskEventKind::ChallengeIssued,
-            feedback_ctx(RiskEventKind::ChallengeIssued),
-            Some("e2e-1".to_string()),
-            None,
-        );
-        let _ = engine.record_feedback(
-            RiskEventKind::SolveSuccess,
-            feedback_ctx(RiskEventKind::SolveSuccess),
-            Some("e2e-2".to_string()),
-            None,
-        );
-        let _ = engine.record_feedback(
-            RiskEventKind::ProtectedActionFailure,
-            feedback_ctx(RiskEventKind::ProtectedActionFailure),
-            Some("e2e-3".to_string()),
-            None,
-        );
-        let _ = engine.confirmed_abuse(
-            feedback_ctx(RiskEventKind::ConfirmedAbuse),
-            Some("e2e-4".to_string()),
-            None,
-        );
-        let decision = engine.assess(context(), None);
+        let _ = engine
+            .record_feedback(
+                RiskEventKind::ChallengeIssued,
+                feedback_ctx(RiskEventKind::ChallengeIssued),
+                Some("e2e-1".to_string()),
+                None,
+            )
+            .unwrap();
+        let _ = engine
+            .record_feedback(
+                RiskEventKind::SolveSuccess,
+                feedback_ctx(RiskEventKind::SolveSuccess),
+                Some("e2e-2".to_string()),
+                None,
+            )
+            .unwrap();
+        let _ = engine
+            .record_feedback(
+                RiskEventKind::ProtectedActionFailure,
+                feedback_ctx(RiskEventKind::ProtectedActionFailure),
+                Some("e2e-3".to_string()),
+                None,
+            )
+            .unwrap();
+        let _ = engine
+            .confirmed_abuse(
+                feedback_ctx(RiskEventKind::ConfirmedAbuse),
+                Some("e2e-4".to_string()),
+                first.decision_id.as_str(),
+            )
+            .unwrap();
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert!(decision.score <= 1000);
         assert!(
             decision.has_reason(RiskReason::LocalNetworkRisk),

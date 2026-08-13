@@ -95,10 +95,11 @@ final class ChallengeController
 
         // Adaptive risk: read (or mint) the continuity session, assess the
         // source BEFORE any challenge is written, and act on the decision.
-        // An invalid client IP (no risk signal available) or a store outage
-        // (the engine degrades internally) never blocks issuance — the
-        // default profile is issued and the baseline Kiwi verification still
-        // applies. An unknown scope depends on unknown_scope.mode:
+        // A store outage (the engine degrades internally) never blocks
+        // issuance. An invalid client IP (no usable risk signal, e.g. a
+        // misconfigured proxy) applies the scope's configured DEGRADED
+        // decision — the default profile is only issued when the degraded
+        // action allows it. An unknown scope depends on unknown_scope.mode:
         // 'baseline' (default) issues the default profile, 'reject' returns
         // the risk-denied 429 without issuing.
         $profile = null;
@@ -130,7 +131,12 @@ final class ChallengeController
                 // default profile.
                 $decision = null;
             } catch (\InvalidArgumentException) {
-                $decision = null;
+                // No usable risk signal (e.g. an unparseable client IP from
+                // a misconfigured proxy): apply the configured DEGRADED
+                // decision for the scope — never silently drop to the
+                // baseline profile below the degraded floor.
+                $decision = $this->risk->degradedDecisionForScope($this->risk->scopeId($scope));
+                $riskAssessed = true;
             }
 
             if ($decision !== null) {
@@ -176,10 +182,14 @@ final class ChallengeController
         }
 
         // A challenge was actually minted: feed the atomic issuance-rate
-        // signal (resource-pressure headroom) and the risk issue-debt signal.
+        // signal (resource-pressure headroom), the risk issue-debt signal,
+        // and pair the challenge nonce to the decision id so a later solve
+        // can be confirmed back to the ORIGINAL decision (short-lived
+        // server-side mapping, TTL = calibration receipt TTL).
         $this->issuanceCounter?->record();
         if ($this->risk !== null && $riskAssessed && $decision !== null) {
             $this->risk->challengeIssued($scope, $clientIp, $riskSession, $decision->decisionId);
+            $this->risk->attachDecisionForNonce($challenge->nonce, $decision->decisionId);
         }
 
         return $this->privateJson($challenge->toArray(), Response::HTTP_OK, $request, $riskSession, $mintedCookie);

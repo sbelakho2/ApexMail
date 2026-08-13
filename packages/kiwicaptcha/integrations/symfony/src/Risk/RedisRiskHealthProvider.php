@@ -6,7 +6,6 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
-use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
 use KiwiCaptcha\Risk\ResourcePressure;
 
 /**
@@ -17,17 +16,14 @@ use KiwiCaptcha\Risk\ResourcePressure;
  *    semaphore wired, or argon_capacity.enabled = false) -> nominal 1000.
  *  - issuanceCapacity: REAL per-second issuance headroom from the atomic
  *    Redis issuance-rate signal ({kiwi:<ns>}:issuance:<second>, incremented
- *    by the challenge controller on every minted challenge):
- *    clamp(max(0, hard_limits.global_per_second - current_rate), 0..1000)
- *    (the ResourcePressure contract is fixed-point 0..1000; 1000 = full
- *    headroom, and the policy denies when headroom drops below 100). A
- *    counter unbounded by a global cap (global_per_second <= 0) or an
- *    unavailable counter (no client / Redis failure) -> nominal 1000.
- *  - riskBackendHealth: the risk state store's LAST operation result via
- *    the engine's circuit breaker (injected alongside the engine): breaker
- *    open (recent consecutive store failures) -> 0, closed -> 1000. NO
- *    per-request PING — the breaker state is derived from the operations
- *    the hot path already performs. Null breaker -> nominal 1000.
+ *    by the challenge controller on every minted challenge) as the REMAINING
+ *    FRACTION of the configured hard_limits.global_per_second:
+ *    clamp(round(max(0, cap - rate) * 1000 / cap), 0..1000) — 100% remaining
+ *    -> 1000, 50% -> 500, 10% -> 100, 0% -> 0 (the ResourcePressure contract
+ *    is fixed-point 0..1000; 1000 = full headroom, and the policy denies when
+ *    headroom drops below 100). A counter unbounded by a global cap
+ *    (global_per_second <= 0) or an unavailable counter (no client / Redis
+ *    failure) -> nominal 1000.
  *
  * The whole snapshot() is cached for 100 ms (in-process timestamp cache):
  * the hot path performs at most one Redis read per 100 ms on top of the
@@ -39,7 +35,9 @@ use KiwiCaptcha\Risk\ResourcePressure;
  * artificial scarcity. The policy's capacity-denial paths
  * (issuanceCapacity < 100 denies, argonCapacity < 300 degrades Argon to
  * Sha20) therefore only engage when the bundle can actually measure the
- * resource.
+ * resource. Risk-backend health is NOT part of this snapshot anymore: the
+ * engine's degraded mode consumes the shared circuit breaker directly (the
+ * breaker is wired into the engine), so the provider never needs it.
  */
 final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
 {
@@ -59,7 +57,6 @@ final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
         private readonly \Redis|\Predis\Client|null $redis = null,
         private readonly string $issuanceKeyPrefix = '{kiwi:kiwi}:issuance:',
         private readonly int $globalPerSecond = 10000,
-        private readonly ?CircuitBreaker $breaker = null,
     ) {
     }
 
@@ -73,7 +70,6 @@ final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
         $pressure = new ResourcePressure(
             argonCapacity: $this->argonCapacity(),
             issuanceCapacity: $this->issuanceCapacity(),
-            riskBackendHealth: $this->backendHealth(),
         );
         $this->cached = $pressure;
         $this->cachedAtMs = $nowMs;
@@ -107,17 +103,8 @@ final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
             return 1000;
         }
 
-        return max(0, min(1000, $this->globalPerSecond - $rate));
-    }
+        $remaining = max(0, $this->globalPerSecond - $rate);
 
-    private function backendHealth(): int
-    {
-        if ($this->breaker === null) {
-            return 1000;
-        }
-
-        // The breaker state IS the last-operation signal: every store
-        // success closes it, consecutive failures open it. No PING.
-        return $this->breaker->isOpen() ? 0 : 1000;
+        return max(0, min(1000, (int) round($remaining * 1000 / $this->globalPerSecond)));
     }
 }

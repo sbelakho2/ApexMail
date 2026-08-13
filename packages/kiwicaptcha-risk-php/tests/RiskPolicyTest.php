@@ -29,7 +29,7 @@ final class RiskPolicyTest extends TestCase
 
     private function healthy(): ResourcePressure
     {
-        return new ResourcePressure(1000, 1000, 1000);
+        return new ResourcePressure(1000, 1000);
     }
 
     private function zeroVector(): SignalVector
@@ -142,11 +142,11 @@ final class RiskPolicyTest extends TestCase
     public function testIssuanceCapacityOverride(): void
     {
         $policy = RiskPolicy::fromConfig($this->config());
-        $d = $policy->decide(1, 0, $this->zeroVector(), new ResourcePressure(1000, 99, 1000), 0, 1_700_000_000_000);
+        $d = $policy->decide(1, 0, $this->zeroVector(), new ResourcePressure(1000, 99), 0, 1_700_000_000_000);
         self::assertSame(RiskAction::Deny, $d->action);
         self::assertTrue($d->hasReason(RiskReason::CapacityPressure));
 
-        $d = $policy->decide(1, 0, $this->zeroVector(), new ResourcePressure(1000, 100, 1000), 0, 1_700_000_000_000);
+        $d = $policy->decide(1, 0, $this->zeroVector(), new ResourcePressure(1000, 100), 0, 1_700_000_000_000);
         self::assertNotSame(RiskAction::Deny, $d->action);
     }
 
@@ -156,11 +156,11 @@ final class RiskPolicyTest extends TestCase
         // The argon-capacity check is the LAST step: a final Argon action
         // with argonCapacity < 300 escalates to StepUp (never Sha20, and
         // never reintroduced by the floor/minimum re-clamp).
-        $d = $policy->decide(1, 600, $this->zeroVector(), new ResourcePressure(299, 1000, 1000), 0, 1_700_000_000_000);
+        $d = $policy->decide(1, 600, $this->zeroVector(), new ResourcePressure(299, 1000), 0, 1_700_000_000_000);
         self::assertSame(RiskAction::StepUp, $d->action);
         self::assertTrue($d->hasReason(RiskReason::CapacityPressure));
 
-        $d = $policy->decide(1, 600, $this->zeroVector(), new ResourcePressure(300, 1000, 1000), 0, 1_700_000_000_000);
+        $d = $policy->decide(1, 600, $this->zeroVector(), new ResourcePressure(300, 1000), 0, 1_700_000_000_000);
         self::assertSame(RiskAction::Argon16, $d->action);
         self::assertFalse($d->hasReason(RiskReason::CapacityPressure));
     }
@@ -173,7 +173,7 @@ final class RiskPolicyTest extends TestCase
         $config = $this->config();
         $config['global_floors'] = [0 => 'allow', 1 => 'argon16', 2 => 'argon32', 3 => 'argon64', 4 => 'argon64'];
         $policy = RiskPolicy::fromConfig($config);
-        $d = $policy->decide(3, 0, $this->zeroVector(), new ResourcePressure(1, 1000, 1000), 1, 1_700_000_000_000);
+        $d = $policy->decide(3, 0, $this->zeroVector(), new ResourcePressure(1, 1000), 1, 1_700_000_000_000);
         self::assertSame(RiskAction::StepUp, $d->action);
         self::assertTrue($d->hasReason(RiskReason::CapacityPressure));
     }
@@ -328,7 +328,7 @@ final class RiskPolicyTest extends TestCase
             'network_risk' => 900,
         ]);
         $now = 1_700_000_000_000;
-        $d = $policy->decide(1, 0, $vector, new ResourcePressure(1000, 50, 1000), 0, $now, $now + 1000);
+        $d = $policy->decide(1, 0, $vector, new ResourcePressure(1000, 50), 0, $now, $now + 1000);
         self::assertSame(RiskAction::Deny, $d->action);
         self::assertLessThanOrEqual(4, count($d->reasons));
         self::assertSame(count($d->reasons), count(array_unique($d->reasons, SORT_REGULAR)));
