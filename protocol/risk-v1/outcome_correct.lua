@@ -1,6 +1,12 @@
 -- Outcome ledger correction: flip L <-> A (authoritative for future
 -- events; ephemeral reputation decays naturally — no synthetic
 -- identities are involved).
+--
+-- SCRIPT BOUNDS (audit #101) — all bounded constants:
+--   max keys touched:     1
+--   max Redis calls:      2 (GET + SET)
+--   max collection cardinality: none
+--
 -- KEYS[1] ledger; ARGV[1] new outcome ('L'/'A'), ARGV[2] outcome TTL
 local raw = redis.call('GET', KEYS[1])
 if not raw then

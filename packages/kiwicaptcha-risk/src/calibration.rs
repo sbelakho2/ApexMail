@@ -128,8 +128,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::Mac;
 use redis::Commands;
 use sha2::Sha256;
 use thiserror::Error;

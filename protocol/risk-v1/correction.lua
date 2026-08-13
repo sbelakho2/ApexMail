@@ -1,6 +1,13 @@
 -- Calibration correction: flip the outcome ledger + reverse/redo the
 -- bucket contribution, ATOMICALLY (canonical, shared PHP/Rust).
 --
+-- SCRIPT BOUNDS (audit #101) — all bounded constants:
+--   max keys touched:     2
+--   max Redis calls:      15 (1 GET + 4 HINCRBYFLOAT + 4 HGET + 4 HSET +
+--                            1 EXPIRE + 1 SET)
+--   max collection cardinality: none (cjson decode of the bounded ledger
+--                           string only)
+--
 -- KEYS[1]  outcome ledger entry (STRING, JSON {"o","scope","hour","score","w"})
 -- KEYS[2]  DECISION-TIME calibration bucket (scope, ledger.hour)
 -- ARGV[1]  new outcome ('L' = legitimate, 'A' = abuse)

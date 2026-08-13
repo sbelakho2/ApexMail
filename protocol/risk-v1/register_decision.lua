@@ -1,6 +1,12 @@
 -- Decision registration: receipt + sample denominator + outcome ledger,
 -- ATOMICALLY (canonical, shared PHP/Rust).
 --
+-- SCRIPT BOUNDS (audit #101) — all bounded constants:
+--   max keys touched:     3
+--   max Redis calls:      4 (2 SET + 1 HINCRBY + 1 EXPIRE)
+--   max collection cardinality: none (cjson encode of the bounded ledger
+--                           object only)
+--
 -- KEYS[1]  decision receipt (STRING, JSON:
 --          {"scope","band","action","decision_hour","score","sampled"})
 -- KEYS[2]  decision-time calibration bucket for (scope, decision_hour)
