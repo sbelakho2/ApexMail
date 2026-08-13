@@ -26,12 +26,12 @@ class KiwiCaptcha extends Constraint
      * The token-level verification failure (audit #57): EVERY token-level
      * core error — WrongScope, IpMismatch, Expired, MalformedToken,
      * BadSignature, TooFast, WrongRegion, WrongPolicyVersion,
-     * MissingClientIp, CounterTooLarge, InsufficientWork,
-     * ConsumeIndeterminate, RecordNotFound, MalformedRecord, a request-
-     * binding mismatch (audit #41) — collapses to ONE public code
-     * `invalid_or_expired`. The precise internal reason is never exposed to
-     * the client (no oracle for which check failed); it stays in the logs.
-     * The alias NOT_SOLVED_ERROR keeps the pre-round-9 name for BC.
+     * MissingClientIp, CounterTooLarge, InsufficientWork, RecordNotFound,
+     * MalformedRecord, a request-binding mismatch (audit #41) — collapses to
+     * ONE public code `invalid_or_expired`. The precise internal reason is
+     * never exposed to the client (no oracle for which check failed); it
+     * stays in the logs. The alias NOT_SOLVED_ERROR keeps the pre-round-9
+     * name for BC.
      */
     public const INVALID_OR_EXPIRED_ERROR = 'invalid_or_expired';
 
@@ -49,8 +49,12 @@ class KiwiCaptcha extends Constraint
     /**
      * The verification could not be completed because a security backend
      * (the challenge storage or the admission gate) is unavailable
-     * (AdmissionUnavailable / StorageUnavailable). Distinct so applications
-     * can surface a temporary service problem instead of a re-solve loop.
+     * (AdmissionUnavailable / StorageUnavailable), or the consume outcome is
+     * unresolvably INDETERMINATE (ConsumeIndeterminate — audit #74: the
+     * storage first tries the consumed record's committed result, and only
+     * a genuinely unresolvable ambiguity lands here). Distinct so
+     * applications can surface a temporary service problem instead of a
+     * re-solve loop.
      */
     public const TEMPORARY_UNAVAILABLE_ERROR = 'temporary_unavailable';
 

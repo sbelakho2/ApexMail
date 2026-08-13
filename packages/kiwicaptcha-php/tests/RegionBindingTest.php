@@ -17,7 +17,7 @@ use PHPUnit\Framework\TestCase;
 /**
  * Region binding (audit #22, Option A): the issued record carries an
  * optional region (NULL = unbound), the record JSON always includes the
- * `region` key (byte parity with the Rust serde schema — 20 keys), and a
+ * `region` key (byte parity with the Rust serde schema — 21 keys), and a
  * verifier configured with an expected region rejects any record whose
  * region does not match EXACTLY (WrongRegion), including unbound records.
  */

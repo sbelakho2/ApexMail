@@ -135,7 +135,7 @@ final class SecurityPolicyTest extends TestCase
             $record->policyVersion ?? 1,
             $record->requestBinding,
         );
-        self::assertStringEndsWith('|2|txn-abc', $canonical, 'the canonical ends with policy_version|request_binding');
+        self::assertStringEndsWith('|2|txn-abc|', $canonical, 'the canonical ends with policy_version|request_binding|issuer (issuer empty when unset)');
 
         $signature = substr($record->challenge, strrpos($record->challenge, '.') + 1);
         self::assertSame(

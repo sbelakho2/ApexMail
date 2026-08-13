@@ -164,7 +164,7 @@ final class ChallengeProfileTest extends TestCase
 
         $counter = $this->solveSha($challenge->prefix, $challenge->salt, $challenge->targetBits);
         $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
-        $outcome = (new Verifier($storage))->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, (int) (microtime(true) * 1_000_000) + 1_000_000);
+        $outcome = (new Verifier($storage, now: static fn (): int => Vectors::ISSUED_AT + 100))->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, (int) (microtime(true) * 1_000_000) + 1_000_000);
         self::assertTrue($outcome->isOk(), sprintf('expected Valid, got %s', $outcome->code()));
     }
 
@@ -186,7 +186,7 @@ final class ChallengeProfileTest extends TestCase
             }
         }
         self::assertNotNull($token, 'a sha-20 solve within the solver cap must be found');
-        $outcome = (new Verifier($storage))->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, (int) (microtime(true) * 1_000_000) + 1_000_000);
+        $outcome = (new Verifier($storage, now: static fn (): int => Vectors::ISSUED_AT + 100))->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, (int) (microtime(true) * 1_000_000) + 1_000_000);
         self::assertTrue($outcome->isOk(), sprintf('expected Valid, got %s', $outcome->code()));
     }
 
@@ -205,7 +205,7 @@ final class ChallengeProfileTest extends TestCase
 
         $counter = $this->solveArgon($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->mKib, $challenge->t);
         $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
-        $outcome = (new Verifier($storage))->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, (int) (microtime(true) * 1_000_000) + 1_000_000);
+        $outcome = (new Verifier($storage, now: static fn (): int => Vectors::ISSUED_AT + 100))->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, (int) (microtime(true) * 1_000_000) + 1_000_000);
         self::assertTrue($outcome->isOk(), sprintf('expected Valid, got %s', $outcome->code()));
     }
 

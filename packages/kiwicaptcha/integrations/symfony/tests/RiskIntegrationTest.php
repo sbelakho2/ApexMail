@@ -43,6 +43,7 @@ use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Processor;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpKernel\KernelInterface;
@@ -89,7 +90,7 @@ final class RiskIntegrationTest extends TestCase
 
     private function challengeRequest(): Request
     {
-        return Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        return JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
     }
 
     public function testAllowIssuesConfiguredDifficultyAndContinuityCookie(): void
@@ -122,7 +123,7 @@ final class RiskIntegrationTest extends TestCase
     {
         $stack = $this->stack(new FakeRiskStateStore());
         $session = bin2hex(random_bytes(16));
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], ['__Host-kiwi-session' => $session], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], ['__Host-kiwi-session' => $session], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
 
         $response = $stack['controller']->challenge($request);
         self::assertSame(200, $response->getStatusCode());
@@ -187,7 +188,7 @@ final class RiskIntegrationTest extends TestCase
     public function testInvalidClientIpSkipsRiskWithoutErroring(): void
     {
         $stack = $this->stack(new FakeRiskStateStore());
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => 'not-an-ip'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => 'not-an-ip'], '{"scope":"login"}');
 
         // The risk assessment is skipped (invalid IP -> the scope's degraded
         // decision applies instead of a live assessment; degraded=allow here
@@ -302,7 +303,7 @@ final class RiskIntegrationTest extends TestCase
     public function testContinuityCookieValidatesAndMints(): void
     {
         $cookie = new ContinuityCookie();
-        $request = Request::create('/challenge', 'POST');
+        $request = JsonRequest::create('/challenge', 'POST');
 
         self::assertNull($cookie->read($request), 'absent cookie reads null');
         $request->cookies->set('__Host-kiwi-session', 'zzzz');
@@ -322,7 +323,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertTrue($http->isHttpOnly());
         self::assertTrue($http->isHttpOnly());
         self::assertFalse($http->isSecure(), 'secure=null follows the http request');
-        $https = Request::create('https://example.com/challenge', 'POST');
+        $https = JsonRequest::create('https://example.com/challenge', 'POST');
         self::assertTrue($cookie->cookie($https, $minted)->isSecure(), 'secure=null follows the https request');
     }
 
@@ -430,7 +431,7 @@ final class RiskIntegrationTest extends TestCase
         // The fake Redis does not speak the risk-v1 EVALSHA protocol -> the
         // engine degrades (store failure -> degraded allow) and issuance
         // still succeeds, cookie included.
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
         $response = $controller->challenge($request);
         self::assertSame(200, $response->getStatusCode());
         self::assertCount(1, $response->headers->getCookies());
@@ -546,7 +547,7 @@ final class RiskIntegrationTest extends TestCase
         $gateway = new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'reject');
         $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
 
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
         $response = $controller->challenge($request);
         self::assertSame(429, $response->getStatusCode());
         $data = json_decode((string) $response->getContent(), true);
@@ -576,7 +577,7 @@ final class RiskIntegrationTest extends TestCase
         $gateway = new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'baseline');
         $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
 
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
         $response = $controller->challenge($request);
         self::assertSame(200, $response->getStatusCode());
         $data = json_decode((string) $response->getContent(), true);
@@ -608,7 +609,7 @@ final class RiskIntegrationTest extends TestCase
         $gateway = new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42);
         $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
 
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"weird_unconfigured_scope"}');
         $response = $controller->challenge($request);
         self::assertSame(200, $response->getStatusCode());
         $data = json_decode((string) $response->getContent(), true);
@@ -654,7 +655,7 @@ final class RiskIntegrationTest extends TestCase
         $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['financial_action' => 1], policy: $policy);
         $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
 
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => 'not-an-ip'], '{"scope":"financial_action"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => 'not-an-ip'], '{"scope":"financial_action"}');
         $response = $controller->challenge($request);
         self::assertSame(429, $response->getStatusCode(), 'the degraded=deny floor must hold even without a usable IP');
         $data = json_decode((string) $response->getContent(), true);
@@ -717,7 +718,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertNull($gateway->currentDecisionId(), 'no decision yet');
 
         $requests = new RequestStack();
-        $requests->push(Request::create('/challenge', 'POST'));
+        $requests->push(JsonRequest::create('/challenge', 'POST'));
         $decision = $gateway->preIssue('login', '198.51.100.7', null);
         self::assertNull($gateway->currentDecisionId(), 'without a RequestStack the gateway cannot hold a request-local id');
         self::assertNotNull($decision->decisionId);
@@ -749,7 +750,7 @@ final class RiskIntegrationTest extends TestCase
         $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], requestStack: $stack);
 
         // Request 1: pre-issue decision id visible only on request 1.
-        $first = Request::create('/challenge', 'POST');
+        $first = JsonRequest::create('/challenge', 'POST');
         $stack->push($first);
         $decision1 = $gateway->preIssue('login', '198.51.100.7', null);
         self::assertSame($decision1->decisionId, $gateway->currentDecisionId(), 'request 1 sees its own decision id');
@@ -757,7 +758,7 @@ final class RiskIntegrationTest extends TestCase
         // The kernel swaps the main request: request 2 is a FRESH Request
         // with empty attributes — request 1's id must be invisible.
         $stack->pop();
-        $second = Request::create('/challenge', 'POST');
+        $second = JsonRequest::create('/challenge', 'POST');
         $stack->push($second);
         self::assertNull($gateway->currentDecisionId(), 'request 2 must not see request 1\'s decision id');
 
@@ -891,7 +892,7 @@ final class RiskIntegrationTest extends TestCase
         $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
 
         $stack = new RequestStack();
-        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->push(JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $gateway = new RiskGateway(
             $engine,
             $classifier,
@@ -986,7 +987,7 @@ final class RiskIntegrationTest extends TestCase
         $token = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
         $stack = new RequestStack();
-        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->push(JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
         $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
@@ -1036,7 +1037,7 @@ final class RiskIntegrationTest extends TestCase
         $token = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
         $stack = new RequestStack();
-        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->push(JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
         $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
@@ -1122,7 +1123,7 @@ final class RiskIntegrationTest extends TestCase
         $token = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
         $stack = new RequestStack();
-        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->push(JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
         $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
@@ -1915,7 +1916,7 @@ final class RiskIntegrationTest extends TestCase
         $limiter = new IssuanceRateLimiter(1, 60, null, null, 'test-pepper', null, 100, 'test-ns', 0);
         $controller = new ChallengeController($issuer, $limiter, true, $gateway, new ContinuityCookie());
 
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
         self::assertSame(200, $controller->challenge($request)->getStatusCode());
 
         $response = $controller->challenge($request);
@@ -1952,7 +1953,7 @@ final class RiskIntegrationTest extends TestCase
         $limiter = new IssuanceRateLimiter(100, 60, null, null, 'test-pepper', new FakePredisClient(), 1, 'test-ns', 0);
         $controller = new ChallengeController($issuer, $limiter, true, $gateway, new ContinuityCookie());
 
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
         self::assertSame(200, $controller->challenge($request)->getStatusCode());
 
         $response = $controller->challenge($request);
@@ -2089,7 +2090,7 @@ final class RiskIntegrationTest extends TestCase
         $gateway->attachDecisionForNonce($challenge->nonce, $preIssue->decisionId);
 
         // The verification request is a FRESH request (empty attributes).
-        $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+        $request = JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
         $stack->push($request);
         $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
@@ -2156,7 +2157,7 @@ final class RiskIntegrationTest extends TestCase
         $preIssue = $gateway->preIssue('login', '198.51.100.7', null);
         $gateway->attachDecisionForNonce($challenge->nonce, $preIssue->decisionId);
         $gateway->setCurrentDecisionId('stale-target');
-        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $stack->push(JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
         $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
         $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();

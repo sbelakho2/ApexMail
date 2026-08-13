@@ -73,6 +73,14 @@ final class Config
      *                                      rejects records issued under a different epoch
      *                                      (WrongPolicyVersion). Cosmetic configuration
      *                                      changes must NOT bump it.
+     * @param string|null $issuer           Deployment identity stamped into every issued
+     *                                      record (audit #67; mirrors Rust
+     *                                      ChallengeConfig.issuer) — e.g. "dev", "staging",
+     *                                      "prod". A verifier configured with an expected
+     *                                      issuer rejects records issued by a different
+     *                                      deployment (WrongIssuer): a compartment that
+     *                                      holds even when deployments share secret keys.
+     *                                      Null (default) stamps an unbound record.
      */
     public function __construct(
         public readonly string $secretKey,
@@ -87,6 +95,7 @@ final class Config
         public readonly int $solverMaxHashes = 5_000_000,
         public readonly BindingMode $bindingMode = BindingMode::Bound,
         public readonly int $policyVersion = 1,
+        public readonly ?string $issuer = null,
     ) {
         if (\strlen($secretKey) < 16) {
             throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');

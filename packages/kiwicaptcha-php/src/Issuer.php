@@ -17,9 +17,10 @@ namespace KiwiCaptcha;
  *   canonical  = "v2|{nonce}|{scope}|{binding_tag}|{issued_at}|{expires_at}|
  *                {algorithm}|{m_kib}|{t}|{p}|{target_bits}|{salt}|
  *                {min_duration_ms}|{region}|{policy_version}|
- *                {request_binding}" — region and request_binding render as
- *                the empty segment when unset, policy_version as the
- *                configured security-policy epoch (audits #42/#41)
+ *                {request_binding}|{issuer}" — region, request_binding and
+ *                issuer render as the empty segment when unset,
+ *                policy_version as the configured security-policy epoch
+ *                (audits #42/#41/#67)
  *   signature  = hex(hmac_sha256(K_challenge, canonical)) — HKDF-derived
  *                purpose key (audit #21, {@see DerivedKeys}); the master
  *                secret is never used directly as the signing key
@@ -112,6 +113,7 @@ final class Issuer
             $this->region,
             $this->config->policyVersion,
             $requestBinding,
+            $this->config->issuer,
         );
         $signature = self::signPayloadV2($payload, $this->config->secretKey);
 
@@ -143,6 +145,7 @@ final class Issuer
             region: $this->region,
             policyVersion: $this->config->policyVersion,
             requestBinding: $requestBinding,
+            issuer: $this->config->issuer,
         );
         $this->storage->store($record);
 
@@ -233,6 +236,7 @@ final class Issuer
             solverMaxHashes: $this->config->solverMaxHashes,
             bindingMode: $this->config->bindingMode,
             policyVersion: $this->config->policyVersion,
+            issuer: $this->config->issuer,
         );
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
@@ -301,16 +305,16 @@ final class Issuer
      * and base64-encoded into the challenge. Shared with the verifier so
      * issuance and verification can never drift apart.
      *
-     * Round-9 layout (audits #41/#42), byte-identical to the Rust crate's
-     * `canonical_signing_input_v2`:
+     * Round-10 layout (audits #41/#42/#67), byte-identical to the Rust
+     * crate's `canonical_signing_input_v2`:
      *
      *     v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|
      *       p|target_bits|salt|min_duration_ms|region|policy_version|
-     *       request_binding
+     *       request_binding|issuer
      *
-     * with `region` and `request_binding` rendering as the EMPTY segment
-     * when unset — so a null region + policy 1 + null binding ends the
-     * canonical with `|0||1|`.
+     * with `region`, `request_binding` and `issuer` rendering as the EMPTY
+     * segment when unset — so a null region + policy 1 + null binding +
+     * null issuer ends the canonical with `|0||1||`.
      */
     public static function canonicalPayload(
         string $nonce,
@@ -328,9 +332,10 @@ final class Issuer
         ?string $region = null,
         int $policyVersion = 1,
         ?string $requestBinding = null,
+        ?string $issuer = null,
     ): string {
         return sprintf(
-            'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s',
+            'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s',
             $nonce,
             $scope,
             $bindingTag,
@@ -346,6 +351,7 @@ final class Issuer
             $region ?? '',
             $policyVersion,
             $requestBinding ?? '',
+            $issuer ?? '',
         );
     }
 

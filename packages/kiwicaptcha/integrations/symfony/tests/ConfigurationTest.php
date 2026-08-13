@@ -446,4 +446,54 @@ final class ConfigurationTest extends TestCase
         self::assertTrue($this->process()['risk']['health']['enabled'], 'risk.health.enabled defaults to true (live/ready routes registered)');
         self::assertFalse($this->process(['risk' => ['health' => ['enabled' => false]]])['risk']['health']['enabled']);
     }
+
+    // ── Round 10: trusted client-IP policy (audit #64) ────────────────────
+
+    public function testClientIpModeDefaultsToSymfonyTrustedProxies(): void
+    {
+        self::assertSame('symfony_trusted_proxies', $this->process()['risk']['client_ip_mode'], 'client_ip_mode defaults to symfony_trusted_proxies (Symfony\'s machinery ignores forwarding from untrusted peers)');
+        self::assertSame('direct', $this->process(['risk' => ['client_ip_mode' => 'direct']])['risk']['client_ip_mode']);
+    }
+
+    public function testClientIpModeRejectsUnknownValues(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['risk' => ['client_ip_mode' => 'header_trust']]);
+    }
+
+    public function testTrustedProxiesDefaultsToEmptyAndAcceptsCidrs(): void
+    {
+        self::assertSame([], $this->process()['risk']['trusted_proxies'], 'trusted_proxies defaults to [] (nobody is trusted)');
+
+        $proxies = $this->process(['risk' => ['trusted_proxies' => ['10.0.0.0/8', '192.168.1.5']]])['risk']['trusted_proxies'];
+        self::assertSame(['10.0.0.0/8', '192.168.1.5'], $proxies);
+    }
+
+    public function testRejectAmbiguousForwardingDefaultsToFalse(): void
+    {
+        self::assertFalse($this->process()['risk']['reject_ambiguous_forwarding'], 'reject_ambiguous_forwarding defaults to false (the anomaly is logged)');
+        self::assertTrue($this->process(['risk' => ['reject_ambiguous_forwarding' => true]])['risk']['reject_ambiguous_forwarding']);
+    }
+
+    // ── Round 10: memory-budget readiness (audit #68) ─────────────────────
+
+    public function testContainerMemoryMibDefaultsToNullAndAcceptsBudgets(): void
+    {
+        self::assertNull($this->process()['risk']['container_memory_mib'], 'container_memory_mib defaults to null (readiness invariant skipped)');
+        self::assertSame(1024, $this->process(['risk' => ['container_memory_mib' => 1024]])['risk']['container_memory_mib']);
+    }
+
+    public function testContainerMemoryMibBelowOneIsRejected(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['risk' => ['container_memory_mib' => 0]]);
+    }
+
+    // ── Round 10: server-configured public origin (audit #78) ─────────────
+
+    public function testPublicBaseUrlDefaultsToNullAndAcceptsOrigins(): void
+    {
+        self::assertNull($this->process()['public_base_url'], 'public_base_url defaults to null (same-origin derived from the request)');
+        self::assertSame('https://captcha.example.com', $this->process(['public_base_url' => 'https://captcha.example.com'])['public_base_url']);
+    }
 }

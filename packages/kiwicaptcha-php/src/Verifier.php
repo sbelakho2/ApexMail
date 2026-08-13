@@ -15,16 +15,21 @@ namespace KiwiCaptcha;
  * hash — so a wrong candidate burns the challenge and the client must fetch
  * and solve a fresh one. This deliberately bounds the server-side cost of
  * memory-hard verification: each submitted token can cost at most one
- * Argon2id (or SHA-256) hash, and replaying a token always fails with
- * RecordNotFound. There is no maxAttempts parameter: the one-shot model IS
- * the attempt bound.
+ * Argon2id (or SHA-256) hash. Replay protection is the CONSUMED marker, not
+ * absence (audit #74): the record survives until its TTL carrying the
+ * deterministic verification result, so a retry returns the SAME outcome
+ * (Valid/InsufficientWork) without re-deriving; a consumed record without a
+ * committed result (crash between consume and commit) is reported as
+ * ConsumeIndeterminate. There is no maxAttempts parameter: the one-shot
+ * model IS the attempt bound.
  *
  * STRICT single-use under concurrency requires an AtomicStorageInterface
- * backend (e.g. Redis GETDEL): the load-and-remove is fused, so two racing
- * requests can never both win the record. PSR-6-backed consume() is
- * best-effort — the read and the delete cannot be fused, so racing requests
- * may both observe the record. The TOCTOU challenge re-check in the proof
- * phase makes a swapped record fail closed (MalformedRecord) either way.
+ * backend (e.g. Redis): the load-and-transition is fused, so two racing
+ * requests can never both win the consume transition. PSR-6-backed consume()
+ * is best-effort — the read and the transition cannot be fused, so racing
+ * requests may both observe the pending record. The TOCTOU challenge
+ * re-check in the proof phase makes a swapped record fail closed
+ * (MalformedRecord) either way.
  *
  * Check order:
  *   1. Structural validation of the stored record: scope shape, nonce/salt
@@ -38,7 +43,9 @@ namespace KiwiCaptcha;
  *      parameters are checked against MIN/MAX_ARGON_* AFTER signature
  *      authentication and BEFORE any allocation — out-of-range yields
  *      UnsupportedArgon2Params.
- *   3. TTL: now < expires_at.
+ *   3. TTL: now < expires_at AND now >= issued_at - MAX_CLOCK_SKEW (audit
+ *      #76: a signed challenge claiming to be issued more than 60s in the
+ *      future is invalid).
  *   4. Scope: challenge scope matches the expected flow.
  *   5. IP binding: v2 records recompute the nonce-bound binding tag (keyed
  *      by the HKDF-derived K_ip_bind); v1 records compare the legacy IP
@@ -49,6 +56,10 @@ namespace KiwiCaptcha;
  *      expected region rejects any record whose region does not match
  *      exactly (WrongRegion) — including unbound (NULL) records, which are
  *      redeemable in every region.
+ *   5c. Security-policy epoch (audit #42) and deployment issuer (audit
+ *      #67): a verifier configured with an expected policy epoch / issuer
+ *      rejects records issued under a different epoch / by a different
+ *      deployment (WrongPolicyVersion / WrongIssuer).
  *   6. Minimum duration: measured SERVER-SIDE from the record's issued_at_ns
  *      (epoch microseconds) to the verification receipt time — the
  *      client-reported duration can no longer be forged to bypass the
@@ -62,8 +73,20 @@ namespace KiwiCaptcha;
  *   8. Argon2id admission gate (optional): when a VerificationAdmissionGate
  *      is configured, it must grant capacity before the memory-hard hash
  *      runs; exhaustion yields CapacityExceeded WITHOUT burning the record.
- *   9. Consume the record, re-derive the hash (SHA-256 or Argon2id per the
- *      record's algorithm), and require >= target_bits leading zero bits.
+ *   9. Consume the record (one-shot transition), re-derive the hash
+ *      (SHA-256 or Argon2id per the record's algorithm), and require >=
+ *      target_bits leading zero bits. A retry on an already-consumed record
+ *      returns its committed deterministic result (Valid/InsufficientWork)
+ *      without re-deriving, or ConsumeIndeterminate when no result was
+ *      committed.
+ *  10. POST-DERIVE FINAL REVALIDATION (audit #59): after the proof derives
+ *      successfully and BEFORE returning Valid, re-check with the CURRENT
+ *      server clock (the verifier's now closure) and the CURRENT
+ *      expectations: the challenge must not have expired during the
+ *      expensive derivation (Expired), and the expected policy epoch,
+ *      region, and issuer must still match — a rotation landing mid-
+ *      derivation fails the re-check. Only then is the deterministic
+ *      result committed (best-effort) and Valid returned.
  */
 final class Verifier
 {
@@ -88,6 +111,14 @@ final class Verifier
      * cannot come from a KiwiCaptcha issuer and is rejected as malformed.
      */
     private const MAX_TTL_SECS = Config::MAX_TTL_SECS;
+
+    /**
+     * Maximum tolerated FUTURE skew for a record's issuance timestamp
+     * (audit #76): a signed challenge claiming issued_at > now + 60s cannot
+     * have come from a real issuer host (even under clock drift) and is
+     * rejected by the TTL check as Expired.
+     */
+    public const MAX_CLOCK_SKEW = 60;
 
     /**
      * Absolute process ceilings for Argon2id parameters (audit #32).
@@ -137,7 +168,7 @@ final class Verifier
          * region-bound challenge is never redeemable elsewhere or on an
          * unbound record. Null (default) disables the check entirely.
          */
-        private readonly ?string $region = null,
+        private ?string $region = null,
         /**
          * The CURRENT security-policy epoch (audit #42). When non-null, a
          * record whose `policy_version` differs is rejected with
@@ -145,7 +176,15 @@ final class Verifier
          * policy revocation (origin/action-policy changes, emergency
          * revocation, compromised tenant). Null (default) disables the check.
          */
-        private readonly ?int $expectedPolicyVersion = null,
+        private ?int $expectedPolicyVersion = null,
+        /**
+         * Expected deployment issuer (audit #67). When non-null, a record
+         * whose `issuer` does not match EXACTLY — including a NULL (unbound)
+         * record issuer — is rejected with WrongIssuer: a dev/staging/prod
+         * compartment that holds even when deployments share secret keys.
+         * Null (default) disables the check.
+         */
+        private ?string $expectedIssuer = null,
     ) {
         // BC shim: pre-gate callers passed the clock override positionally
         // as the second argument. A Closure in that slot is $now, not an
@@ -250,9 +289,18 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::UnsupportedArgon2Params);
         }
 
-        // 3. TTL.
+        // 3. TTL. Both bounds use the verifier's clock: a challenge expired
+        //    before the check (now >= expires_at) OR claiming to have been
+        //    issued more than MAX_CLOCK_SKEW in the future (audit #76 — a
+        //    signed record cannot legitimately come from a host clock that
+        //    far ahead) is rejected.
         $now = $this->now !== null ? (int) ($this->now)() : time();
         if ($now >= $peek->expiresAt) {
+            $this->bestEffortDelete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::Expired);
+        }
+        if ($peek->issuedAt > $now + self::MAX_CLOCK_SKEW) {
             $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::Expired);
@@ -305,6 +353,17 @@ final class Verifier
             $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
+        }
+
+        // 5d. Deployment issuer (audit #67): a verifier configured with an
+        //     expected issuer rejects any record whose issuer does not match
+        //     EXACTLY — an unbound (NULL) record issuer fails closed, because
+        //     an unbound record is redeemable by every deployment and must
+        //     not satisfy an issuer-bound verifier.
+        if ($this->expectedIssuer !== null && $peek->issuer !== $this->expectedIssuer) {
+            $this->bestEffortDelete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::WrongIssuer);
         }
 
         // 6. Minimum duration, measured on the SERVER: elapsed_us is the gap
@@ -371,18 +430,37 @@ final class Verifier
         }
 
         try {
-            // 9. Consume (one-shot) and re-derive the proof.
+            // 9. Consume (one-shot transition, audit #74) and re-derive the
+            //    proof. The record is marked consumed and KEPT until its TTL.
             try {
-                $record = $this->storage->consume($token->nonce);
+                $consumed = $this->storage->consume($token->nonce);
             } catch (\Throwable) {
-                // A lost GETDEL response is intrinsically ambiguous: the
+                // A lost transition response is intrinsically ambiguous: the
                 // challenge may or may not have been consumed. Report the
                 // indeterminate state instead of RecordNotFound.
                 return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
             }
-            if ($record === null) {
+            if ($consumed === null) {
                 return VerifyOutcome::invalid(VerifyError::RecordNotFound);
             }
+
+            // Consumed-state retry (audit #74): an already-consumed record
+            // replays its committed deterministic result WITHOUT re-deriving
+            // the proof — a retry sees exactly what the consuming attempt
+            // saw (Valid/InsufficientWork). A consumed record without a
+            // committed result (crash between consume and commit) is
+            // intrinsically ambiguous — the caller treats it as such.
+            if ($consumed->consumedBefore) {
+                if ($consumed->consumedResult !== null) {
+                    return $consumed->consumedResult->valid
+                        ? VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true)
+                        : VerifyOutcome::invalid(VerifyError::InsufficientWork);
+                }
+
+                return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
+            }
+            $record = $consumed->record;
+
             // TOCTOU guard: the consumed instance must be the SAME challenge
             // we validated and HMAC-checked via peek. Because the v2 HMAC
             // signs EVERY immutable parameter, full re-validation + signature
@@ -412,6 +490,14 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
             }
 
+            // Deployment issuer on the CONSUMED instance (audit #67): the
+            // same racing-swap fail-closed guarantee as the policy check —
+            // the instance that actually proves the PoW must be from the
+            // expected deployment.
+            if ($this->expectedIssuer !== null && $record->issuer !== $this->expectedIssuer) {
+                return VerifyOutcome::invalid(VerifyError::WrongIssuer);
+            }
+
             $hash = $this->deriveHash($record, $token->counter);
             if ($hash === null) {
                 // An Argon2id record whose parameters are within the ceilings
@@ -424,8 +510,40 @@ final class Verifier
                     : VerifyError::MalformedRecord);
             }
             if (self::leadingZeroBits($hash) < $record->targetBits) {
+                // Commit the deterministic invalid outcome (best-effort) so
+                // a retry sees the SAME InsufficientWork without re-deriving.
+                $this->bestEffortCommit($record->nonce, false, $record->requestBinding);
+
                 return VerifyOutcome::invalid(VerifyError::InsufficientWork);
             }
+
+            // 10. POST-DERIVE FINAL REVALIDATION (audit #59): the expensive
+            //     derivation succeeded — re-check against the CURRENT server
+            //     clock and the CURRENT expectations BEFORE accepting. The
+            //     challenge may have expired DURING the derivation (the
+            //     clock read here is the verifier's now closure, so tests
+            //     can drive it), and the policy epoch / region / issuer may
+            //     have rotated mid-derivation. The expectation values read
+            //     here are the CURRENT ones, not a snapshot from the cheap
+            //     phase.
+            $now = $this->now !== null ? (int) ($this->now)() : time();
+            if ($now >= $record->expiresAt) {
+                return VerifyOutcome::invalid(VerifyError::Expired);
+            }
+            if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+                return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
+            }
+            if ($this->region !== null && $record->region !== $this->region) {
+                return VerifyOutcome::invalid(VerifyError::WrongRegion);
+            }
+            if ($this->expectedIssuer !== null && $record->issuer !== $this->expectedIssuer) {
+                return VerifyOutcome::invalid(VerifyError::WrongIssuer);
+            }
+
+            // Commit the deterministic valid outcome (best-effort — a
+            // storage failure must NEVER change the outcome) so a retry
+            // replays it without re-deriving.
+            $this->bestEffortCommit($record->nonce, true, $record->requestBinding);
 
             return VerifyOutcome::valid($record->nonce, $record->requestBinding);
         } finally {
@@ -537,6 +655,38 @@ final class Verifier
         }
     }
 
+    /**
+     * Terminal result commit for a consumed record (audit #74). Best-effort
+     * by design: a failed commit must NEVER override the already-determined
+     * verification outcome — without the stored result a retry of the
+     * consumed record degrades to ConsumeIndeterminate, which is strictly
+     * safer than re-deriving a wrong outcome.
+     */
+    private function bestEffortCommit(string $nonce, bool $valid, ?string $binding): void
+    {
+        try {
+            $this->storage->commitResult($nonce, $valid, $binding);
+        } catch (\Throwable) {
+        }
+    }
+
+    /**
+     * @internal Race-test seam (audit #59): rotate the CURRENT deployment
+     * expectations (policy epoch, region, issuer) to model a rotation that
+     * lands between the cheap checks and the post-derive final revalidation.
+     * The final re-check always reads the CURRENT values, so a rotation
+     * performed at any point before it (e.g. by a stateful clock/storage
+     * stub mid-verification) is observed. All three parameters are applied
+     * as given. Not part of the public verification contract — production
+     * deployments configure the expectations once at construction.
+     */
+    public function rotateDeploymentExpectations(?int $policyVersion, ?string $region, ?string $issuer): void
+    {
+        $this->expectedPolicyVersion = $policyVersion;
+        $this->region = $region;
+        $this->expectedIssuer = $issuer;
+    }
+
     private function deriveHash(ChallengeRecord $record, int $counter): ?string
     {
         $saltBytes = base64_decode($record->salt, true);
@@ -614,6 +764,7 @@ final class Verifier
                 $record->region,
                 $record->policyVersion ?? 1,
                 $record->requestBinding,
+                $record->issuer,
             ), $secretKey);
 
         return hash_equals($expected, self::signatureFromChallenge($record->challenge));

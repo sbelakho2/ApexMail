@@ -16,6 +16,7 @@ use KiwiCaptcha\Risk\RiskDecision;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskReason;
+use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\VerifyError;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
@@ -136,6 +137,7 @@ final class RiskGateway
         private readonly int $decisionTtlSecs = 300,
         private readonly ?RiskPolicy $policy = null,
         private readonly ?CalibrationStore $calibration = null,
+        private readonly ?ProcessEmergencyCap $emergencyCap = null,
     ) {
         if (!\in_array($unknownScopeMode, ['reject', 'baseline', 'minimum'], true)) {
             throw new \InvalidArgumentException(sprintf('unknownScopeMode must be "reject", "baseline" or "minimum" (got "%s")', $unknownScopeMode));
@@ -146,6 +148,20 @@ final class RiskGateway
     public function unknownScopeMode(): string
     {
         return $this->unknownScopeMode;
+    }
+
+    /**
+     * Audit #70: whether the process-local emergency window is CURRENTLY
+     * saturated — the cheap local admission step the challenge controller
+     * runs BEFORE any Redis issuance limiter. NON-CONSUMING
+     * ({@see ProcessEmergencyCap::isOpen()}): the controller never marks an
+     * allowance here, so the engine's own consuming check inside
+     * assessPreIssue() stays the single consumer of the budget (no
+     * double-counting). Returns false when no cap is wired (risk disabled).
+     */
+    public function emergencyCapSaturated(): bool
+    {
+        return $this->emergencyCap?->isOpen() ?? false;
     }
 
     /**

@@ -5,15 +5,26 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
+use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
+use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
+use KiwiCaptcha\Risk\RiskPolicy;
+use KiwiCaptcha\Risk\RiskScorer;
+use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -37,7 +48,7 @@ final class ChallengeFlowTest extends TestCase
     public function testChallengeControllerIssuesValidChallenge(): void
     {
         $controller = new ChallengeController($this->issuer());
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
 
         $response = $controller->challenge($request);
         self::assertSame(200, $response->getStatusCode());
@@ -55,7 +66,7 @@ final class ChallengeFlowTest extends TestCase
     public function testControllerRejectsInvalidScope(): void
     {
         $controller = new ChallengeController($this->issuer());
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"bad|scope"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"bad|scope"}');
 
         $response = $controller->challenge($request);
         self::assertSame(422, $response->getStatusCode());
@@ -75,7 +86,7 @@ final class ChallengeFlowTest extends TestCase
         $controller = new ChallengeController($issuer);
 
         // Issue
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
         $challenge = json_decode((string) $controller->challenge($request)->getContent(), true);
         $this->waitOutMinDuration((float) $challenge['minDurationMs']);
 
@@ -94,16 +105,18 @@ final class ChallengeFlowTest extends TestCase
         $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
 
-        // Single-use: replay fails
+        // Retry semantics (audit #74): an identical replay in the same
+        // context returns the SAME stored result without re-deriving.
         $replay = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
-        self::assertSame(\KiwiCaptcha\VerifyError::RecordNotFound, $replay->error);
+        self::assertTrue($replay->isOk(), 'same-context replay must return the stored result');
+        self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result, not a second derivation');
 
         // Wrong scope fails
         $storage2 = new ArrayStorage();
         $issuer2 = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage2);
         $verifier2 = new Verifier($storage2);
         $ch2 = json_decode((string) (new ChallengeController($issuer2))->challenge(
-            Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}')
+            JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}')
         )->getContent(), true);
         $c2 = 0;
         do {
@@ -179,7 +192,7 @@ final class ChallengeFlowTest extends TestCase
     public function testCrossOriginRequestRejectedWith403(): void
     {
         $controller = new ChallengeController($this->issuer());
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
 
         $response = $controller->challenge($request);
         self::assertSame(403, $response->getStatusCode());
@@ -190,7 +203,7 @@ final class ChallengeFlowTest extends TestCase
     public function testSameOriginRequestIsAllowed(): void
     {
         $controller = new ChallengeController($this->issuer());
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'http://localhost'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'http://localhost'], '{"scope":"login"}');
 
         self::assertSame(200, $controller->challenge($request)->getStatusCode());
     }
@@ -198,7 +211,7 @@ final class ChallengeFlowTest extends TestCase
     public function testNoOriginHeaderIsAllowed(): void
     {
         $controller = new ChallengeController($this->issuer());
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
 
         self::assertSame(200, $controller->challenge($request)->getStatusCode());
     }
@@ -206,7 +219,7 @@ final class ChallengeFlowTest extends TestCase
     public function testSameOriginCheckCanBeDisabled(): void
     {
         $controller = new ChallengeController($this->issuer(), null, false);
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
 
         self::assertSame(200, $controller->challenge($request)->getStatusCode(), 'same_origin_only=false must allow cross-origin');
     }
@@ -231,7 +244,7 @@ final class ChallengeFlowTest extends TestCase
                 return $this->inner->find($nonce);
             }
 
-            public function consume(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 return $this->inner->consume($nonce);
             }
@@ -240,9 +253,14 @@ final class ChallengeFlowTest extends TestCase
             {
                 $this->inner->delete($nonce);
             }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
         };
         $controller = new ChallengeController(new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage));
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
 
         $controller->challenge($request);
         self::assertSame(0, $storage->stores, 'cross-origin rejection must happen before any state is written');
@@ -251,7 +269,7 @@ final class ChallengeFlowTest extends TestCase
     public function testSuccessResponseCarriesPrivateDocumentHeaders(): void
     {
         $controller = new ChallengeController($this->issuer());
-        $response = $controller->challenge(Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
 
         self::assertSame('max-age=0, no-store, private', $response->headers->get('Cache-Control'));
         self::assertSame('no-cache', $response->headers->get('Pragma'));
@@ -264,16 +282,16 @@ final class ChallengeFlowTest extends TestCase
         $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com']);
 
         // Exact Origin match (default port normalized).
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://app.example.com'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://app.example.com'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode(), 'an allowlisted Origin must pass');
 
         // Host is case-insensitive (DNS); explicit default port equals the
         // default.
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://APP.EXAMPLE.COM:443'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://APP.EXAMPLE.COM:443'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
 
         // Referer-origin fallback (no Origin header).
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_REFERER' => 'https://app.example.com/contact'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_REFERER' => 'https://app.example.com/contact'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode(), 'a Referer whose origin matches must pass');
     }
 
@@ -288,13 +306,13 @@ final class ChallengeFlowTest extends TestCase
             'https://sub.app.example.com' => 'subdomain is not the host',
         ];
         foreach ($rejected as $origin => $why) {
-            $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => $origin], '{"scope":"login"}'));
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => $origin], '{"scope":"login"}'));
             self::assertSame(403, $response->getStatusCode(), $why.' must be rejected');
             self::assertSame('origin_rejected', json_decode((string) $response->getContent(), true)['error']['code'], $why);
         }
 
         // No Origin AND no Referer: cannot be matched — rejected.
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(403, $response->getStatusCode(), 'a request with neither Origin nor Referer cannot be matched and must be rejected');
         self::assertSame('origin_rejected', json_decode((string) $response->getContent(), true)['error']['code']);
     }
@@ -319,7 +337,7 @@ final class ChallengeFlowTest extends TestCase
                 return $this->inner->find($nonce);
             }
 
-            public function consume(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 return $this->inner->consume($nonce);
             }
@@ -328,10 +346,15 @@ final class ChallengeFlowTest extends TestCase
             {
                 $this->inner->delete($nonce);
             }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
         };
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
         $controller = new ChallengeController($issuer, null, false, null, null, null, null, ['https://app.example.com']);
-        $request = Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
+        $request = JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}');
 
         $controller->challenge($request);
         self::assertSame(0, $storage->stores, 'an origin-rejected request must never mint a CAPTCHA');
@@ -341,7 +364,7 @@ final class ChallengeFlowTest extends TestCase
     {
         $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, [], true);
 
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_SEC_FETCH_SITE' => 'cross-site'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_SEC_FETCH_SITE' => 'cross-site'], '{"scope":"login"}'));
         self::assertSame(403, $response->getStatusCode());
         self::assertSame('CROSS_SITE_REJECTED', json_decode((string) $response->getContent(), true)['error']['code']);
 
@@ -351,13 +374,13 @@ final class ChallengeFlowTest extends TestCase
             if ($fetchSite !== null) {
                 $server['HTTP_SEC_FETCH_SITE'] = $fetchSite;
             }
-            $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], $server, '{"scope":"login"}'));
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], $server, '{"scope":"login"}'));
             self::assertSame(200, $response->getStatusCode(), 'Sec-Fetch-Site "'.(string) $fetchSite.'" must pass');
         }
 
         // Without enforcement a cross-site header is ignored (defense-in-depth).
         $lax = new ChallengeController($this->issuer());
-        $response = $lax->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_SEC_FETCH_SITE' => 'cross-site'], '{"scope":"login"}'));
+        $response = $lax->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_SEC_FETCH_SITE' => 'cross-site'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
     }
 
@@ -380,7 +403,7 @@ final class ChallengeFlowTest extends TestCase
             'https://[2001:db8::1]:8443' => 'IPv6 literal kept bracketed',
         ];
         foreach ($accepted as $origin => $why) {
-            $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => $origin], '{"scope":"login"}'));
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => $origin], '{"scope":"login"}'));
             self::assertSame(200, $response->getStatusCode(), $why.' must be accepted');
         }
 
@@ -393,7 +416,7 @@ final class ChallengeFlowTest extends TestCase
             'https://[2001:db8::2]:8443' => 'different IPv6 literal',
         ];
         foreach ($rejected as $origin => $why) {
-            $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => $origin], '{"scope":"login"}'));
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => $origin], '{"scope":"login"}'));
             self::assertSame(403, $response->getStatusCode(), $why.' must be rejected');
             self::assertSame('origin_rejected', json_decode((string) $response->getContent(), true)['error']['code'], $why);
         }
@@ -407,14 +430,14 @@ final class ChallengeFlowTest extends TestCase
         $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://bücher.example']);
 
         // The Unicode spelling and its punycode form normalize identically.
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://bücher.example'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://bücher.example'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode(), 'the Unicode spelling must match its own allowlisted form');
 
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://xn--bcher-kva.example'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://xn--bcher-kva.example'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode(), 'the punycode spelling must match the Unicode allowlist entry');
 
         // A different Unicode host must NOT match.
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://kaufen.example'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://kaufen.example'], '{"scope":"login"}'));
         self::assertSame(403, $response->getStatusCode(), 'a different IDN host must be rejected');
     }
 
@@ -424,29 +447,29 @@ final class ChallengeFlowTest extends TestCase
         // anything non-null is accepted (no allowlist to match).
         $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, [], false, null, null, true);
 
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(403, $response->getStatusCode(), 'a MISSING Origin must be rejected when enforce_origin is true');
         self::assertSame('origin_rejected', json_decode((string) $response->getContent(), true)['error']['code']);
 
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'null'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'null'], '{"scope":"login"}'));
         self::assertSame(403, $response->getStatusCode(), 'the literal "null" Origin (opaque/sandboxed) must be rejected when enforced');
         self::assertSame('origin_rejected', json_decode((string) $response->getContent(), true)['error']['code']);
 
         // A usable Origin passes (no allowlist).
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://anything.example'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://anything.example'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
 
         // With an allowlist, the required Origin must ALSO be allowlisted.
         $strict = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com'], false, null, null, true);
-        $response = $strict->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://other.example'], '{"scope":"login"}'));
+        $response = $strict->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://other.example'], '{"scope":"login"}'));
         self::assertSame(403, $response->getStatusCode(), 'enforced + allowlisted: a non-allowlisted Origin must be rejected');
-        $response = $strict->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://app.example.com'], '{"scope":"login"}'));
+        $response = $strict->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://app.example.com'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
 
         // NOT enforced (default): a missing Origin with an allowlist falls
         // back to the Referer as before (server-to-server trusted mode).
         $lax = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com']);
-        $response = $lax->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_REFERER' => 'https://app.example.com/contact'], '{"scope":"login"}'));
+        $response = $lax->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_REFERER' => 'https://app.example.com/contact'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode(), 'enforce_origin=false keeps the Referer-origin fallback (documented trusted mode for server-to-server)');
     }
 
@@ -455,7 +478,7 @@ final class ChallengeFlowTest extends TestCase
         $storage = new ArrayStorage();
         $controller = new ChallengeController(new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage));
 
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"txn-abc-123"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"txn-abc-123"}'));
         self::assertSame(200, $response->getStatusCode());
 
         $data = json_decode((string) $response->getContent(), true);
@@ -469,17 +492,17 @@ final class ChallengeFlowTest extends TestCase
         $controller = new ChallengeController($this->issuer());
 
         // '|' is the canonical-payload separator — never allowed in a binding.
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"a|b"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"a|b"}'));
         self::assertSame(422, $response->getStatusCode());
         self::assertSame('INVALID_REQUEST_BINDING', json_decode((string) $response->getContent(), true)['error']['code']);
 
         // Longer than 128 chars.
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"'.str_repeat('x', 129).'"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"'.str_repeat('x', 129).'"}'));
         self::assertSame(422, $response->getStatusCode());
         self::assertSame('INVALID_REQUEST_BINDING', json_decode((string) $response->getContent(), true)['error']['code']);
 
         // Empty string is treated as absent.
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":""}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":""}'));
         self::assertSame(200, $response->getStatusCode());
     }
 
@@ -489,13 +512,13 @@ final class ChallengeFlowTest extends TestCase
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
         $controller = new ChallengeController($issuer, null, false, null, null, null, null, [], false, $storage, 'static-binding');
 
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode());
         $data = json_decode((string) $response->getContent(), true);
         self::assertSame('static-binding', $storage->find($data['nonce'])?->requestBinding, 'the configured static binding must apply when the request sends none');
 
         // The request's own field WINS over the static default.
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"per-request"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"per-request"}'));
         $data = json_decode((string) $response->getContent(), true);
         self::assertSame('per-request', $storage->find($data['nonce'])?->requestBinding, 'the per-request binding overrides the static default');
     }
@@ -514,11 +537,11 @@ final class ChallengeFlowTest extends TestCase
         $controller = new ChallengeController($issuer, null, false, null, null, null, $outstanding, [], false, $storage);
 
         for ($i = 0; $i < 3; $i++) {
-            $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
             self::assertSame(200, $response->getStatusCode(), 'issuance '.(1 + $i).' must pass below the cap');
         }
 
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(429, $response->getStatusCode(), 'the 4th outstanding challenge must hit the per-source cap');
         self::assertSame('RISK_DENIED', json_decode((string) $response->getContent(), true)['error']['code']);
 
@@ -528,7 +551,7 @@ final class ChallengeFlowTest extends TestCase
 
         // A DIFFERENT source is unaffected (per-source counters are keyed on
         // the HMAC of the canonical IP).
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.8'], '{"scope":"login"}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.8'], '{"scope":"login"}'));
         self::assertSame(200, $response->getStatusCode(), 'a fresh source must not be blocked by another source\'s cap');
     }
 
@@ -546,5 +569,298 @@ final class ChallengeFlowTest extends TestCase
         }
 
         return new FakePredisClient();
+    }
+
+    // ── Round 10: narrow HTTP (audit #77) ─────────────────────────────────
+
+    public function testNonPostMethodsStay405(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $controller = new ChallengeController($issuer);
+
+        foreach (['GET', 'PUT', 'DELETE', 'PATCH', 'HEAD'] as $method) {
+            $response = $controller->challenge(Request::create('/challenge', $method, [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+            self::assertSame(405, $response->getStatusCode(), $method.' must stay 405');
+            self::assertSame('POST', $response->headers->get('Allow'), '405 must advertise Allow: POST');
+            self::assertSame('METHOD_NOT_ALLOWED', json_decode((string) $response->getContent(), true)['error']['code']);
+        }
+        self::assertSame(0, \count((new \ReflectionObject($storage))->getProperty('records')->getValue($storage)), 'no non-POST method may mint a challenge');
+    }
+
+    /**
+     * Audit #63: an OPTIONS preflight ALONE never authorizes — it is a
+     * non-POST method and gets 405 with no challenge stored, no CORS
+     * headers, no state written.
+     */
+    public function testOptionsPreflightNeverAuthorizes(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $controller = new ChallengeController($issuer);
+
+        $response = $controller->challenge(Request::create(
+            '/challenge',
+            'OPTIONS',
+            [],
+            [],
+            [],
+            ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example', 'HTTP_ACCESS_CONTROL_REQUEST_METHOD' => 'POST'],
+        ));
+        self::assertSame(405, $response->getStatusCode(), 'an OPTIONS preflight must never authorize a challenge');
+        self::assertSame(0, \count((new \ReflectionObject($storage))->getProperty('records')->getValue($storage)), 'a preflight must not mint a challenge');
+        self::assertNull($response->headers->get('Access-Control-Allow-Origin'), 'the bundle emits no CORS headers — a preflight gets no ACAO echo');
+    }
+
+    public function testContentEncodingOtherThanIdentityIs415(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        foreach (['gzip', 'br', 'deflate'] as $encoding) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], [
+                'REMOTE_ADDR' => '198.51.100.7',
+                'HTTP_CONTENT_ENCODING' => $encoding,
+            ], '{"scope":"login"}'));
+            self::assertSame(415, $response->getStatusCode(), 'Content-Encoding '.$encoding.' must be refused');
+            self::assertSame('UNSUPPORTED_CONTENT_ENCODING', json_decode((string) $response->getContent(), true)['error']['code']);
+        }
+
+        // identity (explicit or absent) is the only accepted encoding.
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], [
+            'REMOTE_ADDR' => '198.51.100.7',
+            'HTTP_CONTENT_ENCODING' => 'identity',
+        ], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'identity encoding must be accepted');
+    }
+
+    public function testContentTypeOtherThanApplicationJsonIs415(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        foreach (['application/x-www-form-urlencoded', 'text/plain', 'multipart/form-data', 'application/xml'] as $type) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], [
+                'REMOTE_ADDR' => '198.51.100.7',
+                'CONTENT_TYPE' => $type,
+            ], '{"scope":"login"}'));
+            self::assertSame(415, $response->getStatusCode(), 'Content-Type '.$type.' must be refused');
+            self::assertSame('UNSUPPORTED_MEDIA_TYPE', json_decode((string) $response->getContent(), true)['error']['code']);
+        }
+
+        // application/json (with an optional charset) is the widget's POST.
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], [
+            'REMOTE_ADDR' => '198.51.100.7',
+            'CONTENT_TYPE' => 'application/json; charset=utf-8',
+        ], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'application/json with a charset parameter must be accepted');
+    }
+
+    public function testChallengeEndpointAcceptsNoQueryParameters(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        foreach (['debug=1', 'skip_pow=1', 'algorithm=sha256', 'scope=login'] as $query) {
+            $response = $controller->challenge(JsonRequest::create('/challenge?'.$query, 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+            self::assertSame(422, $response->getStatusCode(), 'query parameter "'.$query.'" must be refused');
+            self::assertSame('QUERY_PARAMETERS_NOT_ALLOWED', json_decode((string) $response->getContent(), true)['error']['code']);
+        }
+    }
+
+    // ── Round 10: query-param hardening / unknown fields (audit #72) ──────
+
+    public function testUnknownJsonFieldsAre422(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","debug":1}'));
+        self::assertSame(422, $response->getStatusCode());
+        self::assertSame('UNKNOWN_FIELDS', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","skip_pow":true,"algorithm":"sha256"}'));
+        self::assertSame(422, $response->getStatusCode(), 'any unknown field — alongside known ones — must be refused');
+    }
+
+    public function testDocumentedFieldsAreAccepted(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        // scope + algorithm + request_binding are the documented fields.
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","algorithm":"sha256","request_binding":"txn-1"}'));
+        self::assertSame(200, $response->getStatusCode(), 'the documented fields must be accepted');
+
+        // An empty JSON object {} is valid (all fields optional).
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{}'));
+        self::assertSame(200, $response->getStatusCode(), 'an empty JSON object is a valid document');
+    }
+
+    public function testNonObjectJsonBodiesAre422(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        foreach (['[]', '"login"', '123', 'null', 'not-json{'] as $body) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], $body));
+            self::assertSame(422, $response->getStatusCode(), 'body '.var_export($body, true).' must be refused');
+            self::assertSame('INVALID_JSON', json_decode((string) $response->getContent(), true)['error']['code']);
+        }
+    }
+
+    // ── Round 10: CORS is not authorization (audit #63) ───────────────────
+
+    public function testNoCorsHeadersAreEmittedOnAnyResponse(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        // Success path.
+        $ok = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertNull($ok->headers->get('Access-Control-Allow-Origin'), 'a success response must never echo ACAO');
+        self::assertNull($ok->headers->get('Vary'), 'no CORS header means no Vary: Origin either');
+
+        // Error paths (403 origin rejection, 405, 415).
+        $cross = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}'));
+        self::assertNull($cross->headers->get('Access-Control-Allow-Origin'), 'a 403 must not echo ACAO');
+
+        $badMethod = $controller->challenge(Request::create('/challenge', 'GET'));
+        self::assertNull($badMethod->headers->get('Access-Control-Allow-Origin'), 'a 405 must not echo ACAO');
+
+        $badEncoding = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_CONTENT_ENCODING' => 'gzip'], '{"scope":"login"}'));
+        self::assertNull($badEncoding->headers->get('Access-Control-Allow-Origin'), 'a 415 must not echo ACAO');
+
+        // The origin checks run on EVERY response regardless of any CORS
+        // configuration: the allowlisted controller still rejects a
+        // non-allowlisted origin on every path.
+        $allowlisted = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com']);
+        $denied = $allowlisted->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}'));
+        self::assertSame(403, $denied->getStatusCode(), 'origin enforcement is independent of CORS');
+        self::assertNull($denied->headers->get('Access-Control-Allow-Origin'));
+    }
+
+    // ── Round 10: frame-ancestors CSP (audit #71) ─────────────────────────
+
+    public function testFrameAncestorsCspEmittedWhenAllowlistNonEmpty(): void
+    {
+        $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com', 'https://cdn.example.com']);
+
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://app.example.com'], '{"scope":"login"}'));
+        self::assertSame('frame-ancestors https://app.example.com https://cdn.example.com', $response->headers->get('Content-Security-Policy'), 'the CSP must carry the EXACT space-separated allowlisted origins');
+
+        // Error responses carry the same explicit CSP (never inherited from
+        // default-src — it is always the full directive).
+        $denied = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://evil.example'], '{"scope":"login"}'));
+        self::assertSame(403, $denied->getStatusCode());
+        self::assertSame('frame-ancestors https://app.example.com https://cdn.example.com', $denied->headers->get('Content-Security-Policy'));
+    }
+
+    public function testNoCspHeaderWhenAllowlistEmpty(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertNull($response->headers->get('Content-Security-Policy'), 'an empty allowlist must emit NO CSP header');
+    }
+
+    // ── Round 10: host-context hardening (audit #78) ──────────────────────
+
+    /**
+     * public_base_url comes from SERVER CONFIG: a forged Host header can
+     * never shift the expected same-origin ("Host: evil.example" + "Origin:
+     * https://evil.example" must stay cross-origin).
+     */
+    public function testForgedHostCannotAlterOriginChecksWithPublicBaseUrl(): void
+    {
+        $controller = new ChallengeController($this->issuer(), null, true, null, null, null, null, [], false, null, null, false, null, 'https://app.example.com');
+
+        // Forged Host + matching forged Origin: rejected — the expected
+        // origin is the configured base URL, not the request's host.
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], [
+            'REMOTE_ADDR' => '198.51.100.7',
+            'HTTP_HOST' => 'evil.example',
+            'HTTP_ORIGIN' => 'https://evil.example',
+        ], '{"scope":"login"}'));
+        self::assertSame(403, $response->getStatusCode(), 'a forged Host must not make a cross-origin request look same-origin');
+        self::assertSame('CROSS_ORIGIN_DENIED', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        // The real origin passes even behind the forged Host.
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], [
+            'REMOTE_ADDR' => '198.51.100.7',
+            'HTTP_HOST' => 'evil.example',
+            'HTTP_ORIGIN' => 'https://app.example.com',
+        ], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'the configured origin must pass regardless of the Host header');
+    }
+
+    public function testForgedHostCannotAlterTheIssuedChallenge(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $controller = new ChallengeController($issuer, null, false, null, null, null, null, [], false, $storage);
+
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], [
+            'REMOTE_ADDR' => '198.51.100.7',
+            'HTTP_HOST' => 'attacker-controlled.example',
+        ], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode());
+
+        $nonce = json_decode((string) $response->getContent(), true)['nonce'];
+        $record = $storage->find($nonce);
+        self::assertNotNull($record);
+        // The record carries NO Host-derived material: scope + the socket
+        // peer's binding tag are the only context.
+        self::assertSame('login', $record->scope);
+        self::assertSame(Issuer::bindingTag($nonce, '198.51.100.7', self::SECRET), $record->bindingTag);
+    }
+
+    // ── Round 10: local admission before Redis (audit #70) ────────────────
+
+    private function riskGatewayWithEmergencyCap(ProcessEmergencyCap $cap): RiskGateway
+    {
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
+        $engine = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+
+        return new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], emergencyCap: $cap);
+    }
+
+    /**
+     * Audit #70: a saturated PROCESS-LOCAL emergency cap denies BEFORE any
+     * Redis issuance limiter — the fake Redis client sees ZERO calls.
+     */
+    public function testSaturatedProcessCapDeniesBeforeAnyRedisWrite(): void
+    {
+        $client = new FakePredisClient();
+        $limiter = new IssuanceRateLimiter(10, 60, null, null, 'pepper', $client, 500, 'test-ns');
+        $cap = new ProcessEmergencyCap(1);
+        $cap->allow(); // consume the single per-second allowance -> saturated
+        $gateway = $this->riskGatewayWithEmergencyCap($cap);
+
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), new ArrayStorage());
+        $controller = new ChallengeController($issuer, $limiter, false, $gateway);
+
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(429, $response->getStatusCode());
+        self::assertSame('RISK_DENIED', json_decode((string) $response->getContent(), true)['error']['code']);
+        self::assertSame([], $client->calls, 'the process-local cap must refuse BEFORE any Redis round trip (the rate limiter never ran)');
+    }
+
+    public function testRedisRateLimiterRunsWhenTheProcessCapHasBudget(): void
+    {
+        $client = new FakePredisClient();
+        $limiter = new IssuanceRateLimiter(1, 60, null, null, 'pepper', $client, 500, 'test-ns');
+        $gateway = $this->riskGatewayWithEmergencyCap(new ProcessEmergencyCap(10000));
+
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), new ArrayStorage());
+        $controller = new ChallengeController($issuer, $limiter, false, $gateway);
+
+        // First issuance passes (Redis limiter + engine admission both run).
+        self::assertSame(200, $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'))->getStatusCode());
+        self::assertNotSame([], $client->calls, 'with process budget available the Redis limiter runs');
+
+        // The second issuance hits the per-client Redis cap (429 RATE_LIMITED).
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(429, $response->getStatusCode());
+        self::assertSame('RATE_LIMITED', json_decode((string) $response->getContent(), true)['error']['code']);
     }
 }

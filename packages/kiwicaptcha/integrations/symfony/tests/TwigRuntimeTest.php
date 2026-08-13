@@ -58,6 +58,38 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('data-kiwi-scope="login"', $html);
     }
 
+    // ── Round 10: widget-page frame-ancestors CSP helper (audit #71) ──────
+
+    public function testCspFrameAncestorsIsNullForAnEmptyAllowlist(): void
+    {
+        [$env, $runtime] = $this->runtime();
+        self::assertNull($runtime->cspFrameAncestors(), 'an empty allowlist must produce no CSP directive');
+    }
+
+    public function testCspFrameAncestorsCarriesTheAllowlistedOrigins(): void
+    {
+        $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', challengeOriginAllowlist: ['https://app.example.com', 'https://cdn.example.com']);
+
+        self::assertSame(
+            'frame-ancestors https://app.example.com https://cdn.example.com',
+            $runtime->cspFrameAncestors(),
+            'the directive must be EXPLICIT and space-separated (never default-src inheritance)',
+        );
+    }
+
+    public function testTwigFunctionExposesTheFrameAncestorsDirective(): void
+    {
+        $env = new Environment(new ArrayLoader([]));
+        $extension = new \BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaExtension();
+        $env->addExtension($extension);
+        $env->addRuntimeLoader(new \Twig\RuntimeLoader\FactoryRuntimeLoader([
+            \BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime::class => static fn () => new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', challengeOriginAllowlist: ['https://app.example.com']),
+        ]));
+
+        $html = $env->createTemplate('{{ kiwi_captcha_csp_frame_ancestors() }}')->render([]);
+        self::assertSame('frame-ancestors https://app.example.com', $html);
+    }
+
     public function testTelemetryRenderedFromRuntimeDefaultAndContext(): void
     {
         [$env, $runtime] = $this->runtime();

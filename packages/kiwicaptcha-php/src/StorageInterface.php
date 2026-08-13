@@ -7,34 +7,49 @@ namespace KiwiCaptcha;
 /**
  * Persistence for issued challenges.
  *
- * `consume()` returns the record and removes it, enforcing single-use
- * semantics per stored item. Implementations MAY be non-atomic under
- * concurrency: two racing requests can both read the same record before
- * either removes it. Implementations that guarantee STRICT single-use
- * (a second call MUST return null even under concurrency) implement
+ * `consume()` is a one-shot TRANSITION (audit #74): it marks the record
+ * consumed and KEEPS it until its TTL — replay protection is the consumed
+ * marker, not absence. The returned {@see ConsumedRecord} distinguishes the
+ * winner of the transition (`consumedNow`) from a retry on an
+ * already-consumed record (`consumedBefore`, with the deterministic
+ * `consumedResult` when it was committed before a crash).
+ *
+ * Implementations MAY be non-atomic under concurrency: two racing requests
+ * can both observe the pending state before either marks it consumed.
+ * Implementations that guarantee STRICT single-use (exactly one caller wins
+ * `consumedNow`, even under concurrency) implement
  * {@see AtomicStorageInterface}.
  */
 interface StorageInterface
 {
     /**
      * Store a challenge record, replacing any existing record with the same
-     * nonce.
+     * nonce. The record is stored in its PENDING state.
      */
     public function store(ChallengeRecord $record): void;
 
     /**
      * Load a record by nonce without consuming it (used to inspect state).
+     * Returns the record whether it is pending or already consumed.
      */
     public function find(string $nonce): ?ChallengeRecord;
 
     /**
-     * Load-and-remove a record: returns the record only if it existed and
-     * removes it from the store, so replaying a token yields no record and
-     * verification fails. Best-effort single-use — MAY be non-atomic under
-     * concurrency; implementations that guarantee atomic single-use
-     * implement {@see AtomicStorageInterface}.
+     * One-shot consume transition: returns the record and marks it consumed
+     * (keeping it until its TTL). A missing record yields null; an
+     * already-consumed record is returned with `consumedBefore` set, plus
+     * the committed result (if any).
      */
-    public function consume(string $nonce): ?ChallengeRecord;
+    public function consume(string $nonce): ?ConsumedRecord;
+
+    /**
+     * Commit the deterministic verification result of a consumed record.
+     * Only succeeds (returns true) when the record exists, is in the
+     * CONSUMED state, and has no committed result yet (atomic in the Redis
+     * backend; best-effort elsewhere). The verifier calls this
+     * best-effort — a failure must never change the verification outcome.
+     */
+    public function commitResult(string $nonce, bool $valid, ?string $binding): bool;
 
     /**
      * Delete a record by nonce.

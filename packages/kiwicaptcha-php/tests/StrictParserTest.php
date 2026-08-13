@@ -19,7 +19,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class StrictParserTest extends TestCase
 {
-    /** @return array<string, mixed> a fully valid 20-key record array */
+    /** @return array<string, mixed> a fully valid 21-key record array */
     private static function base(): array
     {
         return [
@@ -43,6 +43,7 @@ final class StrictParserTest extends TestCase
             'region' => null,
             'policy_version' => 1,
             'request_binding' => null,
+            'issuer' => null,
         ];
     }
 
@@ -73,7 +74,8 @@ final class StrictParserTest extends TestCase
         self::assertSame(2, $record->protocolVersion);
         self::assertSame(1, $record->policyVersion);
         self::assertNull($record->requestBinding);
-        self::assertSame(20, \count(ChallengeRecord::WIRE_KEYS));
+        self::assertNull($record->issuer);
+        self::assertSame(21, \count(ChallengeRecord::WIRE_KEYS));
         self::assertSame(ChallengeRecord::WIRE_KEYS, \array_keys($record->toArray()));
     }
 
@@ -169,6 +171,17 @@ final class StrictParserTest extends TestCase
 
         yield 'algorithm alias argon2' => [self::mutate('algorithm', 'argon2'), 'must be exactly'];
 
+        // Audit #73: unknown algorithm strings must be rejected IDENTICALLY
+        // to the Rust parser (PoWAlgorithm enum — exact lowercase names
+        // only, no aliases, no spelling variants).
+        yield 'algorithm unknown argon2d' => [self::mutate('algorithm', 'argon2d'), 'must be exactly'];
+
+        yield 'algorithm unknown sha1' => [self::mutate('algorithm', 'sha1'), 'must be exactly'];
+
+        yield 'algorithm unknown sha256-v2' => [self::mutate('algorithm', 'sha256-v2'), 'must be exactly'];
+
+        yield 'algorithm unknown spaced variant' => [self::mutate('algorithm', 'ARGO N2ID'), 'must be exactly'];
+
         yield 'binding_tag and ip_hash together rejected' => [
             self::base() + ['ip_hash' => 'legacyhash'],
             'both "binding_tag" and its legacy alias "ip_hash"',
@@ -186,29 +199,52 @@ final class StrictParserTest extends TestCase
         self::assertSame('legacyhash', $record->ipHash());
     }
 
-    public function testNullRegionAndRequestBindingAreAccepted(): void
+    public function testNullRegionRequestBindingAndIssuerAreAccepted(): void
     {
         $record = ChallengeRecord::fromArray(self::base());
 
         self::assertNull($record->region);
         self::assertNull($record->requestBinding);
+        self::assertNull($record->issuer);
     }
 
-    public function testStringRegionAndRequestBindingAreAccepted(): void
+    public function testStringRegionRequestBindingAndIssuerAreAccepted(): void
     {
         $data = self::mutate('region', 'eu');
         $data['request_binding'] = 'txn-42';
+        $data['issuer'] = 'prod';
 
         $record = ChallengeRecord::fromArray($data);
 
         self::assertSame('eu', $record->region);
         self::assertSame('txn-42', $record->requestBinding);
+        self::assertSame('prod', $record->issuer);
+    }
+
+    public function testNonStringIssuerIsRejected(): void
+    {
+        try {
+            ChallengeRecord::fromArray(self::mutate('issuer', 123));
+            self::fail('a non-string issuer must be rejected');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('issuer', $e->getMessage());
+        }
+    }
+
+    public function testOversizedIssuerIsRejected(): void
+    {
+        try {
+            ChallengeRecord::fromArray(self::mutate('issuer', str_repeat('i', 5000)));
+            self::fail('an oversized issuer must be rejected');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('4096-byte ceiling', $e->getMessage());
+        }
     }
 
     public function testAbsentOptionalFieldsDefault(): void
     {
         $data = self::base();
-        unset($data['issued_at_ns'], $data['attempts_used'], $data['region'], $data['policy_version'], $data['request_binding'], $data['protocol_version']);
+        unset($data['issued_at_ns'], $data['attempts_used'], $data['region'], $data['policy_version'], $data['request_binding'], $data['issuer'], $data['protocol_version']);
 
         $record = ChallengeRecord::fromArray($data);
 
@@ -217,6 +253,7 @@ final class StrictParserTest extends TestCase
         self::assertNull($record->region);
         self::assertSame(1, $record->policyVersion, 'serde default policy_version is 1');
         self::assertNull($record->requestBinding);
+        self::assertNull($record->issuer, 'a missing issuer key defaults to null (the fuzz corpus has no issuer field)');
     }
 
     public function testProtocolVersionWithinU8RangeIsAccepted(): void
@@ -238,14 +275,31 @@ final class StrictParserTest extends TestCase
         self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
     }
 
-    public function testWireKeySetIsPinnedTo20(): void
+    public function testWireKeySetIsPinnedTo21(): void
     {
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
+            'issuer',
         ], ChallengeRecord::WIRE_KEYS);
+    }
+
+    public function testRuntimeStorageFieldsAreNotWireKeys(): void
+    {
+        // Audit #74: `state` and `consumed_result` are storage-layer runtime
+        // fields wrapped around the canonical JSON — they are NOT part of
+        // the canonical record schema and must be rejected by the strict
+        // serde-mirror parser exactly like any other unknown key.
+        foreach (['state', 'consumed_result'] as $key) {
+            try {
+                ChallengeRecord::fromArray(self::base() + [$key => 'x']);
+                self::fail("'$key' is a storage runtime field and must NOT parse into the record");
+            } catch (MalformedRecordException $e) {
+                self::assertStringContainsString('unknown record key', $e->getMessage());
+            }
+        }
     }
 
     public function testVectorsSecretIsStillUsableAsRecordSeed(): void

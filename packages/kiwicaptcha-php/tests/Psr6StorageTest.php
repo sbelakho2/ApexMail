@@ -52,20 +52,27 @@ final class Psr6StorageTest extends TestCase
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
 
-        $record = $storage->consume('nonce-1');
+        $consumed = $storage->consume('nonce-1');
 
-        self::assertNotNull($record);
-        self::assertSame('nonce-1', $record->nonce);
+        self::assertNotNull($consumed);
+        self::assertSame('nonce-1', $consumed->record->nonce);
+        self::assertTrue($consumed->consumedNow);
     }
 
-    public function testConsumeRemovesRecord(): void
+    public function testConsumeMarksConsumedAndKeepsTheRecord(): void
     {
+        // Audit #74: consume() is a transition — the record is kept (marked
+        // consumed) until its own expiration; a retry observes the consumed
+        // marker instead of a missing record.
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
+        $storage->consume('nonce-1'); // first call wins the transition
 
-        self::assertNotNull($storage->consume('nonce-1'));
-        self::assertNull($storage->consume('nonce-1'), 'second consume must miss');
-        self::assertNull($storage->find('nonce-1'), 'record must be gone after consume');
+        $retry = $storage->consume('nonce-1');
+        self::assertNotNull($retry, 'the consumed record is kept — replay protection is the marker, not absence');
+        self::assertTrue($retry->consumedBefore);
+        self::assertNotNull($storage->find('nonce-1'), 'find must still see the consumed record');
+        self::assertTrue($storage->commitResult('nonce-1', true, null), 'commit on a consumed record without result must succeed');
     }
 
     public function testConsumeOnMissingNonceReturnsNull(): void
@@ -81,7 +88,7 @@ final class Psr6StorageTest extends TestCase
         $storage->store($this->makeRecord());
 
         self::assertNotNull($storage->find('nonce-1'));
-        self::assertNotNull($storage->find('nonce-1'), 'find must not delete');
+        self::assertNotNull($storage->find('nonce-1'), 'find must not transition');
     }
 
     public function testStoreReplacesExistingRecord(): void
@@ -90,10 +97,11 @@ final class Psr6StorageTest extends TestCase
         $storage->store($this->makeRecord('n'));
         $storage->store($this->makeRecord('n'));
 
-        $record = $storage->consume('n');
+        $consumed = $storage->consume('n');
 
-        self::assertNotNull($record);
-        self::assertNull($storage->consume('n'));
+        self::assertNotNull($consumed);
+        self::assertSame('n', $consumed->record->nonce);
+        self::assertNotNull($storage->consume('n'), 'the replaced record is consumed, not deleted');
     }
 
     public function testDeleteRemovesRecord(): void
@@ -106,23 +114,41 @@ final class Psr6StorageTest extends TestCase
         self::assertNull($storage->find('nonce-1'));
     }
 
+    public function testCommitResultStoresAndRejectsSecondCommit(): void
+    {
+        $storage = new Psr6Storage($this->makePool());
+        $storage->store($this->makeRecord());
+
+        self::assertFalse($storage->commitResult('nonce-1', true, 'txn'), 'commit on a pending record must fail');
+        $storage->consume('nonce-1');
+        self::assertTrue($storage->commitResult('nonce-1', true, 'txn'));
+        self::assertFalse($storage->commitResult('nonce-1', false, null), 'a second commit must be rejected');
+
+        $retry = $storage->consume('nonce-1');
+        self::assertNotNull($retry);
+        self::assertTrue($retry->consumedBefore);
+        self::assertNotNull($retry->consumedResult, 'the committed result must ride back on the retry');
+        self::assertTrue($retry->consumedResult->valid);
+        self::assertSame('txn', $retry->consumedResult->binding);
+    }
+
     public function testRecordRoundTripsThroughSerialization(): void
     {
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
 
-        $record = $storage->consume('nonce-1');
+        $consumed = $storage->consume('nonce-1');
 
-        self::assertSame('login', $record?->scope);
-        self::assertSame(PoWAlgorithm::Sha256, $record?->algorithm);
-        self::assertSame(0, $record?->issuedAtNs);
+        self::assertSame('login', $consumed?->record->scope);
+        self::assertSame(PoWAlgorithm::Sha256, $consumed?->record->algorithm);
+        self::assertSame(0, $consumed?->record->issuedAtNs);
     }
 
     public function testPsr6StorageIsNotAtomic(): void
     {
-        // PSR-6 cannot fuse read and delete, so Psr6Storage is best-effort
-        // single-use — it must NOT claim AtomicStorageInterface (only
-        // RedisStorage's GETDEL backend does).
+        // PSR-6 cannot fuse read and transition, so Psr6Storage is
+        // best-effort single-use — it must NOT claim AtomicStorageInterface
+        // (only RedisStorage's fused Lua transition backend does).
         self::assertNotInstanceOf(\KiwiCaptcha\AtomicStorageInterface::class, new Psr6Storage($this->makePool()));
     }
 
@@ -138,7 +164,7 @@ final class Psr6StorageTest extends TestCase
         $loaded = $reader->consume('ns-rec');
 
         self::assertNotNull($loaded);
-        self::assertSame($record->issuedAtNs, $loaded->issuedAtNs);
+        self::assertSame($record->issuedAtNs, $loaded->record->issuedAtNs);
     }
 
     public function testNonceContainingForwardSlashRoundTrips(): void
@@ -157,7 +183,7 @@ final class Psr6StorageTest extends TestCase
         self::assertNotNull($storage->find($nonce));
         $consumed = $storage->consume($nonce);
         self::assertNotNull($consumed);
-        self::assertNull($storage->find($nonce));
+        self::assertNotNull($storage->find($nonce), 'the consumed record is kept until its own expiration');
     }
 
     public function testNonceContainingPlusRoundTrips(): void

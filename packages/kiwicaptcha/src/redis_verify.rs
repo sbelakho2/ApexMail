@@ -2,20 +2,37 @@
 //!
 //! [`RedisChallengeStore`] persists [`ChallengeRecord`]s as the language-
 //! neutral JSON schema shared with the PHP core (`packages/kiwicaptcha-php`)
-//! — the same 18 keys `ChallengeRecord::toArray()` emits — under the key
+//! — the same 21 keys `ChallengeRecord::toArray()` emits — under the key
 //! `{prefix}{nonce}` with an EX TTL of `expires_at - now + ttl_margin_secs`
 //! (min 1 s, exactly like the PHP `RedisStorage` plus the audit #22/#23 TTL
 //! margin). A PHP service and a Rust service can read each other's records
 //! from the same Redis instance.
 //!
+//! # Consumed-state transition (audit #74)
+//!
+//! `consume()` is a Lua TRANSITION, not a GETDEL: the pending record is
+//! KEPT in the store with a storage-level runtime field `state =
+//! "consumed"` (plus the committed outcome `consumed_result`), so a
+//! concurrent loser — or a later replay — observes the consumed record and
+//! returns the WINNER'S COMMITTED OUTCOME instead of RecordNotFound and
+//! instead of re-deriving. The winner derives exactly once and commits its
+//! outcome with [`RedisChallengeStore::commit_result`] (best-effort).
+//! A loser that finds the record consumed but NOT yet committed (crash
+//! between transition and commit) gets
+//! [`VerifyError::ConsumeIndeterminate`].
+//!
 //! [`ProductionVerifier`] implements the PHP verifier's check order with
-//! atomic single-use enforced by Redis GETDEL:
+//! atomic single-use enforced by the consumed-state transition:
 //!
 //! ```text
 //! token decode → store.find(nonce) PEEK (GET) → cheap validation (structure,
-//! v1 gate, signature, TTL, scope, IP binding, server-measured min duration) →
-//! optional Argon admission gate → store.consume(nonce) (GETDEL) → TOCTOU
-//! re-validation of the CONSUMED record → derive hash (once) → leading-zero check
+//! v1 gate, signature, TTL incl. the future-time bound, scope, region,
+//! policy epoch, issuer, IP binding, server-measured min duration) →
+//! optional Argon admission gate → store.consume(nonce) (Lua transition) →
+//! first=false → return the stored outcome (or ConsumeIndeterminate) →
+//! TOCTOU re-validation of the consumed record → derive hash (once) →
+//! FINAL re-validation with a fresh clock read + current expectations →
+//! leading-zero check → best-effort commit_result
 //! ```
 //!
 //! # One-shot semantics (why exactly one derive per nonce)
@@ -23,23 +40,25 @@
 //! The cheap phase and the Argon admission gate run against the PEEKED
 //! record and never consume: a malformed/expired/mismatched challenge or a
 //! gate rejection leaves the record in the store, so the client can retry.
-//! Consumption happens exactly once, immediately before hash derivation, via
-//! Redis `GETDEL`, which atomically returns AND deletes the key. Under
-//! concurrency exactly one caller can ever observe the record: two racing
-//! `verify()` calls on the same token yield one [`VerifyOutcome::Valid`] and
-//! one [`VerifyOutcome::Invalid(VerifyError::RecordNotFound)`] — the loser
-//! never reaches hash derivation, so each nonce drives AT MOST one expensive
-//! Argon2id/SHA-256 computation no matter how many requests race for it.
-//! This is the distributed bound the caller-managed attempt counter in
-//! [`crate::verify::verify_solution`] cannot provide: that counter lives on
-//! a per-process record copy, while GETDEL fuses load-and-remove in the
-//! store itself (Redis 6.2+, same as PHP's `rawCommand('GETDEL', ...)`).
+//! Consumption happens exactly once, immediately before hash derivation,
+//! via the atomic Lua transition (pending → consumed). Under concurrency
+//! exactly one caller can ever win the transition: two racing `verify()`
+//! calls on the same token yield one [`VerifyOutcome::Valid`] (the winner,
+//! which derives) and one SAME outcome returned from the stored result (or
+//! [`VerifyError::ConsumeIndeterminate`] if it races before the commit) —
+//! the loser never reaches hash derivation, so each nonce drives AT MOST one
+//! expensive Argon2id/SHA-256 computation no matter how many requests race
+//! for it. This is the distributed bound the caller-managed attempt counter
+//! in [`crate::verify::verify_solution`] cannot provide: that counter lives
+//! on a per-process record copy, while the Lua transition fuses
+//! load-and-mark-consumed in the store itself.
 //!
-//! A wrong counter reaches the proof phase and therefore burns the record —
-//! replaying any consumed token always fails with `RecordNotFound`. The
-//! TOCTOU re-validation after `consume()` makes a swapped/racing record fail
-//! closed: the consumed instance must carry the exact challenge that was
-//! peeked and must pass the full cheap phase again.
+//! A wrong counter reaches the proof phase, commits `valid = false` and
+//! therefore burns the record — replaying the token returns the stored
+//! `InsufficientWork` outcome. The TOCTOU re-validation after `consume()`
+//! makes a swapped/racing record fail closed: the consumed instance must
+//! carry the exact challenge that was peeked and must pass the full cheap
+//! phase again.
 //!
 //! # Error semantics (find/consume failures)
 //!
@@ -50,27 +69,25 @@
 //!   checkout failed (unreachable backend, failed connect, read/write
 //!   timeout). A GET never consumes, so the challenge is PRESUMED INTACT:
 //!   the client may retry it once the store recovers.
-//! - [`VerifyError::ConsumeIndeterminate`] — the atomic consume (`GETDEL`)
-//!   failed with an uncertain I/O error (e.g. the reply timed out). The
-//!   challenge MAY or MAY NOT have been consumed: GETDEL is atomic on the
-//!   server, so the record is gone if the command landed and intact if it
-//!   never arrived. The verifier NEVER retries the GETDEL automatically —
-//!   see the no-retry rule below. The caller should treat the token as
-//!   unknown (e.g. re-issue) rather than replay it.
+//! - [`VerifyError::ConsumeIndeterminate`] — the atomic consume failed with
+//!   an uncertain I/O error (e.g. the reply timed out), or the record was
+//!   already consumed without a committed outcome (crash between the
+//!   transition and the outcome commit). The verifier NEVER retries the
+//!   consume automatically — see the no-retry rule below. The caller should
+//!   treat the token as unknown (e.g. re-issue) rather than replay it.
 //!
 //! `Ok(None)` from `find()`/`consume()` stays [`VerifyError::RecordNotFound`]
-//! — a genuinely absent key (never issued, expired away, or already consumed
-//! by a concurrent winner).
+//! — a genuinely absent key (never issued, expired away).
 //!
-//! # The GETDEL no-retry rule
+//! # The no-retry rule
 //!
 //! On an uncertain `consume()` failure the pooled connection is POISONED and
-//! r2d2 evicts it (never returned to the idle pool): the GETDEL reply may
-//! still be in flight on that socket, and reusing the connection could
-//! desync the RESP stream. The failure is reported as
-//! [`VerifyError::ConsumeIndeterminate`] and the GETDEL is NEVER
-//! automatically retried — a blind retry could burn a record that the
-//! original attempt did consume.
+//! r2d2 evicts it (never returned to the idle pool): the reply may still be
+//! in flight on that socket, and reusing the connection could desync the
+//! RESP stream. The failure is reported as
+//! [`VerifyError::ConsumeIndeterminate`] and the consume is NEVER
+//! automatically retried — a blind retry could corrupt a record that the
+//! original attempt did transition.
 //!
 //! # Telemetry parity note
 //!
@@ -84,8 +101,8 @@ use crate::challenge::{
 };
 use crate::token::SolutionToken;
 use crate::verify::{
-    ct_eq, derive_hash, leading_zero_bits, signature_from_challenge, validate_record, VerifyError,
-    VerifyOutcome, SKEW_TOLERANCE_US,
+    ct_eq, derive_hash, final_revalidate, leading_zero_bits, signature_from_challenge,
+    validate_record, VerifyError, VerifyOutcome, SKEW_TOLERANCE_US,
 };
 use redis::ConnectionLike;
 
@@ -201,6 +218,147 @@ impl r2d2::ManageConnection for StoreConnectionManager {
     }
 }
 
+/// One Lua script for the consumed-state TRANSITION (audit #74): atomically
+/// marks a pending record consumed (KEEPING it — the storage-level `state`
+/// field is added), or observes the already-consumed record.
+///
+/// Returns (as a RESP array):
+/// - missing key → `false` (Lua nil → RESP null → [`VerifyError::RecordNotFound`]);
+/// - `[record_json, 1]` — this caller won the transition (first);
+/// - `[record_json, 0]` — already consumed by a concurrent caller (the
+///   record_json carries `state` and, once committed, `consumed_result`).
+///
+/// The record's original TTL is preserved on the re-SET so the challenge
+/// still expires on schedule.
+///
+/// The `state` field is appended as a RAW STRING splice — the record's own
+/// JSON bytes are NEVER re-encoded. Re-encoding through `cjson.encode`
+/// would rewrite large integers (`issued_at_ns` ~1.7e15) in scientific
+/// notation, which the strict cross-language parsers reject. PHP mirrors
+/// this script byte-for-byte.
+const CONSUME_TRANSITION_LUA: &str = r#"
+local v = redis.call('GET', KEYS[1])
+if not v then return false end
+local d = cjson.decode(v)
+if type(d) ~= 'table' or d[1] ~= nil then return false end
+if d.state == 'consumed' then
+    return {v, 0}
+end
+if string.sub(v, -1) ~= '}' then return false end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 1 then ttl = 1 end
+redis.call('SET', KEYS[1], string.sub(v, 1, -2) .. ',"state":"consumed"}', 'EX', ttl)
+return {v, 1}
+"#;
+
+/// One Lua script for the best-effort outcome commit (audit #74): stores
+/// `consumed_result = {valid, binding}` exactly once, only when the record
+/// is already `consumed` and carries no result yet. Returns 1 when stored,
+/// 0 otherwise. Like [`CONSUME_TRANSITION_LUA`], the record's JSON bytes
+/// are kept untouched — only the small result object is freshly encoded
+/// (bools + a short string, immune to the cjson large-integer issue).
+const COMMIT_RESULT_LUA: &str = r#"
+local v = redis.call('GET', KEYS[1])
+if not v then return 0 end
+local d = cjson.decode(v)
+if type(d) ~= 'table' or d[1] ~= nil then return 0 end
+if d.state ~= 'consumed' then return 0 end
+if d.consumed_result ~= nil then return 0 end
+if string.sub(v, -1) ~= '}' then return 0 end
+local result
+if ARGV[2] ~= '' then
+    result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
+else
+    result = cjson.encode({valid = ARGV[1] == '1'})
+end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 1 then ttl = 1 end
+redis.call('SET', KEYS[1], string.sub(v, 1, -2) .. ',"consumed_result":' .. result .. '}', 'EX', ttl)
+return 1
+"#;
+
+/// The result of the consumed-state transition (audit #74).
+#[derive(Debug, Clone)]
+pub struct ConsumeResult {
+    /// The consumed record (the value as stored — the runtime `state` /
+    /// `consumed_result` fields are stripped).
+    pub record: ChallengeRecord,
+    /// `true` when THIS caller performed the pending → consumed transition
+    /// and owns the single derivation; `false` when the record was already
+    /// consumed by a concurrent caller (see `stored_result`).
+    pub first: bool,
+    /// The outcome a previous consumer committed, when one exists. Only
+    /// meaningful when `first == false`.
+    pub stored_result: Option<StoredConsumedResult>,
+}
+
+/// A committed verification outcome, persisted at the STORAGE layer (audit
+/// #74) so a concurrent or retried consumer returns the SAME outcome
+/// without re-deriving. This is storage-level runtime state — it is never
+/// part of the [`ChallengeRecord`] wire schema.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredConsumedResult {
+    /// Whether the proof met the difficulty target.
+    pub valid: bool,
+    /// The record's application-supplied transaction binding at commit time.
+    pub binding: Option<String>,
+}
+
+/// A stored value decoded at the storage layer: the [`ChallengeRecord`]
+/// plus the optional committed outcome (audit #74). The `state` field is
+/// stripped from the JSON by [`decode_stored`] (it must never leak into the
+/// strict record parse); the transition flag comes from the Lua reply.
+struct StoredChallenge {
+    record: ChallengeRecord,
+    consumed_result: Option<StoredConsumedResult>,
+}
+
+/// Decode a stored value that MAY carry the storage-level runtime fields
+/// `state` / `consumed_result`. The runtime fields are stripped BEFORE the
+/// strict [`ChallengeRecord`] parse, so `deny_unknown_fields` stays
+/// effective: any other foreign key makes the whole value undecodable.
+/// Returns `None` on any parse failure — a corrupt key must never blow up
+/// the verify path (mirrors the PHP `RedisStorage::decode()`).
+fn decode_stored(raw: &str) -> Option<StoredChallenge> {
+    let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let consumed_result = value
+        .get("consumed_result")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let obj = value.as_object_mut()?;
+    obj.remove("state");
+    obj.remove("consumed_result");
+    let record: ChallengeRecord = serde_json::from_value(value).ok()?;
+    Some(StoredChallenge {
+        record,
+        consumed_result,
+    })
+}
+
+/// Parse the RESP reply of [`CONSUME_TRANSITION_LUA`] into a
+/// [`ConsumeResult`]: `nil` → `None` (missing key); `[raw, 1|0]` → the
+/// consumed record with the `first` flag. The stored outcome is taken from
+/// the returned JSON itself, so `first == false` carries the winner's
+/// committed result when one exists.
+fn parse_consume(value: redis::Value) -> Option<ConsumeResult> {
+    let (raw, first) = match value {
+        redis::Value::Nil => return None,
+        redis::Value::Array(items) if items.len() == 2 => {
+            let raw = match &items[0] {
+                redis::Value::BulkString(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+                _ => return None,
+            };
+            let first = matches!(&items[1], redis::Value::Int(1));
+            (raw, first)
+        }
+        _ => return None,
+    };
+    let stored = decode_stored(&raw)?;
+    Some(ConsumeResult {
+        record: stored.record,
+        first,
+        stored_result: if first { None } else { stored.consumed_result },
+    })
+}
 /// Redis-backed challenge store with atomic single-use semantics.
 ///
 /// Records are stored as JSON at `{prefix}{nonce}` with an EX TTL of
@@ -208,19 +366,20 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 /// `RedisStorage` (same key layout, same JSON schema, same TTL rule), so
 /// records written by one side verify on the other.
 ///
-/// `consume()` uses Redis GETDEL (Redis 6.2+): load and delete are fused,
-/// so two concurrent consumers can never both win the record. `find()`
-/// peeks with a plain GET — the non-consuming read the verify flow runs
-/// before the atomic consume.
+/// `consume()` is a Lua TRANSITION (audit #74): the pending record is kept
+/// with a storage-level `state = "consumed"` field so a concurrent loser
+/// returns the winner's committed outcome instead of re-deriving.
+/// `find()` peeks with a plain GET — the non-consuming read the verify flow
+/// runs before the atomic consume.
 ///
 /// Connections come from a REAL r2d2 connection pool (default size
 /// [`DEFAULT_POOL_SIZE`], see [`RedisChallengeStore::with_pool_size`]):
 /// each operation checks out a pooled `redis::Connection` instead of
 /// opening a fresh one, so concurrent verifies still genuinely race the
-/// GETDEL in Redis (each pooled connection has its own socket) without
+/// transition in Redis (each pooled connection has its own socket) without
 /// per-request connection churn. Connections are opened lazily on first
 /// use and reused; a connection that failed mid-command is poisoned and
-/// evicted by r2d2 (see the module docs — the GETDEL no-retry rule).
+/// evicted by r2d2 (see the module docs — the no-retry rule).
 pub struct RedisChallengeStore {
     pool: r2d2::Pool<StoreConnectionManager>,
     prefix: String,
@@ -423,28 +582,68 @@ impl RedisChallengeStore {
         let raw = Self::run_command(&mut conn, |c| {
             redis::cmd("GET").arg(key).query::<Option<String>>(c)
         })?;
-        Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
+        Ok(raw.and_then(|json| decode_stored(&json).map(|s| s.record)))
     }
 
-    /// Atomically return-and-delete the record for `nonce`.
+    /// Atomically transition the record for `nonce` from `pending` to
+    /// `consumed` — the one-shot bound of the verify flow (audit #74).
     ///
-    /// Returns `None` when the key is absent, when the stored value is not
-    /// valid JSON, or when it does not map onto a [`ChallengeRecord`] — a
-    /// corrupt key must never blow up the verify path (mirrors the PHP
-    /// `RedisStorage::decode()`). `Ok(None)` also means the record is
-    /// already consumed: a replay can never win.
+    /// ONE Lua script on the server:
+    /// - `pending` → the record is KEPT with `state = "consumed"` and
+    ///   `{record, first = true}` is returned — the caller owns the single
+    ///   derivation and must commit its outcome with [`Self::commit_result`].
+    /// - `consumed` → `{record, first = false}` is returned; the caller must
+    ///   return the record's COMMITTED outcome (or
+    ///   [`VerifyError::ConsumeIndeterminate`] when no outcome was committed
+    ///   yet — the previous consumer crashed between transition and commit).
+    /// - missing → `Ok(None)` (RecordNotFound).
     ///
-    /// An `Err` is an UNCERTAIN failure: the GETDEL may or may not have
+    /// The `state` / `consumed_result` JSON fields are STORAGE-LEVEL runtime
+    /// state only — the [`ChallengeRecord`] wire schema itself is unchanged,
+    /// and the record fields parse strictly (`deny_unknown_fields` still
+    /// applies to anything that is not `state`/`consumed_result`).
+    ///
+    /// An `Err` is an UNCERTAIN failure: the transition may or may not have
     /// executed on the server. The connection is poisoned and evicted; the
-    /// caller must NOT retry the GETDEL blindly — see the module docs'
+    /// caller must NOT retry the consume blindly — see the module docs'
     /// no-retry rule.
-    pub fn consume(&self, nonce: &str) -> redis::RedisResult<Option<ChallengeRecord>> {
+    pub fn consume(&self, nonce: &str) -> redis::RedisResult<Option<ConsumeResult>> {
         let key = format!("{}{}", self.prefix, nonce);
         let mut conn = self.checkout()?;
-        let raw = Self::run_command(&mut conn, |c| {
-            redis::cmd("GETDEL").arg(key).query::<Option<String>>(c)
+        let value = Self::run_command(&mut conn, |c| {
+            redis::Script::new(CONSUME_TRANSITION_LUA)
+                .key(key)
+                .invoke::<redis::Value>(c)
         })?;
-        Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
+        Ok(parse_consume(value))
+    }
+
+    /// Best-effort persistence of the proof outcome for an already-consumed
+    /// record (audit #74): ONE Lua script stores `{valid, binding}` exactly
+    /// once, and only while the record is in the `consumed` state with no
+    /// result yet.
+    ///
+    /// Returns `Ok(true)` when the result was stored, `Ok(false)` when a
+    /// result already exists or the record is missing / not consumed,
+    /// `Err(_)` on a storage failure. CALLERS MUST IGNORE THE RESULT: the
+    /// commit is best-effort — a storage failure must never change the
+    /// verification outcome (the record expires via its TTL anyway).
+    pub fn commit_result(
+        &self,
+        nonce: &str,
+        valid: bool,
+        binding: Option<&str>,
+    ) -> redis::RedisResult<bool> {
+        let key = format!("{}{}", self.prefix, nonce);
+        let mut conn = self.checkout()?;
+        let stored = Self::run_command(&mut conn, |c| {
+            redis::Script::new(COMMIT_RESULT_LUA)
+                .key(key)
+                .arg(if valid { "1" } else { "0" })
+                .arg(binding.unwrap_or(""))
+                .invoke::<i64>(c)
+        })?;
+        Ok(stored == 1)
     }
 
     /// Best-effort cleanup of a terminal cheap-failure record. Deletion is
@@ -528,11 +727,22 @@ pub struct ProductionVerifier {
     argon_gate: Option<Box<dyn ArgonAdmissionGate>>,
     accept_legacy_v1: bool,
     expected_region: Option<String>,
+    expected_policy_version: Option<u32>,
+    expected_issuer: Option<String>,
+    /// Clock override (the PHP Verifier's `$now` closure equivalent):
+    /// returns the current Unix time in seconds used by the TTL checks and
+    /// the post-derive final re-validation. Defaults to the real clock.
+    now_unix: fn() -> u64,
+}
+
+fn real_now_unix() -> u64 {
+    now_epoch_micros() / 1_000_000
 }
 
 impl ProductionVerifier {
     /// Build a verifier with no Argon admission gate, no legacy-v1
-    /// acceptance, and no expected region (all mirror the PHP defaults).
+    /// acceptance, and no expected region / policy epoch / issuer (all
+    /// mirror the PHP defaults).
     pub fn new(store: RedisChallengeStore, secret_key: impl Into<String>) -> Self {
         ProductionVerifier {
             store,
@@ -541,7 +751,19 @@ impl ProductionVerifier {
             accept_legacy_v1: false,
             expected_region: None,
             expected_policy_version: None,
+            expected_issuer: None,
+            now_unix: real_now_unix,
         }
+    }
+
+    /// Override the verifier's clock: `f` returns the current Unix time in
+    /// seconds used by the TTL checks and the post-derive final
+    /// re-validation (audit #59). Mirrors the PHP Verifier's `$now` clock
+    /// override; the default is the real clock.
+    #[doc(hidden)]
+    pub fn with_now_fn(mut self, f: fn() -> u64) -> Self {
+        self.now_unix = f;
+        self
     }
 
     /// Add an Argon2id admission gate (default: none). `acquire` returning
@@ -584,6 +806,50 @@ impl ProductionVerifier {
     /// The configured expected region, if any.
     pub fn expected_region(&self) -> Option<&str> {
         self.expected_region.as_deref()
+    }
+
+    /// Require every verified challenge to have been issued under the
+    /// CURRENT security-policy epoch (audit #42): a record with a different
+    /// `policy_version` is rejected with [`VerifyError::WrongPolicyVersion`]
+    /// — outstanding challenges die immediately on policy revocation
+    /// (origin/action-policy changes, emergency revocation, compromised
+    /// tenant). Use [`ProductionVerifier::without_expected_policy_version`]
+    /// to clear.
+    pub fn with_expected_policy_version(mut self, version: u32) -> Self {
+        self.expected_policy_version = Some(version);
+        self
+    }
+
+    /// Disable the policy-epoch expectation (the default).
+    pub fn without_expected_policy_version(mut self) -> Self {
+        self.expected_policy_version = None;
+        self
+    }
+
+    /// The configured expected policy epoch, if any.
+    pub fn expected_policy_version(&self) -> Option<u32> {
+        self.expected_policy_version
+    }
+
+    /// Require every verified challenge to have been issued by this issuer
+    /// (audit #67): a record with a different issuer — or with no issuer at
+    /// all — is rejected with [`VerifyError::WrongIssuer`] (fail closed,
+    /// like the region expectation). Use
+    /// [`ProductionVerifier::without_expected_issuer`] to clear.
+    pub fn with_expected_issuer(mut self, issuer: impl Into<String>) -> Self {
+        self.expected_issuer = Some(issuer.into());
+        self
+    }
+
+    /// Disable the issuer expectation (the default).
+    pub fn without_expected_issuer(mut self) -> Self {
+        self.expected_issuer = None;
+        self
+    }
+
+    /// The configured expected issuer, if any.
+    pub fn expected_issuer(&self) -> Option<&str> {
+        self.expected_issuer.as_deref()
     }
 
     /// Verify a client-submitted solution token against the store.
@@ -679,17 +945,35 @@ impl ProductionVerifier {
             None
         };
 
-        // 5. Atomic CONSUME (GETDEL). The one-shot bound: exactly one caller
-        //    observes the record, so exactly one derive can ever happen per
-        //    nonce. None here means a concurrent verifier won the GETDEL
-        //    first (or the key vanished between peek and consume). An
-        //    uncertain I/O failure → ConsumeIndeterminate: the challenge may
-        //    or may not have been consumed — the GETDEL is NEVER retried.
-        let record = match self.store.consume(&token.nonce) {
-            Ok(Some(record)) => record,
+        // 5. Atomic CONSUME (the pending → consumed TRANSITION, audit #74).
+        //    The one-shot bound: exactly one caller wins the transition and
+        //    derives; a concurrent loser observes `first == false` and
+        //    returns the WINNER'S COMMITTED OUTCOME (Valid/InsufficientWork)
+        //    WITHOUT re-deriving — or ConsumeIndeterminate when the winner
+        //    crashed between the transition and the outcome commit. An
+        //    uncertain I/O failure → ConsumeIndeterminate: the transition
+        //    may or may not have executed — the consume is NEVER retried.
+        let consumed = match self.store.consume(&token.nonce) {
+            Ok(Some(consumed)) => consumed,
             Ok(None) => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
             Err(_) => return VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
         };
+        if !consumed.first {
+            return match consumed.stored_result {
+                Some(result) => {
+                    if result.valid {
+                        VerifyOutcome::Valid {
+                            nonce: consumed.record.nonce,
+                            request_binding: result.binding,
+                        }
+                    } else {
+                        VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+                    }
+                }
+                None => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+            };
+        }
+        let record = consumed.record;
 
         // 6. TOCTOU re-validation of the CONSUMED record: it must carry the
         //    exact challenge that was peeked (constant-time string compare,
@@ -703,20 +987,48 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(e);
         }
 
-        // 7. Single derive + leading-zero check.
+        // 7. Single derive.
         let hash = match derive_hash(&record, token.counter) {
             Ok(hash) => hash,
             Err(e) => return VerifyOutcome::Invalid(e),
         };
+
+        // 7b. POST-DERIVE FINAL re-validation (audit #59): re-read the
+        //     CURRENT server time and the current expectations — the
+        //     challenge may have expired DURING the expensive derivation,
+        //     or the policy epoch / region / issuer expectations may have
+        //     changed while the hash was computing. A failure here is
+        //     terminal: the record is already consumed, no outcome is
+        //     committed, and a concurrent loser sees ConsumeIndeterminate
+        //     (honest — the stored result only ever IS a proof verdict).
+        if let Err(e) = final_revalidate(
+            &record,
+            (self.now_unix)(),
+            self.expected_region.as_deref(),
+            self.expected_policy_version,
+            self.expected_issuer.as_deref(),
+        ) {
+            return VerifyOutcome::Invalid(e);
+        }
+
+        // 8. Leading-zero check + best-effort outcome commit (audit #74):
+        //    the winner stores the proof verdict so concurrent/retried
+        //    consumers return the SAME outcome without re-deriving. The
+        //    commit is best-effort — a storage failure must never change
+        //    the outcome.
         if leading_zero_bits(&hash) >= record.target_bits {
-            // The outcome carries the consumed canonical nonce (jti — audit
-            // #37) so callers can correlate the result with the storage key
-            // and downstream result tokens.
-            VerifyOutcome::Valid {
-                nonce: record.nonce,
-                request_binding: record.request_binding,
-            }
+            let outcome = VerifyOutcome::Valid {
+                nonce: record.nonce.clone(),
+                request_binding: record.request_binding.clone(),
+            };
+            let _ = self
+                .store
+                .commit_result(&token.nonce, true, record.request_binding.as_deref());
+            outcome
         } else {
+            let _ =
+                self.store
+                    .commit_result(&token.nonce, false, record.request_binding.as_deref());
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         }
     }
@@ -760,9 +1072,17 @@ impl ProductionVerifier {
             crate::verify::check_argon2_ceilings(record)?;
         }
 
-        // 3d. TTL (server clock, like the PHP `time()`).
-        let now_unix = now_epoch_micros() / 1_000_000;
+        // 3d. TTL (server clock, like the PHP `time()`). The challenge is
+        //     invalid outside its validity window [issued_at, expires_at):
+        //     expired once now reaches expires_at, and (audit #76) a
+        //     future-issued challenge is a time-domain anomaly when its
+        //     issued_at is more than MAX_CLOCK_SKEW_SECS ahead of the
+        //     verifier clock.
+        let now_unix = (self.now_unix)();
         if now_unix >= record.expires_at {
+            return Err(VerifyError::Expired);
+        }
+        if record.issued_at > now_unix.saturating_add(crate::challenge::MAX_CLOCK_SKEW_SECS) {
             return Err(VerifyError::Expired);
         }
 
@@ -785,6 +1105,15 @@ impl ProductionVerifier {
         if let Some(expected) = self.expected_policy_version {
             if record.policy_version != expected {
                 return Err(VerifyError::WrongPolicyVersion);
+            }
+        }
+
+        // 3e4. Issuer identity (audit #67): an issuer-expecting deployment
+        //      rejects challenges issued by another issuer — or by no
+        //      issuer at all (fail closed).
+        if let Some(expected) = self.expected_issuer.as_deref() {
+            if record.issuer.as_deref() != Some(expected) {
+                return Err(VerifyError::WrongIssuer);
             }
         }
 
@@ -823,5 +1152,136 @@ impl ProductionVerifier {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::challenge::{issue_challenge, BindingMode};
+    use crate::verify::solve_for_test;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const SECRET: &str = "0123456789abcdef0123456789abcdef";
+    const IP: &str = "198.51.100.7";
+
+    fn redis_url() -> Option<String> {
+        match std::env::var("RISK_REDIS_URL") {
+            Ok(url) => Some(url),
+            Err(_) => {
+                eprintln!("RISK_REDIS_URL unset — Redis integration test skipped");
+                None
+            }
+        }
+    }
+
+    fn now_unix() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn now_micros() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64
+    }
+
+    fn sha_config(target_bits: u32) -> crate::challenge::ChallengeConfig {
+        crate::challenge::ChallengeConfig {
+            secret_key: SECRET.into(),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits,
+            argon2_target_bits: target_bits,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+        }
+    }
+
+    fn encode_token(nonce: &str, counter: u64) -> String {
+        crate::token::SolutionToken {
+            nonce: nonce.into(),
+            counter,
+            duration_ms: 5000,
+            telemetry: serde_json::json!({}),
+        }
+        .encode()
+    }
+
+    /// Deterministic fake clock for the final-revalidation race: returns
+    /// `BASE` for the first two reads (the cheap phase's peek + the
+    /// post-consume TOCTOU re-check) and `BASE + 1` afterwards — simulating
+    /// the wall clock ADVANCING PAST expires_at while the proof derives.
+    /// The verifier's clock reads are exactly: cheap(peek), cheap(recheck),
+    /// final gate — so the first two see `BASE` and the final gate sees
+    /// `BASE + 1`.
+    static FAKE_NOW_BASE: AtomicU64 = AtomicU64::new(0);
+    static FAKE_NOW_CALLS: AtomicU64 = AtomicU64::new(0);
+
+    fn fake_now() -> u64 {
+        let call = FAKE_NOW_CALLS.fetch_add(1, Ordering::SeqCst);
+        let base = FAKE_NOW_BASE.load(Ordering::SeqCst);
+        if call >= 2 {
+            base + 1
+        } else {
+            base
+        }
+    }
+
+    #[test]
+    fn expired_during_derivation_is_rejected_by_the_final_revalidation() {
+        // Audit #59 at the production boundary: the challenge expires WHILE
+        // the proof derives. The cheap phase (peek + post-consume re-check)
+        // passes at time BASE; the FINAL re-validation RE-READS the clock
+        // (the race) and sees BASE + 1 ≥ expires_at → Expired, even though
+        // the record was already consumed. Fully deterministic — the
+        // verifier's clock is injected (the PHP `$now` override equivalent),
+        // so the test never depends on wall-clock timing.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:derive-race:{}:", std::process::id());
+
+        let base = now_unix();
+        FAKE_NOW_BASE.store(base, Ordering::SeqCst);
+        let config = crate::challenge::ChallengeConfig {
+            ttl_secs: 1, // expires_at = base + 1
+            ..sha_config(4)
+        };
+        let issued = issue_challenge(&config, "login", IP, base, now_micros(), 0, None).unwrap();
+        let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+        let issued_at_ns = issued.record.issued_at_ns;
+
+        let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
+        store.store(&issued.record).unwrap();
+        let verifier = ProductionVerifier::new(store, SECRET).with_now_fn(fake_now);
+
+        let token = encode_token(&issued.record.nonce, counter);
+        FAKE_NOW_CALLS.store(0, Ordering::SeqCst);
+        assert_eq!(
+            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000),
+            VerifyOutcome::Invalid(VerifyError::Expired),
+            "the final re-validation re-reads the clock: expired during the derive → Expired"
+        );
+
+        // The gate failure is terminal and commits NO outcome: a replay sees
+        // the consumed record without a stored result → ConsumeIndeterminate
+        // (deterministic — pins the no-commit-on-gate-failure semantics).
+        FAKE_NOW_CALLS.store(0, Ordering::SeqCst);
+        assert_eq!(
+            verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000),
+            VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate)
+        );
     }
 }

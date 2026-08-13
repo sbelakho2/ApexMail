@@ -12,6 +12,7 @@ use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Storage\ArrayStorage;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Cache\Adapter\ArrayAdapter;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -33,7 +34,7 @@ final class RateLimiterTest extends TestCase
 
     private function post(ChallengeController $controller, string $ip, string $scope = 'login'): int
     {
-        $response = $controller->challenge(Request::create(
+        $response = $controller->challenge(JsonRequest::create(
             '/kiwi-captcha/challenge',
             'POST',
             [],
@@ -71,7 +72,7 @@ final class RateLimiterTest extends TestCase
         $controller = $this->controller(new IssuanceRateLimiter(1, 60));
         $this->post($controller, '198.51.100.7');
 
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{}'));
         self::assertSame(429, $response->getStatusCode());
         $body = json_decode((string) $response->getContent(), true);
         self::assertSame('RATE_LIMITED', $body['error']['code']);
@@ -251,7 +252,7 @@ final class RateLimiterTest extends TestCase
                 return $this->inner->find($nonce);
             }
 
-            public function consume(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 return $this->inner->consume($nonce);
             }
@@ -259,6 +260,11 @@ final class RateLimiterTest extends TestCase
             public function delete(string $nonce): void
             {
                 $this->inner->delete($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
             }
         };
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
@@ -297,7 +303,7 @@ final class RateLimiterTest extends TestCase
         self::assertSame(200, $this->post($controller, '198.51.100.7'));
         self::assertSame(429, $this->post($controller, '198.51.100.7'), 'N+1st request within the window must be refused');
 
-        $body = json_decode((string) $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{}'))->getContent(), true);
+        $body = json_decode((string) $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{}'))->getContent(), true);
         self::assertSame('RATE_LIMITED', $body['error']['code']);
     }
 
@@ -315,7 +321,7 @@ final class RateLimiterTest extends TestCase
         // deployment-wide cap, not its own.
         self::assertSame(-1, $limiter->check('198.51.100.9'));
 
-        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.9'], '{}'));
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.9'], '{}'));
         self::assertSame(429, $response->getStatusCode());
         $body = json_decode((string) $response->getContent(), true);
         self::assertSame('GLOBAL_RATE_LIMITED', $body['error']['code'], 'global exhaustion must carry the distinct code');

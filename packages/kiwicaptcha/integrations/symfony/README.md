@@ -229,8 +229,41 @@ first-party continuity cookie, see below):
 
 ```yaml
 kiwi_captcha:
+    # public_base_url: https://captcha.example.com  # audit #78: the
+    #                                               # deployment's PUBLIC
+    #                                               # origin from SERVER
+    #                                               # CONFIG — the same-
+    #                                               # origin check compares
+    #                                               # against it, never the
+    #                                               # Host header (set it in
+    #                                               # production)
     risk:
         enabled: true
+        # client_ip_mode: symfony_trusted_proxies  # audit #64: how the
+        #                                           # canonical client IP is
+        #                                           # derived — Symfony's
+        #                                           # trusted-proxy machinery
+        #                                           # (ignores forwarding
+        #                                           # headers from untrusted
+        #                                           # peers) or "direct"
+        #                                           # (socket peer ONLY —
+        #                                           # forwarding headers are
+        #                                           # ALWAYS ignored)
+        # trusted_proxies:                          # CIDRs of the trusted
+        #     - 10.0.0.0/8                          # reverse proxies
+        # reject_ambiguous_forwarding: false        # true = 400
+        #                                           # AMBIGUOUS_FORWARDING
+        #                                           # when a trusted peer
+        #                                           # sends BOTH
+        #                                           # X-Forwarded-For and
+        #                                           # Forwarded; false = log
+        # container_memory_mib: null                # audit #68: readiness
+        #                                           # requires concurrency x
+        #                                           # 64 MiB (max adaptive
+        #                                           # profile) + 256 MiB
+        #                                           # headroom <= budget;
+        #                                           # null = invariant
+        #                                           # skipped (documented)
         # The risk-v1 state lives in Redis (EVALSHA of the canonical Lua).
         # Required: risk.redis_service (a Predis\Client service id) — or the
         # bundle's redis_service / RedisStorage client when it is a Predis
@@ -631,6 +664,41 @@ another. The widget carries the binding end-to-end:
   `KiwiCaptchaValidator::verifiedRequestBinding()`
   (`VerifyOutcome::requestBinding()`).
 
+### Ambiguous-consume deterministic retry (audit #74)
+
+The storage's `consume()` is a consumed-state TRANSITION: records persist
+until their TTL with a `state` / `consumed_result`, and the verifier commits
+the derivation outcome (`commitResult(nonce, valid, binding)`). A re-verify
+of a consumed record WITH a stored result returns the SAME outcome WITHOUT
+re-deriving; WITHOUT a stored result it returns `ConsumeIndeterminate`. The
+validator resolves both cases deterministically:
+
+- **Stored-result retry (a lost response, same binding):** a re-submission
+  of the same token with the SAME request binding returns the SAME success —
+  the canonical jti (`verifiedJti()`) and the stored signed binding
+  (`verifiedRequestBinding()`) are exposed, no second derivation happens
+  (assertable via the storage counters: no second consume/commit), and no
+  side effects repeat (risk feedback, post-solve assessment, outstanding
+  decrement all ran exactly once on the original verification).
+- **Stored-result retry, DIFFERENT binding:** `invalid_or_expired` — a
+  challenge bound to one transaction is never redeemable for another,
+  retries included (the round-9 binding rule applied to the retry).
+- **Stored INVALID result:** `invalid_or_expired` — the original derivation
+  failed; its outcome is authoritative.
+- **Consumed without a committed result** (the original attempt died
+  mid-proof) **or a still-pending record** (the consume never landed) **or
+  no storage wired:** the outcome stays indeterminate and collapses to the
+  DISTINCT public code `temporary_unavailable` — retryable, never a guessed
+  success, never `invalid_or_expired` (the client must not be told its
+  token is burned when it may still redeem). A retry after recovery consumes
+  and derives exactly once.
+
+The validator's resolution reads the consumed state from the STORED RECORD
+(`ChallengeRecord::$consumed` / `$consumedResult` / `$consumedBinding` — the
+round-10 core fields; the bundle probes them defensively, so cores predating
+the transition keep the legacy behavior: an ambiguous consume stays
+`temporary_unavailable` and a retry burns nothing).
+
 ### Argon2 admission wait-queue bound
 
 `argon2_max_waiters` (default 64) bounds the Redis semaphore's waiters
@@ -675,7 +743,19 @@ route prefix:
      `min_policy_epoch`) — when PRESENT, ready requires
      `min_protocol_version <= 2` (this binary's max protocol) AND
      `min_policy_epoch <= risk.policy_version`; when ABSENT, the binary's
-     own configuration is authoritative.
+     own configuration is authoritative;
+  4. the MEMORY-BUDGET invariant holds (audit #68, only when
+     `risk.container_memory_mib` is configured):
+     `argon2_max_concurrent_verifications × 64 MiB (the risk profiles' max
+     m_kib — 65536 KiB, argon64) + 256 MiB headroom <= container_memory_mib`.
+     A violated invariant refuses startup (503
+     `memory_budget_invariant`): a container that cannot hold the
+     worst-case memory-hard verification load plus headroom must not serve
+     traffic (an OOM mid-hash is a security failure, not just an
+     availability one). When `container_memory_mib` is null (default) the
+     check is SKIPPED — document this in your deployment; with a concurrency
+     cap of 0 (= unlimited) the invariant uses 1 hash (only the headroom is
+     guaranteed — set a finite cap for a meaningful check).
 
 Argon queue fullness and transient timeouts NEVER fail readiness. All
 responses carry `Cache-Control: no-store` + `Pragma: no-cache`.
@@ -697,6 +777,78 @@ can issue or verify challenges it cannot honor. Remove the key (or lower
 the fields) only after every node runs a compatible binary. When the key is
 absent, every binary's own configuration is authoritative (the pre-round-9
 behavior).
+
+## Operational deployment guidance
+
+**Disable TLS 1.3 0-RTT (early data) for the verification surface (audit
+#61).** TLS 1.3 0-RTT replays the client's first flight: a captured
+challenge-verify request (the form POST carrying the solution token, and
+the Rust service's `/verify` + `/redeem` paths) can be replayed verbatim to
+the server. KiwiCaptcha's token is single-use — the FIRST 0-RTT replay wins
+the consume and the application's own operation must be keyed on the
+(jti, action) idempotency — but the replay can still burn the solve and
+create duplicate first-flight work. Disable early data for every endpoint
+that receives solution tokens or result tokens:
+
+```nginx
+# nginx: no early data for the challenge/verify surface
+server {
+    listen 443 ssl;
+    ssl_early_data off;               # TLS 1.3 0-RTT disabled
+    ...
+}
+```
+
+On Cloudflare: turn **0-RTT (TLS 1.3)** OFF for the host(s) that serve the
+captcha endpoints (SSL/TLS settings), or configure a WAF rule that strips
+`Early-Data: 1` from verification requests. The challenge-ISSUANCE endpoint
+and the health probes are also better off with 0-RTT off (their responses
+are never cached and replays only waste work), but the /verify + /redeem
+equivalents are the ones that MUST be 0-RTT-free.
+
+**Autoscale on ADMITTED demand, never raw hostile CPU (audit #69).** Scale
+the captcha workers on the admission-side metrics, not on CPU: the
+deployment-wide issuance rate (the `{kiwi:<ns>}:issuance:<second>` counter
+the controller increments on every MINTED challenge — exposed via the
+resource-pressure provider / Redis) and the outstanding-challenge pressure
+are the honest demand signals. A hostile flood that is being DENIED (rate
+limiter, risk engine, emergency cap) must not trigger scale-up — those
+requests never mint and never consume verification CPU on the workers.
+Concretely:
+
+```yaml
+# HorizontalPodAutoscaler (Kubernetes): scale on ADMITTED issuance demand
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: kiwicaptcha
+spec:
+  maxReplicas: 12            # hard cost ceiling — NEVER unbounded
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: kiwicaptcha_issued_per_second   # admitted minted challenges
+        target:
+          type: Value
+          value: "400"        # ~1 worker per 400 issued/s (per worker cap)
+```
+
+Pair the scale-down with COST alarms: `maxReplicas` is the budget ceiling,
+and CloudWatch/GCP cost alerts on the replica count and on the security
+Redis connections keep a demand spike from silently multiplying cloud cost.
+Never autoscale on raw CPU alone: Argon2id verification is CPU-bound, so
+hostile traffic that reaches the verifier (e.g. a replay storm) pushes CPU
+while being refused — CPU-only scaling amplifies the attack's cost instead
+of containing it.
+
+**Issuer identity / public origin come from SERVER CONFIG, never the Host
+header (audit #78).** The deployment's public origin is `public_base_url`
+(see "Same-origin enforcement" above); the issued records carry NO
+Host-derived material. If your infrastructure terminates TLS and rewrites
+Host headers (shared hosting, multiple vhosts on one pool), set
+`public_base_url` explicitly — the same-origin check then ignores whatever
+Host the request carries.
 
 ## Usage
 
@@ -889,14 +1041,72 @@ assets gets a NEW URL and `immutable` can never serve a stale solver/
 driver; never apply `immutable` to any non-versioned URL.
 
 **Same-origin enforcement.** When `same_origin_only` is true (default, and
-forced under strict), requests whose `Origin` header is not the
-application's own origin (scheme + host, constant-time compare) are rejected
-with HTTP 403 `{"error":{"code":"CROSS_ORIGIN_DENIED"}}` **before any state
-is written** — cross-site abuse and CSRF-style challenge minting are
-stopped, and rejected requests consume no rate-limit budget. Requests
-without an `Origin` header (same-origin navigation, curl, non-browser
-clients) are allowed. The check happens before rate limiting, so an
-attacker's cross-origin traffic never pollutes the per-client window.
+forced under strict), requests whose `Origin` header is not the application's
+own origin (scheme + host, constant-time compare) are rejected with HTTP 403
+`{"error":{"code":"CROSS_ORIGIN_DENIED"}}` **before any state is written** —
+cross-site abuse and CSRF-style challenge minting are stopped, and rejected
+requests consume no rate-limit budget. Requests without an `Origin` header
+(same-origin navigation, curl, non-browser clients) are allowed. The check
+happens before rate limiting, so an attacker's cross-origin traffic never
+pollutes the per-client window.
+
+**Host-context hardening (audit #78).** The EXPECTED same-origin comes from
+SERVER CONFIG, never from the `Host` header: set `public_base_url`
+(e.g. `https://captcha.example.com`) and the check compares the request
+Origin against that canonical origin (structured normalization — same rules
+as the allowlist). A forged `Host: evil.example` header then can never make
+`Origin: https://evil.example` look same-origin, and the expected origin
+stays stable behind load balancers and shared hosting. Without
+`public_base_url` (null, the default — fine for localhost/dev) the expected
+origin is derived from the request's own scheme+host; production deployments
+behind shared infrastructure SHOULD set it. The issuer itself never derives
+anything from `Host` — a forged Host cannot alter the issued challenge
+(scope and the socket peer's binding tag are the only context).
+
+**Narrow HTTP (audit #77) + no decompression bombs (audit #65).** The
+challenge endpoint accepts ONLY `POST` with an uncompressed
+`application/json` body:
+
+- non-`POST` methods (including `OPTIONS` preflights) stay HTTP 405 with
+  `Allow: POST` — a preflight alone NEVER authorizes anything;
+- `Content-Encoding` other than `identity` (gzip/br/deflate) is rejected
+  with 415 `UNSUPPORTED_CONTENT_ENCODING` BEFORE the body is read — no
+  transparent decompression into unbounded memory;
+- a PRESENT `Content-Type` other than `application/json` (form-encoded,
+  multipart, text/plain...) is rejected with 415 `UNSUPPORTED_MEDIA_TYPE`;
+- query parameters (`?debug=1`, `?skip_pow=1`, `?algorithm=...`) are
+  rejected with 422 `QUERY_PARAMETERS_NOT_ALLOWED`;
+- the JSON body must be an OBJECT with ONLY the documented fields
+  `scope`, `algorithm` (accepted for forward-compatibility; the issued
+  algorithm always comes from the server), `request_binding` — unknown
+  fields are debug/override probes and get 422 `UNKNOWN_FIELDS`, a
+  non-object document gets 422 `INVALID_JSON`.
+
+The widget's own POSTs are plain uncompressed JSON and pass unchanged.
+
+**CORS is not authorization (audit #63).** The bundle emits NO CORS headers
+— no `Access-Control-Allow-Origin`, no `Access-Control-Allow-Methods` — on
+any response, success or error. Cross-origin access control for the
+application's own endpoints is the application / reverse-proxy's business;
+KiwiCaptcha's origin enforcement (same-origin + allowlist, above) is
+AUTHORIZATION and runs on EVERY security response regardless of any CORS
+configuration. Because no CORS header is ever emitted, no `Vary: Origin` is
+needed either. If your reverse proxy adds CORS headers, it must add
+`Vary: Origin` itself on any response it decorates with
+`Access-Control-Allow-Origin`.
+
+**Frame-ancestors CSP (audit #71).** When `risk.challenge_origin_allowlist`
+is non-empty, EVERY challenge response carries an explicit
+`Content-Security-Policy: frame-ancestors <allowlisted origins,
+space-separated>` header — always the full directive, never inherited from
+`default-src` — so the allowlist is exactly the framing contract of the
+endpoint. An empty allowlist emits no CSP header. For the WIDGET PAGE (the
+application's own form page — the bundle does not own its response headers)
+the Twig function `kiwi_captcha_csp_frame_ancestors()` returns the same
+directive (null when the allowlist is empty) — append it to the page's
+`Content-Security-Policy` header in your own listener/controller
+(`frame-ancestors` is ignored inside `<meta>` tags, so the header is the
+only effective delivery):
 
 **Origin laundering + Fetch Metadata (optional).** With a non-empty
 `risk.challenge_origin_allowlist` the POST must additionally be attributable
@@ -938,6 +1148,29 @@ a peppered HMAC of the IP (`hash_hmac('sha256', $ip, $pepper)` with
 `rate_limit_pepper`, defaulting to the bundle secret), in Redis, the shared
 pool, and the in-memory buckets. `rate_limit: 0` and `rate_limit_global: 0`
 disable the respective limit; both default to nonzero (10 / 500).
+
+**Local admission before Redis (audit #70).** The PROCESS-LOCAL emergency
+window (`risk.hard_limits.process_per_second`, default 10000 — the engine's
+`ProcessEmergencyCap`) is checked BEFORE any Redis issuance limiter: a
+saturated window refuses immediately with the standard 429
+`{"error":{"code":"RISK_DENIED"}}` (retry_after_ms 1000) without a single
+Redis round trip. The check is NON-CONSUMING (`isOpen()`), so the engine's
+own consuming check inside `assessPreIssue()` remains the single consumer
+of the per-process budget — a request admitted here can still be denied
+there, never double-counted. Order: narrow HTTP → origin checks → LOCAL
+cap → Redis rate limiter → risk assessment → issuance.
+
+**Bounded Redis pool + short timeouts (operational).** The security Redis
+(rate limiter, risk state, challenge storage, admission leases) must be a
+BOUNDED connection pool: configure `persistent_connections` off / a small
+`connections` limit (e.g. 5-10 per worker) and SHORT command timeouts
+(e.g. `timeout: 0.3` read, `read_write_timeout: 0.5`) — the bundle treats a
+slow/failed Redis command as a typed refusal (429 / temporary_unavailable),
+never as a hang, so the pool must fail fast rather than queue. Run it with
+`maxmemory-policy noeviction` so challenge/replay state can never be evicted
+mid-window, and size `maxmemory` for the outstanding/rate windows
+(`max_outstanding_challenges_global` records + the sliding windows; the
+consumed-state records persist until their TTL).
 
 **Argon2id verification concurrency cap.** When `algorithm: argon2id`, the
 core `KiwiCaptcha\Verifier` is constructed with a
@@ -991,12 +1224,42 @@ Exhaustion fails verification closed as a normal captcha violation (never a
 500), and — per the core's one-shot semantics — the challenge record is NOT
 burned by a capacity refusal, so the client may retry shortly.
 
-**Trusted proxies.** Both the challenge endpoint and the validator use
-`Request::getClientIp()` (the same source), so configure Symfony's
-`trusted_proxies`/`trusted_headers` consistently when running behind a
-reverse proxy — that is also the IP the challenge binds to when `bind_ip` is
-enabled. Never read `$_SERVER['REMOTE_ADDR']` in the application, or IP
-binding will mismatch the issued challenge.
+**Trusted client-IP policy (audit #64).** The canonical client IP — the one
+the challenge binds to, the rate-limit identity derives from, and the risk
+source pseudonym is built on — is decided by ONE explicit knob,
+`risk.client_ip_mode` (default `symfony_trusted_proxies`), never by ad-hoc
+header reading:
+
+- **`symfony_trusted_proxies` (default):** the bundle configures Symfony's
+  `Request::setTrustedProxies()` from `risk.trusted_proxies` (a list of
+  CIDRs / exact IPs; default `[]`) with `X-Forwarded-For` + `Forwarded`
+  trusted-header flags. Symfony's trusted-proxy machinery then ALREADY
+  ignores forwarding headers from untrusted peers: a forged
+  `X-Forwarded-For` from the open internet can never change the canonical
+  IP. With a NON-EMPTY list the bundle takes ownership of the trusted-proxy
+  configuration (it is global Symfony state); an empty list leaves the
+  application's own configuration untouched (nothing new is trusted).
+- **`direct`:** forwarding headers are ALWAYS ignored — the socket peer
+  (`REMOTE_ADDR`) is the canonical IP, regardless of any application-level
+  trusted-proxy configuration. Use this when the deployment has no
+  proxy-layer that rewrites forwarding headers, or when you do not want the
+  Symfony machinery involved at all.
+
+**Ambiguous forwarding.** When a TRUSTED peer sends BOTH `X-Forwarded-For`
+AND `Forwarded`, the two chains can disagree and the canonical IP is
+ambiguous (Symfony itself refuses to derive one). With
+`risk.reject_ambiguous_forwarding: true` the request is rejected with HTTP
+400 `{"error":{"code":"AMBIGUOUS_FORWARDING"}}` (the validator fails closed
+as `invalid_or_expired`); with the default `false` the anomaly is logged and
+the request proceeds with the only unambiguous value — the socket peer.
+Headers from an UNTRUSTED peer are never ambiguous: they are ignored
+entirely.
+
+The controller, the validator and every risk signal derive the IP through
+this policy, so the binding tag, the rate-limit identity and the risk source
+pseudonym ALWAYS see the same canonical IP — never read
+`$_SERVER['REMOTE_ADDR']` or `Request::getClientIp()` in the application for
+KiwiCaptcha context, or IP binding will mismatch the issued challenge.
 
 For production multi-instance deployments you must provide a **shared**
 storage service implementing `KiwiCaptcha\StorageInterface` via the `storage`

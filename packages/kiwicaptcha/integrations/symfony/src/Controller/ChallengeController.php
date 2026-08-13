@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
+use BelConsulting\KiwiCaptchaBundle\Risk\AmbiguousForwardingException;
+use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\UnknownScopeException;
@@ -35,28 +37,54 @@ use Symfony\Component\HttpFoundation\Response;
  * X-Content-Type-Options nosniff — challenge bytes and client identity must
  * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
  *
- * Hardening order: same-origin check first (cheap, no state written), then
+ * Hardening order: NARROW HTTP first (audit #77/#65: non-POST stays 405 —
+ * an OPTIONS preflight alone never authorizes anything; Content-Encoding
+ * other than identity and Content-Type other than application/json are
+ * rejected with 415 before any body is read — no decompression bombs, no
+ * form-encoded smuggling), then the query-parameter and JSON-field audit
+ * (audit #72: the POST accepts ONLY scope / algorithm? / request_binding —
+ * any query string or unknown JSON field is a debug/override probe and gets
+ * 422), then same-origin (CORS IS NOT AUTHORIZATION — audit #63: origin
+ * enforcement runs on EVERY security response; the bundle never emits CORS
+ * headers at all, so there is no preflight path that could authorize), then
  * the optional origin allowlist (origin_rejected 403) and Fetch Metadata
  * check (CROSS_SITE_REJECTED 403) — the origin-laundering defenses, also
- * before any state is written — then scope read, then issuance rate
- * limiting (per-client and deployment-global; a per-client 429 records
- * SourceRateLimitHit, a global 429 records GlobalCapacityHit — the
- * deployment-wide refusal is identity-neutral and never contaminates the
- * visitor's source reputation), then — when the adaptive risk engine is
- * enabled — the PRE-ISSUE risk assessment (a Deny decision returns 429
- * RISK_DENIED before any challenge is minted; the denial already scored the
- * evidence, so NO further rate-limit event is recorded — double-counting
- * removed; an escalated action raises the difficulty of the issued
- * challenge, an unknown scope in 'reject' mode returns 429 RISK_DENIED
- * without issuing), then issuance (every minted challenge increments the
- * atomic issuance-rate counter used by the resource-pressure provider and
- * is admitted into the bounded outstanding-challenge counters — a cap
- * refusal discards the minted record and returns the risk-denied 429).
+ * before any state is written — then scope read, then the PROCESS-LOCAL
+ * emergency admission step (audit #70: the engine's per-process cap is
+ * checked BEFORE any Redis issuance limiter — a saturated process refuses
+ * with the 429 risk-denied response without a single Redis round trip),
+ * then issuance rate limiting (per-client and deployment-global; a
+ * per-client 429 records SourceRateLimitHit, a global 429 records
+ * GlobalCapacityHit — the deployment-wide refusal is identity-neutral and
+ * never contaminates the visitor's source reputation), then — when the
+ * adaptive risk engine is enabled — the PRE-ISSUE risk assessment (a Deny
+ * decision returns 429 RISK_DENIED before any challenge is minted; the
+ * denial already scored the evidence, so NO further rate-limit event is
+ * recorded — double-counting removed; an escalated action raises the
+ * difficulty of the issued challenge, an unknown scope in 'reject' mode
+ * returns 429 RISK_DENIED without issuing), then issuance (every minted
+ * challenge increments the atomic issuance-rate counter used by the
+ * resource-pressure provider and is admitted into the bounded
+ * outstanding-challenge counters — a cap refusal discards the minted record
+ * and returns the risk-denied 429).
+ *
+ * The canonical client IP comes from {@see ClientIpResolver} (audit #64 —
+ * risk.client_ip_mode / risk.trusted_proxies / risk.reject_ambiguous_
+ * forwarding): the same IP that feeds the challenge binding tag, the
+ * rate-limit identity and the risk source pseudonym, never a Host-header or
+ * forwarding-header free-for-all.
+ *
+ * The expected same-origin comes from the configured public_base_url
+ * (audit #78 — SERVER CONFIG, never the Host header): a forged Host can
+ * never make a cross-origin request look same-origin.
  */
 final class ChallengeController
 {
     /** Maximum request-binding length (mirrors the core scope bound). */
     private const MAX_REQUEST_BINDING_BYTES = 128;
+
+    /** The ONLY JSON fields the challenge POST accepts (audit #72). */
+    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding'];
 
     public function __construct(
         private readonly Issuer $issuer,
@@ -71,11 +99,68 @@ final class ChallengeController
         private readonly ?StorageInterface $storage = null,
         private readonly ?string $defaultRequestBinding = null,
         private readonly bool $enforceOrigin = false,
+        private readonly ?ClientIpResolver $clientIpResolver = null,
+        private readonly ?string $publicBaseUrl = null,
     ) {
     }
 
     public function challenge(Request $request): JsonResponse
     {
+        // NARROW HTTP (audit #77): the endpoint is POST-only — at the
+        // CONTROLLER level too (the route already restricts the method, but
+        // a direct invocation must behave identically). An OPTIONS preflight
+        // is a non-POST method: 405 — a preflight ALONE never authorizes
+        // anything (audit #63).
+        if ($request->getMethod() !== 'POST') {
+            $response = $this->privateJson(
+                ['error' => ['code' => 'METHOD_NOT_ALLOWED', 'message' => 'The challenge endpoint accepts POST requests only.']],
+                Response::HTTP_METHOD_NOT_ALLOWED,
+            );
+            $response->headers->set('Allow', 'POST');
+
+            return $response;
+        }
+
+        // NO DECOMPRESSION BOMBS (audit #65): a request body that was
+        // compressed on the wire must not be transparently decompressed by a
+        // downstream layer into unbounded memory — any Content-Encoding other
+        // than identity is refused BEFORE the body is read. identity (or an
+        // absent header) is the only accepted encoding.
+        foreach ($request->headers->all('content-encoding') as $encoding) {
+            if (strtolower((string) $encoding) !== 'identity') {
+                return $this->privateJson(
+                    ['error' => ['code' => 'UNSUPPORTED_CONTENT_ENCODING', 'message' => 'Content-Encoding must be identity (the widget POSTs plain JSON).']],
+                    Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
+                );
+            }
+        }
+
+        // NARROW HTTP (audit #77): the challenge POST is a JSON document —
+        // form-encoded and multipart bodies are refused before anything is
+        // read (no CSRF-form smuggling, no HTML-form replay through the
+        // endpoint). A PRESENT Content-Type must be application/json (an
+        // optional charset parameter is tolerated); an ABSENT header (curl
+        // -d, legacy clients) is accepted — the body still has to parse as
+        // a strict JSON object with only the documented fields, so nothing
+        // is smuggled in. The widget sends exactly application/json.
+        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        if ($contentType !== '' && $contentType !== 'application/json') {
+            return $this->privateJson(
+                ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
+                Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
+            );
+        }
+
+        // QUERY-PARAM HARDENING (audit #72): the endpoint accepts NO query
+        // parameters — ?debug=1, ?algorithm=sha256 overrides, ?skip_pow=1
+        // and friends are probes and get 422 before any state is touched.
+        if ($request->query->count() > 0) {
+            return $this->privateJson(
+                ['error' => ['code' => 'QUERY_PARAMETERS_NOT_ALLOWED', 'message' => 'The challenge endpoint accepts no query parameters.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+
         if ($this->sameOriginOnly && !$this->isSameOrigin($request)) {
             return $this->privateJson(
                 ['error' => ['code' => 'CROSS_ORIGIN_DENIED', 'message' => 'Cross-origin challenge requests are not allowed.']],
@@ -126,9 +211,59 @@ final class ChallengeController
             }
         }
 
-        $clientIp = (string) ($request->getClientIp() ?? '');
-        $payload = json_decode((string) $request->getContent(), true);
-        $scope = \is_array($payload) && isset($payload['scope']) ? (string) $payload['scope'] : 'default';
+        // Trusted client-IP policy (audit #64): the canonical IP comes from
+        // the configured mode (risk.client_ip_mode). In 'direct' mode
+        // forwarding headers are ALWAYS ignored (socket peer only); in
+        // 'symfony_trusted_proxies' mode Symfony's trusted-proxy machinery
+        // ignores them from untrusted peers. An ambiguous double-forwarding
+        // from a trusted peer is either logged or — when
+        // risk.reject_ambiguous_forwarding is true — rejected with 400
+        // AMBIGUOUS_FORWARDING before any state is written.
+        try {
+            $clientIp = $this->clientIpResolver !== null
+                ? $this->clientIpResolver->resolve($request)
+                : (string) ($request->getClientIp() ?? '');
+        } catch (AmbiguousForwardingException $e) {
+            return $this->privateJson(
+                ['error' => ['code' => 'AMBIGUOUS_FORWARDING', 'message' => 'The request carries ambiguous forwarding headers (X-Forwarded-For and Forwarded together).']],
+                Response::HTTP_BAD_REQUEST,
+            );
+        }
+
+        // The challenge POST is a JSON OBJECT with exactly the documented
+        // fields (audit #72): scope, algorithm (accepted for
+        // forward-compatibility, the issued algorithm always comes from the
+        // server), request_binding. Unknown fields are debug/override probes
+        // and get 422 — the endpoint never silently ignores extra control
+        // surface. A non-object document is refused too (an empty JSON
+        // object {} is valid — the fields are optional).
+        $decoded = json_decode((string) $request->getContent(), false);
+        if (!$decoded instanceof \stdClass) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request body must be a JSON object.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        $payload = (array) $decoded;
+        $unknown = array_values(array_diff(array_keys($payload), self::ACCEPTED_PAYLOAD_FIELDS));
+        if ($unknown !== []) {
+            return $this->privateJson(
+                ['error' => ['code' => 'UNKNOWN_FIELDS', 'message' => 'The challenge request carries unknown fields: '.implode(', ', $unknown).'.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        // Documented fields must carry scalar values — a nested array in a
+        // known field is still a malformed document.
+        if ((array_key_exists('scope', $payload) && !\is_string($payload['scope']))
+            || (array_key_exists('algorithm', $payload) && !\is_string($payload['algorithm']))
+            || (array_key_exists('request_binding', $payload) && $payload['request_binding'] !== null && !\is_string($payload['request_binding']))
+        ) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request fields must be strings.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        $scope = isset($payload['scope']) ? (string) $payload['scope'] : 'default';
 
         // Transaction binding (audit #41): the widget sends the
         // request_binding field it carries (data-kiwi-request-binding); when
@@ -138,7 +273,7 @@ final class ChallengeController
         // binding can never be signed into a challenge; the verification
         // side enforces equality between the record's signed binding and the
         // binding the form POST carries.
-        $requestBinding = \is_array($payload) && isset($payload['request_binding']) && $payload['request_binding'] !== null
+        $requestBinding = isset($payload['request_binding']) && $payload['request_binding'] !== null
             ? (string) $payload['request_binding']
             : $this->defaultRequestBinding;
         if ($requestBinding !== null && $requestBinding !== '') {
@@ -159,6 +294,31 @@ final class ChallengeController
         // risk block — a rate-limited request never receives a cookie.
         $riskSession = $this->continuityCookie?->read($request);
         $mintedCookie = false;
+
+        // LOCAL ADMISSION BEFORE REDIS (audit #70): the process-local
+        // emergency window (risk.hard_limits.process_per_second) is checked
+        // BEFORE any Redis issuance limiter — a saturated window refuses
+        // immediately with the 429 risk-denied response (same shape as the
+        // engine's HardRateLimit denial, retry_after_ms 1000) without a
+        // single Redis round trip. The check is NON-CONSUMING
+        // (RiskGateway::emergencyCapSaturated -> ProcessEmergencyCap::isOpen):
+        // the engine's own consuming allow() inside assessPreIssue() below
+        // remains the single consumer of the per-process budget, so a
+        // request admitted here can still be denied there — never
+        // double-counted.
+        if ($this->risk !== null && $this->risk->emergencyCapSaturated()) {
+            return $this->privateJson(
+                ['error' => [
+                    'code' => 'RISK_DENIED',
+                    'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.',
+                    'retry_after_ms' => 1000,
+                ]],
+                Response::HTTP_TOO_MANY_REQUESTS,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
+        }
 
         if ($this->rateLimiter !== null) {
             $rate = $this->rateLimiter->check($clientIp);
@@ -333,10 +493,18 @@ final class ChallengeController
      *
      * Requests WITHOUT an Origin header (same-origin navigation, curl,
      * non-browser clients) are allowed — a browser cross-site POST always
-     * carries one. When present, the Origin must match the request's own
-     * scheme://host[:port] (constant-time compare; trailing slashes
-     * normalized). Cross-origin requests are rejected BEFORE any state is
-     * written, so they consume no rate-limit budget.
+     * carries one. When present, the Origin must match the EXPECTED origin.
+     *
+     * Audit #78: the expected origin comes from SERVER CONFIG
+     * (public_base_url) when configured — a forged Host header can never
+     * shift the expected origin ("Host: evil.example" + "Origin:
+     * https://evil.example" must stay cross-origin). Comparison is the same
+     * STRUCTURED NORMALIZATION as the allowlist
+     * ({@see self::normalizeOrigin()}). Without public_base_url the
+     * expected origin is derived from the request's own scheme+host
+     * (constant-time compare; trailing slashes normalized) — fine for
+     * localhost/dev, but production deployments behind shared
+     * infrastructure should set public_base_url (README).
      */
     private function isSameOrigin(Request $request): bool
     {
@@ -344,6 +512,14 @@ final class ChallengeController
         if ($origin === null || $origin === '') {
             return true;
         }
+
+        if ($this->publicBaseUrl !== null) {
+            $expected = self::normalizeOrigin($this->publicBaseUrl);
+            $candidate = self::normalizeOrigin($origin);
+
+            return $expected !== null && $candidate !== null && $expected === $candidate;
+        }
+
         $expected = rtrim($request->getScheme().'://'.$request->getHttpHost(), '/');
 
         return hash_equals($expected, rtrim($origin, '/'));
@@ -479,6 +655,15 @@ final class ChallengeController
      *   X-Content-Type-Options: nosniff               (JSON must never be
      *                                                 re-sniffed as HTML)
      *
+     * FRAME-ANCESTORS CSP (audit #71): when risk.challenge_origin_allowlist
+     * is non-empty, EVERY challenge response carries an EXPLICIT
+     * `Content-Security-Policy: frame-ancestors <allowlisted origins,
+     * space-separated>` — never inherited from default-src, so the allowlist
+     * is exactly the framing contract of the challenge endpoint. An empty
+     * allowlist emits NO CSP header (nothing to promise). The bundle emits
+     * NO CORS headers at all (audit #63 — CORS is not authorization; the
+     * origin checks above are, and they run on every response regardless).
+     *
      * When a NEW risk continuity session was minted for this request, the
      * cookie is attached here — on every response path (success, deny, 422),
      * so the session the assessment keyed on is what the client carries.
@@ -492,6 +677,10 @@ final class ChallengeController
         $response->headers->set('Pragma', 'no-cache');
         $response->headers->set('Referrer-Policy', 'no-referrer');
         $response->headers->set('X-Content-Type-Options', 'nosniff');
+
+        if ($this->challengeOriginAllowlist !== []) {
+            $response->headers->set('Content-Security-Policy', 'frame-ancestors '.implode(' ', $this->challengeOriginAllowlist));
+        }
 
         if ($mintedCookie && $request !== null && $riskSession !== null && $this->continuityCookie !== null) {
             $response->headers->setCookie($this->continuityCookie->cookie($request, $riskSession));

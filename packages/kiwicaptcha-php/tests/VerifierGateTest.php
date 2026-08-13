@@ -290,9 +290,14 @@ final class VerifierGateTest extends TestCase
                 return $this->peek;
             }
 
-            public function consume(string $nonce): ?ChallengeRecord
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
-                return $this->swapped;
+                return new \KiwiCaptcha\ConsumedRecord($this->swapped, true, false, null);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return false;
             }
 
             public function delete(string $nonce): void
@@ -331,12 +336,17 @@ final class VerifierGateTest extends TestCase
                 return $this->current;
             }
 
-            public function consume(string $nonce): ?ChallengeRecord
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 $record = $this->current;
                 $this->current = null;
 
-                return $record;
+                return $record === null ? null : new \KiwiCaptcha\ConsumedRecord($record, true, false, null);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return false;
             }
 
             public function delete(string $nonce): void
@@ -403,10 +413,68 @@ final class VerifierGateTest extends TestCase
         $storage->store($record);
 
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
-        $outcome = $verifier->verify($this->tokenFor($record->nonce, 0), Vectors::SECRET);
+        $outcome = $verifier->verify($this->tokenFor($record->nonce, 0), Vectors::SECRET, 'login', self::CLIENT_IP);
 
         self::assertSame(VerifyError::MalformedRecord, $outcome->error);
         self::assertNull($storage->find($record->nonce));
+    }
+
+    public function testLifetimeAtTheMaximumTtlCeilingIsAccepted(): void
+    {
+        // expiresAt - issuedAt = 300 == MAX_TTL_SECS: within the ceiling, so
+        // the record is structurally valid and verifies end-to-end.
+        $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT, expiresAt: self::ISSUED_AT + 300);
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->verify($this->tokenFor($record->nonce, $counter), Vectors::SECRET, 'login', self::CLIENT_IP);
+
+        self::assertTrue($outcome->isOk(), sprintf('a lifetime at the MAX_TTL_SECS boundary must verify, got %s', $outcome->code()));
+    }
+
+    public function testFutureIssuedBeyondClockSkewRejectedAsExpired(): void
+    {
+        // Audit #76: a signed challenge claiming issued_at = now + 61s
+        // exceeds MAX_CLOCK_SKEW (60s) — no real issuer host is that far
+        // ahead, so the TTL check rejects it as Expired.
+        $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT + 61, expiresAt: self::ISSUED_AT + 61 + 120);
+        $storage = new ArrayStorage();
+        $storage->store($record);
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->verify($this->tokenFor($record->nonce, 0), Vectors::SECRET, 'login', self::CLIENT_IP);
+
+        self::assertSame(VerifyError::Expired, $outcome->error);
+        self::assertNull($storage->find($record->nonce), 'a future-issued record must be burned');
+    }
+
+    public function testFutureIssuedAtTheClockSkewBoundaryVerifies(): void
+    {
+        // Audit #76: issued_at = now + 60 sits exactly AT the MAX_CLOCK_SKEW
+        // boundary — the future bound uses `>`, so the record is accepted
+        // and verifies end-to-end.
+        $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT + 60, expiresAt: self::ISSUED_AT + 60 + 120);
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->verify(
+            $this->tokenFor($record->nonce, $counter),
+            Vectors::SECRET,
+            'login',
+            self::CLIENT_IP,
+            nowNs: $record->issuedAtNs + 1_000_000,
+        );
+
+        self::assertTrue($outcome->isOk(), sprintf('a record at the future-skew boundary must verify, got %s', $outcome->code()));
+    }
+
+    public function testMaxClockSkewConstantIsSixtySeconds(): void
+    {
+        self::assertSame(60, Verifier::MAX_CLOCK_SKEW);
     }
 
     public function testArgonTAboveProcessCeilingRejectsAsUnsupported(): void
@@ -611,9 +679,10 @@ final class VerifierGateTest extends TestCase
         $ip = '192.168.1.5';
         $bindingTag = Issuer::bindingTag($nonce, $ip, $secret);
 
-        // Round-9 canonical (audits #41/#42): the 15-field layout with
-        // region/request_binding as empty segments and policy_version 1.
-        $canonicalV2 = 'v2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|';
+        // Round-10 canonical (audits #41/#42/#67): the 16-field layout with
+        // region/request_binding/issuer as empty segments and policy_version
+        // 1.
+        $canonicalV2 = 'v2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1||';
         self::assertSame(
             $canonicalV2,
             Issuer::canonicalPayload(

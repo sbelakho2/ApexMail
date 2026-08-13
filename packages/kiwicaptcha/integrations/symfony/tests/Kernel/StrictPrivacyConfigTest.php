@@ -53,7 +53,7 @@ final class StrictPrivacyConfigTest extends TestCase
 
     public function testStrictChallengeCarriesNoTimingFloorAndNoTelemetry(): void
     {
-        self::$strict->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        self::$strict->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         $response = self::$strict->getResponse();
         self::assertSame(200, $response->getStatusCode());
 
@@ -65,7 +65,7 @@ final class StrictPrivacyConfigTest extends TestCase
     {
         // same_origin_only was set false by the operator, but strict forces
         // it true: a cross-origin Origin header must be rejected.
-        self::$strict->request('POST', '/kiwi-captcha/challenge', server: ['HTTP_ORIGIN' => 'https://evil.example'], content: '{"scope":"login"}');
+        self::$strict->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json', 'HTTP_ORIGIN' => 'https://evil.example'], content: '{"scope":"login"}');
 
         $response = self::$strict->getResponse();
         self::assertSame(403, $response->getStatusCode());

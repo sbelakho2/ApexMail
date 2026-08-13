@@ -111,8 +111,9 @@ pub enum BindingMode {
 /// `ChallengeRecord::toArray()` emits identical keys (nonce, scope,
 /// binding_tag, issued_at, expires_at, algorithm 'sha256'|'argon2id', m_kib,
 /// t, p, target_bits, salt, prefix, challenge, min_duration_ms, issued_at_ns,
-/// attempts_used optional, protocol_version, region). PoWAlgorithm already
-/// serializes lowercase — keep it. Both languages write and read this exact
+/// attempts_used optional, protocol_version, region, policy_version,
+/// request_binding, issuer — 21 keys). PoWAlgorithm already serializes
+/// lowercase — keep it. Both languages write and read this exact
 /// shape, so a record persisted by PHP can be verified by Rust and vice
 /// versa.
 ///
@@ -207,6 +208,16 @@ pub struct ChallengeRecord {
     /// somewhere" into "permission to continue THIS transaction".
     #[serde(default)]
     pub request_binding: Option<String>,
+    /// Deployment identity of the ISSUING application (e.g. "auth-gateway",
+    /// "signup-eu-1" — audit #67). Signed into the v2 canonical payload (the
+    /// FINAL field) so a challenge minted for one audience cannot be redeemed
+    /// in front of another verifier; a verifier configured with an expected
+    /// issuer rejects records whose issuer differs — or that carry no issuer
+    /// at all (fail closed). The JSON key is ALWAYS present for v2 records —
+    /// `null` when unset — for byte parity with the PHP `toArray()` key set
+    /// (21 keys). Absent in legacy stored records: `#[serde(default)]`.
+    #[serde(default)]
+    pub issuer: Option<String>,
 }
 
 fn default_policy_version() -> u32 {
@@ -275,6 +286,12 @@ pub struct ChallengeConfig {
     /// an expected region ([`VerifyError::WrongRegion`]). Deployment
     /// metadata, never signed and never sent to the client.
     pub region: Option<String>,
+    /// Issuer identity stamped into every issued challenge (audit #67): a
+    /// stable deployment string (e.g. "auth-gateway") signed as the FINAL
+    /// canonical v2 field. A verifier configured with an expected issuer
+    /// rejects records with a different — or missing — issuer
+    /// ([`VerifyError::WrongIssuer`]).
+    pub issuer: Option<String>,
 }
 
 impl ChallengeConfig {
@@ -418,10 +435,13 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// Protocol v2 canonical input (`protocol_version == 2`): the full parameter
 /// set so no issuance parameter can be tampered with without breaking the
 /// signature:
-/// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms`.
+/// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer`.
+/// `region`, `request_binding` and `issuer` render as the EMPTY segment when
+/// unset; `issuer` is the FINAL field (audit #67), appended after
+/// `request_binding`.
 pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
     format!(
-        "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         record.nonce,
         record.scope,
         record.binding_tag,
@@ -436,7 +456,8 @@ pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         record.min_duration_ms,
         record.region.as_deref().unwrap_or(""),
         record.policy_version,
-        record.request_binding.as_deref().unwrap_or("")
+        record.request_binding.as_deref().unwrap_or(""),
+        record.issuer.as_deref().unwrap_or("")
     )
 }
 
@@ -586,6 +607,13 @@ pub const SOLVER_MAX_HASHES: u64 = 5_000_000;
 /// `expires_at - issued_at` above this are malformed (they could otherwise
 /// pin expensive server state for an unbounded window).
 pub const MAX_TTL_SECS: u64 = 300;
+
+/// Maximum tolerated clock skew (seconds) between the issuer and verifier
+/// clocks (audit #76). The TTL check rejects challenges whose `issued_at` is
+/// more than this far in the FUTURE relative to the verifier's current time
+/// — a future-issued challenge beyond the skew is a time-domain anomaly and
+/// invalid. Shared with the PHP core.
+pub const MAX_CLOCK_SKEW_SECS: u64 = 60;
 
 /// Maximum Argon2id time cost a record may claim. `t` above this is
 /// rejected by `validate_record` (and at issuance) so verification never runs
@@ -873,6 +901,7 @@ pub fn issue_challenge(
         region: config.region.clone(),
         policy_version: config.policy_version,
         request_binding: request_binding.map(str::to_string),
+        issuer: config.issuer.clone(),
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key)?;
@@ -1051,6 +1080,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1178,6 +1208,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1247,6 +1278,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1290,6 +1322,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1333,6 +1366,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1371,6 +1405,7 @@ mod tests {
             auto_tune_max_bits: 20,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1402,6 +1437,7 @@ mod tests {
                 auto_tune_max_bits: 24,
                 binding_mode: BindingMode::Bound,
                 region: None,
+                issuer: None,
 
                 policy_version: 1,
             },
@@ -1443,6 +1479,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1491,6 +1528,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1528,6 +1566,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1562,6 +1601,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         }
@@ -1620,6 +1660,7 @@ mod tests {
                 expected_scope: None,
                 client_ip: Some("1.2.3.4"),
                 expected_region: None,
+                expected_issuer: None,
                 expected_policy_version: None,
                 telemetry: None,
                 enforce_telemetry: false,
@@ -1669,6 +1710,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1718,6 +1760,70 @@ mod tests {
         let unbound_value = serde_json::to_value(&unbound.record).unwrap();
         assert_eq!(unbound_value["region"], serde_json::Value::Null);
         assert!(unbound_value.as_object().unwrap().contains_key("region"));
+    }
+
+    #[test]
+    fn issue_carries_issuer_on_the_record() {
+        let base = profile_base_config();
+        let with_issuer = ChallengeConfig {
+            issuer: Some("auth-gw-eu".into()),
+            ..base.clone()
+        };
+        let issued = issue_challenge(
+            &with_issuer,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(issued.record.issuer.as_deref(), Some("auth-gw-eu"));
+
+        let unbound = issue_challenge(
+            &base,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(unbound.record.issuer, None);
+        // The JSON key is ALWAYS present (null when unbound) — PHP toArray()
+        // parity, 21 keys.
+        let value = serde_json::to_value(&issued.record).unwrap();
+        assert_eq!(value["issuer"], "auth-gw-eu");
+        let unbound_value = serde_json::to_value(&unbound.record).unwrap();
+        assert_eq!(unbound_value["issuer"], serde_json::Value::Null);
+        assert!(unbound_value.as_object().unwrap().contains_key("issuer"));
+
+        // The issuer is the FINAL canonical v2 field (audit #67): appended
+        // after request_binding, empty when unset.
+        let canonical = crate::challenge::canonical_signing_input_v2(&issued.record);
+        assert!(canonical.ends_with("|auth-gw-eu"), "canonical: {canonical}");
+        let unbound_canonical = crate::challenge::canonical_signing_input_v2(&unbound.record);
+        assert!(
+            unbound_canonical.ends_with("||"),
+            "unbound issuer renders as the empty final segment: {unbound_canonical}"
+        );
+        // The record's signature covers the issuer: tampering with it breaks
+        // the v2 signature (the canonical is signed, so the issuer cannot be
+        // swapped without the secret).
+        let mut tampered = issued.record.clone();
+        tampered.issuer = Some("evil-issuer".into());
+        let signature = issued
+            .record
+            .challenge
+            .rsplit_once('.')
+            .map(|(_, sig)| sig)
+            .unwrap();
+        assert!(
+            !crate::challenge::verify_signature_v2(&tampered, signature, "test-key-16-bytes!")
+                .unwrap()
+        );
     }
 
     #[test]

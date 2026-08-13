@@ -188,4 +188,61 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertGreaterThan($afterFirst, \count($client->calls));
         self::assertGreaterThan($probesBefore, $afterFirst);
     }
+
+    // ── Round 10: memory-budget readiness invariant (audit #68) ───────────
+
+    public function testMaxProfileMemoryReadsTheCoreProfileConstant(): void
+    {
+        self::assertSame(65536, \KiwiCaptcha\ChallengeProfile::argon64()->mKib, 'the largest adaptive profile is argon64 (65536 KiB = 64 MiB)');
+        self::assertSame(64, (int) ceil(\KiwiCaptcha\ChallengeProfile::argon64()->mKib / 1024), 'the invariant\'s max profile memory must be 64 MiB');
+    }
+
+    public function testMemoryBudgetInvariantPassesWhenEnoughMemory(): void
+    {
+        // concurrency 2 x 64 MiB + 256 MiB headroom = 384 MiB <= 512 MiB.
+        $controller = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 2, 512);
+        self::assertSame(200, $controller->ready()->getStatusCode());
+        self::assertTrue($controller->memoryBudgetOk());
+    }
+
+    public function testMemoryBudgetInvariantFailsWhenTheBudgetIsTooSmall(): void
+    {
+        // concurrency 8 x 64 MiB + 256 MiB headroom = 768 MiB > 512 MiB.
+        $controller = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 8, 512);
+
+        $response = $controller->ready();
+        self::assertSame(503, $response->getStatusCode(), 'a container that cannot hold the worst-case verification memory must not be ready');
+        self::assertStringContainsString('memory_budget_invariant', (string) $response->getContent());
+    }
+
+    public function testMemoryBudgetBoundaryIsExact(): void
+    {
+        // concurrency 4 x 64 + 256 = 512: the boundary budget is exactly
+        // enough -> ready; one MiB less -> not ready.
+        $ok = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 4, 512);
+        self::assertSame(200, $ok->ready()->getStatusCode(), 'required == budget is ready');
+
+        $tooSmall = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 4, 511);
+        self::assertSame(503, $tooSmall->ready()->getStatusCode(), 'required > budget is not ready');
+    }
+
+    public function testMemoryBudgetSkippedWhenNotConfigured(): void
+    {
+        // container_memory_mib null (default): the invariant is skipped —
+        // readiness is decided by the other legs only.
+        $controller = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 100, null);
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'a null budget must skip the invariant');
+        self::assertTrue($controller->memoryBudgetOk());
+    }
+
+    public function testUnlimitedConcurrencyUsesOneHashForTheInvariant(): void
+    {
+        // argon2_max_concurrent_verifications = 0 (unlimited) is treated as 1
+        // for the invariant (at least one hash must fit): 1 x 64 + 256 = 320.
+        $ok = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, 320);
+        self::assertSame(200, $ok->ready()->getStatusCode(), 'the unlimited-cap floor (320 MiB) must fit');
+
+        $tooSmall = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, 319);
+        self::assertSame(503, $tooSmall->ready()->getStatusCode());
+    }
 }

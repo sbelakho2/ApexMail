@@ -32,7 +32,7 @@ final class RouterIntegrationTest extends TestCase
 
     public function testChallengeRouteIsRegisteredOutOfTheBox(): void
     {
-        self::$browser->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
 
         $response = self::$browser->getResponse();
         self::assertSame(200, $response->getStatusCode());
@@ -53,7 +53,7 @@ final class RouterIntegrationTest extends TestCase
 
     public function testChallengeRouteReturnsJsonErrorForInvalidScope(): void
     {
-        self::$browser->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"bad|scope"}');
+        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"bad|scope"}');
 
         $response = self::$browser->getResponse();
         self::assertSame(422, $response->getStatusCode());
@@ -62,7 +62,7 @@ final class RouterIntegrationTest extends TestCase
 
     public function testConfiguredRoutePrefixChangesTheActualRoute(): void
     {
-        $this->prefixedBrowser()->request('POST', '/security/captcha/challenge', content: '{"scope":"login"}');
+        $this->prefixedBrowser()->request('POST', '/security/captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
 
         $response = $this->prefixedBrowser()->getResponse();
         self::assertSame(200, $response->getStatusCode());
@@ -71,7 +71,7 @@ final class RouterIntegrationTest extends TestCase
 
     public function testDefaultRouteIsGoneWhenPrefixIsConfigured(): void
     {
-        $this->prefixedBrowser()->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        $this->prefixedBrowser()->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
 
         self::assertSame(404, $this->prefixedBrowser()->getResponse()->getStatusCode());
     }
@@ -94,7 +94,7 @@ final class RouterIntegrationTest extends TestCase
         self::assertSame(200, $client->getResponse()->getStatusCode());
         self::assertSame(['ok' => true], json_decode($client->getResponse()->getContent(), true));
 
-        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         self::assertSame(200, $client->getResponse()->getStatusCode());
         self::assertNotEmpty(json_decode($client->getResponse()->getContent(), true)['nonce']);
     }
@@ -107,31 +107,31 @@ final class RouterIntegrationTest extends TestCase
         $client->disableReboot();
 
         // Success path.
-        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         $response = $client->getResponse();
         self::assertSame(200, $response->getStatusCode());
         $this->assertPrivateDocumentHeaders($response);
 
         // Error path (422).
-        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"bad|scope"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"bad|scope"}');
         $this->assertPrivateDocumentHeaders($client->getResponse());
 
         // Rate-limited path (429).
         for ($i = 0; $i < 12; $i++) {
-            $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+            $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         }
         $rateLimited = $client->getResponse();
         self::assertSame(429, $rateLimited->getStatusCode());
         $this->assertPrivateDocumentHeaders($rateLimited);
 
         // Cross-origin path (403).
-        $client->request('POST', '/kiwi-captcha/challenge', server: ['HTTP_ORIGIN' => 'https://evil.example'], content: '{"scope":"login"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json', 'HTTP_ORIGIN' => 'https://evil.example'], content: '{"scope":"login"}');
         $this->assertPrivateDocumentHeaders($client->getResponse());
     }
 
     public function testCrossOriginPostIsRejectedWith403(): void
     {
-        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['HTTP_ORIGIN' => 'https://evil.example'], content: '{"scope":"login"}');
+        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json', 'HTTP_ORIGIN' => 'https://evil.example'], content: '{"scope":"login"}');
 
         $response = self::$browser->getResponse();
         self::assertSame(403, $response->getStatusCode());
@@ -143,7 +143,7 @@ final class RouterIntegrationTest extends TestCase
     {
         // The request itself is served at http://localhost (KernelBrowser
         // default): a matching Origin must be accepted.
-        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['HTTP_ORIGIN' => 'http://localhost'], content: '{"scope":"login"}');
+        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json', 'HTTP_ORIGIN' => 'http://localhost'], content: '{"scope":"login"}');
         self::assertSame(200, self::$browser->getResponse()->getStatusCode());
     }
 
@@ -151,7 +151,7 @@ final class RouterIntegrationTest extends TestCase
     {
         // No Origin header (curl, same-origin navigation, non-browser
         // clients): allowed.
-        self::$browser->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         self::assertSame(200, self::$browser->getResponse()->getStatusCode());
     }
 
@@ -202,7 +202,7 @@ final class RouterIntegrationTest extends TestCase
         self::assertSame(404, $client->getResponse()->getStatusCode(), 'risk.health.enabled=false must not register /health/ready');
 
         // The challenge route stays.
-        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         self::assertSame(200, $client->getResponse()->getStatusCode());
     }
 
@@ -239,14 +239,14 @@ final class RouterIntegrationTest extends TestCase
         // the validator, there is no public verify route).
         $client = new KernelBrowser(new TestKernel('test', true));
 
-        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         $response = $client->getResponse();
         self::assertSame(200, $response->getStatusCode());
         self::assertSame('max-age=0, no-store, private', $response->headers->get('Cache-Control'));
         self::assertSame('no-cache', $response->headers->get('Pragma'));
 
         // The error path carries the same contract.
-        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"bad|scope"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"bad|scope"}');
         $response = $client->getResponse();
         self::assertSame(422, $response->getStatusCode());
         self::assertSame('max-age=0, no-store, private', $response->headers->get('Cache-Control'));

@@ -27,13 +27,15 @@ final class VerifyOutcome
         public readonly ?string $detail,
         public readonly ?string $nonce,
         public readonly ?string $requestBinding,
+        public readonly bool $fromStoredResult = false,
     ) {
     }
 
-    public static function valid(?string $nonce = null, ?string $requestBinding = null): self
+    public static function valid(?string $nonce = null, ?string $requestBinding = null, bool $fromStoredResult = false): self
     {
-        return new self(true, null, null, $nonce, $requestBinding);
+        return new self(true, null, null, $nonce, $requestBinding, $fromStoredResult);
     }
+
 
     public static function invalid(VerifyError $error): self
     {

@@ -33,6 +33,7 @@ final class KiwiCaptchaRuntime
         private readonly string $template = self::DEFAULT_TEMPLATE,
         private readonly string $telemetry = 'off',
         private readonly ?string $requestBinding = null,
+        private readonly array $challengeOriginAllowlist = [],
     ) {
         $assetDir ??= \dirname(__DIR__, 2).'/Resources/public';
         $this->css = $this->readAsset($assetDir, 'widget.css');
@@ -64,6 +65,30 @@ final class KiwiCaptchaRuntime
     public function driver(): string
     {
         return $this->driver;
+    }
+
+    /**
+     * The EXPLICIT `frame-ancestors` CSP directive for the widget PAGE
+     * (audit #71): the space-separated allowlisted origins
+     * (risk.challenge_origin_allowlist) — always explicit, never
+     * default-src inheritance. Returns null when the allowlist is empty
+     * (no CSP promise to make).
+     *
+     * The application should append this directive to the Content-Security-
+     * Policy header of every page that embeds the widget (frame-ancestors
+     * is ignored inside <meta> tags, so the header is the only delivery
+     * that works — the challenge ENDPOINT itself emits the header
+     * automatically). The value already includes the directive name:
+     *
+     *     Content-Security-Policy: default-src 'self'; <?= $runtime->cspFrameAncestors() ?>
+     */
+    public function cspFrameAncestors(): ?string
+    {
+        if ($this->challengeOriginAllowlist === []) {
+            return null;
+        }
+
+        return 'frame-ancestors '.implode(' ', $this->challengeOriginAllowlist);
     }
 
     /**

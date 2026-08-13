@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
+use KiwiCaptcha\ChallengeProfile;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -33,6 +34,18 @@ use Symfony\Component\HttpFoundation\Response;
  *         rolling deployments, rollbacks) takes the old binary OUT of the
  *         pool BEFORE it serves traffic it cannot honor. When the key is
  *         ABSENT the binary's own configuration is authoritative.
+ *      4. the MEMORY-BUDGET invariant holds (audit #68, only when
+ *         risk.container_memory_mib is configured):
+ *         `argon2_max_concurrent_verifications × max-adaptive-profile-memory
+ *         (64 MiB — the risk profiles' argon64 m_kib 65536 KiB) + 256 MiB
+ *         headroom <= container_memory_mib`. A violated invariant refuses
+ *         startup (503 memory_budget_invariant): the configured container
+ *         cannot hold the worst-case memory-hard verification load plus
+ *         headroom, so the process must not serve traffic. When
+ *         container_memory_mib is null (or the concurrency cap is 0 =
+ *         unlimited) the check is skipped (documented — the invariant is
+ *         only meaningful with a finite cap; an unlimited cap needs an
+ *         explicit budget decision).
  *
  * The route paths follow the configured route_prefix (default
  * /kiwi-captcha/health/live + /health/ready) and are registered by
@@ -50,6 +63,9 @@ final class KiwiHealthController
      * ready.
      */
     public const MAX_PROTOCOL_VERSION = 2;
+
+    /** Fixed headroom of the memory-budget invariant (audit #68), in MiB. */
+    public const MEMORY_HEADROOM_MIB = 256;
 
     /** In-process probe/state cache window in ms. */
     private const CACHE_MS = 1000;
@@ -75,6 +91,17 @@ final class KiwiHealthController
      * @param int                        $policyVersion the configured
      *                                                   risk.policy_version
      * @param callable(): float|null     $nowMs         clock override (tests)
+     * @param int                        $argonConcurrency  the configured
+     *                                                   argon2_max_concurrent_
+     *                                                   verifications (0 =
+     *                                                   unlimited; the
+     *                                                   invariant treats it
+     *                                                   as 1 — at least one
+     *                                                   hash must fit)
+     * @param int|null                   $containerMemoryMib risk.container_
+     *                                                   memory_mib — null
+     *                                                   (default) skips the
+     *                                                   invariant
      */
     public function __construct(
         private readonly string $secretKey,
@@ -82,6 +109,8 @@ final class KiwiHealthController
         private readonly string $namespace,
         private readonly int $policyVersion,
         private $nowMs = null,
+        private readonly int $argonConcurrency = 0,
+        private readonly ?int $containerMemoryMib = null,
     ) {
     }
 
@@ -110,8 +139,46 @@ final class KiwiHealthController
         if (!$policyOk) {
             return $this->json(['status' => 'not_ready', 'reason' => $reason ?? 'security_policy_incompatible'], Response::HTTP_SERVICE_UNAVAILABLE);
         }
+        if (!$this->memoryBudgetOk()) {
+            return $this->json(['status' => 'not_ready', 'reason' => 'memory_budget_invariant'], Response::HTTP_SERVICE_UNAVAILABLE);
+        }
 
         return $this->json(['status' => 'ready']);
+    }
+
+    /**
+     * The memory-budget readiness invariant (audit #68):
+     * `max(1, argon_concurrency) × MAX_PROFILE_MIB + MEMORY_HEADROOM_MIB
+     * <= container_memory_mib`. True (ready) when the budget is null (the
+     * check is skipped and documented) or the budget is large enough — a
+     * container that cannot hold the worst-case verification memory load
+     * must not serve traffic (OOM in the middle of a memory-hard hash is a
+     * security failure, not just an availability one).
+     *
+     * The concurrency cap is floored at 1: a cap of 0 means "unlimited",
+     * for which no worst case exists — the invariant then only guarantees
+     * the headroom (the operator must set a finite cap for a meaningful
+     * check, see README).
+     */
+    public function memoryBudgetOk(): bool
+    {
+        if ($this->containerMemoryMib === null) {
+            return true;
+        }
+        $concurrency = max(1, $this->argonConcurrency);
+        $required = $concurrency * $this->maxProfileMib() + self::MEMORY_HEADROOM_MIB;
+
+        return $this->containerMemoryMib >= $required;
+    }
+
+    /**
+     * Max adaptive-profile memory in MiB (audit #68): the risk profiles'
+     * largest m_kib is 65536 KiB = 64 MiB (ChallengeProfile::argon64) —
+     * read from the core's profile constant, never hard-coded.
+     */
+    private function maxProfileMib(): int
+    {
+        return (int) ceil(ChallengeProfile::argon64()->mKib / 1024);
     }
 
     /**

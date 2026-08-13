@@ -38,13 +38,13 @@ final class HardeningWiringTest extends TestCase
         // single worker is the scenario the in-memory limiter guards.
         $client = new KernelBrowser(self::$kernel);
         $client->disableReboot();
-        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         self::assertSame(200, $client->getResponse()->getStatusCode());
 
-        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         self::assertSame(200, $client->getResponse()->getStatusCode());
 
-        $client->request('POST', '/kiwi-captcha/challenge', content: '{"scope":"login"}');
+        $client->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json'], content: '{"scope":"login"}');
         self::assertSame(429, $client->getResponse()->getStatusCode());
         self::assertStringContainsString('RATE_LIMITED', (string) $client->getResponse()->getContent());
     }

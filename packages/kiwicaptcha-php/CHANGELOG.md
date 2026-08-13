@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+- Audit round 10:
+  - Deployment issuer compartment (audit #67): `ChallengeRecord.issuer`
+    (21-key wire schema), `Config.issuer`, `Verifier.expectedIssuer` +
+    `VerifyError::WrongIssuer`; the v2 canonical payload gains the issuer as
+    its FINAL field (`...|request_binding|issuer`).
+  - Post-derive final revalidation (audit #59): after the proof derives, the
+    verifier re-checks expiry (with its clock) and the CURRENT
+    policy/region/issuer expectations before returning Valid.
+  - Future-time bound (audit #76): `Verifier::MAX_CLOCK_SKEW` (60s) — a
+    challenge issued more than 60s in the future is rejected.
+  - Consumed-state retry (audit #74): consume() is an atomic TRANSITION
+    (record kept until its TTL, `state`/`consumed_result` runtime JSON
+    fields); `StorageInterface::commitResult()` stores the deterministic
+    outcome; retries replay Valid/InsufficientWork without re-deriving, or
+    ConsumeIndeterminate when no result was committed.
+
 ### Removed
 - Bundled Symfony layer (`KiwiCaptcha\Symfony` namespace, widget Twig
   template, `tests/Symfony`, and the framework-specific composer dev

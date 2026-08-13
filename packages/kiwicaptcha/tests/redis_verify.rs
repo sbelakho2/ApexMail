@@ -20,7 +20,7 @@ use kiwicaptcha::challenge::{
 };
 use kiwicaptcha::redis_verify::{
     AdmissionError, ArgonAdmissionGate, ArgonLease, ProductionVerifier, RedisChallengeStore,
-    DEFAULT_POOL_SIZE,
+    StoredConsumedResult, DEFAULT_POOL_SIZE,
 };
 use kiwicaptcha::token::SolutionToken;
 use kiwicaptcha::verify::{solve_for_test, VerifyError, VerifyOutcome};
@@ -173,6 +173,7 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
         auto_tune_max_bits: 20,
         binding_mode: BindingMode::Bound,
         region: None,
+        issuer: None,
         policy_version: 1,
     }
 }
@@ -193,6 +194,7 @@ fn argon_config(target_bits: u32) -> ChallengeConfig {
         auto_tune_max_bits: 20,
         binding_mode: BindingMode::Bound,
         region: None,
+        issuer: None,
         policy_version: 1,
     }
 }
@@ -276,11 +278,19 @@ fn valid_solution_verifies_and_wire_format_is_language_neutral() {
 }
 
 #[test]
-fn two_concurrent_verifies_exactly_one_wins() {
+fn two_concurrent_verifies_exactly_one_derives() {
+    // Audit #74: the consumed-state transition keeps the record, so the
+    // concurrent loser now returns the WINNER'S STORED OUTCOME — the SAME
+    // Valid — or ConsumeIndeterminate when it races between the transition
+    // and the outcome commit. NOT RecordNotFound. Exactly one derive
+    // happens: commit_result stores exactly once, so the single stored
+    // `consumed_result` (valid=true) pins the derive count; the counting
+    // gate proves both racers passed through the Argon gate (the gate runs
+    // BEFORE the transition, so both acquire; only the winner derives).
     let Some(url) = redis_url() else { return };
     let prefix = prefix("race");
     let issued = issue_challenge(
-        &sha_config(4),
+        &argon_config(4),
         "login",
         IP,
         now_unix(),
@@ -289,15 +299,25 @@ fn two_concurrent_verifies_exactly_one_wins() {
         None,
     )
     .unwrap();
-    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
 
-    let verifier = Arc::new(verifier_for(&url, &prefix));
+    let active = Arc::new(AtomicUsize::new(0));
+    let acquired = Arc::new(AtomicUsize::new(0));
+    let released = Arc::new(AtomicUsize::new(0));
+    let gate = CountingGate {
+        active: Arc::clone(&active),
+        acquired: Arc::clone(&acquired),
+        released: Arc::clone(&released),
+        accept: true,
+    };
+    let verifier = Arc::new(verifier_for(&url, &prefix).with_argon_gate(gate));
     verifier.store().store(&issued.record).unwrap();
 
-    // Two threads race the same token; GETDEL means exactly one of them can
-    // ever observe the record — the loser must fail before any derive.
+    // Two threads race the same token; the transition means exactly one of
+    // them wins it — the loser must return the stored outcome without any
+    // derivation.
     let barrier = Arc::new(Barrier::new(3));
     let mut handles = Vec::new();
     for _ in 0..2 {
@@ -312,23 +332,51 @@ fn two_concurrent_verifies_exactly_one_wins() {
     barrier.wait();
 
     let mut valid = 0;
-    let mut not_found = 0;
+    let mut indeterminate = 0;
     for handle in handles {
         match handle.join().unwrap() {
             VerifyOutcome::Valid { .. } => valid += 1,
-            VerifyOutcome::Invalid(VerifyError::RecordNotFound) => not_found += 1,
+            VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate) => indeterminate += 1,
             other => panic!("unexpected concurrent outcome: {other:?}"),
         }
     }
     assert_eq!(
-        (valid, not_found),
-        (1, 1),
-        "exactly one concurrent verify may derive; the other must see the consumed record"
+        valid + indeterminate,
+        2,
+        "one winner (Valid) + one loser (stored Valid or ConsumeIndeterminate)"
     );
+    assert!(valid >= 1, "the transition winner must return Valid");
+    assert!(
+        indeterminate <= 1,
+        "only the loser may see ConsumeIndeterminate (racing before the commit)"
+    );
+
+    // Exactly one derive + commit: the stored record carries ONE committed
+    // outcome (valid=true) — a second derive would have committed a second
+    // outcome, which commit_result refuses.
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(stored["state"], "consumed");
+    assert_eq!(stored["consumed_result"]["valid"], true);
+
+    // Both racers consult the Argon gate (it runs before the transition);
+    // every lease is released.
+    assert_eq!(
+        acquired.load(Ordering::SeqCst),
+        2,
+        "both racers acquire a gate lease"
+    );
+    assert_eq!(active.load(Ordering::SeqCst), 0, "no lease left in flight");
+    assert_eq!(released.load(Ordering::SeqCst), 2, "every lease released");
 }
 
 #[test]
-fn replay_after_valid_verify_is_record_not_found() {
+fn replay_after_valid_verify_returns_the_stored_outcome() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("replay");
     let issued = issue_challenge(
@@ -352,10 +400,15 @@ fn replay_after_valid_verify_is_record_not_found() {
         verify_at(&verifier, &token, issued_at_ns),
         VerifyOutcome::Valid { .. }
     ));
-    assert_eq!(
-        verify_at(&verifier, &token, issued_at_ns),
-        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
-        "a consumed token can never verify twice"
+    // Audit #74: the consumed record is KEPT with the committed outcome —
+    // a replay returns the SAME Valid (from the stored result), never
+    // RecordNotFound and never a re-derivation.
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "a replayed token returns the stored outcome of the first verification"
     );
 }
 
@@ -380,8 +433,9 @@ fn wrong_counter_is_insufficient_work_and_burns_the_record() {
     let verifier = verifier_for(&url, &prefix);
     verifier.store().store(&issued.record).unwrap();
 
-    // Wrong counter: the one-shot model consumes the record, so the attempt
-    // bound is per-nonce (GETDEL), not a caller-managed counter.
+    // Wrong counter: the one-shot model consumes the record via the
+    // transition and commits valid=false, so the attempt bound is per-nonce
+    // (the transition), not a caller-managed counter.
     assert_eq!(
         verify_at(
             &verifier,
@@ -390,14 +444,16 @@ fn wrong_counter_is_insufficient_work_and_burns_the_record() {
         ),
         VerifyOutcome::Invalid(VerifyError::InsufficientWork)
     );
+    // Audit #74: the retry with the correct counter sees the stored
+    // valid=false outcome — the SAME InsufficientWork, not RecordNotFound.
     assert_eq!(
         verify_at(
             &verifier,
             &encode_token(&issued.record.nonce, valid),
             issued_at_ns
         ),
-        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
-        "a wrong counter must burn the challenge"
+        VerifyOutcome::Invalid(VerifyError::InsufficientWork),
+        "a wrong counter commits valid=false; the replay returns the stored outcome"
     );
 }
 
@@ -855,7 +911,7 @@ fn connection_pool_reuses_connections_round_robin() {
             verify_at(&verifier, &token, issued_at_ns),
             VerifyOutcome::Valid { .. }
         ));
-        verifier.store().consume(&issued.record.nonce).unwrap();
+        let _ = verifier.store().consume(&issued.record.nonce).unwrap();
     }
 }
 
@@ -896,7 +952,7 @@ fn pool_reuses_the_same_slots_across_operations() {
             .consume(&issued.record.nonce)
             .unwrap()
             .expect("stored record consumes");
-        assert_eq!(consumed.challenge, issued.record.challenge);
+        assert_eq!(consumed.record.challenge, issued.record.challenge);
     }
     let (conns, idle) = store.debug_pool_state();
     assert_eq!(
@@ -973,8 +1029,9 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
 
     // A miniature RESP2 server: answers the PEEK (GET) with the stored
     // record's JSON so the verifier's cheap phase succeeds, and then NEVER
-    // replies to GETDEL — the client's read timeout fires and consume()
-    // must map to ConsumeIndeterminate. Hermetic: no RISK_REDIS_URL needed.
+    // replies to the consume transition (EVAL) — the client's read timeout
+    // fires and consume() must map to ConsumeIndeterminate. Hermetic: no
+    // RISK_REDIS_URL needed.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -991,8 +1048,9 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
                         buf.drain(..consumed);
                         match args[0].as_str() {
                             // Hold the connection open WITHOUT a reply: the
-                            // client hits its 1 s read timeout.
-                            "GETDEL" => loop {
+                            // client hits its 1 s read timeout. (The redis
+                            // crate invokes scripts via EVALSHA.)
+                            "EVAL" | "EVALSHA" => loop {
                                 std::thread::sleep(std::time::Duration::from_secs(1));
                             },
                             "GET" => {
@@ -1021,12 +1079,12 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
 
 #[test]
 fn record_json_keys_match_php_cross_language_format() {
-    // The 18 keys PHP ChallengeRecord::toArray() emits for v2 records — the
+    // The 21 keys PHP ChallengeRecord::toArray() emits for v2 records — the
     // exact key set a PHP RedisStorage writes and fromArray() reads. The
-    // `region` key (audit #22) is ALWAYS present: null when the challenge is
-    // region-unbound, exactly like PHP. No Redis needed: pure language-
+    // `region` and `issuer` keys (audits #22/#67) are ALWAYS present: null
+    // when unbound, exactly like PHP. No Redis needed: pure language-
     // neutral schema parity.
-    const PHP_KEYS: [&str; 18] = [
+    const PHP_KEYS: [&str; 21] = [
         "nonce",
         "scope",
         "binding_tag",
@@ -1047,6 +1105,7 @@ fn record_json_keys_match_php_cross_language_format() {
         "region",
         "policy_version",
         "request_binding",
+        "issuer",
     ];
 
     let issued = issue_challenge(
@@ -1077,10 +1136,15 @@ fn record_json_keys_match_php_cross_language_format() {
         serde_json::Value::Null,
         "the region key must be present (null when unbound) in the Rust wire format"
     );
+    assert_eq!(
+        value["issuer"],
+        serde_json::Value::Null,
+        "the issuer key must be present (null when unbound) in the Rust wire format (audit #67)"
+    );
 
     // Reverse direction: a PHP toArray()-shaped object (same keys, including
-    // attempts_used, protocol_version and region) must deserialize into the
-    // Rust record — the shape RedisChallengeStore::consume parses.
+    // attempts_used, protocol_version, region and issuer) must deserialize
+    // into the Rust record — the shape RedisChallengeStore::consume parses.
     let php_written = serde_json::json!({
         "nonce": issued.record.nonce,
         "scope": issued.record.scope,
@@ -1100,6 +1164,7 @@ fn record_json_keys_match_php_cross_language_format() {
         "attempts_used": 0,
         "protocol_version": 2,
         "region": null,
+        "issuer": null,
     });
     let decoded: ChallengeRecord = serde_json::from_value(php_written.clone()).unwrap();
     assert_eq!(decoded.nonce, issued.record.nonce);
@@ -1108,16 +1173,25 @@ fn record_json_keys_match_php_cross_language_format() {
     assert_eq!(decoded.protocol_version, 2);
     assert_eq!(decoded.expires_at, issued.record.expires_at);
     assert_eq!(decoded.region, None);
+    assert_eq!(decoded.issuer, None);
     // A region-bound PHP record round-trips the region.
     let mut region_written = php_written.clone();
     region_written["region"] = serde_json::json!("eu");
     let decoded: ChallengeRecord = serde_json::from_value(region_written).unwrap();
     assert_eq!(decoded.region.as_deref(), Some("eu"));
-    // Old PHP records WITHOUT the region key still deserialize (serde default).
+    // An issuer-bound PHP record round-trips the issuer (audit #67).
+    let mut issuer_written = php_written.clone();
+    issuer_written["issuer"] = serde_json::json!("auth-gw");
+    let decoded: ChallengeRecord = serde_json::from_value(issuer_written).unwrap();
+    assert_eq!(decoded.issuer.as_deref(), Some("auth-gw"));
+    // Old PHP records WITHOUT the region/issuer keys still deserialize
+    // (serde default).
     let mut legacy_written = php_written;
     legacy_written.as_object_mut().unwrap().remove("region");
+    legacy_written.as_object_mut().unwrap().remove("issuer");
     let decoded: ChallengeRecord = serde_json::from_value(legacy_written).unwrap();
     assert_eq!(decoded.region, None);
+    assert_eq!(decoded.issuer, None);
 }
 
 // ── Round-8 audit: replica wait, TTL margin, region, jti, strict tokens ──
@@ -1299,7 +1373,7 @@ fn valid_outcome_exposes_the_consumed_nonce() {
         &encode_token(&issued.record.nonce, counter),
         issued.record.issued_at_ns,
     ) {
-        VerifyOutcome::Valid { nonce } => assert_eq!(nonce, issued.record.nonce),
+        VerifyOutcome::Valid { nonce, .. } => assert_eq!(nonce, issued.record.nonce),
         other => panic!("expected Valid, got {other:?}"),
     }
 }
@@ -1360,4 +1434,267 @@ fn noncanonical_tokens_reach_the_verifier_as_malformed_token() {
         ),
         VerifyOutcome::Valid { .. }
     ));
+}
+
+// ── Round-10 audit: issuer (67), final re-validation (59), future-time
+//    bound (76), consumed-state transition (74), algorithm hard-fail (73) ──
+
+#[test]
+fn consumed_state_transition_and_outcome_commit_lifecycle() {
+    // Audit #74 at the STORE level: consume() is a Lua transition that KEEPS
+    // the record (state=pending → consumed), commit_result() stores the
+    // outcome exactly once, and a later consume returns first=false with the
+    // stored result.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("transition");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let store = store_for(&url, &prefix);
+    store.store(&issued.record).unwrap();
+
+    // 1. First consume wins the transition (first=true), no stored result.
+    let first = store
+        .consume(&issued.record.nonce)
+        .unwrap()
+        .expect("pending record consumes");
+    assert!(first.first);
+    assert_eq!(first.stored_result, None);
+    assert_eq!(first.record.challenge, issued.record.challenge);
+
+    // The stored value now carries the storage-level runtime `state`; the
+    // record part still parses strictly.
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(stored["state"], "consumed");
+    assert!(stored.get("consumed_result").is_none());
+
+    // 2. Consume while consumed with NO committed outcome: first=false,
+    //    no stored result (the crash-window case → ConsumeIndeterminate
+    //    upstream).
+    let second = store
+        .consume(&issued.record.nonce)
+        .unwrap()
+        .expect("consumed record still reads");
+    assert!(!second.first);
+    assert_eq!(second.stored_result, None);
+
+    // 3. Commit the outcome: stored exactly once and returned on replay.
+    assert!(store
+        .commit_result(&issued.record.nonce, true, None)
+        .unwrap());
+    let third = store
+        .consume(&issued.record.nonce)
+        .unwrap()
+        .expect("consumed record still reads");
+    assert!(!third.first);
+    assert_eq!(
+        third.stored_result,
+        Some(StoredConsumedResult {
+            valid: true,
+            binding: None
+        })
+    );
+
+    // 4. A second commit is a no-op (0) — the first outcome wins.
+    assert!(!store
+        .commit_result(&issued.record.nonce, false, Some("x"))
+        .unwrap());
+
+    // 5. Committing a PENDING record is a no-op (0); a binding round-trips.
+    let issued2 = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        Some("txn-1"),
+    )
+    .unwrap();
+    store.store(&issued2.record).unwrap();
+    assert!(
+        !store
+            .commit_result(&issued2.record.nonce, true, Some("txn-1"))
+            .unwrap(),
+        "committing a pending record must be refused"
+    );
+    let first2 = store
+        .consume(&issued2.record.nonce)
+        .unwrap()
+        .expect("second record consumes");
+    assert!(first2.first);
+    assert!(store
+        .commit_result(&issued2.record.nonce, true, Some("txn-1"))
+        .unwrap());
+    let replay2 = store
+        .consume(&issued2.record.nonce)
+        .unwrap()
+        .expect("second record replays");
+    assert_eq!(
+        replay2.stored_result,
+        Some(StoredConsumedResult {
+            valid: true,
+            binding: Some("txn-1".into())
+        })
+    );
+
+    // 6. Missing keys: consume → None, commit → false.
+    assert!(store.consume("does-not-exist").unwrap().is_none());
+    assert!(!store.commit_result("does-not-exist", true, None).unwrap());
+}
+
+#[test]
+fn verifier_expected_issuer_rejects_mismatched_and_unbound_records() {
+    // Audit #67 at the production boundary: with_expected_issuer enforces
+    // the issuer in the cheap phase. A record issued by a different issuer
+    // — or by no issuer — is rejected with WrongIssuer BEFORE any consume.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("issuer");
+    let config = ChallengeConfig {
+        issuer: Some("auth-gw-eu".into()),
+        ..sha_config(4)
+    };
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // Mismatch: record issuer "auth-gw-eu", verifier expects "auth-gw-us".
+    let expecting_us = verifier_for(&url, &prefix).with_expected_issuer("auth-gw-us");
+    expecting_us.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&expecting_us, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::WrongIssuer)
+    );
+    // The cheap failure consumed the record; re-store for the next check.
+    expecting_us.store().store(&issued.record).unwrap();
+
+    // Match: record issuer "auth-gw-eu", verifier expects "auth-gw-eu".
+    let expecting_eu = verifier_for(&url, &prefix).with_expected_issuer("auth-gw-eu");
+    assert!(matches!(
+        verify_at(&expecting_eu, &token, issued_at_ns),
+        VerifyOutcome::Valid { .. }
+    ));
+
+    // Unbound record + expecting issuer → fail closed.
+    let unbound = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter2 = solve_for_test(&unbound.record).expect("4-bit sha solves");
+    let token2 = encode_token(&unbound.record.nonce, counter2);
+    expecting_eu.store().store(&unbound.record).unwrap();
+    assert_eq!(
+        verify_at(&expecting_eu, &token2, unbound.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::WrongIssuer)
+    );
+
+    // No expectation → the record's issuer is ignored; the accessors and
+    // the clearing builder behave.
+    let free = verifier_for(&url, &prefix);
+    free.store().store(&unbound.record).unwrap();
+    assert!(matches!(
+        verify_at(&free, &token2, unbound.record.issued_at_ns),
+        VerifyOutcome::Valid { .. }
+    ));
+    assert_eq!(expecting_eu.expected_issuer(), Some("auth-gw-eu"));
+    let cleared = verifier_for(&url, &prefix)
+        .with_expected_issuer("auth-gw")
+        .without_expected_issuer();
+    assert_eq!(cleared.expected_issuer(), None);
+}
+
+#[test]
+fn future_issued_challenge_beyond_skew_is_rejected() {
+    // Audit #76 at the production boundary: a challenge whose issued_at is
+    // more than MAX_CLOCK_SKEW_SECS (60) ahead of the verifier clock is a
+    // time-domain anomaly — the cheap TTL phase rejects it with Expired.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("future");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix() + 61, // issued_at > now + 60 → beyond the skew bound
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(
+            &verifier,
+            &encode_token(&issued.record.nonce, counter),
+            issued.record.issued_at_ns
+        ),
+        VerifyOutcome::Invalid(VerifyError::Expired),
+        "a future-issued challenge beyond the clock skew must be rejected"
+    );
+}
+
+#[test]
+fn unknown_algorithm_variants_in_stored_records_are_record_not_found() {
+    // Audit #73 at the production boundary: a stored record with an unknown
+    // algorithm variant cannot parse (serde rejects it; PHP fromArray
+    // throws MalformedRecordException) — the storage layer maps the corrupt
+    // key to RecordNotFound, identical to PHP.
+    let Some(url) = redis_url() else { return };
+    for algo in ["argon2d", "sha1", "sha256-v2", "ARGON2ID"] {
+        let prefix = prefix(&format!("algo-{algo}"));
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(&issued.record).unwrap();
+        value["algorithm"] = serde_json::json!(algo);
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let mut conn = redis::Client::open(url.clone())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg(serde_json::to_string(&value).unwrap())
+            .query(&mut conn)
+            .unwrap();
+        let verifier = verifier_for(&url, &prefix);
+        assert_eq!(
+            verifier.verify(
+                &encode_token(&issued.record.nonce, 0),
+                "login",
+                IP,
+                now_micros()
+            ),
+            VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+            "algorithm {algo:?} must be undecodable (RecordNotFound), like PHP"
+        );
+    }
 }

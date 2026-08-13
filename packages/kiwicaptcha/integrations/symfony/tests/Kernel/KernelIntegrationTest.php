@@ -13,6 +13,7 @@ use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerInterface;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Validator\ConstraintViolationListInterface;
 
@@ -31,7 +32,7 @@ final class KernelIntegrationTest extends TestCase
         self::$kernel ??= new TestKernel('test', true);
         self::$kernel->boot();
         $this->container()->get('request_stack')->push(
-            Request::create('/login', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']),
+            JsonRequest::create('/login', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']),
         );
     }
 
@@ -177,7 +178,7 @@ final class KernelIntegrationTest extends TestCase
     public function testChallengeControllerReturnsJsonShape(): void
     {
         $controller = $this->container()->get(ChallengeController::class);
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
 
         $response = $controller->challenge($request);
         self::assertSame(200, $response->getStatusCode());
@@ -209,10 +210,13 @@ final class KernelIntegrationTest extends TestCase
         $form->submit($this->solveToken($challenge));
         self::assertTrue($form->isValid(), $this->describe($form->getErrors(true)));
 
-        // Replay: same token on a fresh form must fail.
+        // Retry semantics (audit #74): an identical replay in the same
+        // context returns the SAME stored result WITHOUT a second
+        // derivation — deterministic retry safety, not reuse of a second
+        // operation. A replay under a DIFFERENT binding is rejected.
         $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['scope' => 'login']);
         $form->submit($this->solveToken($challenge));
-        self::assertFalse($form->isValid());
+        self::assertTrue($form->isValid(), 'same-context retry must return the same stored result');
     }
 
     public function testEndToEndValidationThroughValidatorService(): void
@@ -231,10 +235,11 @@ final class KernelIntegrationTest extends TestCase
         $violations = $validator->validate($dto);
         self::assertCount(0, $violations, $this->describeViolations($violations));
 
-        // Single-use: replaying the same token must now fail.
+        // Retry semantics (audit #74): the same token in the same context
+        // returns the same stored result (idempotent), never a second
+        // derivation.
         $violations = $validator->validate($dto);
-        self::assertCount(1, $violations);
-        self::assertSame(KiwiCaptcha::NOT_SOLVED_ERROR, $violations[0]->getCode());
+        self::assertCount(0, $violations, 'same-context retry must return the same stored result');
     }
 
     /**

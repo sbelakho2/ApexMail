@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
+use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisRiskHealthProvider;
@@ -384,7 +385,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // engine): ONE honest per-process window from hard_limits —
             // process_per_second (assessPreIssue() checks the single cap
             // once before any state backend; per-source throttling belongs
-            // to the distributed keyed layer).
+            // to the distributed keyed layer). The CONTROLLER also consults
+            // it via the gateway (audit #70) BEFORE the Redis issuance
+            // limiter — non-consuming, so the engine stays the single
+            // budget consumer.
             $container->setDefinition('kiwi_captcha.risk.emergency_limiter', new Definition(ProcessEmergencyCap::class, [
                 $riskConfig['hard_limits']['process_per_second'],
             ]));
@@ -527,6 +531,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$decisionTtlSecs', $riskConfig['nonce_to_decision_ttl_secs'])
                 ->setArgument('$calibration', $calibrationRef)
                 ->setArgument('$policy', new Reference('kiwi_captcha.risk.policy'))
+                // Audit #70: the controller's cheap local admission step
+                // (RiskGateway::emergencyCapSaturated) — the process-local
+                // window checked BEFORE any Redis issuance limiter.
+                ->setArgument('$emergencyCap', new Reference('kiwi_captcha.risk.emergency_limiter'))
                 ->setPublic(true));
             if ($container->has(PrincipalResolverInterface::class)) {
                 // An application-registered principal resolver is OPT-IN:
@@ -548,6 +556,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $riskGatewayRef = new Reference(RiskGateway::class);
             $riskCookieRef = new Reference(ContinuityCookie::class);
         }
+        // ── Trusted client-IP policy (audit #64) ──────────────────────────
+        // Wired UNCONDITIONALLY (not gated on risk.enabled): the canonical
+        // client IP feeds the challenge binding tag, the rate-limit identity
+        // and the risk source pseudonym — the controller and the validator
+        // must agree on it in every deployment mode.
+        $container->setDefinition(ClientIpResolver::class, (new Definition(ClientIpResolver::class, [
+            $config['risk']['client_ip_mode'],
+            $config['risk']['trusted_proxies'],
+            $config['risk']['reject_ambiguous_forwarding'],
+        ]))
+            ->setArgument('$logger', $loggerRef)
+            ->setPublic(true));
+
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
             $rateLimiterRef,
@@ -566,7 +587,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Audit #43: when enforced, a challenge POST without a usable
             // Origin header is rejected with 403 origin_rejected.
             $config['risk']['enforce_origin'],
-        ]))->addTag('controller.service_arguments')->setPublic(true));
+        ]))
+            // Audit #64: the trusted client-IP policy drives the controller's
+            // canonical IP (binding tag / rate-limit identity / risk source).
+            ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
+            // Audit #78: the same-origin expected origin comes from SERVER
+            // CONFIG, never the Host header.
+            ->setArgument('$publicBaseUrl', $config['public_base_url'])
+            ->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──
         $container->setDefinition(KiwiCaptchaRouteLoader::class, (new Definition(KiwiCaptchaRouteLoader::class, [
@@ -590,7 +618,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $redisRef,
             $healthNamespace,
             $config['risk']['policy_version'],
-        ]))->addTag('controller.service_arguments')->setPublic(true));
+        ]))
+            // Audit #68: the memory-budget readiness invariant
+            // (concurrency x max profile + headroom <= container_memory_mib).
+            ->setArgument('$argonConcurrency', $config['argon2_max_concurrent_verifications'])
+            ->setArgument('$containerMemoryMib', $config['risk']['container_memory_mib'])
+            ->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Form type (renders the widget through the form theme) ──
         // The route prefix is injected so the default 'endpoint' option
@@ -620,6 +653,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $outstandingRef,
         ]))
             ->setArgument('$logger', $loggerRef)
+            // Audit #74: the challenge storage resolves ambiguous-consume
+            // outcomes from the consumed record (state + consumed_result).
+            ->setArgument('$storage', $storageRef)
+            // Audit #64: the SAME canonical client IP the controller bound
+            // the challenge to (trusted client-IP policy).
+            ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
             ->addTag('validator.constraint_validator'));
 
         // ── Twig widget runtime + twig function (embeds the shared widget assets) ──
@@ -631,6 +670,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Audit #41: the static transaction binding is the standalone
             // widget's data-kiwi-request-binding default.
             $config['risk']['request_binding'],
+            // Audit #71: the widget page's frame-ancestors CSP helper —
+            // the space-separated allowlisted origins.
+            $config['risk']['challenge_origin_allowlist'],
         ]))->addTag('twig.runtime'));
         $container->setDefinition(TwigExtension::class, (new Definition(TwigExtension::class))
             ->addTag('twig.extension'));

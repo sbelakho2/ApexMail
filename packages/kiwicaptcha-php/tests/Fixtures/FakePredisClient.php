@@ -9,10 +9,14 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *
  * There is no real Redis in CI. Predis dispatches every command through
  * `__call`, so this fake intercepts exactly the commands RedisStorage sends
- * (get, set, del, eval, expire, exists, wait) and emulates the Lua scripts'
+ * (get, set, del, eval, exists, wait) and emulates the Lua scripts'
  * semantics:
  *
- *  - GETDEL script: return-and-delete (atomic single-use).
+ *  - consume-transition script: marks the stored record consumed (keeps it)
+ *    and returns {json, consumed_now, consumed_before, result_json} — the
+ *    audit #74 one-shot transition, not a delete.
+ *  - commit-result script: stores {valid, binding} on a consumed record
+ *    without a result yet; returns 1/0.
  *  - WAIT: returns 0 (no replicas — a real replica-less Redis returns 0
  *    without error; only the number of acknowledged replicas is reported).
  *
@@ -44,7 +48,6 @@ final class FakePredisClient extends \Predis\Client
             'GET' => $this->store[(string) $arguments[0]] ?? null,
             'SET' => $this->fakeSet($arguments),
             'DEL' => $this->fakeDel($arguments),
-            'EXPIRE' => 1,
             'EXISTS' => isset($this->store[(string) $arguments[0]]) ? 1 : 0,
             'EVAL' => $this->fakeEval($arguments),
             // Replica-less fake: WAIT returns 0 acknowledged replicas (real
@@ -96,23 +99,67 @@ final class FakePredisClient extends \Predis\Client
         return $removed;
     }
 
-    /** @param list<mixed> $arguments */
+    /**
+     * @param list<mixed> $arguments [script, numKeys, key1..keyN, arg1..argN]
+     */
     private function fakeEval(array $arguments): mixed
     {
         $script = (string) $arguments[0];
         $numKeys = (int) $arguments[1];
         $keysAndArgs = \array_slice($arguments, 2);
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
+        $args = \array_slice($keysAndArgs, $numKeys);
 
-        if (str_contains($script, 'GETDEL')) {
+        // Consume transition (audit #74): mark consumed, keep the record.
+        if (str_contains($script, 'consume transition')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return null;
             }
-            $value = $this->store[$key];
-            unset($this->store[$key]);
+            $raw = $this->store[$key];
+            try {
+                $obj = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+            } catch (\JsonException) {
+                // The real Lua pcall-wraps the decode: corrupt values
+                // degrade to "missing" instead of erroring the eval.
+                return null;
+            }
+            if (($obj['state'] ?? 'pending') === 'consumed') {
+                $res = $obj['consumed_result'] ?? null;
 
-            return $value;
+                return [$raw, 0, 1, $res !== null ? json_encode($res, JSON_UNESCAPED_SLASHES) : ''];
+            }
+            $obj['state'] = 'consumed';
+            $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
+
+            return [$raw, 1, 0, ''];
+        }
+
+        // Commit result (audit #74): only on a consumed record without a
+        // result yet. ARGV = [valid, binding, has_binding].
+        if (str_contains($script, 'commit result')) {
+            $key = (string) $keys[0];
+            if (!isset($this->store[$key])) {
+                return 0;
+            }
+            try {
+                $obj = json_decode($this->store[$key], true, flags: JSON_THROW_ON_ERROR);
+            } catch (\JsonException) {
+                return 0;
+            }
+            if (($obj['state'] ?? 'pending') !== 'consumed') {
+                return 0;
+            }
+            if (isset($obj['consumed_result']) && $obj['consumed_result'] !== null) {
+                return 0;
+            }
+            $obj['consumed_result'] = [
+                'valid' => ($args[0] ?? '0') === '1',
+                'binding' => ($args[2] ?? '0') === '1' ? (string) ($args[1] ?? '') : null,
+            ];
+            $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
+
+            return 1;
         }
 
         return null;

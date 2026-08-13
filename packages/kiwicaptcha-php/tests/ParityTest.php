@@ -112,8 +112,12 @@ final class ParityTest extends TestCase
         self::assertSame(VerifyError::IpMismatch, $outcome->error);
     }
 
-    public function testReplayRejected(): void
+    public function testReplayReturnsTheCommittedStoredOutcome(): void
     {
+        // Audit #74: the record is consumed but KEPT until its TTL, and the
+        // deterministic result is committed — a replay of the same token
+        // returns the SAME Valid outcome without re-deriving (the bundle
+        // dedupes same-binding retries at the validator).
         $storage = new ArrayStorage();
         $storage->store($this->recordFromVector(Vectors::SHA));
 
@@ -121,9 +125,9 @@ final class ParityTest extends TestCase
         $token = $this->tokenFor(Vectors::SHA);
 
         self::assertTrue($verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP)->isOk());
-        // Second use: record consumed => RecordNotFound.
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP);
-        self::assertSame(VerifyError::RecordNotFound, $outcome->error);
+        self::assertTrue($outcome->isOk(), sprintf('a replay must return the committed stored outcome, got %s', $outcome->code()));
+        self::assertSame(Vectors::SHA['nonce'], $outcome->nonce(), 'the replay exposes the same nonce');
     }
 
     public function testTamperedChallengeRejected(): void

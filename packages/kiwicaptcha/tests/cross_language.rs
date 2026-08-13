@@ -27,11 +27,15 @@ fn rust_verifies_php_issued_record() {
         secret_key: "0123456789abcdef0123456789abcdef",
         counter,
         duration_ms: 5000,
-        now_unix: 1_700_000_100,
+        now_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
         now_ns,
         min_duration_ms: 0,
         expected_scope: Some("login"),
         expected_region: None,
+        expected_issuer: None,
         expected_policy_version: None,
         client_ip: Some("198.51.100.7"),
         telemetry: None,
@@ -51,11 +55,15 @@ fn rust_verifies_php_issued_record() {
         secret_key: "0123456789abcdef0123456789abcdef",
         counter,
         duration_ms: 5000,
-        now_unix: 1_700_000_100,
+        now_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
         now_ns,
         min_duration_ms: 0,
         expected_scope: Some("login"),
         expected_region: None,
+        expected_issuer: None,
         expected_policy_version: None,
         client_ip: Some("9.9.9.9"),
         telemetry: None,
@@ -114,6 +122,7 @@ fn rust_issues_record_for_php() {
         auto_tune_max_bits: 20,
         binding_mode: kiwicaptcha::challenge::BindingMode::Bound,
         region: None,
+        issuer: None,
         policy_version: 1,
     };
     let now_unix = std::time::SystemTime::now()

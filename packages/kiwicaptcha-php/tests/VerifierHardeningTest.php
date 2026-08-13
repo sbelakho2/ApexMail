@@ -405,9 +405,10 @@ final class VerifierHardeningTest extends TestCase
     }
 
     /**
-     * One-shot model: consume-on-verify removes the record BEFORE the proof
-     * is checked, so a wrong candidate burns the challenge. The second
-     * (correct) verify finds no record.
+     * Consume-on-verify (audit #74): a wrong candidate burns the challenge —
+     * the record transitions to consumed and the deterministic invalid
+     * outcome is committed, so the second (correct) verify sees the SAME
+     * InsufficientWork instead of re-deriving the proof.
      */
     public function testWrongCandidateBurnsTheChallenge(): void
     {
@@ -427,18 +428,18 @@ final class VerifierHardeningTest extends TestCase
         $verifier = new Verifier($storage, acceptLegacyV1: true);
         $first = $verifier->verify($wrongToken, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertSame(VerifyError::InsufficientWork, $first->error);
-        self::assertNull($storage->find($record->nonce), 'the failed verify must have consumed the record');
 
         $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
-        self::assertSame(VerifyError::RecordNotFound, $second->error, 'one-shot: the correct token arrives too late');
+        self::assertSame(VerifyError::InsufficientWork, $second->error, 'the correct token arrives after the consumed marker: the stored invalid outcome replays');
     }
 
     /**
-     * One-shot model: a FIRST verify that succeeds removes the record, so a
-     * replay always fails with RecordNotFound — the attempt bound IS the
+     * Consume-on-verify (audit #74): a FIRST verify that succeeds consumes
+     * the record and commits the deterministic valid outcome, so a replay
+     * returns the SAME Valid without re-deriving — the attempt bound IS the
      * single-use record (there is no maxAttempts parameter).
      */
-    public function testSuccessfulVerifyIsOneShot(): void
+    public function testSuccessfulVerifyReplaysTheCommittedOutcome(): void
     {
         $storage = new ArrayStorage();
         [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
@@ -448,7 +449,8 @@ final class VerifierHardeningTest extends TestCase
         self::assertTrue($first->isOk(), sprintf('first verify must succeed, got %s', $first->code()));
 
         $second = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
-        self::assertSame(VerifyError::RecordNotFound, $second->error);
+        self::assertTrue($second->isOk(), sprintf('a replay must return the committed stored outcome, got %s', $second->code()));
+        self::assertNotNull($storage->find($record->nonce), 'the consumed record is KEPT until its TTL (replay protection is the consumed marker, not absence)');
     }
 
     public function testVerifySignatureHasNoMaxAttemptsParameter(): void

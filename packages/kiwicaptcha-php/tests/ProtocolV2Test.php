@@ -110,10 +110,38 @@ final class ProtocolV2Test extends TestCase
             5,
         );
 
-        // Round-9 layout (audits #41/#42): the canonical carries region
-        // (empty when unset), policy_version, and request_binding (empty
-        // when unset) — byte-identical to the Rust canonical_signing_input_v2.
-        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1|', $canonical);
+        // Round-10 layout (audits #41/#42/#67): the canonical carries region
+        // (empty when unset), policy_version, request_binding (empty when
+        // unset), and the FINAL issuer segment (empty when unset) —
+        // byte-identical to the Rust canonical_signing_input_v2.
+        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1||', $canonical);
+    }
+
+    public function testCanonicalPayloadCarriesIssuerAsFinalSegment(): void
+    {
+        // Audit #67: the issuer is appended AFTER request_binding as the
+        // FINAL canonical field — issuer "prod" ends the canonical with
+        // |prod.
+        $canonical = Issuer::canonicalPayload(
+            'nonce123',
+            'login',
+            'tag456',
+            111,
+            222,
+            PoWAlgorithm::Sha256,
+            0,
+            1,
+            1,
+            8,
+            'c2FsdA==',
+            5,
+            null,
+            2,
+            'txn-1',
+            'prod',
+        );
+
+        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||2|txn-1|prod', $canonical);
     }
 
     public function testNewRecordDefaultsToProtocolV2(): void

@@ -9,9 +9,11 @@ use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\ConsumedStateStorage;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use KiwiCaptcha\BindingMode;
+use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -22,6 +24,7 @@ use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Storage\ArrayStorage;
+use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
@@ -646,5 +649,297 @@ final class ValidatorTest extends TestCase
         $violations = $this->validate($dto, ['captcha' => [new KiwiCaptcha()]]);
         self::assertCount(1, $violations);
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+    }
+
+    // ── Round 10: ambiguous-consume deterministic retry (audit #74) ───────
+
+    /**
+     * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
+     */
+    private function buildRetryEngine(Verifier $verifier, ?StorageInterface $storage, string $ip = '198.51.100.7', ?string $binding = null): array
+    {
+        $stack = new RequestStack();
+        $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => $ip]);
+        if ($binding !== null) {
+            $request->attributes->set(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE, $binding);
+        }
+        $stack->push($request);
+
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, null, null, null, null, $storage);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+        return [$engine, $stack, $validator];
+    }
+
+    private function issueBoundChallenge(string $binding, StorageInterface $storage): \KiwiCaptcha\Challenge
+    {
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+
+        return $issuer->issue('login', '198.51.100.7', $binding);
+    }
+
+    /**
+     * Whether the vendored core already carries the audit #74 consumed-state
+     * fields (ChallengeRecord::$consumed / $consumedResult / $consumedBinding
+     * and the WIRE_KEYS entries). The parallel core work adds them; until
+     * then the full stored-result scenarios cannot be constructed.
+     */
+    private function coreSupportsConsumedState(): bool
+    {
+        try {
+            $sample = ChallengeRecord::fromArray([
+                'nonce' => base64_encode(str_repeat('a', 32)),
+                'scope' => 'login',
+                'binding_tag' => '',
+                'issued_at' => 1_800_000_000,
+                'expires_at' => 1_800_000_120,
+                'algorithm' => 'sha256',
+                'm_kib' => 0,
+                't' => 1,
+                'p' => 1,
+                'target_bits' => 8,
+                'salt' => base64_encode('1234567890abcdef'),
+                'prefix' => 'prefix',
+                'challenge' => 'challenge',
+                'min_duration_ms' => 0,
+            ])->toArray();
+            ChallengeRecord::fromArray($sample + ['consumed' => true, 'consumed_result' => null, 'consumed_binding' => null]);
+
+            return true;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * Audit #74, retryable contract (runs on the CURRENT core): a
+     * ConsumeIndeterminate (lost consume response) NEVER burns the token and
+     * NEVER re-derives — the first attempt surfaces as temporary_unavailable
+     * (the record is still pending), and a retry consumes + derives exactly
+     * ONCE.
+     */
+    public function testConsumeIndeterminateIsRetryableAndNeverBurnsTheToken(): void
+    {
+        $storage = new ConsumedStateStorage();
+        $verifier = new Verifier($storage);
+        $challenge = $this->issueBoundChallenge('txn-123', $storage);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine, $stack] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        // Lost response: the consume transition threw mid-flight.
+        $storage->throwOnConsume = true;
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'an unresolvable indeterminate outcome must be temporary_unavailable — never invalid_or_expired');
+        self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
+        self::assertSame(0, $storage->consumes, 'the ambiguous attempt must not consume');
+
+        // The client retries the same token: the storage recovered — exactly
+        // one consume + one derive, then success with the canonical jti.
+        $storage->throwOnConsume = false;
+        self::assertCount(0, $engine->validate($dto), 'the retry of the same token must succeed once storage recovers');
+        self::assertSame($challenge->nonce, $stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
+        self::assertSame(1, $storage->consumes, 'the retry consumed exactly once');
+        self::assertSame(0, $storage->deletes, 'the ambiguous flow must never delete the record');
+    }
+
+    public function testConsumeIndeterminateWithoutStorageWiredIsTemporaryUnavailable(): void
+    {
+        $storage = new ConsumedStateStorage();
+        $storage->throwOnConsume = true;
+        $verifier = new Verifier($storage);
+        $challenge = $this->issueBoundChallenge('txn-123', $storage);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // No storage is wired into the validator: the indeterminate outcome
+        // cannot be resolved — it collapses to temporary_unavailable.
+        [$engine] = $this->buildRetryEngine($verifier, null, binding: 'txn-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode());
+    }
+
+    /**
+     * Audit #74 (a): the FULL stored-result retry — first verification
+     * succeeds (consume transition + derive + committed result); a lost
+     * response makes the client re-submit the SAME token with the SAME
+     * binding: the retry resolves from the STORED RESULT — the SAME success
+     * (jti + binding exposed) with NO second consume, NO second derive.
+     *
+     * Requires the round-10 core (consumed-state record fields + the
+     * stored-result re-verify path); skipped until it is vendored.
+     */
+    public function testStoredResultRetryWithSameBindingSucceedsWithoutSecondDerive(): void
+    {
+        if (!$this->coreSupportsConsumedState()) {
+            self::markTestSkipped('the round-10 core (consumed-state record + stored-result re-verify) is not vendored yet');
+        }
+
+        $storage = new ConsumedStateStorage();
+        $verifier = new Verifier($storage);
+        $challenge = $this->issueBoundChallenge('txn-123', $storage);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // FIRST verification: real derive — consume transition + committed
+        // result (the round-10 verifier commits after deriving).
+        [$engine, $stack, $validator] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine->validate($dto));
+        self::assertSame($challenge->nonce, $stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
+        self::assertSame(1, $storage->consumes);
+        self::assertSame(1, $storage->commits, 'the round-10 verifier must commit the derivation result');
+
+        // LOST RESPONSE: the client never saw the reply and re-submits the
+        // same token with the same binding.
+        [$engine2, $stack2, $validator2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
+        $dto2 = new class {
+            public ?string $captcha = null;
+        };
+        $dto2->captcha = $token;
+        $meta2 = $engine2->getMetadataFor($dto2::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(0, $engine2->validate($dto2), 'a retry with the SAME binding must produce the SAME success');
+        self::assertSame($challenge->nonce, $stack2->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'the retry must expose the SAME canonical jti');
+        self::assertSame('txn-123', $validator2->verifiedRequestBinding(), 'the retry must expose the stored signed binding');
+        self::assertSame(1, $storage->consumes, 'the retry must NOT consume again — the outcome came from the STORED RESULT, no second derive');
+        self::assertSame(1, $storage->commits, 'the retry must NOT commit again');
+        self::assertSame(0, $storage->deletes);
+    }
+
+    /**
+     * Audit #74 (b): the retry with a DIFFERENT request binding is refused
+     * with invalid_or_expired — a challenge bound to one transaction is
+     * never redeemable for another, retries included.
+     */
+    public function testStoredResultRetryWithDifferentBindingFailsInvalidOrExpired(): void
+    {
+        if (!$this->coreSupportsConsumedState()) {
+            self::markTestSkipped('the round-10 core (consumed-state record + stored-result re-verify) is not vendored yet');
+        }
+
+        $storage = new ConsumedStateStorage();
+        $verifier = new Verifier($storage);
+        $challenge = $this->issueBoundChallenge('txn-123', $storage);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // First verification succeeds (bound to txn-123).
+        [$engine] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine->validate($dto));
+
+        // Retry with a DIFFERENT binding: the stored-result outcome carries
+        // the stored binding, the round-9 check rejects the mismatch.
+        [$engine2, $stack2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-OTHER');
+        $dto2 = new class {
+            public ?string $captcha = null;
+        };
+        $dto2->captcha = $token;
+        $meta2 = $engine2->getMetadataFor($dto2::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine2->validate($dto2);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'a stored-result retry with a different binding must be invalid_or_expired');
+        self::assertNull($stack2->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
+    }
+
+    /**
+     * A consumed record whose committed result is INVALID (the original
+     * derivation failed, response lost) resolves the retry to
+     * invalid_or_expired — the failed outcome is authoritative.
+     */
+    public function testStoredResultRetryOfAFailedDeriveFailsInvalidOrExpired(): void
+    {
+        if (!$this->coreSupportsConsumedState()) {
+            self::markTestSkipped('the round-10 core (consumed-state record + stored-result re-verify) is not vendored yet');
+        }
+
+        $storage = new ConsumedStateStorage();
+        $verifier = new Verifier($storage);
+        $challenge = $this->issueBoundChallenge('txn-123', $storage);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // Simulate the original attempt: consumed, derivation FAILED,
+        // committed result invalid, response lost.
+        $storage->transitionConsumed($challenge->nonce);
+        $storage->commitResult($challenge->nonce, false, null);
+
+        [$engine, $stack] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'a stored INVALID result must resolve the retry to invalid_or_expired');
+        self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
+        self::assertSame(0, $storage->consumes, 'the retry must not re-derive a record with a committed result');
+    }
+
+    /**
+     * A consumed record WITHOUT a committed result (the original attempt
+     * died mid-proof) stays genuinely indeterminate — the retry collapses
+     * to temporary_unavailable, never to a guessed success.
+     */
+    public function testConsumedWithoutCommittedResultStaysTemporaryUnavailable(): void
+    {
+        if (!$this->coreSupportsConsumedState()) {
+            self::markTestSkipped('the round-10 core (consumed-state record + stored-result re-verify) is not vendored yet');
+        }
+
+        $storage = new ConsumedStateStorage();
+        $verifier = new Verifier($storage);
+        $challenge = $this->issueBoundChallenge('txn-123', $storage);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // Consumed mid-proof, no result committed.
+        $storage->transitionConsumed($challenge->nonce);
+
+        [$engine] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'consumed-without-result must stay indeterminate (temporary_unavailable)');
     }
 }

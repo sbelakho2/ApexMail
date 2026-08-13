@@ -9,6 +9,14 @@
   // (see SECURITY.md — versioned-resource expectation).
   var KIWI_SOLVER_BUILD_ID = "2026-08-r1";
 
+  // ── Challenge fetch timeout (audit #66) ─────────────────────────────
+  // A hung challenge endpoint must never leave the widget stuck: the fetch
+  // carries an AbortController whose timer aborts it after this many ms,
+  // routing the widget into the controlled error state (idle-resettable).
+  // data-kiwi-fetch-timeout-ms overrides the default per container/widget
+  // (test-injectable; integrators may tune their own latency budget).
+  var KIWI_FETCH_TIMEOUT_MS = 15000;
+
   // ── Argon2id worker source (embedded) ───────────────────────────────
   // Same-origin Web Worker for the memory-hard Argon2id solver. The worker
   // must run off the main thread (each 64 MiB hash blocks the UI for tens of
@@ -779,14 +787,37 @@
           if (p.indexOf("signup")>=0||p.indexOf("register")>=0) scope="signup";
           else if (p.indexOf("forgot")>=0) scope="forgot-password";
         }
+        // Algorithm selection (audit #62): the client may only select among
+        // the solver profiles the server offers (sha256 / argon2id). Any
+        // other attribute value is normalized back to the default — the
+        // driver can never invent an algorithm, and a solver failure must
+        // never downgrade a challenge request (there is no capability-based
+        // fallback anywhere: a failed worker/WASM path retries with the SAME
+        // profile, and difficulty parameters come from the server alone).
         var algorithm = W.getAttribute("data-kiwi-algorithm") || container.getAttribute("data-kiwi-algorithm") || "sha256";
+        if (algorithm !== "sha256" && algorithm !== "argon2id") algorithm = "sha256";
         var requestBinding = W.getAttribute("data-kiwi-request-binding") || container.getAttribute("data-kiwi-request-binding");
         var reqBody = { scope: scope };
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
         if (requestBinding) reqBody.request_binding = requestBinding;
-        var resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody) });
-        if (!resp.ok) throw new Error("Challenge failed");
-        var data = await resp.json();
+        var timeoutAttr = W.getAttribute("data-kiwi-fetch-timeout-ms") || container.getAttribute("data-kiwi-fetch-timeout-ms") || "";
+        var fetchTimeoutMs = parseInt(timeoutAttr, 10);
+        if (!(fetchTimeoutMs > 0)) fetchTimeoutMs = KIWI_FETCH_TIMEOUT_MS;
+        var abortController = new AbortController();
+        var abortTimer = setTimeout(function () { abortController.abort(); }, fetchTimeoutMs);
+        var resp, data;
+        try {
+          resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody), signal: abortController.signal });
+          if (!resp.ok) throw new Error("Challenge failed");
+          data = await resp.json();
+        } finally {
+          clearTimeout(abortTimer);
+        }
+        // No weaker challenge (audit #62): the response algorithm may only
+        // be equal or stronger than requested — a server downgrade (argon2id
+        // requested, sha256 returned) is a FAILED challenge, never a weaker
+        // solve. The client may only ever accept what it asked for or more.
+        if (algorithm === "argon2id" && (data.algorithm || "sha256") !== "argon2id") throw new Error("Challenge downgraded");
         if (data.ttlSecs) startCountdown(data.ttlSecs);
         setStatus("Verifying\u2026", "Working", "solving");
         var result = null;

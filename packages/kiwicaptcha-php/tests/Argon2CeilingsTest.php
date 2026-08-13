@@ -184,7 +184,7 @@ final class Argon2CeilingsTest extends TestCase
 
         self::assertSame(VerifyError::UnsupportedArgon2Params, $outcome->error);
         self::assertSame(1, $gate->acquires, 'the cheap ceiling check passes for p=4; only the compute step refuses');
-        self::assertNull($storage->find($record->nonce));
+        self::assertNotNull($storage->find($record->nonce), 'the consumed record is KEPT until its TTL (audit #74 — replay protection is the consumed marker, not absence)');
     }
 
     public function testMinimalInCeilingRecordVerifiesEndToEnd(): void

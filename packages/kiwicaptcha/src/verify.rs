@@ -129,6 +129,12 @@ pub struct VerifyContext<'a> {
     /// deployment fails closed on region-unbound challenges). When `None`,
     /// the record's region is not checked.
     pub expected_region: Option<&'a str>,
+    /// Expected issuer identity (audit #67). If [`Some`], the solution is
+    /// rejected with [`VerifyError::WrongIssuer`] when the stored record was
+    /// issued by a different issuer — or by no issuer at all (fail closed,
+    /// like the region expectation). When `None`, the record's issuer is not
+    /// checked.
+    pub expected_issuer: Option<&'a str>,
     /// The CURRENT security-policy epoch. When set, a record whose
     /// `policy_version` differs is rejected with
     /// [`VerifyError::WrongPolicyVersion`] — outstanding challenges die
@@ -228,6 +234,12 @@ pub enum VerifyError {
     WrongScope,
     #[error("challenge was issued for a different region")]
     WrongRegion,
+    /// The stored record was issued under a DIFFERENT issuer identity than
+    /// the verifier's configured expected issuer (audit #67) — or under no
+    /// issuer at all (an issuer-expecting deployment fails closed on
+    /// issuer-unbound challenges).
+    #[error("challenge was issued by a different issuer")]
+    WrongIssuer,
     /// The stored record was issued under a DIFFERENT security-policy epoch
     /// than the verifier's configured current version — the policy that
     /// authorized the challenge (origin/action rules, difficulty floors,
@@ -448,8 +460,19 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         }
     }
 
-    // 2. TTL.
+    // 2. TTL. The challenge is invalid outside its validity window
+    //    [issued_at, expires_at): expired once now reaches expires_at, and
+    //    (audit #76) a future-issued challenge is a time-domain anomaly
+    //    when its issued_at is more than MAX_CLOCK_SKEW_SECS ahead of the
+    //    verifier clock — the issuer and verifier clocks are broken.
     if ctx.now_unix >= ctx.record.expires_at {
+        return VerifyOutcome::Invalid(VerifyError::Expired);
+    }
+    if ctx.record.issued_at
+        > ctx
+            .now_unix
+            .saturating_add(crate::challenge::MAX_CLOCK_SKEW_SECS)
+    {
         return VerifyOutcome::Invalid(VerifyError::Expired);
     }
 
@@ -475,6 +498,15 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     if let Some(expected) = ctx.expected_policy_version {
         if ctx.record.policy_version != expected {
             return VerifyOutcome::Invalid(VerifyError::WrongPolicyVersion);
+        }
+    }
+
+    // 7c. Issuer identity (audit #67): a verifier that expects a specific
+    //     issuer rejects challenges issued by another issuer — or by no
+    //     issuer at all (fail closed, like the region expectation).
+    if let Some(expected) = ctx.expected_issuer {
+        if ctx.record.issuer.as_deref() != Some(expected) {
+            return VerifyOutcome::Invalid(VerifyError::WrongIssuer);
         }
     }
 
@@ -570,6 +602,23 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         Err(e) => return VerifyOutcome::Invalid(e),
     };
 
+    // 5b. FINAL re-validation (audit #59): the expensive derivation may have
+    //     taken long enough that the challenge expired DURING it — or the
+    //     verifier's current expectations (policy epoch, region, issuer) may
+    //     have changed while the hash was computing. Re-check the CURRENT
+    //     server time (ctx.now_unix) and the current expectations BEFORE the
+    //     outcome is declared valid: a challenge that expired mid-derive is
+    //     Expired even though the record is already consumed.
+    if let Err(e) = final_revalidate(
+        ctx.record,
+        ctx.now_unix,
+        ctx.expected_region,
+        ctx.expected_policy_version,
+        ctx.expected_issuer,
+    ) {
+        return VerifyOutcome::Invalid(e);
+    }
+
     if leading_zero_bits(&hash) >= ctx.record.target_bits {
         // The outcome carries the consumed canonical nonce (jti) so callers
         // can correlate the result without re-decoding the solution.
@@ -580,6 +629,51 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     } else {
         VerifyOutcome::Invalid(VerifyError::InsufficientWork)
     }
+}
+
+/// POST-DERIVE final re-validation (audit #59): re-check the challenge's
+/// validity with the CURRENT server time and the CURRENT verifier
+/// expectations, AFTER the (potentially long) proof derivation succeeded but
+/// BEFORE the outcome is declared valid.
+///
+/// A challenge can expire DURING the expensive derivation — the cheap TTL
+/// check ran before the hash was computed — and the verifier's current
+/// expectations (security-policy epoch, region, issuer) can change while the
+/// proof is being derived. This gate is therefore re-run as the LAST step of
+/// [`verify_solution`] and of the production verifier (whose final step
+/// passes a FRESH clock read — the real race — see `redis_verify`).
+///
+/// Checks, in order:
+/// - `now_unix >= expires_at` → [`VerifyError::Expired`];
+/// - expected region mismatch → [`VerifyError::WrongRegion`];
+/// - expected policy epoch mismatch → [`VerifyError::WrongPolicyVersion`];
+/// - expected issuer mismatch → [`VerifyError::WrongIssuer`].
+pub(crate) fn final_revalidate(
+    record: &ChallengeRecord,
+    now_unix: u64,
+    expected_region: Option<&str>,
+    expected_policy_version: Option<u32>,
+    expected_issuer: Option<&str>,
+) -> Result<(), VerifyError> {
+    if now_unix >= record.expires_at {
+        return Err(VerifyError::Expired);
+    }
+    if let Some(expected) = expected_region {
+        if record.region.as_deref() != Some(expected) {
+            return Err(VerifyError::WrongRegion);
+        }
+    }
+    if let Some(expected) = expected_policy_version {
+        if record.policy_version != expected {
+            return Err(VerifyError::WrongPolicyVersion);
+        }
+    }
+    if let Some(expected) = expected_issuer {
+        if record.issuer.as_deref() != Some(expected) {
+            return Err(VerifyError::WrongIssuer);
+        }
+    }
+    Ok(())
 }
 
 /// Constant-time byte comparison (equal-length inputs; both operands here are
@@ -791,6 +885,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -815,6 +910,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -834,6 +930,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
@@ -893,6 +990,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -919,6 +1017,7 @@ mod tests {
                 auto_tune_max_bits: 24,
                 binding_mode: BindingMode::Bound,
                 region: None,
+                issuer: None,
 
                 policy_version: 1,
             };
@@ -949,6 +1048,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -985,6 +1085,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1020,6 +1121,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1046,6 +1148,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1071,6 +1174,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1112,6 +1216,7 @@ mod tests {
                 auto_tune_max_bits: 24,
                 binding_mode: BindingMode::Bound,
                 region: None,
+                issuer: None,
 
                 policy_version: 1,
             };
@@ -1139,6 +1244,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1186,6 +1292,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1218,6 +1325,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1250,6 +1358,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1290,6 +1399,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1320,6 +1430,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1350,6 +1461,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1380,6 +1492,7 @@ mod tests {
             expected_scope: None,
             client_ip: None,
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1409,6 +1522,7 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::None,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -1428,6 +1542,7 @@ mod tests {
             client_ip: Some("1.2.3.4"),
 
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1457,6 +1572,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1479,6 +1595,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1509,6 +1626,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1529,6 +1647,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1560,6 +1679,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: true,
@@ -1589,6 +1709,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: true,
@@ -1621,6 +1742,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: Some(&json!({})),
             enforce_telemetry: true,
@@ -1644,6 +1766,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: Some(&json!([])),
             enforce_telemetry: true,
@@ -1673,6 +1796,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: Some(&json!(null)),
             enforce_telemetry: true,
@@ -1703,6 +1827,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: Some(&json!({
                 "wd": false, "hc": 8, "dm": 8, "me": 5, "ke": 2, "et": []
@@ -1733,6 +1858,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: false,
@@ -1765,6 +1891,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1796,6 +1923,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -1825,6 +1953,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -2060,6 +2189,7 @@ mod tests {
             expected_scope: Some("signup"),
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -2088,6 +2218,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -2116,6 +2247,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -2211,6 +2343,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -2232,6 +2365,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -2381,6 +2515,7 @@ mod tests {
             auto_tune_max_bits: 20,
             binding_mode: BindingMode::Bound,
             region: None,
+            issuer: None,
 
             policy_version: 1,
         };
@@ -2453,6 +2588,7 @@ mod tests {
                 auto_tune_max_bits: 20,
                 binding_mode: BindingMode::None,
                 region: None,
+                issuer: None,
 
                 policy_version: 1,
             },
@@ -2477,6 +2613,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -2504,6 +2641,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -2538,6 +2676,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: Some("us"),
+            expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
@@ -2568,6 +2707,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: Some("us"),
+            expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
@@ -2598,6 +2738,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: Some("us"),
+            expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
@@ -2621,6 +2762,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
@@ -2632,6 +2774,334 @@ mod tests {
             verify_solution(&mut ctx_none),
             VerifyOutcome::Valid { .. }
         ));
+    }
+
+    // ── Round-10 audit: issuer identity (audit #67) ────────────────────
+
+    #[test]
+    fn issuer_mismatch_is_rejected_with_wrong_issuer() {
+        // The record's issuer is signed deployment metadata (final canonical
+        // field). A verifier configured with an expected issuer rejects
+        // challenges issued by another issuer.
+        let mut record = make_record(8);
+        record.issuer = Some("auth-gw-eu".into());
+        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed (audit #67)
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: Some("auth-gw-us"),
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::WrongIssuer)
+        );
+    }
+
+    #[test]
+    fn issuer_expected_but_record_unbound_fails_closed() {
+        // A deployment that expects an issuer fails closed on issuer-unbound
+        // challenges (record.issuer == None), exactly like the region
+        // expectation.
+        let mut record = make_record(8);
+        assert_eq!(record.issuer, None);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: Some("auth-gw"),
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::WrongIssuer)
+        );
+    }
+
+    #[test]
+    fn matching_issuer_verifies_and_no_expectation_never_fires() {
+        let mut record = make_record(8);
+        record.issuer = Some("auth-gw".into());
+        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed (audit #67)
+        let counter = solve_for_test(&record).unwrap();
+
+        let mut ctx_match = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: Some("auth-gw"),
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx_match),
+            VerifyOutcome::Valid { .. }
+        ));
+
+        // No expected issuer → the record's issuer is ignored entirely.
+        let mut ctx_none = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx_none),
+            VerifyOutcome::Valid { .. }
+        ));
+    }
+
+    #[test]
+    fn v2_fixture_with_issuer_set_verifies() {
+        // The issuer is the FINAL canonical field (audit #67): a fixture
+        // record with an issuer set re-signs and verifies — the byte-exact
+        // anchor the PHP side pins too.
+        let mut record = fixture_record(2);
+        record.issuer = Some("auth-gw".into());
+        resign_v2(&mut record, FIXTURE_SECRET);
+        assert!(matches!(
+            verify_fixture(&mut record, false),
+            VerifyOutcome::Valid { .. }
+        ));
+    }
+
+    // ── Round-10 audit: future-time bound (audit #76) ─────────────────
+
+    #[test]
+    fn future_issued_challenge_beyond_skew_is_rejected() {
+        // A challenge issued more than MAX_CLOCK_SKEW_SECS (60) in the
+        // future relative to the verifier clock is a time-domain anomaly —
+        // the TTL check rejects it. Mutating issued_at invalidates the
+        // signature, so re-sign first.
+        let mut record = make_record(8);
+        record.issued_at = NOW_UNIX + 62; // > now (NOW_UNIX+1) + 60 → anomaly
+        record.expires_at = record.issued_at + 120;
+        resign_v2(&mut record, "test-key-16-bytes!");
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1, // issued_at > now + 60 → invalid
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::Expired)
+        );
+
+        // Exactly AT the skew bound is still acceptable (issued_at ==
+        // now + 60): the boundary is inclusive.
+        let mut record = make_record(8);
+        record.issued_at = NOW_UNIX + 61; // == now (NOW_UNIX+1) + 60
+        record.expires_at = record.issued_at + 120;
+        resign_v2(&mut record, "test-key-16-bytes!");
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Valid { .. }
+        ));
+    }
+
+    // ── Round-10 audit: POST-DERIVE final re-validation (audit #59) ───
+
+    #[test]
+    fn final_revalidation_race_expired_during_derive() {
+        // The expensive derivation may straddle expires_at: the cheap TTL
+        // check passes, the hash derives, and by the final re-check the
+        // CURRENT server time has advanced past expiry. The final gate must
+        // reject — deterministically simulated with an advanced now_unix.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let cheap_now = record.expires_at - 1;
+
+        // Cheap phase + derive + final re-check all pass just before expiry.
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: cheap_now,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Valid { .. }
+        ));
+
+        // The final re-check with the advanced clock: the gate fires at the
+        // exact expiry boundary (the ProductionVerifier re-reads the real
+        // clock at this step — see tests/redis_verify.rs).
+        assert_eq!(
+            final_revalidate(&record, cheap_now, None, None, None),
+            Ok(())
+        );
+        assert_eq!(
+            final_revalidate(&record, record.expires_at, None, None, None),
+            Err(VerifyError::Expired)
+        );
+        assert_eq!(
+            final_revalidate(&record, record.expires_at + 5, None, None, None),
+            Err(VerifyError::Expired)
+        );
+    }
+
+    #[test]
+    fn final_revalidation_rejects_changed_expectations() {
+        // Expectations (policy epoch, region, issuer) can change while the
+        // proof is deriving: the final gate re-checks them all against the
+        // CURRENT configuration.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let now_unix = NOW_UNIX + 1;
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Valid { .. }
+        ));
+
+        // Each expectation re-checked at the final step fails closed when it
+        // no longer matches the record.
+        assert_eq!(
+            final_revalidate(&record, now_unix, None, Some(2), None),
+            Err(VerifyError::WrongPolicyVersion),
+            "policy version changed between cheap and final → rejected"
+        );
+        assert_eq!(
+            final_revalidate(&record, now_unix, Some("us"), None, None),
+            Err(VerifyError::WrongRegion),
+            "region expectation changed between cheap and final → rejected"
+        );
+        assert_eq!(
+            final_revalidate(&record, now_unix, None, None, Some("auth-gw")),
+            Err(VerifyError::WrongIssuer),
+            "issuer expectation changed between cheap and final → rejected"
+        );
+        // The matching configuration passes.
+        assert_eq!(
+            final_revalidate(&record, now_unix, None, None, None),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn unknown_algorithm_variants_are_rejected_at_parse_time() {
+        // Audit #73: serde rejects unknown PoWAlgorithm variants exactly like
+        // PHP's fromArray throws MalformedRecordException — "argon2d",
+        // "sha1", "sha256-v2" and "ARGON2ID" are all parse errors, and the
+        // storage layer maps a corrupt key to RecordNotFound (PHP parity).
+        let record = make_record(8);
+        for algo in ["argon2d", "sha1", "sha256-v2", "ARGON2ID"] {
+            let mut value = serde_json::to_value(&record).unwrap();
+            value["algorithm"] = serde_json::json!(algo);
+            assert!(
+                serde_json::from_value::<ChallengeRecord>(value).is_err(),
+                "algorithm {algo:?} must be rejected at parse time"
+            );
+        }
     }
 
     #[test]
@@ -2729,14 +3199,16 @@ mod tests {
     // salt   = base64("1234567890abcdef")  (16 ASCII bytes)
     // scope = "login"; issued_at = 1700000000; expires_at = 1700000120;
     // min_duration_ms = 0; Sha256: target_bits = 8, m_kib = 0, t = 1, p = 1;
-    // ip = "192.168.1.5"; protocol_version = 2 (v1 vector below).
+    // ip = "192.168.1.5"; protocol_version = 2 (v1 vector below);
+    // region/request_binding/issuer all unset → the canonical ends `|0||1||`
+    // (audit #67: issuer is the FINAL field, empty when unset).
     const FIXTURE_SECRET: &str = "0123456789abcdef0123456789abcdef";
     const FIXTURE_NONCE: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=";
     const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
     const FIXTURE_BINDING_TAG: &str =
         "5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f";
-    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|";
-    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWIxMDU0MjRmZTNhNWNmYTNhZmRjY2RhOTVmNzM0YzllNjZlZTcwM2U4YjhkNDI2YTA3Y2ZlMWNiOWM4OTU0ZnwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDB8fDF8.98136b8110b9dd49b1b873816516e6e1e7b85da5b11a8a8835a54a318af269f8";
+    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1||";
+    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWIxMDU0MjRmZTNhNWNmYTNhZmRjY2RhOTVmNzM0YzllNjZlZTcwM2U4YjhkNDI2YTA3Y2ZlMWNiOWM4OTU0ZnwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDB8fDF8fA==.4dfe8d37360bbcf9de71ffc39d3840e6e938d2c4a39b7192e225976b04032505";
     const FIXTURE_LEGACY_IP_HASH: &str =
         "5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf";
     const FIXTURE_CANONICAL_V1: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf|1700000000";
@@ -2777,6 +3249,7 @@ mod tests {
             region: None,
             policy_version: 1,
             request_binding: None,
+            issuer: None,
         }
     }
 
@@ -2793,6 +3266,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("192.168.1.5"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
@@ -2877,6 +3351,7 @@ mod tests {
             expected_scope: Some("signup"),
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_issuer: None,
             expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,

@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Round-8 security audits #25, #27, #28 + Round-9 audits #41, #53, #54, #55.
+// Round-8 security audits #25, #27, #28 + Round-9 audits #41, #53, #54, #55
+// + Round-10 audits #62 (no wasm-downgrade fallback), #66 (fetch timeout),
+// #77 (narrow request shape), #78 (host-header independence).
 //
 // This file is canonical at packages/kiwicaptcha-wasm/tests/browser/specs/
 // and MUST be copied into the public repo's tests/browser/specs/ during
@@ -459,5 +461,192 @@ test.describe('KiwiCaptcha solver version coupling (audit #53)', () => {
     );
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     await expect(page.locator('[data-kiwi-info]')).toContainText('out of date');
+  });
+});
+
+test.describe('KiwiCaptcha no wasm-downgrade fallback (audit #62)', () => {
+  test('solver failures cannot change the requested algorithm — one fetch, attribute-only algorithm (static source assertion)', () => {
+    const src = driverSource();
+    // Exactly ONE fetch exists in the whole driver: there can be no
+    // "retry with a weaker challenge" code path to fetch a second time.
+    expect(src.match(/fetch\(/g) ?? []).toHaveLength(1);
+    // The algorithm variable is declared exactly twice in the file: once in
+    // the driver (from the container/widget attributes only) and once in the
+    // embedded worker source (from the solve request). No other declaration.
+    expect(src.match(/var algorithm\s*=/g) ?? []).toHaveLength(2);
+    // The ONLY hard-coded algorithm assignment in the entire file is the
+    // audit-#62 profile normalization itself (pinned by both assertions
+    // below) — no failure path may assign a different, weaker algorithm.
+    expect(src.match(/algorithm\s*=\s*["']/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(/if \(algorithm !== "sha256" && algorithm !== "argon2id"\) algorithm = "sha256";/);
+    // The request body algorithm is exactly the attribute-derived variable.
+    expect(src).toMatch(/var algorithm\s*=\s*W\.getAttribute\("data-kiwi-algorithm"\) \|\| container\.getAttribute\("data-kiwi-algorithm"\) \|\| "sha256"/);
+    expect(src).toMatch(/reqBody\.algorithm\s*=\s*algorithm/);
+    // Only the two server-offered profiles are selectable — anything else is
+    // normalized to the default; the client can never invent parameters.
+    expect(src).toMatch(/algorithm !== "sha256" && algorithm !== "argon2id"/);
+    // Solver selection is driven ONLY by the server's response algorithm —
+    // never by a client capability probe (no navigator capability gating).
+    expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) === "argon2id"/);
+    expect(src, 'no capability probe may gate the algorithm choice').not.toMatch(/navigator\.[\w.]*[Cc]apab/);
+    // A server-side downgrade (argon2id requested, weaker returned) is a
+    // FAILED challenge, never accepted and never solved.
+    expect(src).toMatch(/Challenge downgraded/);
+    expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) !== "argon2id"/);
+  });
+
+  test('a stale worker leaves the widget in the mismatch state without ever re-requesting a weaker challenge (runtime)', async ({ page }) => {
+    const bodies = [];
+    await page.route('**/challenge', async (route) => {
+      bodies.push(route.request().postDataJSON() ?? {});
+      await route.continue();
+    });
+    await page.goto('/?worker-stale=1&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute(
+      'data-state',
+      'kiwi:solver-mismatch',
+      { timeout: 60_000 }
+    );
+    await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
+    // The mismatch is terminal — exactly one challenge was requested, and it
+    // asked for argon2id. The failed worker triggered NO weaker re-request.
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].algorithm).toBe('argon2id');
+  });
+
+  test('WASM unavailable: bounded retries keep requesting argon2id and settle in the controlled error state (runtime)', async ({ page }) => {
+    // ?csp=strict blocks wasm compilation AND blob workers (script-src
+    // without blob:/wasm-unsafe-eval), so the argon2id challenge cannot be
+    // solved at all — there is no pure-JS argon2id fallback. The driver must
+    // fail (bounded retries, then idle), and EVERY challenge request must
+    // still ask for argon2id: never a downgrade to sha256.
+    const bodies = [];
+    await page.route('**/challenge', async (route) => {
+      bodies.push(route.request().postDataJSON() ?? {});
+      await route.continue();
+    });
+    await page.goto('/?csp=strict&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+      timeout: 60_000,
+    });
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
+    expect(bodies.length, 'bounded retries must re-attempt the challenge').toBeGreaterThanOrEqual(3);
+    for (const body of bodies) {
+      expect(body.algorithm, 'every challenge request must stay argon2id — no wasm-downgrade fallback').toBe('argon2id');
+    }
+  });
+});
+
+test.describe('KiwiCaptcha challenge fetch timeout (audit #66)', () => {
+  test('the fetch is abortable: AbortController, 15 s default, data-kiwi-fetch-timeout-ms override, bounded worker solve (static source assertion)', () => {
+    const src = driverSource();
+    expect(src).toMatch(/AbortController/);
+    expect(src).toMatch(/signal\s*:\s*abortController\.signal/);
+    expect(src).toMatch(/KIWI_FETCH_TIMEOUT_MS\s*=\s*15000/);
+    expect(src).toMatch(/data-kiwi-fetch-timeout-ms/);
+    expect(src).toMatch(/clearTimeout\(abortTimer\)/);
+    // The worker solve path is bounded end to end: the driver caps the
+    // counter range it hands the worker (maxHashes), the worker caps its
+    // own search range (argMax), and every worker path terminates in a
+    // done/failed terminal message.
+    expect(src).toMatch(/maxHashes: MAX_SHA_HASHES/);
+    expect(src).toMatch(/argMax = Math\.min\(MAX_SHA_HASHES/);
+  });
+
+  test('a stalled challenge endpoint is aborted and the widget settles in the controlled idle error state (runtime)', async ({ page }) => {
+    // The route never fulfills: the request hangs until the driver's
+    // AbortController fires at data-kiwi-fetch-timeout-ms (1500 ms here).
+    const stalled = [];
+    await page.route('**/stall', async (route) => {
+      stalled.push(route.request().url());
+    });
+    const start = Date.now();
+    await serveWidgetPage(page, {
+      'data-kiwi-endpoint': '/stall',
+      'data-kiwi-scope': 'login',
+      'data-kiwi-fetch-timeout-ms': '1500',
+    });
+    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+      timeout: 40_000,
+    });
+    const elapsed = Date.now() - start;
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
+    // Bounded retries re-attempt (3 fetches), each aborted by its own
+    // timeout — the widget must never be left stuck on a hung server.
+    expect(stalled).toHaveLength(3);
+    // Three abort cycles at 1.5 s plus 1 s/2 s backoff ≈ 7.5 s; the lower
+    // bound proves the abort timer actually ran (not an instant failure).
+    expect(elapsed).toBeGreaterThanOrEqual(4000);
+    expect(elapsed).toBeLessThan(25_000);
+  });
+});
+
+test.describe('KiwiCaptcha host-header independence (audit #78)', () => {
+  test('same-origin enforcement uses window.location.origin only — never location.host/hostname or a Host header (static source assertion)', () => {
+    const src = driverSource();
+    // The endpoint check compares ORIGINS (the page's own scheme+host+port),
+    // never a request Host header — a Host header is attacker-influenced,
+    // window.location is not.
+    expect(src).toMatch(/url\.origin !== window\.location\.origin/);
+    expect(src).toMatch(/window\.location\.origin/);
+    // No host-based trust decision may exist anywhere in the driver.
+    expect(src.match(/location\.hostname/g) ?? []).toEqual([]);
+    expect(src.match(/location\.host\b/g) ?? []).toEqual([]);
+    expect(src.match(/document\.location\.host/g) ?? []).toEqual([]);
+    // The fetch never reads or sets a Host header (browser-managed only).
+    expect(src.match(/["']Host["']/g) ?? []).toEqual([]);
+  });
+});
+
+test.describe('KiwiCaptcha narrow request shape (audit #77)', () => {
+  test('the challenge POST body is built from exactly {scope, algorithm, request_binding} (static source assertion)', () => {
+    const src = driverSource();
+    // scope enters via the object literal; algorithm and request_binding via
+    // the only two reqBody assignments that exist in the file. A fourth
+    // field would have to appear here.
+    expect(src).toMatch(/var reqBody = \{ scope: scope \};/);
+    expect(src.match(/reqBody\.\w+/g) ?? []).toEqual([
+      'reqBody.algorithm',
+      'reqBody.request_binding',
+    ]);
+  });
+
+  test('with a binding and argon2id the wire body contains exactly {scope, algorithm, request_binding} (runtime)', async ({ page }) => {
+    const bodies = [];
+    await page.route('**/challenge', async (route) => {
+      bodies.push(route.request().postDataJSON() ?? {});
+      await route.continue();
+    });
+    await serveWidgetPage(page, {
+      'data-kiwi-endpoint': '/challenge',
+      'data-kiwi-scope': 'login',
+      'data-kiwi-request-binding': 'form-42-abc',
+      'data-kiwi-algorithm': 'argon2id',
+    });
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
+      timeout: 60_000,
+    });
+    expect(bodies).toHaveLength(1);
+    expect(Object.keys(bodies[0]).sort()).toEqual(['algorithm', 'request_binding', 'scope']);
+  });
+
+  test('without an algorithm the wire body is exactly {scope, request_binding} — no algorithm field, no extras (runtime)', async ({ page }) => {
+    const bodies = [];
+    await page.route('**/challenge', async (route) => {
+      bodies.push(route.request().postDataJSON() ?? {});
+      await route.continue();
+    });
+    await serveWidgetPage(page, {
+      'data-kiwi-endpoint': '/challenge',
+      'data-kiwi-scope': 'login',
+      'data-kiwi-request-binding': 'form-42-abc',
+    });
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
+      timeout: 60_000,
+    });
+    expect(bodies).toHaveLength(1);
+    expect(Object.keys(bodies[0]).sort()).toEqual(['request_binding', 'scope']);
   });
 });

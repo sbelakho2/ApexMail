@@ -15,9 +15,10 @@ Browser behavioral telemetry is a **supplement, not the security boundary** — 
 - **Difficulty derived per algorithm** — SHA-256 scales to 20 bits (~1M hashes); Argon2id is capped at 10 bits because every memory-hard hash is ~1000x more expensive.
 - **Server-side minimum solve duration** — a **timing-anomaly heuristic**, not a proof of human behavior: PoW is probabilistic (a valid solution can occur at counter 0) and a fast bot can wait before submitting, so the floor only rejects solves that **arrive** faster than the theoretical minimum, measured **server-side** from challenge issuance to verification receipt (high-resolution issuance timestamp vs server receipt time). The client-reported duration is forgeable (a custom client can submit `duration_ms=5000`) and is used **only as telemetry**. Clock policy: when the verifier clock is behind the issuer clock, a skew within 5 s (`SKEW_TOLERANCE_US`) skips the floor heuristic (the apparent negative elapsed time carries no signal) and a larger skew is rejected as `TooFast`; records without a high-resolution issuance timestamp (`issued_at_ns == 0`) are **malformed** — the legacy client-duration fallback was removed.
 - **Comprehensive record validation before any hash** — `verify_solution` runs `validate_record` first (right after attempt accounting): scope bounds, nonce = 32 bytes, salt = 16 bytes, `expires_at - issued_at <= 300 s`, `prefix == challenge|salt|`, SHA-256 difficulty 1..=20, Argon2id difficulty 1..=10 with `p == 1`, `t` 3..=6, `m_kib` 8..=65536. A malformed or attacker-crafted record is rejected as `MalformedRecord` before any signature or hash work.
-- **HMAC-signed challenges, protocol v2** — the signed canonical input covers the full parameter set (`v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms`), so no issuance parameter can be tampered with without breaking the signature. The challenge string is `base64(canonical).hex_tag` for both protocol versions; v1 records (legacy canonical `nonce|scope|ip_hash|issued_at`) keep verifying during the migration window (max TTL).
+- **HMAC-signed challenges, protocol v2** — the signed canonical input covers the full parameter set (`v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer`, with `region`/`request_binding`/`issuer` rendering as the EMPTY segment when unset — issuer is the FINAL field, audit #67), so no issuance parameter can be tampered with without breaking the signature. The challenge string is `base64(canonical).hex_tag` for both protocol versions; v1 records (legacy canonical `nonce|scope|ip_hash|issued_at`) keep verifying during the migration window (max TTL). The TTL check also rejects challenges issued more than `MAX_CLOCK_SKEW_SECS` (60) in the future (audit #76).
 - **Nonce-bound IP binding** — the record stores `binding_tag`, an HMAC over the nonce + canonical IP bytes (IPv4-mapped IPv6 normalized to 4-byte IPv4). The tag changes with every nonce, so the record **creates no stable IP-derived identifier**. Verification recomputes the tag from the submitting IP and compares in constant time; an empty `binding_tag` (i.e. the challenge was issued with `BindingMode::None`) disables the check; a `None` client IP with a NON-EMPTY tag fails closed with `MissingClientIp`. This is a **relay mitigation, not a guarantee**: IPs legitimately change behind NAT/proxies, and operators can disable the check.
-- **Single-use with bounded verification cost** — verification consumes the challenge, and the verification path includes per-nonce attempt accounting (`max_attempts`) that bounds the server-side cost of wrong candidates (critical for memory-hard Argon2id verification). Per-nonce attempt caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) ships both: `rate_limit` (per-IP issuance window, optionally Redis/PSR-6 backed) and `argon2_max_concurrent_verifications` (per-process semaphore). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. Redis `GETDEL`).
+- **POST-DERIVE final re-validation (audit #59)** — after the proof derives successfully and BEFORE the outcome is declared valid, the verifier re-checks the CURRENT server time and the CURRENT expectations (policy epoch, region, issuer): a challenge that expired DURING the expensive derivation is `Expired` even though the record was already consumed. The production verifier re-reads the clock at this final step.
+- **Single-use with bounded verification cost** — verification consumes the challenge, and the verification path includes per-nonce attempt accounting (`max_attempts`) that bounds the server-side cost of wrong candidates (critical for memory-hard Argon2id verification). Per-nonce attempt caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) ships both: `rate_limit` (per-IP issuance window, optionally Redis/PSR-6 backed) and `argon2_max_concurrent_verifications` (per-process semaphore). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. the consumed-state Lua transition in `RedisChallengeStore` — the record is KEPT with a storage-level `state` and the winner's committed outcome, so a concurrent loser returns the SAME outcome instead of re-deriving, audit #74).
 Note on distributed deployments: the in-record `attempts_used` counter is a LOCAL bound — concurrent workers loading the same record each see `attempts_used = 0` and could each run one expensive verification before any update is persisted. To make attempt accounting a STRICT concurrency bound, reserve attempts atomically (e.g. a Redis Lua INCR, as the Symfony bundle's one-shot Redis model does) or rely on one-shot atomic challenge consumption.
 - **Premium UI** — modern, responsive widget with native dark mode and zero external dependencies (no external JS, no iframes, no third-party hosts). The emitted markup takes an optional CSP nonce: with a nonce, `<style nonce>` / `<script nonce>` are emitted; without one, the widget still works under CSP policies that allow `'unsafe-inline'` or where the application post-processes the HTML (as ApexMail does).
 - **First-party behavioral telemetry, opt-in** — **no third-party tracking. No third-party requests. First-party behavioral signals never leave your application.** Telemetry is collected only in the mode the page opts into via `data-kiwi-telemetry` on the widget or container: `"off"` (default), `"minimal"` (`me`/`ke` interaction counts), or `"full"` (adds `wd` = webdriver flag and quantized event timings). Listeners are widget-local (never document-wide) and are removed when the solve finishes. **Privacy Strict** — the default mode — collects no behavioral or device telemetry and creates no stable client identifier. Telemetry is a **supplementary** signal: it is client-controlled and forgeable, so it is never treated as the security boundary.
@@ -54,8 +55,8 @@ Note on distributed deployments: the in-record `attempts_used` counter is a LOCA
 │          │                                           │    hash      │
 │          │                                           │ 9. telemetry │
 │          │                                           │    (opt-in)  │
-│          │                                           │ then GETDEL  │
-│ └─────────┘                                           │ (single-use) │
+│          │                                           │ then consume│
+│ └─────────┘                                           │ (transition) │
 └───────────────────────────────────────────────────────┴──────────────┘
 ```
 
@@ -210,7 +211,7 @@ let mut record: ChallengeRecord = redis.get(&format!("kcaptcha:{}", solution.non
 
 // record: &mut ChallengeRecord — verification performs attempt accounting on
 // the record, which the caller must persist back (on failure) or consume
-// atomically (GETDEL) on success.
+// atomically (the consumed-state transition) on success.
 let mut ctx = VerifyContext {
     record: &mut record,
     secret_key: &config.secret_key, // must match issuance; >= 16 bytes
@@ -222,6 +223,9 @@ let mut ctx = VerifyContext {
     min_duration_ms: 0,                // floor is max(ctx, record.min_duration_ms);
                                        // 0 = use only the record's floor
     expected_scope: Some("login"),     // reject cross-scope replay
+    expected_region: None,             // reject records from other regions
+    expected_issuer: None,             // reject records from other issuers (audit #67)
+    expected_policy_version: None,     // reject records from revoked policy epochs
     client_ip: Some(&client_ip),       // IP binding: None + a bound record => MissingClientIp;
     //                                        only BindingMode::None records verify without an IP
     telemetry: Some(&solution.telemetry), // supplementary behavioral signal
@@ -234,7 +238,8 @@ let mut ctx = VerifyContext {
 match verify_solution(&mut ctx) {
     VerifyOutcome::Valid => {
         // Consume the challenge atomically for strict single-use under
-        // concurrency (e.g. Redis GETDEL), then allow login.
+        // concurrency (e.g. the RedisChallengeStore Lua transition), then
+        // allow login.
     }
     VerifyOutcome::Invalid(reason) => { /* reject */ }
 }
