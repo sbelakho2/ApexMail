@@ -155,16 +155,38 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * SET with an optional EX (seconds) TTL: the nonce->decision handle
-     * write path.
+     * SET with optional EX (seconds) TTL and NX flag (the nonce->decision
+     * handle write path and the correction once-only guard): NX returns
+     * null when the key already exists (Redis SET NX nil — the guard is
+     * armed exactly once). Accepts both Predis argument shapes: flat
+     * ('EX', ttl, 'NX') and the options-array form.
      */
-    private function fakeSet(array $arguments): string
+    private function fakeSet(array $arguments): ?string
     {
         $key = (string) $arguments[0];
         $value = (string) $arguments[1];
+        $ttl = null;
+        $flags = [];
+        $rest = \array_slice($arguments, 2);
+        if (isset($rest[0]) && \is_array($rest[0])) {
+            $flags = array_map('strtoupper', array_keys($rest[0]));
+            if (isset($rest[0]['EX'])) {
+                $ttl = (int) $rest[0]['EX'];
+            }
+        } else {
+            $flags = array_map('strtoupper', $rest);
+            $exIndex = array_search('EX', $flags, true);
+            if ($exIndex !== false) {
+                $ttl = (int) $arguments[2 + $exIndex + 1];
+            }
+        }
+        $nx = \in_array('NX', $flags, true);
+        if ($nx && isset($this->strings[$key])) {
+            return null;
+        }
         $this->strings[$key] = $value;
-        if (($arguments[2] ?? null) === 'EX') {
-            $this->fakePexpire([$key, (int) $arguments[3] * 1000]);
+        if ($ttl !== null) {
+            $this->fakePexpire([$key, $ttl * 1000]);
         }
 
         return 'OK';
@@ -297,19 +319,32 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'cjson.decode(raw)')) {
-            // Calibration CONFIRM (canonical confirm.lua): GET the receipt
-            // JSON -> discard when unsampled in random_sample mode (mode 1)
-            // or malformed -> DEL -> HINCRBYFLOAT the hourly score bucket ->
-            // EXPIRE the bucket -> return the receipt scope (0 when the
-            // receipt is missing/consumed/discarded). Mirrors the script's
-            // semantics exactly (weighted: weight = inverse sampling
-            // probability; score clamped 0..1000).
+            // Calibration CONFIRM / CORRECTION (canonical confirm.lua): GET
+            // the receipt JSON -> validate mode/weight -> DEL -> when the
+            // FIRST confirmation is recorded (status 1): HINCRBYFLOAT the
+            // hourly score bucket, EXPIRE the bucket, and INCR the
+            // sampled-decisions RESOLVED counter in random_sample mode
+            // (KEYS[3]). Returns the shared accepted-outcome status:
+            //   0 = missing / already consumed / corrupt receipt,
+            //   1 = FIRST confirmation recorded,
+            //   2 = FIRST confirmation, deliberately unsampled
+            //       (random_sample mode: consumed, NOT recorded).
+            // Mirrors the canonical script's semantics exactly (weighted:
+            // weight = inverse sampling probability; score clamped 0..1000).
             $receiptKey = (string) $keys[0];
             $bucketKey = (string) $keys[1];
+            $resolvedKey = (string) ($keys[2] ?? '');
             $mode = (int) $rest[0];
             $weight = (float) $rest[1];
             $legitimate = (int) $rest[2] === 1;
             $bucketTtlSecs = (int) $rest[3];
+
+            if ($mode !== 0 && $mode !== 1 && $mode !== 2) {
+                throw new \Predis\Response\ServerException('invalid calibration mode');
+            }
+            if ($mode === 2 && ($weight <= 0 || !\is_finite($weight))) {
+                throw new \Predis\Response\ServerException('invalid calibration weight');
+            }
 
             $raw = $this->strings[$receiptKey] ?? null;
             if ($raw === null) {
@@ -321,34 +356,36 @@ final class FakePredisClient extends \Predis\Client
 
                 return 0;
             }
-            if ($mode === 1 && (int) ($receipt['sampled'] ?? 0) !== 1) {
-                unset($this->strings[$receiptKey]);
-
-                return 0;
+            $sampled = (int) ($receipt['sampled'] ?? 0) === 1;
+            $status = 1;
+            if ($mode === 1 && !$sampled) {
+                $status = 2;
             }
             unset($this->strings[$receiptKey]);
 
-            if ($weight < 0) {
-                $weight = 0;
-            }
-            $score = (float) ($receipt['score'] ?? 0);
-            if ($score < 0) {
-                $score = 0;
-            }
-            if ($score > 1000) {
-                $score = 1000;
+            if ($status === 1) {
+                $score = (float) ($receipt['score'] ?? 0);
+                if ($score < 0) {
+                    $score = 0;
+                }
+                if ($score > 1000) {
+                    $score = 1000;
+                }
+
+                if ($legitimate) {
+                    $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
+                } else {
+                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $weight]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
+                }
+                $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
+                if ($mode === 1 && $resolvedKey !== '') {
+                    $this->fakeIncr([$resolvedKey]);
+                }
             }
 
-            if ($legitimate) {
-                $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
-                $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
-            } else {
-                $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $weight]);
-                $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
-            }
-            $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
-
-            return (int) $receipt['scope'];
+            return $status;
         }
 
         if (!str_contains($script, 'ZREMRANGEBYSCORE')) {

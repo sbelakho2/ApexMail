@@ -233,4 +233,52 @@ final class ConfigurationTest extends TestCase
             }
         }
     }
+
+    public function testCalibrationResolutionGateAndCostDefaults(): void
+    {
+        $calibration = $this->process()['risk']['calibration'];
+
+        self::assertSame(0.80, $calibration['minimum_resolution_ratio'], 'minimum_resolution_ratio defaults to 0.80 (the label-reporting process must resolve 80% of the server-selected sample before the model may move)');
+        self::assertSame(1.0, $calibration['false_positive_cost'], 'false_positive_cost defaults to 1.0');
+        self::assertSame(2.0, $calibration['false_negative_cost'], 'false_negative_cost defaults to 2.0 (abuse that slips through costs twice a false rejection)');
+    }
+
+    public function testCalibrationResolutionGateAndCostBoundsAreValidated(): void
+    {
+        // Boundary values accepted.
+        $this->process(['risk' => ['calibration' => ['minimum_resolution_ratio' => 0.0]]]);
+        $this->process(['risk' => ['calibration' => ['minimum_resolution_ratio' => 1.0]]]);
+        $this->process(['risk' => ['calibration' => ['false_positive_cost' => 0.1]]]);
+        $this->process(['risk' => ['calibration' => ['false_positive_cost' => 10.0]]]);
+        $this->process(['risk' => ['calibration' => ['false_negative_cost' => 0.1]]]);
+        $this->process(['risk' => ['calibration' => ['false_negative_cost' => 10.0]]]);
+
+        // Out-of-range values rejected.
+        $invalid = [
+            ['risk' => ['calibration' => ['minimum_resolution_ratio' => -0.01]]],
+            ['risk' => ['calibration' => ['minimum_resolution_ratio' => 1.01]]],
+            ['risk' => ['calibration' => ['false_positive_cost' => 0.05]]],
+            ['risk' => ['calibration' => ['false_positive_cost' => 10.1]]],
+            ['risk' => ['calibration' => ['false_negative_cost' => 0.05]]],
+            ['risk' => ['calibration' => ['false_negative_cost' => 10.1]]],
+        ];
+        foreach ($invalid as $config) {
+            try {
+                $this->process($config);
+                self::fail('out-of-range calibration knob must be rejected by the tree: '.json_encode($config));
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+
+        // Explicit in-range values flow through.
+        $calibration = $this->process(['risk' => ['calibration' => [
+            'minimum_resolution_ratio' => 0.5,
+            'false_positive_cost' => 2.5,
+            'false_negative_cost' => 3.75,
+        ]]])['risk']['calibration'];
+        self::assertSame(0.5, $calibration['minimum_resolution_ratio']);
+        self::assertSame(2.5, $calibration['false_positive_cost']);
+        self::assertSame(3.75, $calibration['false_negative_cost']);
+    }
 }

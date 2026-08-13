@@ -338,7 +338,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $riskConfig['calibration']['receipt_ttl_secs'],
                 ]))
                     ->setArgument('$samplingMode', $riskConfig['calibration']['mode'])
-                    ->setArgument('$samplingProbabilityPpm', $riskConfig['calibration']['sampling_probability_ppm']));
+                    ->setArgument('$samplingProbabilityPpm', $riskConfig['calibration']['sampling_probability_ppm'])
+                    ->setArgument('$minimumResolutionRatio', $riskConfig['calibration']['minimum_resolution_ratio'])
+                    ->setArgument('$falsePositiveCost', $riskConfig['calibration']['false_positive_cost'])
+                    ->setArgument('$falseNegativeCost', $riskConfig['calibration']['false_negative_cost']));
                 $calibrationRef = new Reference('kiwi_captcha.risk.calibration');
             }
 

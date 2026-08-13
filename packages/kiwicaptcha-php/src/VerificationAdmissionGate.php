@@ -18,7 +18,20 @@ namespace KiwiCaptcha;
  */
 interface VerificationAdmissionGate
 {
+    /**
+     * Acquire an Argon2 admission slot. Returns an opaque lease token, or
+     * null when capacity is exhausted (the challenge stays intact and can
+     * be retried). Implementations MUST NOT throw for ordinary capacity
+     * exhaustion; a backend outage may throw — the verifier translates it
+     * into a typed, non-consuming AdmissionUnavailable result.
+     */
     public function acquire(): ?string;
 
+    /**
+     * Release a previously acquired lease. MUST NOT throw into
+     * verification: a failed release is best-effort (a leaked slot is
+     * recovered by the lease TTL) and must never override a completed
+     * verification result.
+     */
     public function release(string $lease): void;
 }

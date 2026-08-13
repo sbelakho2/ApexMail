@@ -37,7 +37,8 @@ namespace KiwiCaptcha;
  *   4. Scope: challenge scope matches the expected flow.
  *   5. IP binding: v2 records recompute the nonce-bound binding tag; v1
  *      records compare the legacy IP hash. An empty binding tag disables
- *      the check; a null client IP skips it.
+ *      the check; with a nonempty binding tag a missing client IP fails
+ *      closed (MissingClientIp) — a null IP NEVER skips the binding.
  *   6. Minimum duration: measured SERVER-SIDE from the record's issued_at_ns
  *      (epoch microseconds) to the verification receipt time — the
  *      client-reported duration can no longer be forged to bypass the
@@ -157,7 +158,13 @@ final class Verifier
             return VerifyOutcome::malformedToken($e->getMessage());
         }
 
-        $peek = $this->storage->find($token->nonce);
+        try {
+            $peek = $this->storage->find($token->nonce);
+        } catch (\Throwable) {
+            // Backend failure: typed result, challenge presumed intact
+            // (the client can retry once storage recovers).
+            return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+        }
         if ($peek === null) {
             return VerifyOutcome::invalid(VerifyError::RecordNotFound);
         }
@@ -275,7 +282,15 @@ final class Verifier
         //    consuming or deleting the record — the client can retry.
         $lease = null;
         if ($peek->algorithm === PoWAlgorithm::Argon2id && $this->argonGate !== null) {
-            $lease = $this->argonGate->acquire();
+            try {
+                $lease = $this->argonGate->acquire();
+            } catch (\Throwable) {
+                // Backend failure: report a typed, NON-CONSUMING result so
+                // the challenge stays intact and can be retried after the
+                // admission backend recovers (never propagate, never treat
+                // the failure as full free capacity).
+                return VerifyOutcome::invalid(VerifyError::AdmissionUnavailable);
+            }
             if ($lease === null) {
                 return VerifyOutcome::invalid(VerifyError::CapacityExceeded);
             }
@@ -283,7 +298,14 @@ final class Verifier
 
         try {
             // 9. Consume (one-shot) and re-derive the proof.
-            $record = $this->storage->consume($token->nonce);
+            try {
+                $record = $this->storage->consume($token->nonce);
+            } catch (\Throwable) {
+                // A lost GETDEL response is intrinsically ambiguous: the
+                // challenge may or may not have been consumed. Report the
+                // indeterminate state instead of RecordNotFound.
+                return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
+            }
             if ($record === null) {
                 return VerifyOutcome::invalid(VerifyError::RecordNotFound);
             }
@@ -312,7 +334,13 @@ final class Verifier
             return VerifyOutcome::valid();
         } finally {
             if ($lease !== null) {
-                $this->argonGate?->release($lease);
+                try {
+                    $this->argonGate?->release($lease);
+                } catch (\Throwable) {
+                    // Best-effort: a failed release must NEVER override the
+                    // verification result (the challenge is already
+                    // consumed). A leaked lease is recovered by its TTL.
+                }
             }
         }
     }

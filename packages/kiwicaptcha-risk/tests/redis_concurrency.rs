@@ -325,56 +325,77 @@ fn global_level_enters_hysteresis_hold_after_storm() {
         eprintln!("skipping redis concurrency test: RISK_REDIS_URL not set");
         return;
     };
-    let store = store();
-    // Scope-2 events: 32 concurrent events ratchet gp to 64000 -> level 4
-    // (normalized 914) and arm the cooldown window.
+    // A SHORT hysteresis window (2 s) and sat_global 11_000: 5 concurrent
+    // events ratchet gp to 10000 -> normalized 909 -> level 4 and arm the
+    // cooldown. The rate-limit clock is Redis TIME, so the hold and the
+    // drop after the window are exercised with REAL ~1 s / ~2.1 s sleeps.
+    let mut sats = DEFAULT_SATURATIONS;
+    sats[8] = 11_000; // sat_global (ARGV[16])
+    let store = store_with(1800, 2000, sats);
+    let mut conn = client().get_connection().expect("connection");
+    let t: Vec<i64> = redis::cmd("TIME").query(&mut conn).expect("TIME");
+    let t0 = (t[0] * 1000 + t[1] / 1000) as u64;
+    let source = hex::encode([0xAA; 16]);
+    let subnet = hex::encode([0xBB; 16]);
     let results = storm(
         &store,
         RiskEventKind::PreIssue,
         2,
-        32,
-        hex::encode([0xAA; 16]),
-        hex::encode([0xBB; 16]),
+        5,
+        source.clone(),
+        subnet.clone(),
         common::event_id,
         common::T0,
     );
     assert!(results.iter().all(|r| r.is_ok()));
-    // The cached level reflects whichever call COMPLETED last, which races
-    // with execution order; a settle-observe after the storm (all 32 events
-    // persisted by now) reads the ratcheted level deterministically.
-    store
-        .observe(&common::observation(
+    // A settle RiskDenied probe (no pressure added) reads the ratcheted
+    // level deterministically and arms the deadline at ratchet + 2 s.
+    let probe = |id: u64| {
+        let mut o = common::observation(
             RiskEventKind::PreIssue,
             2,
-            hex::encode([0xAA; 16]),
-            hex::encode([0xBB; 16]),
+            source.clone(),
+            subnet.clone(),
             None,
             None,
-            common::event_id(99),
+            common::event_id(id),
             common::T0,
-        ))
-        .expect("settle observe");
+        );
+        o.event = RiskEventKind::RiskDenied;
+        o
+    };
+    store.observe(&probe(99)).expect("settle observe");
     assert_eq!(store.last_global_level(), 4);
-    assert_eq!(store.last_cooldown_until_ms(), common::T0 + 60_000);
+    let cool = store.last_cooldown_until_ms();
+    assert!(
+        cool > t0 + 2_000 && cool <= t0 + 7_000,
+        "the 2 s cooldown must be armed at the ratchet time + 2000"
+    );
 
-    // t0+61s: rf 16750 + rs 30780 + the new event's 2000 = gp 49530 ->
-    // normalized 707 -> target L2 (< L4). The window has passed, so the
-    // level must drop to the target and the hold must close.
-    store
-        .observe(&common::observation(
-            RiskEventKind::PreIssue,
-            2,
-            hex::encode([0xAA; 16]),
-            hex::encode([0xBB; 16]),
-            None,
-            None,
-            common::event_id(33),
-            common::T0 + 61_000,
-        ))
-        .expect("observe");
+    // Inside the window (+1 s): gp 10000 - ~270 = ~9730 -> 884 — below the
+    // L4 enter (900), above the L4 exit (850) — the level holds and the
+    // deadline is untouched.
+    std::thread::sleep(Duration::from_millis(1000));
+    store.observe(&probe(100)).expect("hold observe");
     assert_eq!(
         store.last_global_level(),
-        2,
+        4,
+        "level holds inside the window"
+    );
+    assert_eq!(
+        store.last_cooldown_until_ms(),
+        cool,
+        "the hold keeps the deadline"
+    );
+
+    // After the window (+~2.1 s more, ~3.1 s total): gp 10000 - ~840 =
+    // ~9160 -> 833 < the L4 exit 850 and now >= cool -> the level must drop
+    // to the target (L3) and the hold must close.
+    std::thread::sleep(Duration::from_millis(2100));
+    store.observe(&probe(101)).expect("drop observe");
+    assert_eq!(
+        store.last_global_level(),
+        3,
         "level must drop to the target after the hysteresis window"
     );
     assert_eq!(store.last_cooldown_until_ms(), 0);
@@ -413,12 +434,17 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
             winners += 1;
             assert_eq!(
                 observed.vector.source_fast, 125,
-                "winner sees a single increment"
+                "the winner sees a fresh single increment"
             );
         }
-        // Every caller sees the CURRENT signals (125): duplicates are
-        // no-ops, not errors.
-        assert_eq!(observed.vector.source_fast, 125);
+        // Every caller sees ~ONE event worth of current signals: duplicates
+        // are no-ops, not errors (the rf channel leaks 250/s of REAL time,
+        // so the floor may drop a unit on slow runners).
+        assert!(
+            (100..=125).contains(&observed.vector.source_fast),
+            "duplicate callers must see ~125, got {}",
+            observed.vector.source_fast
+        );
     }
     assert_eq!(
         winners, 1,
@@ -456,9 +482,12 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
             common::T0,
         ))
         .expect("observe");
-    assert_eq!(
-        after.vector.source_fast,
-        2 * control_vector.vector.source_fast,
-        "the storm must have moved the state by exactly one unit"
+    // The storm moved the state by exactly ONE unit (two events in total,
+    // minus the small real-elapsed decay; a double-increment storm would
+    // read ~375+ and 100 increments would saturate at 1000).
+    assert!(
+        (200..=250).contains(&after.vector.source_fast),
+        "the storm must have moved the state by exactly one unit (got {})",
+        after.vector.source_fast
     );
 }

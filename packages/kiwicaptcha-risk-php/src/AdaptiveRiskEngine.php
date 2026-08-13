@@ -280,20 +280,25 @@ final class AdaptiveRiskEngine
      * Best-effort atomic calibration confirmation: consumes the decision's
      * receipt EXACTLY ONCE (single canonical confirm.lua script) and
      * records the outcome against the ORIGINAL decision's scope bucket.
-     * Returns the receipt scope when the outcome was recorded, or null
-     * when calibration is not configured or the receipt is missing /
-     * already consumed / discarded by sampling. Never throws — the
-     * reputation feedback is the primary purpose.
+     * Returns the SHARED accepted-outcome status (wire contract with the
+     * Rust mirror): 0 = nothing consumed (missing / already confirmed /
+     * corrupt / no calibration configured), 1 = FIRST confirmation with
+     * calibration recorded, 2 = FIRST confirmation deliberately unsampled.
+     * Statuses 1 and 2 authorize the first-party reputation event exactly
+     * once; status 0 must never book one (a webhook retry must never
+     * amplify). Never throws — a calibration backend failure surfaces as
+     * status 0 and the receipt survives, so a retry applies the outcome
+     * exactly once.
      */
-    public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): ?int
+    public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
     {
         if ($this->calibration === null) {
-            return null;
+            return 0;
         }
         try {
             return $this->calibration->confirmOutcome($decisionId, $legitimate, $weight);
         } catch (\Throwable) {
-            return null;
+            return 0;
         }
     }
 
@@ -301,9 +306,13 @@ final class AdaptiveRiskEngine
      * Confirmed-legitimate outcome: REQUIRES the id of the decision being
      * confirmed so the outcome is recorded against the ORIGINAL decision's
      * scope bucket. FIRST runs the calibrator's atomic confirm (receipt
-     * consumed exactly once, best-effort — the reputation event proceeds
-     * even when the receipt was already consumed), THEN records the
-     * ConfirmedLegitimate reputation event via record_feedback().
+     * consumed exactly once), THEN — and only when the confirmation is the
+     * FIRST one (status 1 or 2) — records the ConfirmedLegitimate
+     * reputation event via record_feedback(). REPUTATION GATING: a status-0
+     * outcome (receipt already consumed / missing / backend failure) is a
+     * no-op returning an EventReceipt marked isDuplicate with zero signals
+     * and NO observation — one real-world outcome produces at most ONE
+     * reputation mutation, so webhook retries can never amplify.
      *
      * @throws \InvalidArgumentException when $decisionId is null or empty
      */
@@ -312,7 +321,9 @@ final class AdaptiveRiskEngine
         if ($decisionId === null || $decisionId === '') {
             throw new \InvalidArgumentException('confirmedLegitimate requires the decision id being confirmed');
         }
-        $this->confirmOutcome($decisionId, true);
+        if ($this->confirmOutcome($decisionId, true) === 0) {
+            return $this->skippedConfirmationReceipt(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey);
+        }
         return $this->record_feedback(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey);
     }
 
@@ -320,9 +331,14 @@ final class AdaptiveRiskEngine
      * Confirmed-abuse outcome: REQUIRES the id of the decision being
      * confirmed so the outcome is recorded against the ORIGINAL decision's
      * scope bucket. FIRST runs the calibrator's atomic confirm (receipt
-     * consumed exactly once, best-effort — the reputation event proceeds
-     * even when the receipt was already consumed), THEN records the
-     * ConfirmedAbuse reputation event via record_feedback().
+     * consumed exactly once), THEN — and only when the confirmation is the
+     * FIRST one (status 1 or 2) — records the ConfirmedAbuse reputation
+     * event via record_feedback(). REPUTATION GATING: a status-0 outcome
+     * (receipt already consumed / missing / backend failure) is a no-op
+     * returning an EventReceipt marked isDuplicate with zero signals and
+     * NO observation — one real-world outcome produces at most ONE
+     * reputation mutation, so webhook retries can never re-penalize the
+     * source with repeated +6000 ConfirmedAbuse.
      *
      * @throws \InvalidArgumentException when $decisionId is null or empty
      */
@@ -331,8 +347,109 @@ final class AdaptiveRiskEngine
         if ($decisionId === null || $decisionId === '') {
             throw new \InvalidArgumentException('confirmedAbuse requires the decision id being confirmed');
         }
-        $this->confirmOutcome($decisionId, false);
+        if ($this->confirmOutcome($decisionId, false) === 0) {
+            return $this->skippedConfirmationReceipt(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey);
+        }
         return $this->record_feedback(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey);
+    }
+
+    /**
+     * Compensating-state correction: fixes a prior label by recording the
+     * OPPOSITE reputation event for a decision AT MOST ONCE, guarded by a
+     * SET NX reservation in the calibration store
+     * ({kiwi:<ns>}:cal:corrected:<hex(sha256(decisionId))> EX
+     * receiptTtlSecs — see CalibrationStore::reserveCorrection()).
+     *
+     * $legitimate mirrors the (mistaken) FIRST confirmed outcome — a first
+     * confirmation of legitimate=true (trust) is compensated by a
+     * ConfirmedAbuse event and vice versa. The compensation lands in
+     * per-decision, decision-anchored pseudonyms (the original identity
+     * context is unrecoverable once the receipt is consumed) and is
+     * additionally dedupe-guarded by a deterministic event_id, so it can
+     * never re-apply or amplify a real visitor. Calibration consumes only
+     * the first confirmed outcome: the correction NEVER touches receipts
+     * or hourly buckets ($weight is accepted for signature parity with
+     * confirmOutcome() and unused).
+     *
+     * Returns true when the compensation was applied (best-effort — a
+     * state-store failure is silent and the reservation stays consumed so
+     * a retry cannot double-apply); false when the decision was already
+     * corrected or no calibration store is attached (the guard cannot be
+     * enforced without its namespace).
+     *
+     * @throws \InvalidArgumentException when $decisionId is empty
+     */
+    public function confirmCorrection(string $decisionId, bool $legitimate, ?float $weight = null): bool
+    {
+        if ($decisionId === '') {
+            throw new \InvalidArgumentException('confirmCorrection requires a non-empty decision id');
+        }
+        if ($this->calibration === null) {
+            return false;
+        }
+        try {
+            if (!$this->calibration->reserveCorrection($decisionId)) {
+                return false;
+            }
+        } catch (\Throwable) {
+            return false;
+        }
+        $event = $legitimate ? RiskEventKind::ConfirmedAbuse : RiskEventKind::ConfirmedLegitimate;
+        $observation = $this->correctionObservation($decisionId, $event);
+        try {
+            $this->store->observe($observation);
+        } catch (\Throwable) {
+            // Best-effort: the reservation stays consumed so a retry cannot
+            // double-apply the compensation.
+        }
+        return true;
+    }
+
+    /**
+     * A deterministic, identity-free observation for a compensation event:
+     * source/subnet pseudonyms and the dedupe event_id are sha256-derived
+     * from the decision_id (distinct salts for the ±1 epoch boundary keys
+     * so the rotated pseudonyms never collide), which isolates every
+     * correction's state mutation in its own keys and makes the event
+     * once-only even if the guard key expires.
+     */
+    private function correctionObservation(string $decisionId, RiskEventKind $event): RiskObservation
+    {
+        $digest = static fn (string $salt): string => substr(hash('sha256', $salt . $decisionId), 0, 32);
+        $nowMs = (int) floor(microtime(true) * 1000);
+        $nowSecs = intdiv($nowMs, 1000);
+        return new RiskObservation(
+            event: $event,
+            scope: 0,
+            sourceEpoch: intdiv($nowSecs, $this->sourceEpochSecs),
+            sourceIdPrev: $digest('kiwicaptcha:correction:srcp:'),
+            sourceId: $digest('kiwicaptcha:correction:srcc:'),
+            sourceIdNext: $digest('kiwicaptcha:correction:srcn:'),
+            subnetEpoch: intdiv($nowSecs, $this->subnetEpochSecs),
+            subnetIdPrev: $digest('kiwicaptcha:correction:netp:'),
+            subnetId: $digest('kiwicaptcha:correction:netc:'),
+            subnetIdNext: $digest('kiwicaptcha:correction:netn:'),
+            sessionId: null,
+            principalId: null,
+            eventId: hash('sha256', 'kiwicaptcha:correction:evt:' . $decisionId),
+            networkRisk: 0,
+            nowMs: $nowMs,
+        );
+    }
+
+    /**
+     * The no-op receipt for a status-0 confirmation (already confirmed /
+     * missing / backend failure): the event id is derived exactly like the
+     * feedback path would, but NO observation reaches the store — the
+     * caller sees a duplicate-marked, zero-signal receipt.
+     */
+    private function skippedConfirmationReceipt(RiskEventKind $event, RiskContext $ctx, ?string $idempotencyKey): EventReceipt
+    {
+        return new EventReceipt(
+            eventId: $this->normalizeEventId($event, $ctx->scope, $idempotencyKey),
+            isDuplicate: true,
+            signals: SignalVector::zero(),
+        );
     }
 
     /**

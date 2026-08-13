@@ -113,9 +113,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 try {
                     $postSolve = $this->risk->postSolveDecision($constraint->scope, $ip, $session);
                 } catch (\InvalidArgumentException) {
-                    // No risk signal available for this context — the valid
-                    // solve stands on its own.
-                    $postSolve = null;
+                    // No live risk signal for this context (e.g. an
+                    // unparseable or missing client IP): enforce the scope's
+                    // DEGRADED friction instead of silently skipping the
+                    // adaptive re-check — in BindingMode::None deployments a
+                    // valid PoW must not pass with zero adaptive friction.
+                    // This mirrors the fail-safe degraded rule on the
+                    // pre-issue path (degradedDecisionForScope applies the
+                    // policy's degraded action without touching the state
+                    // store).
+                    $postSolve = $this->risk->degradedDecisionForScope($this->risk->scopeId($constraint->scope));
                 }
                 if ($postSolve !== null && $postSolve->action === RiskAction::Deny) {
                     $this->context->buildViolation($constraint->message)

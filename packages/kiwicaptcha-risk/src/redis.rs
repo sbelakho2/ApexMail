@@ -563,15 +563,35 @@ mod tests {
         assert!(!first.is_duplicate);
 
         // Same event_id again: duplicate no-op, current signals returned.
+        // The channels leak by REAL elapsed time (rf 250/s, rs 20/s), so
+        // sequential calls can floor one unit lower on a slow runner.
         let duplicate = store.observe(&observation(&id, 0, T0, 0)).unwrap();
-        assert_eq!(duplicate.vector.source_fast, 125);
         assert!(duplicate.is_duplicate);
+        assert!(
+            (100..=125).contains(&duplicate.vector.source_fast),
+            "a duplicate must not increment (got {})",
+            duplicate.vector.source_fast
+        );
+        assert!(
+            (8..=10).contains(&duplicate.vector.source_slow),
+            "a duplicate must not increment (got {})",
+            duplicate.vector.source_slow
+        );
 
-        // A distinct event must observe the state from a SINGLE increment.
+        // A distinct event must observe the state from a SINGLE increment
+        // (two events, minus the small real-elapsed decay).
         let third = store.observe(&observation(&event_id(8), 0, T0, 0)).unwrap();
-        assert_eq!(third.vector.source_fast, 250);
-        assert_eq!(third.vector.source_slow, 20);
         assert!(!third.is_duplicate);
+        assert!(
+            (200..=250).contains(&third.vector.source_fast),
+            "exactly two increments (got {})",
+            third.vector.source_fast
+        );
+        assert!(
+            (18..=20).contains(&third.vector.source_slow),
+            "exactly two increments (got {})",
+            third.vector.source_slow
+        );
     }
 
     #[test]
@@ -603,7 +623,14 @@ mod tests {
                 .vector;
         }
         assert_eq!(vector.source_fast, 1000);
-        assert_eq!(vector.source_slow, 1000);
+        // source_slow leaks at 20/s against 100_000 raw: the sequential
+        // storm decays a few raw units of REAL elapsed time, so the floor
+        // can sit at 999; anything below 990 would mean lost increments.
+        assert!(
+            (990..=1000).contains(&vector.source_slow),
+            "no increments may be lost (got {})",
+            vector.source_slow
+        );
         assert_eq!(vector.subnet_fast, 1000);
         assert_eq!(vector.global_pressure, 1000);
         assert_eq!(store.last_global_level(), 4);
@@ -615,11 +642,16 @@ mod tests {
             eprintln!("skipping Redis test: RISK_REDIS_URL not set");
             return;
         };
+        let mut conn = client().get_connection().expect("connection");
+        let t: Vec<i64> = redis::cmd("TIME").query(&mut conn).expect("TIME");
+        let t0 = (t[0] * 1000 + t[1] / 1000) as u64;
 
         // Normalized global thresholds: L1 >= 300, L2 >= 550, L3 >= 750,
         // L4 >= 900 (raw gp scaled by sat_global 70000). Each PreIssue adds
         // 2000 raw (rf 1000 + rs 1000): 20 events -> gp 40000 -> 571 (L2);
-        // 32 events -> gp 64000 -> 914 (L4). Leak: rf 250/s, rs 20/s.
+        // 32 events -> gp 64000 -> 914 (L4). Leak: rf 250/s, rs 20/s. The
+        // rate-limit clock is Redis TIME, so the cooldown deadline is
+        // asserted against the real clock, not an injected one.
         let big = store(60_000, "big");
         for i in 1..=20u64 {
             big.observe(&observation(&event_id(i), 2, T0, 0)).unwrap();
@@ -629,40 +661,71 @@ mod tests {
             big.observe(&observation(&event_id(i), 2, T0, 0)).unwrap();
         }
         assert_eq!(big.last_global_level(), 4, "32 events must reach level 4");
-        assert_eq!(big.last_cooldown_until_ms(), T0 + 60_000);
-
-        // t0+61s: rf 32000 - 15250 = 16750; rs 32000 - 1220 = 30780;
-        // gp 49530 -> 707 -> target L2 (< L4). The window has passed, so the
-        // level drops to the target (hysteresis hold expired).
-        big.observe(&observation(&event_id(33), 2, T0 + 61_000, 0))
-            .unwrap();
-        assert_eq!(
-            big.last_global_level(),
-            2,
-            "level must drop to the target after the hysteresis window"
+        let cool = big.last_cooldown_until_ms();
+        assert!(
+            cool > t0 + 60_000 && cool <= t0 + 65_000,
+            "the 60 s cooldown must be armed at the ratchet time + 60000 (got {cool}, t0 {t0})"
         );
-        assert_eq!(big.last_cooldown_until_ms(), 0);
 
-        // A 50 ms window leaves as soon as the window passes.
-        let tiny = store(50, "tiny");
-        for i in 1..=32u64 {
+        // The DROP after the hysteresis window needs a real ~2.1 s sleep
+        // (the script derives its clock from Redis TIME): a SHORT window of
+        // 2 s and a saturation that makes 5 events reach L4 (10000 raw ->
+        // 909). RiskDenied probes add NO pressure, so the decay is pure.
+        let mut sats = DEFAULT_SATURATIONS;
+        sats[8] = 11_000; // sat_global (ARGV[16])
+        let tiny = RedisRiskStateStore::with_options(
+            client(),
+            &unique_namespace("tiny"),
+            1800,
+            60,
+            2000,
+            1800,
+            86_400,
+            sats,
+        );
+        for i in 1..=5u64 {
             tiny.observe(&observation(&event_id(i), 2, T0, 0)).unwrap();
         }
+        let settle = |id: u64| {
+            let mut o = observation(&event_id(id), 2, T0, 0);
+            o.event = RiskEventKind::RiskDenied;
+            o
+        };
+        tiny.observe(&settle(90)).unwrap();
         assert_eq!(tiny.last_global_level(), 4);
-        // After 100ms the pressure decays below the L4 exit threshold (850):
-        // rf 32000 - 25 = 31975; rs 32000 - 2 = 31998 -> gp 63973 -> 913 —
-        // still >= 900, so the level stays 4 until the window passes.
-        tiny.observe(&observation(&event_id(33), 2, T0 + 100, 0))
-            .unwrap();
+        let cool = tiny.last_cooldown_until_ms();
+        assert!(
+            cool > t0 + 2_000 && cool <= t0 + 7_000,
+            "the 2 s cooldown must be armed at the ratchet time + 2000"
+        );
+
+        // Inside the window (+1 s): gp 10000 - ~270 = ~9730 -> 884 — below
+        // the L4 ENTER (900), still above the L4 EXIT (850) — the hold
+        // applies and the deadline is untouched.
+        std::thread::sleep(Duration::from_millis(1000));
+        tiny.observe(&settle(90)).unwrap();
         assert_eq!(
             tiny.last_global_level(),
             4,
-            "level holds inside the 50ms window"
+            "level holds inside the 2 s window"
         );
-        // The cooldown was armed by the FIRST event's ratchet (T0+50) and
-        // only re-arms on a level RISE — at level 4 with the target still 4
-        // the arm stays at its first value.
-        assert_eq!(tiny.last_cooldown_until_ms(), T0 + 50);
+        assert_eq!(
+            tiny.last_cooldown_until_ms(),
+            cool,
+            "the hold keeps the deadline"
+        );
+
+        // After the window (+~2.1 s more, ~3.1 s total): gp 10000 - ~840 =
+        // ~9160 -> 833 < the L4 exit 850 and now >= cool -> the level drops
+        // to the target (L3) and the hold closes.
+        std::thread::sleep(Duration::from_millis(2100));
+        tiny.observe(&settle(90)).unwrap();
+        assert_eq!(
+            tiny.last_global_level(),
+            3,
+            "level must drop to the target after the hysteresis window"
+        );
+        assert_eq!(tiny.last_cooldown_until_ms(), 0);
     }
 
     #[test]

@@ -131,6 +131,32 @@ fn redis_url() -> Option<String> {
     }
 }
 
+/// Minimal RESP2 command parser for the fake-Redis test server: returns the
+/// command's argument strings and the number of bytes consumed, or `None`
+/// while the buffer holds only a partial command.
+fn parse_resp_command(buf: &[u8]) -> Option<(Vec<String>, usize)> {
+    fn split_crlf(buf: &[u8]) -> Option<(&[u8], &[u8])> {
+        let i = buf.windows(2).position(|w| w == b"\r\n")?;
+        Some((&buf[..i], &buf[i + 2..]))
+    }
+    let rest = buf.strip_prefix(b"*")?;
+    let (nline, mut rest) = split_crlf(rest)?;
+    let count: usize = std::str::from_utf8(nline).ok()?.parse().ok()?;
+    let mut args = Vec::with_capacity(count);
+    for _ in 0..count {
+        let rest2 = rest.strip_prefix(b"$")?;
+        let (llen, rest3) = split_crlf(rest2)?;
+        let len: usize = std::str::from_utf8(llen).ok()?.parse().ok()?;
+        if rest3.len() < len + 2 {
+            return None;
+        }
+        args.push(String::from_utf8_lossy(&rest3[..len]).into_owned());
+        rest = &rest3[len + 2..];
+    }
+    let consumed = buf.len() - rest.len();
+    Some((args, consumed))
+}
+
 fn sha_config(target_bits: u32) -> ChallengeConfig {
     ChallengeConfig {
         secret_key: SECRET.into(),
@@ -694,6 +720,139 @@ fn connection_pool_reuses_connections_round_robin() {
         );
         verifier.store().consume(&issued.record.nonce).unwrap();
     }
+}
+
+#[test]
+fn pool_reuses_the_same_slots_across_operations() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("pool-reuse");
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = RedisChallengeStore::with_pool_size(
+        redis::Client::open(url.clone()).unwrap(),
+        prefix.clone(),
+        2,
+    );
+    // 48 operations over a 2-slot pool: the SAME two slots must serve every
+    // operation (lazy open on first use, reuse afterwards) — a pool that
+    // recreated connections per operation would show more than 2 total
+    // connections.
+    for _ in 0..16 {
+        store.store(&issued.record).unwrap();
+        let peeked = store
+            .find(&issued.record.nonce)
+            .unwrap()
+            .expect("stored record peeks");
+        assert_eq!(peeked.challenge, issued.record.challenge);
+        let consumed = store
+            .consume(&issued.record.nonce)
+            .unwrap()
+            .expect("stored record consumes");
+        assert_eq!(consumed.challenge, issued.record.challenge);
+    }
+    let (conns, idle) = store.debug_pool_state();
+    assert_eq!(
+        conns, 2,
+        "48 operations must never open more than the configured 2 connections"
+    );
+    assert_eq!(
+        idle, 2,
+        "both slots must be returned to the pool between operations"
+    );
+
+    // One-shot semantics still hold end-to-end on the reused slots.
+    store.store(&issued.record).unwrap();
+    let verifier = ProductionVerifier::new(store, SECRET);
+    assert_eq!(
+        verify_at(
+            &verifier,
+            &encode_token(&issued.record.nonce, counter),
+            issued_at_ns
+        ),
+        VerifyOutcome::Valid
+    );
+}
+
+#[test]
+fn unreachable_store_maps_find_error_to_storage_unavailable() {
+    // Bind a listener and drop it so the port is guaranteed closed: pool
+    // connects fail fast with ECONNREFUSED and the checkout returns after
+    // the bounded POOL_CHECKOUT_TIMEOUT. No RISK_REDIS_URL needed — this
+    // test is hermetic.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let verifier = verifier_for(&format!("redis://127.0.0.1:{port}/"), &prefix("dead"));
+    assert_eq!(
+        verifier.verify(
+            &encode_token(&issued.record.nonce, 0),
+            "login",
+            IP,
+            now_micros()
+        ),
+        VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        "a find()/checkout failure must map to StorageUnavailable (the challenge is presumed intact), never RecordNotFound"
+    );
+}
+
+#[test]
+fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let record_json = serde_json::to_string(&issued.record).unwrap();
+    let nonce = issued.record.nonce.clone();
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // A miniature RESP2 server: answers the PEEK (GET) with the stored
+    // record's JSON so the verifier's cheap phase succeeds, and then NEVER
+    // replies to GETDEL — the client's read timeout fires and consume()
+    // must map to ConsumeIndeterminate. Hermetic: no RISK_REDIS_URL needed.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().expect("store connects");
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            match stream.read(&mut tmp) {
+                Ok(0) => return,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    while let Some((args, consumed)) = parse_resp_command(&buf) {
+                        buf.drain(..consumed);
+                        match args[0].as_str() {
+                            // Hold the connection open WITHOUT a reply: the
+                            // client hits its 1 s read timeout.
+                            "GETDEL" => loop {
+                                std::thread::sleep(std::time::Duration::from_secs(1));
+                            },
+                            "GET" => {
+                                let reply =
+                                    format!("${}\r\n{}\r\n", record_json.len(), record_json);
+                                stream.write_all(reply.as_bytes()).unwrap();
+                            }
+                            _ => {
+                                stream.write_all(b"+OK\r\n").unwrap();
+                            }
+                        }
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    let verifier = verifier_for(&format!("redis://127.0.0.1:{port}/"), &prefix("hung"));
+    assert_eq!(
+        verify_at(&verifier, &encode_token(&nonce, counter), issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+        "an uncertain GETDEL failure must map to ConsumeIndeterminate, never RecordNotFound"
+    );
 }
 
 #[test]

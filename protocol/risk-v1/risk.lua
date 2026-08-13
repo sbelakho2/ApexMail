@@ -1,4 +1,4 @@
--- Risk Protocol v1 — canonical production state script (v3 semantics).
+-- Risk Protocol v1 — canonical production state script (v4 semantics).
 --
 -- One atomic assessment: read → decay → apply event → aggregate → normalize,
 -- across (all keys share the hash tag {kiwi:<deployment>} — Redis Cluster safe):
@@ -14,9 +14,14 @@
 --   KEYS[10] dedupe key (string)                 — event_id guard
 --
 -- ARGV:
---   [1]  event             RiskEventKind int (1..14)
+--   [1]  event             RiskEventKind int (1..17)
 --   [2]  scope             int (0 = unknown)
---   [3]  now_ms            server clock, ms
+--   [3]  now_ms            UNUSED — Redis TIME is the distributed state
+--                           clock authority (decay, hysteresis, cooldown and
+--                           state timestamps all derive from TIME inside
+--                           this script, so app-node clock skew can never
+--                           change shared risk-state behavior). The slot is
+--                           kept for wire compatibility.
 --   [4]  event_id          128-bit hex ('' = dedupe disabled)
 --   [5]  dedupe_ttl_s      60
 --   [6]  state_ttl_s       source/subnet retention
@@ -43,7 +48,7 @@
 --   trust_credit, principal_credit, global_level(0..4), cooldown_until_ms,
 --   is_duplicate (0/1)
 --
--- Event semantics (risk-v1 v2):
+-- Event semantics (risk-v1 v3):
 --   PreIssue (1)            → request velocity + scope-hopping
 --   ChallengeIssued (2)     → issue_debt
 --   SolveSuccess (3)        → repay debt, tiny trust
@@ -84,6 +89,12 @@ local function num(v)
     if not v then return 0 end
     return tonumber(v) or 0
 end
+
+-- Distributed clock authority: Redis TIME, not the application clock.
+-- App-node skew can otherwise make pressure decay faster or slower on
+-- different nodes sharing one state namespace.
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 
 local function leak(value, elapsed_ms, leak_per_sec)
     local leaked = math.floor(elapsed_ms * leak_per_sec / 1000)
@@ -243,7 +254,6 @@ if ARGV[4] ~= '' then
     end
 end
 
-local now = tonumber(ARGV[3])
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
 local state_ttl = tonumber(ARGV[6])

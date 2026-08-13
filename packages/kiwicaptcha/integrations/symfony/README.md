@@ -278,7 +278,8 @@ kiwi_captcha:
         #     mode: random_sample           # label selection: complete |
         #                                   # random_sample (Kiwi samples at
         #                                   # assessment time; unsampled
-        #                                   # confirmations are discarded so
+        #                                   # confirmations are consumed but
+        #                                   # not recorded — status 2 — so
         #                                   # the label can never select
         #                                   # itself into the population) |
         #                                   # weighted (the app supplies the
@@ -286,6 +287,16 @@ kiwi_captcha:
         #                                   # per confirmation)
         #     sampling_probability_ppm: 100000  # PPM chance a decision is
         #                                   # sampled (random_sample mode)
+        #     minimum_resolution_ratio: 0.8 # random_sample resolution gate:
+        #                                   # bias adjustment is suspended
+        #                                   # while sampled total >=
+        #                                   # min_samples but resolved/total
+        #                                   # < this ratio (0 disables)
+        #     false_positive_cost: 1.0      # class-normalized calibration:
+        #     false_negative_cost: 2.0      #   price of a false positive vs
+        #                                   #   a false negative (default:
+        #                                   #   abuse slipping through costs
+        #                                   #   twice a false rejection)
         continuity_cookie:
             name: kiwi_risk_session
             ttl_secs: 15552000              # 180 days; 0 = session cookie
@@ -336,7 +347,16 @@ reputation event against the source/session/principal signals.
 confirmations (email confirmation, fraud review, chargeback, moderation):
 just a decision id + outcome — no IP, no scope, no session — and an
 optional inverse sampling probability (`$samplingProbabilityPpm`,
-weight = 1_000_000/ppm) for weighted calibration. `metricsSnapshot()`
+weight = 1_000_000/ppm) for weighted calibration. It returns the engine's
+shared status: `0` = missing/already confirmed (a webhook retry is a
+no-op — at most one reputation mutation per decision), `1` = first
+confirmation recorded, `2` = first confirmation but deliberately unsampled
+(random_sample mode). `confirmCorrection()` (a label correction of a
+decision, same signature/weight mapping) is the engine's compensating
+once-only API: it returns `true` when the compensation was applied and
+`false` on retries (per-decision SET NX guard — a correction never
+re-touches the calibration aggregates, which keep the first confirmed
+outcome). `metricsSnapshot()`
 returns aggregate decision counters, global level, store latency — no
 identity labels. Decisions are logged through the app's `logger` (info for
 decisions, warning for denials) with scope/action/score/reasons only —

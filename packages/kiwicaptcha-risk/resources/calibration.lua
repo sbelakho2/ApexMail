@@ -1,29 +1,45 @@
--- Calibration: exact score-sensitive bias + proportional rate limit
+-- Calibration: class-normalized score bias + proportional rate limit
 -- (canonical, shared PHP/Rust).
 --
 -- KEYS[1..24]  hourly score buckets for one scope (hash; fields
 --              legit_count / legit_score_sum / abuse_count /
 --              abuse_score_sum — EXACT scores, not band-quantized)
 -- KEYS[25]     rate-limit state (hash; fields bias_mp / ts)
--- ARGV[1]      now (epoch ms)
+-- KEYS[26]     sampled-decisions TOTAL counter (random_sample mode only;
+--              string, INCR at assessment time for every sampled decision)
+-- KEYS[27]     sampled-decisions RESOLVED counter (random_sample mode only;
+--              string, INCR by confirm.lua on a sampled confirmation)
+-- ARGV[1]      now (epoch ms — informational; the script uses its own
+--              Redis TIME for the rate-limit clock)
 -- ARGV[2]      min_samples       (below this the TARGET bias is 0)
 -- ARGV[3]      max_adjustment    (points, ±clamp on the raw bias)
 -- ARGV[4]      max_change_per_minute (points/minute, proportional allowance)
+-- ARGV[5]      minimum_resolution_ratio (float 0..1; 0 disables the gate)
+-- ARGV[6]      sampling mode (0 complete, 1 random_sample, 2 weighted)
+-- ARGV[7]      false_positive_cost (float, default 1.0)
+-- ARGV[8]      false_negative_cost (float, default 2.0)
 --
--- EXACT score calibration: every confirmed outcome carries its original
--- risk score (0..1000). Per hourly bucket we keep
+-- CLASS-NORMALIZED exact score calibration (volume-independent):
+--   FP mean = legit_score_sum / legit_count      (0 when no legit samples)
+--   FN mean = (abuse_count*1000 - abuse_score_sum) / abuse_count
+--                                               (0 when no abuse samples)
+--   error   = FN mean * fn_cost - FP mean * fp_cost
+--   raw     = error * 2 / 10
 --
---   legit_count, legit_score_sum, abuse_count, abuse_score_sum
+-- Class normalization removes label-volume dominance: 99x more legitimate
+-- cases can no longer swamp the signal on their own. The fp/fn cost knobs
+-- let the operator price false positives against false negatives
+-- explicitly. A perfectly separating classifier (legit traffic at low
+-- scores, abuse at high scores) contributes ~zero pressure; abuse
+-- predicted at low risk pushes the bias up, legitimate traffic predicted
+-- at high risk pushes it down.
 --
---   FP pressure = legit_score_sum
---   FN pressure = abuse_count * 1000 - abuse_score_sum
---   raw         = (FN - FP) * 2 / (total * 10)
---
--- A perfectly separating classifier (legitimate traffic at low scores,
--- abuse at high scores) contributes ~zero pressure and stays near bias 0;
--- abuse predicted at low risk pushes the bias up, legitimate traffic
--- predicted at high risk pushes it down. Bands remain only for
--- observability — the bias is computed from exact scores.
+-- RANDOM-SAMPLE RESOLUTION GATE: in random_sample mode, bias adjustment
+-- is SUSPENDED (target stays 0) while total >= min_samples AND
+-- resolved/total < minimum_resolution_ratio — the label-reporting process
+-- must demonstrably resolve a minimum fraction of the server-selected
+-- sample before the model may move (the sampled flag alone cannot fix a
+-- biased reporting process; the resolution ratio can detect it).
 --
 -- The rate limiter is PROPORTIONAL to elapsed time and applies to the
 -- PATH, not just the target: internal bias is stored in MILLI-POINTS
@@ -60,7 +76,9 @@ for i = 1, 24 do
     end
 end
 
-local now = tonumber(ARGV[1])
+-- Distributed clock for the rate-limit window.
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 
 local prev_bias_mp = redis.call('HGET', KEYS[25], 'bias_mp')
 local prev_ts = redis.call('HGET', KEYS[25], 'ts')
@@ -73,17 +91,32 @@ if not prev_ts then
 end
 redis.call('HSET', KEYS[25], 'ts', now)
 
--- Target: exact score calibration above the threshold, 0 below.
+-- Target: class-normalized calibration above the threshold, 0 below.
 local raw_mp = 0
 local total = legit_count + abuse_count
 if total >= tonumber(ARGV[2]) and total > 0 then
-    local fn_pressure = abuse_count * 1000 - abuse_score_sum
-    local fp_pressure = legit_score_sum
-    local raw = trunc_div((fn_pressure - fp_pressure) * 2, total * 10)
-    local max_adj = tonumber(ARGV[3])
-    if raw > max_adj then raw = max_adj end
-    if raw < -max_adj then raw = -max_adj end
-    raw_mp = raw * 1000
+    local resolved_ratio_ok = true
+    local mode = tonumber(ARGV[6])
+    local min_ratio = tonumber(ARGV[5]) or 0
+    if mode == 1 and min_ratio > 0 then
+        local sample_total = tonumber(redis.call('GET', KEYS[26]) or '0')
+        local sample_resolved = tonumber(redis.call('GET', KEYS[27]) or '0')
+        if sample_total >= tonumber(ARGV[2]) and sample_resolved < sample_total * min_ratio then
+            resolved_ratio_ok = false
+        end
+    end
+    if resolved_ratio_ok then
+        local fp_mean = 0
+        if legit_count > 0 then fp_mean = legit_score_sum / legit_count end
+        local fn_mean = 0
+        if abuse_count > 0 then fn_mean = (abuse_count * 1000 - abuse_score_sum) / abuse_count end
+        local error = fn_mean * tonumber(ARGV[8]) - fp_mean * tonumber(ARGV[7])
+        local raw = trunc_div(error * 2, 10)
+        local max_adj = tonumber(ARGV[3])
+        if raw > max_adj then raw = max_adj end
+        if raw < -max_adj then raw = -max_adj end
+        raw_mp = raw * 1000
+    end
 end
 
 -- Proportional movement toward the target (never an instant jump).

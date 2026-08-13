@@ -520,10 +520,16 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     /// When the event is ConfirmedLegitimate/ConfirmedAbuse AND
     /// `decision_id` is given, the calibration receipt of that decision is
     /// confirmed FIRST (one atomic script invocation — consume receipt +
-    /// record the exact score into the scope's hourly bucket); the
-    /// reputation event is then recorded regardless of whether the receipt
-    /// was still alive (an already-consumed receipt is a no-op). Calibration
-    /// is best-effort: any backend failure is silent.
+    /// record the exact score into the scope's hourly bucket), and the
+    /// reputation event is recorded ONLY when the confirmation is the
+    /// FIRST one (status 1 = recorded, status 2 = consumed-but-unsampled).
+    /// A retry that finds the receipt already consumed (status 0) is a
+    /// no-op: the receipt reports `is_duplicate = true` with empty signals
+    /// and NO reputation event is booked, so retries can never amplify a
+    /// ConfirmedAbuse. A calibration backend failure is silent and also
+    /// skips the reputation event (the receipt survives, so the caller can
+    /// retry and the outcome is then applied exactly once). Calibration is
+    /// best-effort throughout.
     ///
     /// # Errors
     ///
@@ -546,11 +552,22 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         if confirmed {
             if let Some(receipt_id) = decision_id.filter(|d| !d.is_empty()) {
                 let legitimate = event == RiskEventKind::ConfirmedLegitimate;
-                // FIRST the atomic calibrator confirm; calibration is
-                // best-effort (backend failure is silent, and the reputation
-                // event below happens even when the receipt was already
-                // consumed -> confirm returns None).
-                let _ = self.confirm_outcome(&receipt_id, legitimate, None);
+                // FIRST the atomic calibrator confirm. REPUTATION GATING:
+                // the reputation event is booked only on the FIRST
+                // confirmation (status 1 or 2); status 0 (missing/already
+                // consumed) and backend errors book nothing — the receipt
+                // survives an error, so a retry applies the outcome exactly
+                // once instead of amplifying it.
+                match self.confirm_outcome(&receipt_id, legitimate, None) {
+                    Ok(0) | Err(_) => {
+                        return Ok(EventReceipt {
+                            event_id: observation.event_id,
+                            is_duplicate: true,
+                            signals: SignalVector::zero(),
+                        });
+                    }
+                    Ok(_) => {}
+                }
             }
         }
 
@@ -576,11 +593,14 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     /// records the exact score into the scope's hourly bucket (or discards
     /// it when the receipt is missing/already consumed/unsampled).
     ///
-    /// `Ok(Some(scope))` when the outcome was recorded; `Ok(None)` when
-    /// there was nothing to record. `weight` is the inverse sampling
-    /// probability for weighted sampling (default 1.0). Only records — the
-    /// reputation event is booked separately via
-    /// [`RiskEngine::record_feedback`].
+    /// Returns the SHARED accepted-outcome status (wire contract with PHP):
+    /// `0` nothing consumed (missing / already confirmed / corrupt /
+    /// unsampled-discard), `1` FIRST confirmation with calibration
+    /// recorded, `2` FIRST confirmation, deliberately unsampled. Only
+    /// statuses 1 and 2 authorize the first-party reputation event (see
+    /// [`RiskEngine::record_feedback`]); the reputation event itself is
+    /// booked separately. `weight` is the inverse sampling probability for
+    /// weighted sampling (default 1.0).
     ///
     /// # Errors
     ///
@@ -591,7 +611,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         decision_id: &str,
         legitimate: bool,
         weight: Option<f64>,
-    ) -> Result<Option<u32>, RiskError> {
+    ) -> Result<u8, RiskError> {
         if decision_id.is_empty() {
             return Err(RiskError::EmptyDecisionId);
         }
@@ -599,7 +619,97 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             Some(calibration) => calibration
                 .confirm_outcome(decision_id, legitimate, weight)
                 .map_err(|e| RiskError::Calibration(e.to_string())),
-            None => Ok(None),
+            None => Ok(0),
+        }
+    }
+
+    /// Compensating-state correction: records the OPPOSITE reputation
+    /// event for a decision AT MOST ONCE, guarded by a SET NX reservation
+    /// in the calibration store
+    /// (`{kiwi:<ns>}:cal:corrected:<hex(sha256(decision_id))>` EX
+    /// `receipt_ttl_secs` — see [`CalibrationStore::reserve_correction`]).
+    ///
+    /// `legitimate` mirrors the (mistaken) FIRST confirmed outcome — a
+    /// first confirmation of `legitimate = true` (trust) is compensated by
+    /// a ConfirmedAbuse event and vice versa. The compensation lands in
+    /// per-decision, decision-anchored pseudonyms (the original identity
+    /// context is unrecoverable once the receipt is consumed) and is
+    /// additionally dedupe-guarded by a deterministic event_id, so it can
+    /// never re-apply or amplify a real visitor. Calibration consumes only
+    /// the first confirmed outcome: the correction NEVER touches receipts
+    /// or hourly buckets (`weight` is accepted for signature parity with
+    /// [`RiskEngine::confirm_outcome`] and unused).
+    ///
+    /// Returns `Ok(true)` when the compensation was applied (or attempted
+    /// best-effort — a state-store failure is silent, and the reservation
+    /// stays consumed so a retry cannot double-apply), `Ok(false)` when
+    /// the decision was already corrected or no calibration store is
+    /// attached (the guard cannot be enforced without its namespace).
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::EmptyDecisionId`] when `decision_id` is empty;
+    /// [`RiskError::Calibration`] when the correction guard backend fails.
+    pub fn confirm_correction(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        _weight: Option<f64>,
+    ) -> Result<bool, RiskError> {
+        if decision_id.is_empty() {
+            return Err(RiskError::EmptyDecisionId);
+        }
+        let Some(calibration) = &self.calibration else {
+            return Ok(false);
+        };
+        if !calibration
+            .reserve_correction(decision_id)
+            .map_err(|e| RiskError::Calibration(e.to_string()))?
+        {
+            return Ok(false);
+        }
+        let event = if legitimate {
+            RiskEventKind::ConfirmedAbuse
+        } else {
+            RiskEventKind::ConfirmedLegitimate
+        };
+        let observation = self.correction_observation(decision_id, event);
+        let _ = self.store.observe(&observation);
+        Ok(true)
+    }
+
+    /// A deterministic, identity-free observation for a compensation
+    /// event: source/subnet pseudonyms and the dedupe event_id are
+    /// sha256-derived from the decision_id (distinct salts for the ±1
+    /// epoch boundary keys so the rotated pseudonyms never collide), which
+    /// isolates every correction's state mutation in its own keys and
+    /// makes the event once-only even if the guard key expires.
+    fn correction_observation(&self, decision_id: &str, event: RiskEventKind) -> RiskObservation {
+        use sha2::{Digest, Sha256};
+        let digest = |salt: &[u8]| -> String {
+            let mut h = Sha256::new();
+            h.update(salt);
+            h.update(decision_id.as_bytes());
+            hex::encode(h.finalize())
+        };
+        let now_ms = now_ms();
+        let now_secs = (now_ms / 1000) as i64;
+        RiskObservation {
+            event,
+            scope: 0,
+            source_epoch: now_secs / self.source_epoch_secs as i64,
+            source_id_prev: digest(b"kiwicaptcha:correction:srcp:"),
+            source_id: digest(b"kiwicaptcha:correction:srcc:"),
+            source_id_next: digest(b"kiwicaptcha:correction:srcn:"),
+            subnet_epoch: now_secs / self.subnet_epoch_secs as i64,
+            subnet_id_prev: digest(b"kiwicaptcha:correction:netp:"),
+            subnet_id: digest(b"kiwicaptcha:correction:netc:"),
+            subnet_id_next: digest(b"kiwicaptcha:correction:netn:"),
+            session_id: None,
+            principal_id: None,
+            event_id: digest(b"kiwicaptcha:correction:evt:"),
+            network_risk: 0,
+            now_ms,
         }
     }
 
@@ -792,20 +902,26 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
 
     /// Assigns the decision_id and registers the calibration receipt with
     /// the decision's EXACT risk score + the calibrator's sampling flag
-    /// (silently on failure — never breaks issuance).
+    /// (silently on failure — never breaks issuance). A SAMPLED decision
+    /// also books the assessment-time sample-total counter
+    /// (`mark_sampled`), the resolution-gate denominator.
     fn finalize_decision(&self, scope: u32, mut decision: RiskDecision) -> RiskDecision {
         let mut id = [0u8; 16];
         thread_rng().fill_bytes(&mut id);
         decision.decision_id = hex::encode(id);
         if let Some(calibration) = &self.calibration {
+            let sampled = calibration.sample();
             let _ = calibration.record_receipt(
                 &decision.decision_id,
                 scope,
                 decision.band,
                 decision.action,
                 decision.score as u32,
-                calibration.sample(),
+                sampled,
             );
+            if sampled {
+                let _ = calibration.mark_sampled();
+            }
         }
         decision
     }
@@ -1461,9 +1577,10 @@ mod tests {
 
     struct StaticCalibration {
         bias: i32,
-        confirm_result: Option<u32>,
+        confirm_status: u8,
         receipts: Mutex<ReceiptLog>,
         confirmed: Mutex<Vec<(String, bool, Option<f64>)>>,
+        corrected: Mutex<Vec<String>>,
     }
 
     impl CalibrationStore for StaticCalibration {
@@ -1492,16 +1609,48 @@ mod tests {
             decision_id: &str,
             legitimate: bool,
             weight: Option<f64>,
-        ) -> Result<Option<u32>, crate::calibration::CalibrationError> {
+        ) -> Result<u8, crate::calibration::CalibrationError> {
             self.confirmed
                 .lock()
                 .unwrap()
                 .push((decision_id.to_string(), legitimate, weight));
-            Ok(self.confirm_result)
+            // The mock models the real receipt lifecycle: the FIRST confirm
+            // for a decision returns the configured status (1/2), every
+            // later confirm sees the receipt consumed and returns 0.
+            let status = if self
+                .confirmed
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _, _)| id == decision_id)
+                .count()
+                <= 1
+            {
+                self.confirm_status
+            } else {
+                0
+            };
+            Ok(status)
         }
 
         fn sample(&self) -> bool {
             true
+        }
+
+        fn mark_sampled(&self) -> Result<(), crate::calibration::CalibrationError> {
+            Ok(())
+        }
+
+        fn reserve_correction(
+            &self,
+            decision_id: &str,
+        ) -> Result<bool, crate::calibration::CalibrationError> {
+            let mut corrected = self.corrected.lock().unwrap();
+            if corrected.iter().any(|id| id == decision_id) {
+                return Ok(false);
+            }
+            corrected.push(decision_id.to_string());
+            Ok(true)
         }
 
         fn bias_for_scope(&self, _scope: u32, _now_ms: i64) -> i32 {
@@ -1509,19 +1658,20 @@ mod tests {
         }
     }
 
-    fn static_calibration(bias: i32, confirm_result: Option<u32>) -> Arc<StaticCalibration> {
+    fn static_calibration(bias: i32, confirm_status: u8) -> Arc<StaticCalibration> {
         Arc::new(StaticCalibration {
             bias,
-            confirm_result,
+            confirm_status,
             receipts: Mutex::new(Vec::new()),
             confirmed: Mutex::new(Vec::new()),
+            corrected: Mutex::new(Vec::new()),
         })
     }
 
     #[test]
     fn calibration_bias_applies_to_base_before_band_mapping() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let cal = static_calibration(60, Some(1));
+        let cal = static_calibration(60, 1);
         let engine =
             RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
         let decision = engine.assess_pre_issue(context(), None).unwrap();
@@ -1540,7 +1690,7 @@ mod tests {
     #[test]
     fn confirmed_outcome_consumes_receipt_and_records() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let cal = static_calibration(0, Some(1));
+        let cal = static_calibration(0, 1);
         let engine =
             RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
         let ctx = RiskContext::new(
@@ -1572,10 +1722,12 @@ mod tests {
     }
 
     #[test]
-    fn reputation_event_survives_an_already_consumed_receipt() {
+    fn an_already_consumed_receipt_skips_the_reputation_event() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        // confirm_result None: the receipt was already consumed elsewhere.
-        let cal = static_calibration(0, None);
+        // The receipt was already consumed elsewhere: the confirm reports
+        // status 0 (missing/already confirmed) -> NO reputation event, and
+        // the receipt reports the outcome as a no-op.
+        let cal = static_calibration(0, 0);
         let engine =
             RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
         let ctx = RiskContext::new(
@@ -1588,18 +1740,20 @@ mod tests {
             ResourcePressure::default(),
         );
         let receipt = engine.confirmed_abuse(ctx, None, "decision-x").unwrap();
-        assert!(!receipt.is_duplicate);
-        // The calibrator was still asked to confirm (returned None -> no
-        // record) AND the reputation event went through anyway.
+        // The calibrator was still asked to confirm...
         assert_eq!(cal.confirmed.lock().unwrap().len(), 1);
-        assert_eq!(engine.store.calls.load(Ordering::Relaxed), 1);
+        // ...but the state store was NEVER touched: a retry can no longer
+        // amplify ConfirmedAbuse.
+        assert_eq!(engine.store.calls.load(Ordering::Relaxed), 0);
+        assert!(receipt.is_duplicate);
+        assert_eq!(receipt.signals, SignalVector::zero());
         assert_eq!(receipt.event_id.len(), 32);
     }
 
     #[test]
     fn engine_confirm_outcome_delegates_and_validates() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let cal = static_calibration(0, Some(7));
+        let cal = static_calibration(0, 1);
         let engine =
             RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
         assert_eq!(
@@ -1610,24 +1764,21 @@ mod tests {
             engine
                 .confirm_outcome("decision-z", false, Some(10.0))
                 .unwrap(),
-            Some(7),
+            1,
             "the engine delegates to the calibrator (weight included)"
         );
         assert_eq!(
             cal.confirmed.lock().unwrap()[0],
             ("decision-z".to_string(), false, Some(10.0))
         );
-        // Without a calibration store: no-op, never an error.
+        // Without a calibration store: status 0, never an error.
         let plain = RiskEngine::new(
             MockStore::new(SignalVector::zero(), 0),
             classifier(),
             policy(),
             keys(),
         );
-        assert_eq!(
-            plain.confirm_outcome("decision-z", true, None).unwrap(),
-            None
-        );
+        assert_eq!(plain.confirm_outcome("decision-z", true, None).unwrap(), 0);
     }
 
     #[test]
@@ -1653,11 +1804,276 @@ mod tests {
             engine.confirmed_abuse(ctx(RiskEventKind::ConfirmedAbuse), None, ""),
             Err(RiskError::EmptyDecisionId)
         );
-        // A real decision_id flows through to record_feedback.
+        // Without a calibration store the decision_id cannot be confirmed:
+        // status 0 -> the reputation event is NOT booked (the receipt
+        // reports a no-op; there is no receipt to consume).
         let receipt = engine
             .confirmed_legitimate(ctx(RiskEventKind::ConfirmedLegitimate), None, "decision-y")
             .unwrap();
+        assert!(receipt.is_duplicate);
+        assert_eq!(engine.store.calls.load(Ordering::Relaxed), 0);
+        // Without a decision_id the outcome has no receipt to guard: the
+        // reputation event proceeds (legacy wrapper semantics).
+        let receipt = engine
+            .record_feedback(
+                RiskEventKind::ConfirmedLegitimate,
+                ctx(RiskEventKind::ConfirmedLegitimate),
+                None,
+                None,
+            )
+            .unwrap();
         assert!(!receipt.is_duplicate);
+    }
+
+    #[test]
+    fn first_confirmation_gates_reputation_and_retries_cannot_amplify() {
+        let store = CapturingStore(Mutex::new(Vec::new()));
+        // The mock models a live receipt: the FIRST confirm returns status 1
+        // (recorded), every retry returns 0 (already consumed).
+        let cal = static_calibration(0, 1);
+        let engine =
+            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let ctx = |event| {
+            RiskContext::new(
+                1,
+                "203.0.113.27".parse().unwrap(),
+                None,
+                None,
+                event,
+                NetworkFlags::default(),
+                ResourcePressure::default(),
+            )
+        };
+
+        // First confirmation: calibration records AND the reputation event
+        // is booked once.
+        let receipt = engine
+            .confirmed_abuse(ctx(RiskEventKind::ConfirmedAbuse), None, "decision-amp")
+            .unwrap();
+        assert!(!receipt.is_duplicate);
+        {
+            let captured = engine.store.0.lock().unwrap();
+            assert_eq!(captured.len(), 1, "exactly one reputation event");
+            assert_eq!(captured[0].event, RiskEventKind::ConfirmedAbuse);
+        }
+
+        // RETRY of the same decision: status 0 -> the reputation event must
+        // NOT be booked again (retries can no longer amplify).
+        let receipt = engine
+            .confirmed_abuse(ctx(RiskEventKind::ConfirmedAbuse), None, "decision-amp")
+            .unwrap();
+        assert!(receipt.is_duplicate, "the retry reports a no-op");
+        let captured = engine.store.0.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            1,
+            "a retry must never book a second reputation event"
+        );
+    }
+
+    #[test]
+    fn status_two_confirmation_mutates_reputation_once_without_calibration_feed() {
+        let store = CapturingStore(Mutex::new(Vec::new()));
+        // Status 2 = FIRST confirmation, deliberately unsampled: the
+        // reputation event is authorized exactly once, calibration is
+        // untouched (the calibration.rs suite asserts the bucket stays
+        // empty for status 2).
+        let cal = static_calibration(0, 2);
+        let engine =
+            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let ctx = RiskContext::new(
+            1,
+            "203.0.113.27".parse().unwrap(),
+            None,
+            None,
+            RiskEventKind::ConfirmedLegitimate,
+            NetworkFlags::default(),
+            ResourcePressure::default(),
+        );
+        let receipt = engine
+            .confirmed_legitimate(ctx, None, "decision-u")
+            .unwrap();
+        assert!(!receipt.is_duplicate);
+        let captured = engine.store.0.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].event, RiskEventKind::ConfirmedLegitimate);
+        assert_eq!(cal.confirmed.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn confirm_correction_applies_the_opposite_event_once() {
+        let store = CapturingStore(Mutex::new(Vec::new()));
+        let cal = static_calibration(0, 1);
+        let engine =
+            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+
+        // Empty decision id is rejected up front.
+        assert_eq!(
+            engine.confirm_correction("", true, None),
+            Err(RiskError::EmptyDecisionId)
+        );
+
+        // A first confirmation of legitimate=true (trust) is compensated by
+        // the OPPOSITE event: ConfirmedAbuse.
+        assert!(
+            engine.confirm_correction("decision-c", true, None).unwrap(),
+            "the winning reservation applies the compensation"
+        );
+        {
+            let captured = engine.store.0.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].event, RiskEventKind::ConfirmedAbuse);
+        }
+        assert_eq!(&*cal.corrected.lock().unwrap(), &["decision-c".to_string()]);
+
+        // Once-only: the second attempt finds the guard consumed.
+        assert!(!engine.confirm_correction("decision-c", true, None).unwrap());
+        assert_eq!(
+            engine.store.0.lock().unwrap().len(),
+            1,
+            "the compensation must be recorded at most once"
+        );
+
+        // The opposite direction: a first confirmation of abuse
+        // (legitimate=false) is compensated by ConfirmedLegitimate.
+        assert!(engine
+            .confirm_correction("decision-d", false, None)
+            .unwrap());
+        {
+            let captured = engine.store.0.lock().unwrap();
+            assert_eq!(captured.len(), 2);
+            assert_eq!(captured[1].event, RiskEventKind::ConfirmedLegitimate);
+        }
+
+        // Without a calibration store there is no namespace to guard in:
+        // the correction is refused (never applied).
+        let plain = RiskEngine::new(
+            CapturingStore(Mutex::new(Vec::new())),
+            classifier(),
+            policy(),
+            keys(),
+        );
+        assert!(!plain.confirm_correction("decision-e", true, None).unwrap());
+    }
+
+    #[test]
+    fn redis_correction_guard_is_once_only() {
+        let Some(raw_url) = std::env::var("RISK_REDIS_URL")
+            .ok()
+            .filter(|u| !u.is_empty())
+        else {
+            eprintln!("skipping Redis correction test: RISK_REDIS_URL not set");
+            return;
+        };
+        let url = if let Some(rest) = raw_url.strip_prefix("tcp://") {
+            format!("redis://{rest}")
+        } else {
+            raw_url
+        };
+        let mut suffix = [0u8; 4];
+        thread_rng().fill_bytes(&mut suffix);
+        let calibration = std::sync::Arc::new(crate::calibration::RedisCalibrationStore::new(
+            ::redis::Client::open(url.clone()).expect("url parses"),
+            &format!("corr{}", hex::encode(suffix)),
+        ));
+        let engine = RiskEngine::new(
+            CapturingStore(Mutex::new(Vec::new())),
+            classifier(),
+            policy(),
+            keys(),
+        )
+        .with_calibration(calibration.clone());
+
+        assert!(engine.confirm_correction("decision-r", true, None).unwrap());
+        assert!(
+            !engine.confirm_correction("decision-r", true, None).unwrap(),
+            "the SET NX guard must hold across engine calls"
+        );
+        let captured = engine.store.0.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].event, RiskEventKind::ConfirmedAbuse);
+
+        // The guard key exists with the receipt TTL (300 s default).
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(b"decision-r");
+        let key = format!(
+            "{{kiwi:{}}}:cal:corrected:{}",
+            calibration.namespace(),
+            hex::encode(h.finalize())
+        );
+        let mut conn = ::redis::Client::open(url.clone())
+            .expect("url parses")
+            .get_connection()
+            .expect("connection");
+        let ttl: i64 = ::redis::cmd("TTL").arg(&key).query(&mut conn).expect("ttl");
+        assert!(
+            (1..=300).contains(&ttl),
+            "the guard must expire with the receipt TTL (got {ttl})"
+        );
+    }
+
+    #[test]
+    fn redis_engine_samples_the_total_counter() {
+        let Some(raw_url) = std::env::var("RISK_REDIS_URL")
+            .ok()
+            .filter(|u| !u.is_empty())
+        else {
+            eprintln!("skipping Redis sampled-counter test: RISK_REDIS_URL not set");
+            return;
+        };
+        let url = if let Some(rest) = raw_url.strip_prefix("tcp://") {
+            format!("redis://{rest}")
+        } else {
+            raw_url
+        };
+        let mut suffix = [0u8; 4];
+        thread_rng().fill_bytes(&mut suffix);
+        // ppm 1_000_000: random-sample mode always draws a sample, so every
+        // decision books the assessment-time total counter.
+        let calibration =
+            std::sync::Arc::new(crate::calibration::RedisCalibrationStore::with_options(
+                ::redis::Client::open(url.clone()).expect("url parses"),
+                &format!("samp{}", hex::encode(suffix)),
+                1,
+                150,
+                10,
+                300,
+                crate::calibration::SamplingMode::RandomSample,
+                1_000_000,
+                0.80,
+                1.0,
+                2.0,
+            ));
+        let engine = RiskEngine::new(
+            CapturingStore(Mutex::new(Vec::new())),
+            classifier(),
+            policy(),
+            keys(),
+        )
+        .with_calibration(calibration.clone());
+
+        for i in 0..3u32 {
+            let decision = engine
+                .assess_pre_issue(context(), Some(format!("samp-{i}")))
+                .unwrap();
+            assert_eq!(decision.decision_id.len(), 32);
+        }
+        let mut conn = ::redis::Client::open(url)
+            .expect("url parses")
+            .get_connection()
+            .expect("connection");
+        let total: i64 = ::redis::cmd("GET")
+            .arg(format!(
+                "{{kiwi:{}}}:cal:sample:total",
+                calibration.namespace()
+            ))
+            .query(&mut conn)
+            .expect("get");
+        assert_eq!(
+            total, 3,
+            "every sampled assessment must INCR the sample-total counter"
+        );
     }
 
     // ── End-to-end with the Redis store (skipped unless RISK_REDIS_URL) ──

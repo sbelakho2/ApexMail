@@ -6,8 +6,19 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
+use KiwiCaptcha\BindingMode;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
+use KiwiCaptcha\PoWAlgorithm;
+use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
+use KiwiCaptcha\Risk\RiskIdentityFactory;
+use KiwiCaptcha\Risk\RiskKeys;
+use KiwiCaptcha\Risk\RiskPolicy;
+use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
@@ -64,6 +75,102 @@ final class ValidatorTest extends TestCase
         --$counter;
 
         return \KiwiCaptcha\SolutionToken::create($nonce, $counter, 5000, [])->encode();
+    }
+
+    /**
+     * A full risk stack (engine + gateway with a wired policy) over a fake
+     * state store for ONE 'login' scope.
+     *
+     * @return array{gateway: RiskGateway, store: FakeRiskStateStore}
+     */
+    private function riskStack(int $scopeId, string $minimum, string $degraded, bool $postSolveCheck): array
+    {
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                $scopeId => ['base_risk' => 100, 'minimum' => $minimum, 'post_solve_check' => $postSolveCheck, 'degraded' => $degraded],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => $scopeId], null, null, ['login' => $postSolveCheck], 'reject', null, null, null, null, '{kiwi:validator-test}:decision:', 300, $policy);
+
+        return ['gateway' => $gateway, 'store' => $store];
+    }
+
+    /**
+     * Solve a challenge issued with BindingMode::None and validate it
+     * against a request carrying NO usable client IP (bogus/missing), so the
+     * post-solve assessment throws InvalidArgumentException and the
+     * validator must fall back to the scope's DEGRADED decision.
+     */
+    private function validateUnboundSolveWithoutIp(int $scopeId, string $minimum, string $degraded, ?string $badIp, KiwiCaptcha $constraint): ConstraintViolationListInterface
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, bindingMode: BindingMode::None), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        // Request::create defaults REMOTE_ADDR to 127.0.0.1 — null it
+        // explicitly to simulate a request with NO client IP at all.
+        $server = $badIp !== null ? ['REMOTE_ADDR' => $badIp] : ['REMOTE_ADDR' => null];
+        $stack->push(Request::create('/', 'POST', [], [], [], $server));
+
+        $gateway = $this->riskStack($scopeId, $minimum, $degraded, true)['gateway'];
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', $constraint);
+
+        return $engine->validate($dto);
+    }
+
+    /**
+     * P1: a post-solve assessment with no usable risk signal (bogus or
+     * MISSING client IP — e.g. BindingMode::None deployments) must NOT
+     * silently skip the adaptive re-check. The scope's DEGRADED decision
+     * applies exactly like on the pre-issue path: degraded=deny fails the
+     * valid solve with POST_SOLVE_REJECTED_ERROR instead of passing with
+     * zero adaptive friction.
+     */
+    public function testPostSolveNoIpEnforcesDegradedDeny(): void
+    {
+        // Bogus client IP.
+        $violations = $this->validateUnboundSolveWithoutIp(1, 'allow', 'deny', 'not-an-ip', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode(), 'a degraded=deny scope must reject the valid solve when the client IP is unusable');
+
+        // Missing client IP entirely.
+        $violations = $this->validateUnboundSolveWithoutIp(1, 'allow', 'deny', null, new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR, $violations[0]->getCode(), 'a degraded=deny scope must reject the valid solve when NO client IP exists');
+    }
+
+    /**
+     * P1: with a degraded=sha20 scope the degraded fallback applies the
+     * minimum friction (the PoW challenge itself) — the valid solve passes
+     * (no Deny/StepUp in the degraded decision), exactly like a normal
+     * post-solve decision, instead of crashing or silently skipping.
+     */
+    public function testPostSolveNoIpEnforcesDegradedMinimumFriction(): void
+    {
+        $violations = $this->validateUnboundSolveWithoutIp(1, 'allow', 'sha20', 'not-an-ip', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $violations, 'a degraded=sha20 decision is neither Deny nor StepUp — the valid solve passes with the minimum friction');
+
+        $violations = $this->validateUnboundSolveWithoutIp(1, 'allow', 'sha20', null, new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $violations, 'missing IP: same minimum-friction contract');
     }
 
     private function validate(object $object, array $metadata): ConstraintViolationListInterface

@@ -40,8 +40,42 @@
 //! closed: the consumed instance must carry the exact challenge that was
 //! peeked and must pass the full cheap phase again.
 //!
-//! A Redis failure inside `find()` or `consume()` fails closed as
-//! `RecordNotFound` — never `Valid`.
+//! # Error semantics (find/consume failures)
+//!
+//! Storage failures are mapped onto two distinct rejections, never blurred
+//! into `RecordNotFound`:
+//!
+//! - [`VerifyError::StorageUnavailable`] — the PEEK (`find()`) or its pool
+//!   checkout failed (unreachable backend, failed connect, read/write
+//!   timeout). A GET never consumes, so the challenge is PRESUMED INTACT:
+//!   the client may retry it once the store recovers.
+//! - [`VerifyError::ConsumeIndeterminate`] — the atomic consume (`GETDEL`)
+//!   failed with an uncertain I/O error (e.g. the reply timed out). The
+//!   challenge MAY or MAY NOT have been consumed: GETDEL is atomic on the
+//!   server, so the record is gone if the command landed and intact if it
+//!   never arrived. The verifier NEVER retries the GETDEL automatically —
+//!   see the no-retry rule below. The caller should treat the token as
+//!   unknown (e.g. re-issue) rather than replay it.
+//!
+//! `Ok(None)` from `find()`/`consume()` stays [`VerifyError::RecordNotFound`]
+//! — a genuinely absent key (never issued, expired away, or already consumed
+//! by a concurrent winner).
+//!
+//! # The GETDEL no-retry rule
+//!
+//! On an uncertain `consume()` failure the pooled connection is POISONED and
+//! r2d2 evicts it (never returned to the idle pool): the GETDEL reply may
+//! still be in flight on that socket, and reusing the connection could
+//! desync the RESP stream. The failure is reported as
+//! [`VerifyError::ConsumeIndeterminate`] and the GETDEL is NEVER
+//! automatically retried — a blind retry could burn a record that the
+//! original attempt did consume.
+//!
+//! # Telemetry parity note
+//!
+//! Telemetry enforcement is a PHP / high-level-integration feature (Privacy
+//! Strict disables telemetry anyway). The Rust production API deliberately
+//! does not enforce telemetry — this is the documented parity boundary.
 
 use crate::challenge::{
     binding_tag, hash_ip, now_epoch_micros, payload_from_record, verify_signature,
@@ -52,13 +86,119 @@ use crate::verify::{
     ct_eq, derive_hash, leading_zero_bits, signature_from_challenge, validate_record, VerifyError,
     VerifyOutcome, SKEW_TOLERANCE_US,
 };
+use redis::ConnectionLike;
 
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 /// Default number of pooled Redis connections.
 pub const DEFAULT_POOL_SIZE: usize = 4;
+
+/// TCP connect timeout for every pooled connection.
+///
+/// Applied at connect time via `redis::Client::get_connection_with_timeout`.
+/// 500 ms is tight enough that a dead backend degrades to
+/// [`VerifyError::StorageUnavailable`] quickly, while comfortably covering
+/// local/co-located Redis (sub-millisecond connects).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Read timeout applied to every pooled connection (per-command).
+///
+/// A hung Redis degrades to [`VerifyError::StorageUnavailable`] /
+/// [`VerifyError::ConsumeIndeterminate`] within this bound instead of
+/// blocking a request forever.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Write timeout applied to every pooled connection (per-command).
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Maximum time `pool.get()` waits for a free slot (the r2d2 builder's
+/// `connection_timeout`). Bounds checkout stalls when every slot is busy
+/// with a hung command, and bounds the dead-backend case: `pool.get()`
+/// returns this long after the first failed connect.
+pub const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The r2d2 connection manager: opens a real `redis::Connection` per pooled
+/// slot with the crate's timeouts applied at connect time, and reports
+/// poisoned connections as broken so r2d2 evicts them instead of reusing
+/// them (see the module docs — GETDEL no-retry rule).
+struct StoreConnectionManager {
+    client: redis::Client,
+}
+
+/// A pooled Redis connection. `poisoned` is set on any command-level
+/// failure: the connection may be protocol-desynced (e.g. a GETDEL whose
+/// reply timed out — the reply could still be in flight on the socket), so
+/// r2d2 must evict it on return.
+struct ManagedConnection {
+    inner: redis::Connection,
+    poisoned: bool,
+}
+
+impl ManagedConnection {
+    /// Mark the connection as unusable: r2d2's `has_broken` will evict it
+    /// on return instead of returning it to the idle pool.
+    fn poison(&mut self) {
+        self.poisoned = true;
+    }
+}
+
+impl redis::ConnectionLike for ManagedConnection {
+    fn req_packed_command(&mut self, cmd: &[u8]) -> redis::RedisResult<redis::Value> {
+        self.inner.req_packed_command(cmd)
+    }
+
+    fn req_packed_commands(
+        &mut self,
+        cmd: &[u8],
+        offset: usize,
+        count: usize,
+    ) -> redis::RedisResult<Vec<redis::Value>> {
+        self.inner.req_packed_commands(cmd, offset, count)
+    }
+
+    fn get_db(&self) -> i64 {
+        self.inner.get_db()
+    }
+
+    fn check_connection(&mut self) -> bool {
+        self.inner.check_connection()
+    }
+
+    fn is_open(&self) -> bool {
+        self.inner.is_open()
+    }
+}
+
+impl r2d2::ManageConnection for StoreConnectionManager {
+    type Connection = ManagedConnection;
+    type Error = redis::RedisError;
+
+    fn connect(&self) -> Result<ManagedConnection, redis::RedisError> {
+        let inner = self.client.get_connection_with_timeout(CONNECT_TIMEOUT)?;
+        inner.set_read_timeout(Some(READ_TIMEOUT))?;
+        inner.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        Ok(ManagedConnection {
+            inner,
+            poisoned: false,
+        })
+    }
+
+    fn is_valid(&self, conn: &mut ManagedConnection) -> Result<(), redis::RedisError> {
+        if conn.inner.check_connection() {
+            Ok(())
+        } else {
+            Err(redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "pooled connection failed validation (PING)",
+            )))
+        }
+    }
+
+    fn has_broken(&self, conn: &mut ManagedConnection) -> bool {
+        conn.poisoned || !conn.inner.is_open()
+    }
+}
 
 /// Redis-backed challenge store with atomic single-use semantics.
 ///
@@ -72,47 +212,17 @@ pub const DEFAULT_POOL_SIZE: usize = 4;
 /// peeks with a plain GET — the non-consuming read the verify flow runs
 /// before the atomic consume.
 ///
-/// Connections come from a lazily-initialized round-robin pool (default
-/// size [`DEFAULT_POOL_SIZE`], see [`RedisChallengeStore::with_pool_size`]):
-/// each operation borrows a pooled `Connection` instead of opening a fresh
-/// one, so concurrent verifies still genuinely race the GETDEL in Redis
-/// (each pooled connection has its own socket) without per-request
-/// connection churn.
+/// Connections come from a REAL r2d2 connection pool (default size
+/// [`DEFAULT_POOL_SIZE`], see [`RedisChallengeStore::with_pool_size`]):
+/// each operation checks out a pooled `redis::Connection` instead of
+/// opening a fresh one, so concurrent verifies still genuinely race the
+/// GETDEL in Redis (each pooled connection has its own socket) without
+/// per-request connection churn. Connections are opened lazily on first
+/// use and reused; a connection that failed mid-command is poisoned and
+/// evicted by r2d2 (see the module docs — the GETDEL no-retry rule).
 pub struct RedisChallengeStore {
-    client: redis::Client,
+    pool: r2d2::Pool<StoreConnectionManager>,
     prefix: String,
-    pool: ConnectionPool,
-}
-
-/// Lazy round-robin pool of sync Redis connections — the same pattern as
-/// `kiwicaptcha-risk`'s `ConnectionPool`: `pool_size` slots, each opened
-/// on first use, handed out round-robin via an atomic counter.
-pub(crate) struct ConnectionPool {
-    slots: Vec<Mutex<Option<redis::Connection>>>,
-    next: AtomicUsize,
-}
-
-impl ConnectionPool {
-    fn new(pool_size: usize) -> ConnectionPool {
-        assert!(pool_size >= 1, "pool_size must be >= 1");
-        ConnectionPool {
-            slots: (0..pool_size).map(|_| Mutex::new(None)).collect(),
-            next: AtomicUsize::new(0),
-        }
-    }
-
-    /// Picks the next slot round-robin and lazily opens its connection.
-    fn get(
-        &self,
-        client: &redis::Client,
-    ) -> redis::RedisResult<MutexGuard<'_, Option<redis::Connection>>> {
-        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
-        let mut guard = self.slots[idx].lock().unwrap_or_else(|p| p.into_inner());
-        if guard.is_none() {
-            *guard = Some(client.get_connection()?);
-        }
-        Ok(guard)
-    }
 }
 
 impl RedisChallengeStore {
@@ -133,16 +243,65 @@ impl RedisChallengeStore {
         prefix: impl Into<String>,
         pool_size: usize,
     ) -> Self {
+        assert!(pool_size >= 1, "pool_size must be >= 1");
+        let manager = StoreConnectionManager { client };
+        // No min_idle and build_unchecked: connections are opened lazily on
+        // first use, so building a store never touches the network. The
+        // checkout wait is bounded by POOL_CHECKOUT_TIMEOUT; the r2d2
+        // defaults for idle_timeout/max_lifetime (10/30 min) and
+        // test_on_check_out (PING on checkout) apply, so desynced or stale
+        // idle connections are reaped/revalidated by the pool itself.
+        let pool = r2d2::Pool::builder()
+            .max_size(pool_size as u32)
+            .connection_timeout(POOL_CHECKOUT_TIMEOUT)
+            .build_unchecked(manager);
         RedisChallengeStore {
-            client,
+            pool,
             prefix: prefix.into(),
-            pool: ConnectionPool::new(pool_size),
         }
     }
 
     /// The configured connection pool size.
     pub fn pool_size(&self) -> usize {
-        self.pool.slots.len()
+        self.pool.max_size() as usize
+    }
+
+    /// Diagnostic observability: `(total connections, idle connections)`
+    /// currently managed by the pool. Exposed for operations and tests; not
+    /// part of the stable API surface.
+    #[doc(hidden)]
+    pub fn debug_pool_state(&self) -> (u32, u32) {
+        let state = self.pool.state();
+        (state.connections, state.idle_connections)
+    }
+
+    /// Check out a pooled connection, applying the crate's timeouts (set at
+    /// connect time by the manager). A checkout failure is mapped to a
+    /// `redis::RedisError` — the pool's `connection_timeout` bounds the wait.
+    fn checkout(&self) -> redis::RedisResult<r2d2::PooledConnection<StoreConnectionManager>> {
+        self.pool.get().map_err(|e| {
+            redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "r2d2 pool checkout failed",
+                e.to_string(),
+            ))
+        })
+    }
+
+    /// Run one command on a checked-out connection. Any command-level error
+    /// POISONS the connection (its protocol state may be desynced — see the
+    /// module docs' GETDEL no-retry rule), then propagates the error.
+    fn run_command<T>(
+        conn: &mut r2d2::PooledConnection<StoreConnectionManager>,
+        f: impl FnOnce(&mut dyn redis::ConnectionLike) -> redis::RedisResult<T>,
+    ) -> redis::RedisResult<T> {
+        match f(conn) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                conn.poison();
+                Err(e)
+            }
+        }
     }
 
     /// Persist a record with `EX ttl = max(1, expires_at - now)` — the exact
@@ -157,16 +316,15 @@ impl RedisChallengeStore {
             .expect("ChallengeRecord JSON serialization is infallible");
         let now_unix = now_epoch_micros() / 1_000_000;
         let ttl = record.expires_at.saturating_sub(now_unix).max(1);
-        let mut guard = self.pool.get(&self.client)?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            redis::RedisError::from((redis::ErrorKind::IoError, "pooled connection vanished"))
-        })?;
-        redis::cmd("SET")
-            .arg(key)
-            .arg(value)
-            .arg("EX")
-            .arg(ttl)
-            .query::<()>(conn)
+        let mut conn = self.checkout()?;
+        Self::run_command(&mut conn, |c| {
+            redis::cmd("SET")
+                .arg(key)
+                .arg(value)
+                .arg("EX")
+                .arg(ttl)
+                .query::<()>(c)
+        })
     }
 
     /// Load a record WITHOUT consuming it — the peek of the verify flow
@@ -175,14 +333,15 @@ impl RedisChallengeStore {
     /// Returns `None` when the key is absent, when the stored value is not
     /// valid JSON, or when it does not map onto a [`ChallengeRecord`] — a
     /// corrupt key must never blow up the verify path (mirrors the PHP
-    /// `RedisStorage::decode()`).
+    /// `RedisStorage::decode()`). An `Err` is a genuine storage failure
+    /// (unreachable backend, timeout) — the verify flow maps it to
+    /// [`VerifyError::StorageUnavailable`], never `RecordNotFound`.
     pub fn find(&self, nonce: &str) -> redis::RedisResult<Option<ChallengeRecord>> {
         let key = format!("{}{}", self.prefix, nonce);
-        let mut guard = self.pool.get(&self.client)?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            redis::RedisError::from((redis::ErrorKind::IoError, "pooled connection vanished"))
+        let mut conn = self.checkout()?;
+        let raw = Self::run_command(&mut conn, |c| {
+            redis::cmd("GET").arg(key).query::<Option<String>>(c)
         })?;
-        let raw: Option<String> = redis::cmd("GET").arg(key).query(conn)?;
         Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
     }
 
@@ -193,13 +352,17 @@ impl RedisChallengeStore {
     /// corrupt key must never blow up the verify path (mirrors the PHP
     /// `RedisStorage::decode()`). `Ok(None)` also means the record is
     /// already consumed: a replay can never win.
+    ///
+    /// An `Err` is an UNCERTAIN failure: the GETDEL may or may not have
+    /// executed on the server. The connection is poisoned and evicted; the
+    /// caller must NOT retry the GETDEL blindly — see the module docs'
+    /// no-retry rule.
     pub fn consume(&self, nonce: &str) -> redis::RedisResult<Option<ChallengeRecord>> {
         let key = format!("{}{}", self.prefix, nonce);
-        let mut guard = self.pool.get(&self.client)?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            redis::RedisError::from((redis::ErrorKind::IoError, "pooled connection vanished"))
+        let mut conn = self.checkout()?;
+        let raw = Self::run_command(&mut conn, |c| {
+            redis::cmd("GETDEL").arg(key).query::<Option<String>>(c)
         })?;
-        let raw: Option<String> = redis::cmd("GETDEL").arg(key).query(conn)?;
         Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
     }
 }
@@ -263,7 +426,8 @@ pub enum AdmissionError {
 /// Production verifier: the PHP core's one-shot flow, backed by
 /// [`RedisChallengeStore`] for distributed single-use.
 ///
-/// See the module docs for the check order and the one-shot semantics.
+/// See the module docs for the check order, the one-shot semantics, the
+/// storage error semantics, and the GETDEL no-retry rule.
 pub struct ProductionVerifier {
     store: RedisChallengeStore,
     secret_key: String,
@@ -328,6 +492,15 @@ impl ProductionVerifier {
     /// record is burned exactly once, at the GETDEL, so at most one hash
     /// derivation ever runs per nonce (concurrent losers see
     /// `RecordNotFound`).
+    ///
+    /// Storage failure semantics (see the module docs): a `find()` /
+    /// checkout failure rejects with [`VerifyError::StorageUnavailable`]
+    /// (the challenge is presumed intact — retryable once the store
+    /// recovers); a `consume()` failure rejects with
+    /// [`VerifyError::ConsumeIndeterminate`] and the GETDEL is NEVER
+    /// retried automatically (the challenge may or may not have been
+    /// consumed). `Ok(None)` from either stays
+    /// [`VerifyError::RecordNotFound`] — a genuinely absent key.
     pub fn verify(&self, token: &str, scope: &str, client_ip: &str, now_ns: u64) -> VerifyOutcome {
         // 1. Token decode. The counter is bounded here too: the decoder
         //    rejects counter >= SOLVER_MAX_HASHES (VerifyError::CounterTooLarge
@@ -339,10 +512,13 @@ impl ProductionVerifier {
 
         // 2. PEEK (non-consuming GET). None → RecordNotFound — the record
         //    was never issued, was already consumed, or expired away. A
-        //    Redis error fails closed (never Valid).
+        //    storage failure (unreachable backend, timeout) →
+        //    StorageUnavailable: the challenge was never touched by the
+        //    GET, so it is presumed intact and retryable.
         let peek = match self.store.find(&token.nonce) {
             Ok(Some(record)) => record,
-            Ok(None) | Err(_) => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+            Ok(None) => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+            Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
         };
 
         // 3. Cheap validation on the PEEKED record — a failure returns the
@@ -380,10 +556,13 @@ impl ProductionVerifier {
         // 5. Atomic CONSUME (GETDEL). The one-shot bound: exactly one caller
         //    observes the record, so exactly one derive can ever happen per
         //    nonce. None here means a concurrent verifier won the GETDEL
-        //    first (or the key vanished between peek and consume).
+        //    first (or the key vanished between peek and consume). An
+        //    uncertain I/O failure → ConsumeIndeterminate: the challenge may
+        //    or may not have been consumed — the GETDEL is NEVER retried.
         let record = match self.store.consume(&token.nonce) {
             Ok(Some(record)) => record,
-            Ok(None) | Err(_) => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+            Ok(None) => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+            Err(_) => return VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
         };
 
         // 6. TOCTOU re-validation of the CONSUMED record: it must carry the

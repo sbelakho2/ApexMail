@@ -82,6 +82,9 @@ final class RiskWiringTest extends TestCase
         self::assertSame(600, $args[5], 'arg 5 = receipt_ttl_secs (the AggregateCalibrator ctor position after maxChangePerMinute)');
         self::assertSame('random_sample', $args['$samplingMode'], 'samplingMode follows calibration.mode (default random_sample)');
         self::assertSame(100000, $args['$samplingProbabilityPpm'], 'samplingProbabilityPpm follows calibration.sampling_probability_ppm (default 100000)');
+        self::assertSame(0.8, $args['$minimumResolutionRatio'], 'minimumResolutionRatio follows calibration.minimum_resolution_ratio (default 0.80 — the resolution gate)');
+        self::assertSame(1.0, $args['$falsePositiveCost'], 'falsePositiveCost follows calibration.false_positive_cost (default 1.0)');
+        self::assertSame(2.0, $args['$falseNegativeCost'], 'falseNegativeCost follows calibration.false_negative_cost (default 2.0)');
 
         // Explicit sampling config flows through to the calibrator.
         $risk = $this->riskDefaults();
@@ -89,6 +92,15 @@ final class RiskWiringTest extends TestCase
         $args = $this->load($risk)->getDefinition('kiwi_captcha.risk.calibration')->getArguments();
         self::assertSame('weighted', $args['$samplingMode']);
         self::assertSame(500000, $args['$samplingProbabilityPpm']);
+
+        // Explicit resolution-gate / class-cost knobs flow through to the
+        // calibrator.
+        $risk = $this->riskDefaults();
+        $risk['calibration'] = ['enabled' => true, 'minimum_resolution_ratio' => 0.5, 'false_positive_cost' => 2.5, 'false_negative_cost' => 3.75];
+        $args = $this->load($risk)->getDefinition('kiwi_captcha.risk.calibration')->getArguments();
+        self::assertSame(0.5, $args['$minimumResolutionRatio']);
+        self::assertSame(2.5, $args['$falsePositiveCost']);
+        self::assertSame(3.75, $args['$falseNegativeCost']);
 
         // The default receipt TTL is the audit's 300 s.
         $risk = $this->riskDefaults();

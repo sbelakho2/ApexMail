@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Risk\Tests;
 
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
 use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
+use KiwiCaptcha\Risk\Calibration\AggregateCalibrator;
 use KiwiCaptcha\Risk\Calibration\CalibrationStore;
 use KiwiCaptcha\Risk\EventReceipt;
 use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
@@ -23,6 +24,7 @@ use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\RiskWeights;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
+use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use KiwiCaptcha\Risk\Storage\RiskStoreException;
 use PHPUnit\Framework\TestCase;
@@ -71,6 +73,48 @@ final class AdaptiveRiskEngineTest extends TestCase
             networkFlags: (new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]))->classify('203.0.113.27'),
             resources: new ResourcePressure(1000, 1000),
         );
+    }
+
+    /**
+     * A deterministic stub calibration store whose confirmOutcome returns
+     * the given status (1|2 = first confirmation -> reputation authorized;
+     * 0 = already confirmed -> no-op).
+     */
+    private function staticCalibration(int $confirmStatus): CalibrationStore
+    {
+        return new class($confirmStatus) implements CalibrationStore {
+            public function __construct(private readonly int $confirmStatus)
+            {
+            }
+
+            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+            {
+            }
+
+            public function sample(): bool
+            {
+                return true;
+            }
+
+            public function markSampled(): void
+            {
+            }
+
+            public function reserveCorrection(string $decisionId): bool
+            {
+                return false;
+            }
+
+            public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
+            {
+                return $this->confirmStatus;
+            }
+
+            public function biasForScope(int $scope, int $now): int
+            {
+                return 0;
+            }
+        };
     }
 
     /**
@@ -264,7 +308,19 @@ final class AdaptiveRiskEngineTest extends TestCase
                 return SignalVector::zero();
             }
         };
-        $engine = $this->engine($store);
+        // The confirmed* paths gate the reputation event on the calibration
+        // status (1|2) — without a store the status is 0 and the event is a
+        // no-op, so this idempotency-normalization test runs with a
+        // status-1 stub.
+        $engine = new AdaptiveRiskEngine(
+            store: $store,
+            classifier: new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]),
+            identityFactory: new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat(chr(0x42), 32))),
+            scorer: new RiskScorer(),
+            policy: $this->policy(),
+            keys: RiskKeys::fromMaster(str_repeat(chr(0x42), 32)),
+            calibration: $this->staticCalibration(1),
+        );
         $key = 'shared-idempotency-key';
         $preIssue = $this->expectedEventId(RiskEventKind::PreIssue, 1, $key);
 
@@ -452,7 +508,16 @@ final class AdaptiveRiskEngineTest extends TestCase
                 return true;
             }
 
-            public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): ?int
+            public function markSampled(): void
+            {
+            }
+
+            public function reserveCorrection(string $decisionId): bool
+            {
+                return false;
+            }
+
+            public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
             {
                 $this->confirmed[] = [$decisionId, $legitimate, $weight];
                 return 1;
@@ -519,10 +584,102 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame([[$denied->decisionId, 1, 10, RiskAction::Deny, 1000, 1]], array_slice($capturedReceipts, 1));
     }
 
-    public function testConfirmedFeedbackRunsReputationEventEvenWhenReceiptConsumed(): void
+    public function testConfirmedFeedbackGatesReputationOnStatus(): void
+    {
+        // REPUTATION GATING: the reputation event is booked ONLY on a FIRST
+        // confirmation (status 1 or 2). Status 0 (already confirmed /
+        // missing / backend failure) returns a duplicate-marked receipt
+        // with zero signals and NO observation — a webhook retry can never
+        // amplify a ConfirmedAbuse.
+        $run = function (int $status): array {
+            $confirmed = [];
+            $observedEvents = [];
+            $calibration = new class($confirmed, $status) implements CalibrationStore {
+                public function __construct(
+                    private array &$confirmed,
+                    private readonly int $status,
+                ) {
+                }
+
+                public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+                {
+                }
+
+                public function sample(): bool
+                {
+                    return true;
+                }
+
+                public function markSampled(): void
+                {
+                }
+
+                public function reserveCorrection(string $decisionId): bool
+                {
+                    return false;
+                }
+
+                public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
+                {
+                    $this->confirmed[] = [$decisionId, $legitimate, $weight];
+                    return $this->status;
+                }
+
+                public function biasForScope(int $scope, int $now): int
+                {
+                    return 0;
+                }
+            };
+
+            $store = new class($observedEvents) implements RiskStateStoreInterface {
+                public function __construct(private array &$observedEvents)
+                {
+                }
+
+                public function observe(RiskObservation $observation): SignalVector
+                {
+                    $this->observedEvents[] = $observation->event;
+                    return SignalVector::zero();
+                }
+            };
+            $engine = new AdaptiveRiskEngine(
+                store: $store,
+                classifier: new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]),
+                identityFactory: new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat(chr(0x42), 32))),
+                scorer: new RiskScorer(),
+                policy: $this->policy(),
+                keys: RiskKeys::fromMaster(str_repeat(chr(0x42), 32)),
+                calibration: $calibration,
+            );
+
+            $decisionId = str_repeat('a', 32);
+            $receipt = $engine->confirmedLegitimate($this->context(event: RiskEventKind::ConfirmedLegitimate), $decisionId);
+            return [$confirmed, $observedEvents, $receipt];
+        };
+
+        // Status 0 (already consumed / missing): the atomic confirm still
+        // runs, but NO reputation event is booked.
+        [$confirmed, $observedEvents, $receipt] = $run(0);
+        self::assertSame([[$confirmed[0][0], true, null]], $confirmed, 'the atomic confirm must still run');
+        self::assertSame([], $observedEvents, 'status 0 must NOT record the reputation event');
+        self::assertTrue($receipt->isDuplicate, 'a status-0 confirmation returns a duplicate-marked receipt');
+        self::assertSame(SignalVector::zero()->toArray(), $receipt->signals->toArray(), 'the no-op receipt carries zero signals');
+
+        // Status 1 (first confirmation recorded): the reputation event follows.
+        [, $observedEvents, $receipt] = $run(1);
+        self::assertSame([RiskEventKind::ConfirmedLegitimate], $observedEvents, 'status 1 authorizes the reputation event');
+        self::assertFalse($receipt->isDuplicate);
+
+        // Status 2 (first confirmation, deliberately unsampled): the
+        // reputation event is still authorized exactly once.
+        [, $observedEvents, $receipt] = $run(2);
+        self::assertSame([RiskEventKind::ConfirmedLegitimate], $observedEvents, 'status 2 (unsampled) still authorizes the reputation event once');
+        self::assertFalse($receipt->isDuplicate);
+    }
+
+    public function testConfirmOutcomeDelegatesStatus(): void
     {
         $confirmed = [];
-        $observedEvents = [];
         $calibration = new class($confirmed) implements CalibrationStore {
             public function __construct(private array &$confirmed)
             {
@@ -537,10 +694,82 @@ final class AdaptiveRiskEngineTest extends TestCase
                 return true;
             }
 
-            public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): ?int
+            public function markSampled(): void
+            {
+            }
+
+            public function reserveCorrection(string $decisionId): bool
+            {
+                return false;
+            }
+
+            public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
             {
                 $this->confirmed[] = [$decisionId, $legitimate, $weight];
-                return null; // receipt already consumed: calibration is best-effort
+                return 2;
+            }
+
+            public function biasForScope(int $scope, int $now): int
+            {
+                return 0;
+            }
+        };
+        $store = new class implements RiskStateStoreInterface {
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::zero();
+            }
+        };
+        $engine = new AdaptiveRiskEngine(
+            store: $store,
+            classifier: new CidrNetworkClassifier([]),
+            identityFactory: new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat(chr(0x42), 32))),
+            scorer: new RiskScorer(),
+            policy: $this->policy(),
+            keys: RiskKeys::fromMaster(str_repeat(chr(0x42), 32)),
+            calibration: $calibration,
+        );
+        self::assertSame(2, $engine->confirmOutcome('dec-1', true, 4.0), 'confirmOutcome passes the calibrator status through');
+        self::assertSame([['dec-1', true, 4.0]], $confirmed);
+        self::assertSame(0, $this->engine($store)->confirmOutcome('dec-2', false), 'no calibration store -> status 0');
+    }
+
+    public function testConfirmCorrectionAppliesTheOppositeEventOnce(): void
+    {
+        $corrected = [];
+        $observedEvents = [];
+        $calibration = new class($corrected, $observedEvents) implements CalibrationStore {
+            public function __construct(
+                private array &$corrected,
+                private array &$observedEvents,
+            ) {
+            }
+
+            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+            {
+            }
+
+            public function sample(): bool
+            {
+                return true;
+            }
+
+            public function markSampled(): void
+            {
+            }
+
+            public function reserveCorrection(string $decisionId): bool
+            {
+                if (in_array($decisionId, $this->corrected, true)) {
+                    return false;
+                }
+                $this->corrected[] = $decisionId;
+                return true;
+            }
+
+            public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
+            {
+                return 1;
             }
 
             public function biasForScope(int $scope, int $now): int
@@ -556,13 +785,13 @@ final class AdaptiveRiskEngineTest extends TestCase
 
             public function observe(RiskObservation $observation): SignalVector
             {
-                $this->observedEvents[] = $observation->event;
+                $this->observedEvents[] = [$observation->event, $observation->scope, $observation->eventId];
                 return SignalVector::zero();
             }
         };
         $engine = new AdaptiveRiskEngine(
             store: $store,
-            classifier: new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]),
+            classifier: new CidrNetworkClassifier([]),
             identityFactory: new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat(chr(0x42), 32))),
             scorer: new RiskScorer(),
             policy: $this->policy(),
@@ -570,12 +799,44 @@ final class AdaptiveRiskEngineTest extends TestCase
             calibration: $calibration,
         );
 
-        $decisionId = str_repeat('a', 32);
-        $receipt = $engine->confirmedLegitimate($this->context(event: RiskEventKind::ConfirmedLegitimate), $decisionId);
-        self::assertSame([[$decisionId, true, null]], $confirmed, 'the atomic confirm must still run');
-        self::assertSame([RiskEventKind::ConfirmedLegitimate], $observedEvents, 'the reputation event must happen even when the receipt was already consumed');
-        self::assertInstanceOf(EventReceipt::class, $receipt);
-        self::assertNull($engine->confirmOutcome($decisionId, true), 'confirmOutcome() delegates to the calibrator (null here)');
+        // A first confirmation of legitimate=true (trust) is compensated by
+        // the OPPOSITE event: ConfirmedAbuse.
+        self::assertTrue($engine->confirmCorrection('decision-c', true), 'the winning reservation applies the compensation');
+        self::assertCount(1, $observedEvents);
+        self::assertSame(RiskEventKind::ConfirmedAbuse, $observedEvents[0][0]);
+        self::assertSame(0, $observedEvents[0][1], 'the compensation lands in the identity-free scope 0');
+        self::assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $observedEvents[0][2], 'the correction event_id is deterministic 64-hex');
+
+        // Once-only: the second attempt finds the guard consumed.
+        self::assertFalse($engine->confirmCorrection('decision-c', true));
+        self::assertFalse($engine->confirmCorrection('decision-c', false), 'the guard is label-agnostic');
+        self::assertCount(1, $observedEvents, 'the compensation must be recorded at most once');
+
+        // The opposite direction: a first confirmation of abuse
+        // (legitimate=false) is compensated by ConfirmedLegitimate.
+        self::assertTrue($engine->confirmCorrection('decision-d', false));
+        self::assertCount(2, $observedEvents);
+        self::assertSame(RiskEventKind::ConfirmedLegitimate, $observedEvents[1][0]);
+
+        // Without a calibration store there is no namespace to guard in:
+        // the correction is refused (never applied).
+        $plain = $this->engine(new class($observedEvents) implements RiskStateStoreInterface {
+            public function __construct(private array &$observedEvents)
+            {
+            }
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                $this->observedEvents[] = [$observation->event, 0, ''];
+                return SignalVector::zero();
+            }
+        });
+        self::assertFalse($plain->confirmCorrection('decision-e', true));
+        self::assertCount(2, $observedEvents, 'without a calibration store the correction never reaches the state');
+
+        // Empty decision id is rejected up front.
+        $this->expectException(\InvalidArgumentException::class);
+        $engine->confirmCorrection('', true);
     }
 
     public function testStoreFailureDegradesAndOpensBreaker(): void
@@ -650,7 +911,15 @@ final class AdaptiveRiskEngineTest extends TestCase
                 return SignalVector::zero();
             }
         };
-        $engine = $this->engine($store);
+        $engine = new AdaptiveRiskEngine(
+            store: $store,
+            classifier: new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]),
+            identityFactory: new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat(chr(0x42), 32))),
+            scorer: new RiskScorer(),
+            policy: $this->policy(),
+            keys: RiskKeys::fromMaster(str_repeat(chr(0x42), 32)),
+            calibration: $this->staticCalibration(1),
+        );
         $engine->record(RiskEventKind::ProtectedActionFailure, 1, '203.0.113.27', 'sess', null);
         $engine->confirmedLegitimate(
             $this->context(event: RiskEventKind::ConfirmedLegitimate),
@@ -741,5 +1010,87 @@ final class AdaptiveRiskEngineTest extends TestCase
         $json = json_decode((string) json_encode($decision), true);
         self::assertIsArray($json);
         self::assertSame('allow', $json['action']);
+    }
+
+    /**
+     * END-TO-END reputation gating against REAL Redis (skipped without
+     * RISK_REDIS_URL): the first confirmation (status 1) records the
+     * reputation event into the source state; a retry (status 0) returns
+     * the duplicate-marked receipt and leaves the state untouched — a
+     * webhook retry can never amplify ConfirmedAbuse (+5000 bad). A
+     * deliberately unsampled first confirmation (status 2) still mutates
+     * reputation exactly once.
+     */
+    public function testReputationGatingIsOncePerDecisionWithRedis(): void
+    {
+        $url = getenv('RISK_REDIS_URL');
+        if (!is_string($url) || $url === '') {
+            self::markTestSkipped('RISK_REDIS_URL not set; start redis with: docker run -d -p 6399:6379 redis:7-alpine');
+        }
+        $client = RedisRiskStateStore::createClient($url);
+        $keys = RiskKeys::fromMaster(str_repeat(chr(0x42), 32));
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]);
+        $ns = 'gt' . bin2hex(random_bytes(4));
+        $store = new RedisRiskStateStore($client, namespace: $ns);
+        $calibrator = new AggregateCalibrator($client, namespace: $ns, minSamples: 10, samplingMode: 'complete');
+        $engine = new AdaptiveRiskEngine(
+            store: $store,
+            classifier: $classifier,
+            identityFactory: $identityFactory,
+            scorer: new RiskScorer(),
+            policy: $this->policy(),
+            keys: $keys,
+            calibration: $calibrator,
+        );
+
+        // Assess registers the calibration receipt for the decision.
+        $decision = $engine->assess($this->context());
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $decision->decisionId);
+
+        $ctx = $this->context(event: RiskEventKind::ConfirmedAbuse);
+        $nowSecs = intdiv((int) floor(microtime(true) * 1000), 1000);
+        $epoch = intdiv($nowSecs, 900);
+        $sourceKey = "{kiwi:{$ns}}:risk:src:{$epoch}:" . $identityFactory->sourceIdForEpoch($ctx, $epoch);
+
+        $badBefore = (int) ($client->hget($sourceKey, 'bad') ?? 0);
+        $first = $engine->confirmedAbuse($ctx, $decision->decisionId);
+        self::assertFalse($first->isDuplicate, 'the FIRST confirmation records the reputation event');
+        $badAfter = (int) ($client->hget($sourceKey, 'bad') ?? 0);
+        self::assertGreaterThanOrEqual($badBefore + 5000, $badAfter, 'ConfirmedAbuse must add bad +5000 to the source state');
+
+        // Retry of the SAME decision: status 0 -> duplicate-marked no-op,
+        // NO second reputation event.
+        $retry = $engine->confirmedAbuse($ctx, $decision->decisionId);
+        self::assertTrue($retry->isDuplicate, 'a retried confirmation is marked duplicate (status 0)');
+        self::assertSame(SignalVector::zero()->toArray(), $retry->signals->toArray(), 'the retry receipt carries zero signals');
+        self::assertSame($badAfter, (int) ($client->hget($sourceKey, 'bad') ?? 0), 'a retry must never amplify ConfirmedAbuse');
+
+        // A deliberately UNSAMPLED first confirmation (status 2) still
+        // mutates reputation exactly once (and never calibrates).
+        $ns2 = 'gt2' . bin2hex(random_bytes(4));
+        $store2 = new RedisRiskStateStore($client, namespace: $ns2);
+        $calibrator2 = new AggregateCalibrator($client, namespace: $ns2, minSamples: 10, samplingMode: 'random_sample', samplingProbabilityPpm: 1_000_000);
+        $engine2 = new AdaptiveRiskEngine(
+            store: $store2,
+            classifier: $classifier,
+            identityFactory: $identityFactory,
+            scorer: new RiskScorer(),
+            policy: $this->policy(),
+            keys: $keys,
+            calibration: $calibrator2,
+        );
+        $calibrator2->recordReceipt('unsampled-dec', 1, 0, RiskAction::Allow, 100, 0);
+        $sourceKey2 = "{kiwi:{$ns2}}:risk:src:{$epoch}:" . $identityFactory->sourceIdForEpoch($ctx, $epoch);
+        $bad2 = (int) ($client->hget($sourceKey2, 'bad') ?? 0);
+        $first2 = $engine2->confirmedAbuse($ctx, 'unsampled-dec');
+        self::assertFalse($first2->isDuplicate, 'status 2 (unsampled) still authorizes the reputation event');
+        self::assertGreaterThanOrEqual($bad2 + 5000, (int) ($client->hget($sourceKey2, 'bad') ?? 0), 'the unsampled first confirmation mutates reputation once');
+        $retry2 = $engine2->confirmedAbuse($ctx, 'unsampled-dec');
+        self::assertTrue($retry2->isDuplicate, 'a retried unsampled confirmation is a no-op');
+        $badAfter2 = (int) ($client->hget($sourceKey2, 'bad') ?? 0);
+        self::assertSame($badAfter2, (int) ($client->hget($sourceKey2, 'bad') ?? 0), 'no second reputation mutation');
+        $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
+        self::assertSame([], $client->hgetall("{kiwi:{$ns2}}:cal:1:{$hour}"), 'a status-2 outcome never reaches the calibration buckets');
     }
 }

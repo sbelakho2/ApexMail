@@ -194,6 +194,21 @@ pub enum VerifyError {
     MalformedToken,
     #[error("challenge record not found (already consumed, expired, or never issued)")]
     RecordNotFound,
+    /// The challenge store (e.g. Redis) could not be reached for the
+    /// non-consuming peek: unreachable backend, failed connect, or a
+    /// read/write timeout. The challenge was never touched, so it is
+    /// presumed intact and can be retried once the store recovers. Never
+    /// returned for a genuinely absent key — that is
+    /// [`VerifyError::RecordNotFound`].
+    #[error("challenge store unavailable — the challenge is presumed intact and can be retried once the store recovers")]
+    StorageUnavailable,
+    /// The atomic consume (GETDEL) failed with an uncertain I/O error —
+    /// the challenge may or may not have been consumed on the server. The
+    /// consumer MUST NOT retry the GETDEL automatically (the record may
+    /// already be burned); treat the token as unknown instead of replaying
+    /// it. See the GETDEL no-retry rule in `redis_verify`.
+    #[error("challenge consumption is indeterminate (storage I/O failure) — the challenge may or may not have been consumed; do not blindly retry this token")]
+    ConsumeIndeterminate,
     #[error("verification capacity exceeded — try again shortly")]
     CapacityExceeded,
     #[error("admission gate unavailable — try again shortly")]

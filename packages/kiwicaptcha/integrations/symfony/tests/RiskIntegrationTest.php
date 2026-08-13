@@ -1142,7 +1142,8 @@ final class RiskIntegrationTest extends TestCase
      * confirmedLegitimate / confirmedAbuse REQUIRE the decisionId: the
      * engine enforces it with InvalidArgumentException and the gateway lets
      * that enforcement surface (application-only signals, never inferred by
-     * the bundle).
+     * the bundle). With a decisionId the FIRST confirmation (status 1)
+     * books the reputation event exactly once.
      */
     public function testConfirmedSignalsRequireDecisionId(): void
     {
@@ -1168,44 +1169,93 @@ final class RiskIntegrationTest extends TestCase
             self::assertTrue(true);
         }
 
-        // With a decisionId the confirmation is recorded normally.
+        // With a decisionId AND a calibration store the first confirmation
+        // (status 1) records the reputation event.
+        $store = new FakeRiskStateStore();
+        $client = new FakePredisClient();
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $calibrator = new AggregateCalibrator($client, 'cal-reqid', samplingMode: 'complete');
+        $engine = new AdaptiveRiskEngine(
+            $store,
+            $classifier,
+            new RiskIdentityFactory($keys),
+            new RiskScorer(),
+            $policy,
+            $keys,
+            calibration: $calibrator,
+        );
+        $calibrator->recordReceipt('dec-1', 1, 0, RiskAction::Allow, 100, 1);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+
         $receipt = $gateway->confirmedAbuse('login', '198.51.100.7', null, null, 'dec-1');
         self::assertInstanceOf(EventReceipt::class, $receipt);
-        $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
+        self::assertFalse($receipt->isDuplicate);
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
         self::assertSame([RiskEventKind::ConfirmedAbuse], $events);
     }
 
     /**
      * recordConfirmedReputation is the CONTEXT-FUL path: with a valid
      * source/session context the engine confirms the decision atomically
-     * and records the reputation event (the observation carries the
-     * source/session/principal signals); without a usable client IP there
-     * is nothing to attribute the reputation event to and the signal is
-     * skipped (null) — never an exception.
+     * (status 1/2 — the first confirmation) and records the reputation
+     * event (the observation carries the source/session/principal signals);
+     * without a usable client IP there is nothing to attribute the
+     * reputation event to and the signal is skipped (null) — never an
+     * exception.
      */
     public function testRecordConfirmedReputationStillUpdatesReputation(): void
     {
-        $stack = $this->stack(new FakeRiskStateStore());
-        $gateway = $stack['gateway'];
+        $store = new FakeRiskStateStore();
+        $client = new FakePredisClient();
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $calibrator = new AggregateCalibrator($client, 'cal-rep-ctx', samplingMode: 'complete');
+        $engine = new AdaptiveRiskEngine(
+            $store,
+            $classifier,
+            new RiskIdentityFactory($keys),
+            new RiskScorer(),
+            $policy,
+            $keys,
+            calibration: $calibrator,
+        );
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
 
+        $calibrator->recordReceipt('dec-1', 1, 0, RiskAction::Allow, 100, 1);
         $receipt = $gateway->recordConfirmedReputation(true, 'login', '198.51.100.7', null, null, 'dec-1');
         self::assertInstanceOf(EventReceipt::class, $receipt, 'the context-ful confirmation must return the engine EventReceipt');
-        $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
         self::assertSame([RiskEventKind::ConfirmedLegitimate], $events, 'the reputation event is recorded via the engine');
 
         // The reputation event is attributed to the request context: the
         // observation carries the derived source pseudonym.
         $identityFactory = new RiskIdentityFactory(RiskKeys::fromMaster(self::SECRET));
-        self::assertSame($identityFactory->sourceId('198.51.100.7', time()), $stack['store']->observations[0]->sourceId);
+        self::assertSame($identityFactory->sourceId('198.51.100.7', time()), $store->observations[0]->sourceId);
 
         // Legitimate vs abuse flag selects the event kind.
+        $calibrator->recordReceipt('dec-2', 1, 0, RiskAction::Allow, 100, 1);
         $gateway->recordConfirmedReputation(false, 'login', '198.51.100.7', null, null, 'dec-2');
-        $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
         self::assertSame([RiskEventKind::ConfirmedLegitimate, RiskEventKind::ConfirmedAbuse], $events);
 
         // Invalid client IP: nothing to attribute the reputation event to.
         self::assertNull($gateway->recordConfirmedReputation(true, 'login', 'not-an-ip', null, null, 'dec-3'), 'an unparseable IP skips the reputation signal (null), never an exception');
-        self::assertCount(2, $stack['store']->observations, 'the skipped signal must not reach the engine');
+        self::assertCount(2, $store->observations, 'the skipped signal must not reach the engine');
     }
 
     /**
@@ -1246,7 +1296,7 @@ final class RiskIntegrationTest extends TestCase
         // No IP, no scope, no session: the delayed confirmation records the
         // outcome purely against the calibration aggregates.
         $result = $gateway->confirmDecisionOutcome('dec-1', true);
-        self::assertSame(1, $result, 'the confirmation returns the receipt scope (1)');
+        self::assertSame(1, $result, 'first confirmation returns status 1 (outcome recorded)');
         self::assertArrayNotHasKey('{kiwi:cal-test}:cal:receipt:dec-1', $client->strings, 'the receipt is consumed atomically by the confirm script');
         $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
         $bucket = "{kiwi:cal-test}:cal:1:{$hour}";
@@ -1254,10 +1304,13 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(100.0, $client->hashes[$bucket]['legit_score_sum'] ?? null, 'the exact score is summed');
         self::assertArrayNotHasKey('abuse_count', $client->hashes[$bucket], 'no abuse side may be touched');
 
-        // A missing / already-consumed receipt confirms to null (nothing
-        // recorded), and the reputation event is NOT part of this path.
-        self::assertNull($gateway->confirmDecisionOutcome('dec-1', true), 'a consumed receipt confirms to null');
-        self::assertNull($gateway->confirmDecisionOutcome('never-registered', false));
+        // A missing / already-consumed receipt confirms to status 0 — the
+        // application treats it as a no-op (a webhook retry of an
+        // already-confirmed decision is harmless; at most ONE reputation
+        // mutation per decision). The reputation event is NOT part of this
+        // path.
+        self::assertSame(0, $gateway->confirmDecisionOutcome('dec-1', true), 'an already-consumed receipt confirms to status 0 (no-op, no double-record)');
+        self::assertSame(0, $gateway->confirmDecisionOutcome('never-registered', false), 'a missing receipt confirms to status 0');
         self::assertSame([], $store->observations, 'the calibration-only path never records a reputation event');
     }
 
@@ -1324,9 +1377,11 @@ final class RiskIntegrationTest extends TestCase
 
     /**
      * random_sample calibration: the receipt carries the assessment-time
-     * "sampled" flag; an UNSAMPLED confirmation is discarded (deleted, not
-     * counted) so the label can never select itself into the calibration
-     * population, while a sampled confirmation is recorded.
+     * "sampled" flag; an UNSAMPLED confirmation is CONSUMED with status 2
+     * (deliberately not recorded — the label can never select itself into
+     * the calibration population; the caller may still apply first-party
+     * reputation exactly once), while a sampled confirmation is recorded
+     * with status 1.
      */
     public function testConfirmDecisionOutcomeRandomSampleDiscardsUnsampledReceipts(): void
     {
@@ -1354,18 +1409,92 @@ final class RiskIntegrationTest extends TestCase
         $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
 
         // Unsampled receipt (Kiwi did not sample this decision): the
-        // confirmation is discarded — null result, receipt consumed, no
-        // bucket write.
+        // confirmation is consumed with status 2 — receipt gone, NO bucket
+        // write.
         $calibrator->recordReceipt('unsampled', 1, 0, RiskAction::Allow, 100, 0);
-        self::assertNull($gateway->confirmDecisionOutcome('unsampled', true), 'an unsampled confirmation must be discarded');
+        self::assertSame(2, $gateway->confirmDecisionOutcome('unsampled', true), 'an unsampled confirmation is consumed with status 2 (deliberately not recorded)');
         self::assertArrayNotHasKey('{kiwi:cal-sample}:cal:receipt:unsampled', $client->strings, 'the unsampled receipt is consumed (deleted), never left to be confirmed twice');
         $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
         self::assertArrayNotHasKey("{kiwi:cal-sample}:cal:1:{$hour}", $client->hashes, 'an unsampled outcome must never reach the aggregates');
 
-        // Sampled receipt: recorded normally.
+        // Sampled receipt: recorded with status 1 (and the sampled-decision
+        // RESOLVED counter of the resolution gate is INCRed exactly once).
         $calibrator->recordReceipt('sampled', 1, 0, RiskAction::Allow, 100, 1);
-        self::assertSame(1, $gateway->confirmDecisionOutcome('sampled', true), 'a sampled confirmation is recorded');
+        self::assertSame(1, $gateway->confirmDecisionOutcome('sampled', true), 'a sampled confirmation is recorded with status 1');
         self::assertSame(1.0, $client->hashes["{kiwi:cal-sample}:cal:1:{$hour}"]['legit_count'] ?? null);
+        self::assertSame(1, $client->counters['{kiwi:cal-sample}:cal:sample:resolved'] ?? null, 'the sampled confirmation increments the resolution-gate RESOLVED counter exactly once');
+    }
+
+    /**
+     * confirmCorrection: an application-level label CORRECTION of a
+     * decision (e.g. a fraud-review appeal or chargeback verdict flipped
+     * the class). Maps $samplingProbabilityPpm to the engine weight exactly
+     * like confirmDecisionOutcome (weight = 1_000_000/ppm). The engine's
+     * compensating-state API is ONCE-ONLY: a per-decision SET NX guard (the
+     * receipt is already consumed by the first confirmation) makes the
+     * second correction a no-op (false) — retries can never double-
+     * compensate, and the calibration aggregates keep the first confirmed
+     * outcome.
+     */
+    public function testConfirmCorrectionIsOnceOnly(): void
+    {
+        $client = new FakePredisClient();
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $calibrator = new AggregateCalibrator($client, 'cal-corr', samplingMode: 'complete');
+        $engine = new AdaptiveRiskEngine(
+            $store,
+            $classifier,
+            new RiskIdentityFactory($keys),
+            new RiskScorer(),
+            $policy,
+            $keys,
+            calibration: $calibrator,
+        );
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+
+        $calibrator->recordReceipt('corr-1', 1, 0, RiskAction::Allow, 100, 1);
+
+        // First correction: the compensation is applied exactly once.
+        self::assertTrue($gateway->confirmCorrection('corr-1', false), 'the first correction applies the compensation');
+        $guard = '{kiwi:cal-corr}:cal:corrected:'.hash('sha256', 'corr-1');
+        self::assertSame('1', $client->strings[$guard] ?? null, 'the once-only guard is armed on the decision id');
+
+        // Once-only: a second correction of the SAME decision is a no-op.
+        self::assertFalse($gateway->confirmCorrection('corr-1', true), 'a second correction of the same decision is a no-op (false)');
+
+        // The correction is compensation only: it never writes the
+        // calibration buckets (calibration consumes only the first
+        // confirmed outcome).
+        self::assertSame([], $client->hashes, 'a correction never writes calibration buckets');
+
+        // ppm -> weight mapping (weighted-mode parity with
+        // confirmDecisionOutcome; the engine receives weight =
+        // 1_000_000/ppm).
+        self::assertTrue($gateway->confirmCorrection('corr-2', true, 500_000), 'weight = 1_000_000/500000 = 2.0 is passed to the engine');
+        self::assertFalse($gateway->confirmCorrection('corr-2', true, 500_000), 'a retried correction of corr-2 is also once-only');
+
+        // Out-of-range ppm is refused loudly.
+        try {
+            $gateway->confirmCorrection('corr-3', true, 0);
+            self::fail('ppm 0 must be rejected');
+        } catch (\InvalidArgumentException) {
+            self::assertTrue(true);
+        }
+        try {
+            $gateway->confirmCorrection('corr-4', true, 1_000_001);
+            self::fail('ppm above 1_000_000 must be rejected');
+        } catch (\InvalidArgumentException) {
+            self::assertTrue(true);
+        }
     }
 
     /**
@@ -1407,6 +1536,50 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(100.0, $client->hashes["{kiwi:cal-rep}:cal:1:{$hour}"]['legit_score_sum'] ?? null, 'the calibration side recorded the outcome');
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
         self::assertSame([RiskEventKind::ConfirmedLegitimate], $events, 'the reputation event follows the atomic confirmation');
+    }
+
+    /**
+     * Webhook retries must NOT amplify reputation: the engine gates the
+     * reputation event on the confirm status (1/2 -> event; 0 -> none), so
+     * re-delivering the same confirmation of the same decision records the
+     * event AT MOST ONCE — a retried ConfirmedAbuse can never re-penalize
+     * the source.
+     */
+    public function testConfirmedReputationRetryDoesNotAmplify(): void
+    {
+        $client = new FakePredisClient();
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $calibrator = new AggregateCalibrator($client, 'cal-rep-retry', samplingMode: 'complete');
+        $engine = new AdaptiveRiskEngine(
+            $store,
+            $classifier,
+            new RiskIdentityFactory($keys),
+            new RiskScorer(),
+            $policy,
+            $keys,
+            calibration: $calibrator,
+        );
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+
+        $calibrator->recordReceipt('dec-retry', 1, 0, RiskAction::Allow, 100, 1);
+        $first = $gateway->recordConfirmedReputation(false, 'login', '198.51.100.7', null, 'key-1', 'dec-retry');
+        $retry = $gateway->recordConfirmedReputation(false, 'login', '198.51.100.7', null, 'key-2', 'dec-retry');
+
+        self::assertInstanceOf(EventReceipt::class, $first, 'the first confirmation records the reputation event');
+        self::assertFalse($first->isDuplicate, 'the first confirmation is a real (non-duplicate) event');
+        self::assertInstanceOf(EventReceipt::class, $retry, 'a retried confirmation returns the duplicate-marked receipt');
+        self::assertTrue($retry->isDuplicate, 'a retried confirmation of the same decision is marked duplicate (status 0 -> no reputation mutation)');
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::ConfirmedAbuse], $events, 'at most ONE reputation mutation per decision — retries cannot amplify ConfirmedAbuse');
     }
 
     /**

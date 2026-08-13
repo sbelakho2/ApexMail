@@ -315,14 +315,23 @@ final class RiskGateway
      * is nothing to attribute a delayed confirmation to — it is a pure
      * calibration signal).
      *
-     * @return int|null the receipt's scope id when the outcome was recorded,
-     *                  null when there is no receipt (already consumed /
-     *                  expired) or it was discarded (unsampled)
+     * @return int the engine's shared accepted-outcome status:
+     *             0 = missing / already confirmed / corrupt receipt (the
+     *                 application can treat it as a no-op — a webhook retry
+     *                 of an already-confirmed decision is harmless);
+     *             1 = FIRST confirmation; the calibration outcome was
+     *                 recorded;
+     *             2 = FIRST confirmation; deliberately unsampled
+     *                 (random_sample mode: the decision was not in the
+     *                 server-selected sample, so it does NOT enter
+     *                 calibration — but the confirmation is still consumed
+     *                 and the caller may apply first-party reputation
+     *                 exactly once).
      *
      * @throws \InvalidArgumentException when $samplingProbabilityPpm is
      *                                   outside 1..1_000_000
      */
-    public function confirmDecisionOutcome(string $decisionId, bool $legitimate, ?int $samplingProbabilityPpm = null): ?int
+    public function confirmDecisionOutcome(string $decisionId, bool $legitimate, ?int $samplingProbabilityPpm = null): int
     {
         if ($samplingProbabilityPpm !== null && ($samplingProbabilityPpm < 1 || $samplingProbabilityPpm > 1_000_000)) {
             throw new \InvalidArgumentException(sprintf(
@@ -332,6 +341,44 @@ final class RiskGateway
         }
 
         return $this->engine->confirmOutcome(
+            $decisionId,
+            $legitimate,
+            $samplingProbabilityPpm !== null ? 1_000_000 / $samplingProbabilityPpm : null,
+        );
+    }
+
+    /**
+     * CORRECTION of a previously confirmed outcome (e.g. a chargeback
+     * verdict or moderation appeal flipped the label): the engine's
+     * compensating-state API — records the corrected class at most once
+     * per decision (SET NX guard on the decision id, TTL = the calibration
+     * receipt TTL; the receipt itself is already consumed by the first
+     * confirmation, so the guard is the only gate). Calibration aggregates
+     * keep the FIRST confirmed outcome; a correction compensates
+     * reputation, never re-touches the buckets.
+     *
+     * Same weight mapping as {@see confirmDecisionOutcome()}
+     * ($samplingProbabilityPpm is the inverse sampling probability in parts
+     * per million, converted to weight = 1_000_000/ppm) and the same
+     * one-shot contract: a second correction of the same decision returns
+     * false (no-op — retries can never double-compensate).
+     *
+     * @return bool whether the compensation was applied (false = already
+     *               corrected / guard exhausted)
+     *
+     * @throws \InvalidArgumentException when $samplingProbabilityPpm is
+     *                                   outside 1..1_000_000
+     */
+    public function confirmCorrection(string $decisionId, bool $legitimate, ?int $samplingProbabilityPpm = null): bool
+    {
+        if ($samplingProbabilityPpm !== null && ($samplingProbabilityPpm < 1 || $samplingProbabilityPpm > 1_000_000)) {
+            throw new \InvalidArgumentException(sprintf(
+                'samplingProbabilityPpm must be 1..1000000 (got %d) — it is the inverse sampling probability in parts per million (weight = 1_000_000/ppm)',
+                $samplingProbabilityPpm,
+            ));
+        }
+
+        return $this->engine->confirmCorrection(
             $decisionId,
             $legitimate,
             $samplingProbabilityPpm !== null ? 1_000_000 / $samplingProbabilityPpm : null,
