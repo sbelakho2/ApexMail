@@ -75,7 +75,13 @@ identical in:
    | 930–979 | StepUp |
    | 980–1000 | Deny |
 
-6. `RiskReason` — enum: SourceBurst, SourceSustained, NetworkBurst,
+6. Clock — all pressure decay, hysteresis, cooldown and state timestamps
+   derive from REDIS TIME inside the risk script (ARGV[3] now_ms is kept
+   for wire compatibility but unused): multi-node app clocks can never
+   change shared risk-state behavior. Application wall clocks remain only
+   for the HMAC pseudonym epoch (±1 epoch lookups tolerate boundary skew).
+
+7. `RiskReason` — enum: SourceBurst, SourceSustained, NetworkBurst,
    ChallengeDebt, InvalidProofs, MalformedTraffic, ReplayTraffic,
    ActionFailures, ScopeHopping, GlobalAttack, LocalNetworkRisk,
    CapacityPressure, HardRateLimit, Cooldown. Top 3–4 reasons returned
