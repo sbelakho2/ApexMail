@@ -23,6 +23,10 @@ fn malicious_corpus_acceptance_is_pinned() {
             Ok(rec) => {
                 accepted += 1;
                 accepted_nonces.insert(rec.nonce);
+                // Audit #91: the corpus predates the kid key — every accepted
+                // record must default to kid = 1 (the historical single-key
+                // deployments), keeping the acceptance count pinned at 659.
+                assert_eq!(rec.kid, 1, "missing kid must default to 1");
             }
             Err(_) => rejected += 1,
         }

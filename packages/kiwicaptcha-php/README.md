@@ -13,11 +13,13 @@ Byte-for-byte compatible with the reference implementation in
 
 **Protocol v2** (current issuance, `protocol_version` 2):
 
-- canonical payload = `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer`
-  (round 10: `region`/`request_binding`/`issuer` render as empty segments
+- canonical payload = `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`
+  (round 11: `region`/`request_binding`/`issuer` render as empty segments
   when unset; `policy_version` is the security-policy epoch, default 1;
   `issuer` is the deployment identity — a dev/staging/production
-  compartment that holds even with shared secret keys, audit #67)
+  compartment that holds even with shared secret keys, audit #67; `kid` is
+  the signing key id, default 1, the FINAL canonical field — the verifier
+  selects the signature secret per kid via `secretsByKid`, audit #91)
 - challenge = `base64(canonical_payload) + "." + hex(hmac_sha256(secret, canonical_payload))` —
   **full-parameter signing**: every record field that shapes verification is
   covered by the HMAC, so a tampered record can never pass
@@ -92,11 +94,12 @@ deploy — v1 records expire naturally under the normal
   (`RedisStorage`, fused Lua transition — atomic state flip, any Redis with
   Lua); PSR-6 pools are best-effort (see [Storage](#storage)).
 - **shared language-neutral record format**: challenge records are persisted
-  as JSON whose keys match the Rust crate's serde schema one-to-one — 21
+  as JSON whose keys match the Rust crate's serde schema one-to-one — 22
   canonical keys (`nonce`, `scope`, `binding_tag`, `issued_at`, `expires_at`,
   `algorithm`, `m_kib`, `t`, `p`, `target_bits`, `salt`, `prefix`,
   `challenge`, `min_duration_ms`, `issued_at_ns`, `protocol_version`,
-  `attempts_used`, `region`, `policy_version`, `request_binding`, `issuer`),
+  `attempts_used`, `region`, `policy_version`, `request_binding`, `issuer`,
+  `kid`),
   with `issued_at_ns` epoch microseconds in both implementations — a PHP
   service and a Rust service can read each other's records from the same
   Redis instance. The storage layer WRAPS the canonical JSON with two runtime
@@ -230,7 +233,7 @@ pass.
 In production, use `RedisStorage` (or any `AtomicStorageInterface` backed by
 an atomic transition-style consume) so challenges are shared across workers
 and consumed exactly once. RedisStorage persists records as
-**language-neutral JSON** (the 21 canonical keys matching the Rust crate's
+**language-neutral JSON** (the 22 canonical keys matching the Rust crate's
 serde schema — plus the storage runtime fields `state`/`consumed_result`
 wrapped around them — with `issued_at_ns` in epoch microseconds), so a Rust
 service can read the same records from the same Redis instance.

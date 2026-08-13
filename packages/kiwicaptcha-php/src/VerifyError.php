@@ -17,6 +17,7 @@ enum VerifyError: string
     case WrongRegion = 'wrong_region';
     case WrongIssuer = 'challenge was issued by a different deployment';
     case WrongPolicyVersion = 'challenge was issued under a different security-policy epoch';
+    case UnknownKid = 'unknown signing key id';
     case TooFast = 'too_fast';
     case InsufficientWork = 'insufficient_work';
     case MalformedRecord = 'malformed_record';

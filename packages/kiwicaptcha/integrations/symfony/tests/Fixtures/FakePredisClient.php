@@ -58,7 +58,7 @@ final class FakePredisClient extends \Predis\Client
     /** @var array<string, string> plain strings (SET / GETDEL decision handles) */
     public array $strings = [];
 
-    /** @var array<string, array<string, float>> hashes (HINCRBYFLOAT calibration buckets) */
+    /** @var array<string, array<string, float|string>> hashes (HINCRBYFLOAT calibration buckets + HSET policy fields) */
     public array $hashes = [];
 
     /** @var list<array{0: string, 1: list<mixed>}> */
@@ -106,8 +106,20 @@ final class FakePredisClient extends \Predis\Client
         return array_keys($members);
     }
 
+    /**
+     * @internal test hook: make a command fail with a server exception
+     * (Redis-outage tests). '*' fails EVERY command; a command name fails
+     * only that one.
+     */
+    public ?string $failCommand = null;
+
     public function __call($commandID, $arguments)
     {
+        if ($this->failCommand !== null
+            && ($this->failCommand === '*' || strtoupper($this->failCommand) === strtoupper((string) $commandID))
+        ) {
+            throw new \Predis\Response\ServerException('connection refused (fake)');
+        }
         $this->calls[] = [strtoupper((string) $commandID), $arguments];
 
         return match (strtoupper((string) $commandID)) {
@@ -127,6 +139,8 @@ final class FakePredisClient extends \Predis\Client
             'SET' => $this->fakeSet($arguments),
             'HINCRBYFLOAT' => $this->fakeHincrbyfloat($arguments),
             'HGETALL' => $this->fakeHgetall($arguments),
+            'HSET' => $this->fakeHset($arguments),
+            'HGET' => $this->fakeHget($arguments),
             'PING' => $this->pingOk() ? 'PONG' : throw new \RuntimeException('connection refused (fake)'),
             default => null,
         };
@@ -147,6 +161,37 @@ final class FakePredisClient extends \Predis\Client
     private function fakeHgetall(array $arguments): array
     {
         return $this->hashes[(string) $arguments[0]] ?? [];
+    }
+
+    /**
+     * HSET: set one hash field (the central security-policy state written
+     * by tests; values are stored as strings).
+     */
+    private function fakeHset(array $arguments): int
+    {
+        $key = (string) $arguments[0];
+        $field = (string) $arguments[1];
+        $value = (string) $arguments[2];
+        $this->hashes[$key] ??= [];
+        $isNew = !\array_key_exists($field, $this->hashes[$key]);
+        $this->hashes[$key][$field] = $value;
+
+        return $isNew ? 1 : 0;
+    }
+
+    /**
+     * HGET: one hash field, or null when the key/field does not exist.
+     */
+    private function fakeHget(array $arguments): ?string
+    {
+        $key = (string) $arguments[0];
+        $field = (string) $arguments[1];
+
+        if (!isset($this->hashes[$key]) || !\array_key_exists($field, $this->hashes[$key])) {
+            return null;
+        }
+
+        return (string) $this->hashes[$key][$field];
     }
 
     /**
@@ -454,6 +499,20 @@ final class FakePredisClient extends \Predis\Client
             $this->fakeZremrangebyscore([$key, '-inf', (string) $this->timeMs()]);
 
             return $this->zcard($key);
+        }
+
+        if (str_contains($script, 'Scope issuance cap')) {
+            // ScopeIssuanceCap::allow: KEYS[1] = {kiwi:<ns>}:issuance:<scope>:
+            // <minute>; ARGV[1] = cap. INCR -> EXPIRE 60 on the first
+            // increment -> refuse beyond the cap (0), else 1.
+            $key = (string) $keys[0];
+            $cap = (int) $rest[0];
+            $n = $this->fakeIncr([$key]);
+            if ($n === 1) {
+                $this->fakePexpire([$key, 60000]);
+            }
+
+            return $n > $cap ? 0 : 1;
         }
 
         if (str_contains($script, 'redis.call(\'INCR\', KEYS[1])')) {

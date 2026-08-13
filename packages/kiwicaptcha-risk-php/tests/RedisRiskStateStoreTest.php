@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk\Tests;
 
 use KiwiCaptcha\Risk\RiskEventKind;
+use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskObservation;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
@@ -483,5 +484,126 @@ final class RedisRiskStateStoreTest extends TestCase
         $ttl = (int) $this->client->ttl($default->ledgerKey('ttl-dec-2'));
         self::assertGreaterThan(0, $ttl);
         self::assertLessThanOrEqual(RedisRiskStateStore::DEFAULT_OUTCOME_TTL_SECS, $ttl);
+    }
+
+    /** An observation with a caller-chosen source pseudonym (fixed subnet pseudonym). */
+    private function observationWithSource(string $sourceId, string $eventId, RiskEventKind $event = RiskEventKind::PreIssue, int $scope = 0): RiskObservation
+    {
+        return new RiskObservation(
+            event: $event,
+            scope: $scope,
+            sourceEpoch: 12345,
+            sourceIdPrev: str_repeat('a', 32), // never written: stays zero
+            sourceId: $sourceId,
+            sourceIdNext: str_repeat('c', 32), // never written: stays zero
+            subnetEpoch: 12345,
+            subnetIdPrev: str_repeat('d', 32),
+            subnetId: str_repeat('e', 32), // the SHARED /64-style network aggregate
+            subnetIdNext: str_repeat('f', 32),
+            sessionId: null,
+            principalId: null,
+            eventId: $eventId,
+            networkRisk: 0,
+            nowMs: self::T0,
+        );
+    }
+
+    /**
+     * AUDIT #88 (b) — POISONED SOURCE ABSOLUTE CAP: hundreds of invalid
+     * proofs (plus request velocity and replay pressure) saturate the
+     * channels; the score clamps at 1000 and the policy action reaches
+     * Deny — but NEVER exceeds either, so there is no unbounded punishment
+     * mode.
+     */
+    public function testPoisonedSourceReachesTheCapButNeverExceedsIt(): void
+    {
+        $store = $this->store();
+        $scorer = new \KiwiCaptcha\Risk\RiskScorer();
+        $weights = new \KiwiCaptcha\Risk\RiskWeights();
+        $policy = \KiwiCaptcha\Risk\RiskPolicy::fromConfig([
+            'version' => 3,
+            'weights' => $weights->toArray(),
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'sha20']],
+            'global_floors' => [1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+        ]);
+
+        $source = str_repeat('b', 32);
+        $maxScore = 0;
+        $i = 0;
+        // 100 request velocity + 300 invalid proofs + 200 replay attempts:
+        // rf/rs/bad/rep/global all saturate -> the score MUST clamp at 1000.
+        for ($r = 0; $r < 100; $r++) {
+            $vector = $store->observe($this->observationWithSource($source, sprintf('%032x', $i++)));
+            $maxScore = max($maxScore, $scorer->score(100, $vector, $weights));
+        }
+        for ($p = 0; $p < 300; $p++) {
+            $vector = $store->observe($this->observationWithSource($source, sprintf('%032x', $i++), RiskEventKind::InvalidProof));
+            $maxScore = max($maxScore, $scorer->score(100, $vector, $weights));
+        }
+        for ($r = 0; $r < 200; $r++) {
+            $vector = $store->observe($this->observationWithSource($source, sprintf('%032x', $i++), RiskEventKind::ReplayAttempt));
+            $maxScore = max($maxScore, $scorer->score(100, $vector, $weights));
+        }
+        self::assertLessThanOrEqual(1000, $maxScore, 'the score must never exceed the 0..1000 cap while poisoning');
+
+        $final = $store->observe($this->observationWithSource($source, sprintf('%032x', $i++)));
+        $score = $scorer->score(100, $final, $weights);
+        self::assertSame(1000, $score, 'a fully poisoned source must reach the cap exactly');
+        $decision = $policy->decide(1, $score, $final, new \KiwiCaptcha\Risk\ResourcePressure(1000, 1000), 0, self::T0);
+        self::assertSame(RiskAction::Deny, $decision->action, 'the cap action is the ladder top (Deny)');
+        self::assertSame(RiskAction::Deny->rank(), $decision->action->rank(), 'the ladder top is the absolute maximum action');
+        foreach ($final->toArray() as $field => $value) {
+            self::assertLessThanOrEqual(1000, $value, "signal $field must stay bounded at 1000");
+        }
+    }
+
+    /**
+     * AUDIT #88 (c) — /64-STYLE NETWORK AGGREGATE WEAK PER-SIGNAL EFFECT:
+     * many bad proofs across many IPs in ONE network saturate the shared
+     * network channel, but the network signal stays bounded at 1000 and
+     * the exact-IP signals of a single attacker dominate its score.
+     */
+    public function testNetworkAggregateRisesBoundedWhileExactIpDominates(): void
+    {
+        $store = $this->store();
+        $scorer = new \KiwiCaptcha\Risk\RiskScorer();
+        $weights = new \KiwiCaptcha\Risk\RiskWeights();
+
+        // 200 distinct sources (IPs) in one network: each sends one request
+        // with one invalid proof into the SHARED subnet pseudonym.
+        $i = 0;
+        for ($ip = 1; $ip <= 200; $ip++) {
+            $source = sprintf('%032x', $ip);
+            $store->observe($this->observationWithSource($source, sprintf('%032x', $i++)));
+            $store->observe($this->observationWithSource($source, sprintf('%032x', $i++), RiskEventKind::InvalidProof));
+        }
+
+        // One attacker's exact-IP signals: 1 request + 1 bad proof.
+        $attacker = $store->observe($this->observationWithSource(sprintf('%032x', 1), sprintf('%032x', $i++)));
+        $subnet = $attacker->subnetFast; // shared network velocity, 200 requests
+        self::assertSame(1000, $subnet, 'the network aggregate saturates at 1000');
+        self::assertLessThanOrEqual(1000, $subnet, 'the network signal must stay bounded at 1000');
+        self::assertGreaterThan(0, $subnet, 'many bad proofs across the network DO raise the shared signal');
+
+        $exactIp = $scorer->score(0, SignalVector::fromArray([
+            'source_fast' => $attacker->sourceFast,
+            'source_slow' => $attacker->sourceSlow,
+            'bad_proof' => $attacker->badProof,
+        ]), $weights);
+        $networkOnly = $scorer->score(0, SignalVector::fromArray(['subnet_fast' => $subnet]), $weights);
+        self::assertGreaterThan(
+            $networkOnly,
+            $exactIp,
+            sprintf(
+                'the exact-IP signals (%d) must dominate the network aggregate signal (%d) even at network saturation',
+                $exactIp,
+                $networkOnly
+            )
+        );
+        self::assertLessThanOrEqual(
+            1000,
+            $exactIp + $networkOnly,
+            'even combined the attacker\'s score is bounded'
+        );
     }
 }

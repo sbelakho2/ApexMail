@@ -34,11 +34,20 @@ namespace KiwiCaptcha;
  * Check order:
  *   1. Structural validation of the stored record: scope shape, nonce/salt
  *      sizes, TTL ceiling (MAX_TTL_SECS), prefix binding, and the
- *      per-algorithm difficulty range.
+ *      per-algorithm difficulty range (the protocol bounds 1..MAX_DIFFICULTY,
+ *      audit #87 — the leading-zero comparison only ever runs against a
+ *      validated difficulty).
+ *   2. Kid resolution (audit #91): when a secretsByKid set is configured,
+ *      the signature secret for the record's kid is selected here — an
+ *      unknown kid, or a kid beyond the newest configured kid (the
+ *      rollback/forward guard — a future-keyed challenge must never verify
+ *      on an older node), fails with UnknownKid. An empty set keeps the
+ *      legacy single-secret path (the verify() secret parameter).
  *   2. Re-check the challenge HMAC signature (constant-time compare) —
  *      protocol v1 payloads use the legacy canonical form signed with the
  *      master key, protocol v2 uses the full-parameter canonical payload
- *      signed with the HKDF-derived K_challenge.
+ *      (kid included) signed with the HKDF-derived K_challenge of the
+ *      kid-selected secret.
  *   2b. Absolute Argon2id process ceilings (audit #32): the SIGNED
  *      parameters are checked against MIN/MAX_ARGON_* AFTER signature
  *      authentication and BEFORE any allocation — out-of-range yields
@@ -185,6 +194,18 @@ final class Verifier
          * Null (default) disables the check.
          */
         private ?string $expectedIssuer = null,
+        /**
+         * Secret set keyed by signing key id (audit #91). When NON-EMPTY,
+         * the secret for the record's `kid` is selected for the signature
+         * re-check (and the IP-binding re-derivation): a record whose kid is
+         * unknown — or whose kid exceeds the newest configured kid (the
+         * rollback/forward guard: a future-keyed challenge must never verify
+         * on an older node) — is rejected with UnknownKid. Keys are the
+         * monotonic kid sequence 1..N (positive integers). When EMPTY, the
+         * legacy single-secret path stays: the verify() $secretKey parameter
+         * is used for every record.
+         */
+        private readonly array $secretsByKid = [],
     ) {
         // BC shim: pre-gate callers passed the clock override positionally
         // as the second argument. A Closure in that slot is $now, not an
@@ -199,6 +220,13 @@ final class Verifier
                 'Verifier::__construct(): Argument #2 ($argonGate) must be of type ?KiwiCaptcha\VerificationAdmissionGate, %s given',
                 get_debug_type($argonGate),
             ));
+        }
+        foreach ($secretsByKid as $kid => $secret) {
+            if (!\is_int($kid) || $kid < 1 || !\is_string($secret) || \strlen($secret) < 16) {
+                throw new \InvalidArgumentException(
+                    'secretsByKid keys must be positive integer kid values 1..N with secrets of at least 16 bytes'
+                );
+            }
         }
         $this->argonGate = $argonGate;
         $this->now = $now;
@@ -267,11 +295,27 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::MalformedRecord);
         }
 
+        // 2. Kid resolution (audit #91): with a secretsByKid set, the
+        //    signature secret is selected per the record's kid — an unknown
+        //    kid, or one beyond the newest configured kid (the
+        //    rollback/forward guard — a future-keyed challenge must never
+        //    verify on an older node), fails with UnknownKid BEFORE any
+        //    signature work. An empty set keeps the legacy single-secret
+        //    path: the verify() $secretKey parameter is used for every
+        //    record (kid is then metadata only).
+        $signingSecret = $this->secretForKey($peek, $secretKey);
+        if ($signingSecret === null) {
+            $this->bestEffortDelete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::UnknownKid);
+        }
+
         // 2. Signature re-check: reconstruct the payload from the record and
         //    compare against the signature embedded in the challenge string.
         //    Protocol v1 uses the legacy canonical form; protocol v2 uses the
-        //    full-parameter canonical payload.
-        if (!$this->verifyRecordSignature($peek, $secretKey)) {
+        //    full-parameter canonical payload (kid included). The key is the
+        //    kid-selected secret (or the verify() secret in legacy mode).
+        if (!$this->verifyRecordSignature($peek, $signingSecret)) {
             $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::BadSignature);
@@ -320,14 +364,16 @@ final class Verifier
         //    skipping the check — the caller must provide the IP it would
         //    have passed to issuance. Protocol v2 records carry a nonce-bound
         //    binding tag (recomputed here); v1 records carry the legacy
-        //    stable IP hash.
+        //    stable IP hash. Both are keyed by the KID-SELECTED secret
+        //    (audit #91: K_ip_bind is derived from the same master secret
+        //    that signed the challenge).
         if ($peek->bindingTag !== '') {
             if ($clientIp === null) {
                 return VerifyOutcome::invalid(VerifyError::MissingClientIp);
             }
             $expectedTag = $peek->protocolVersion === 1
-                ? Issuer::hashIp($clientIp, $secretKey)
-                : Issuer::bindingTag($peek->nonce, $clientIp, $secretKey);
+                ? Issuer::hashIp($clientIp, $signingSecret)
+                : Issuer::bindingTag($peek->nonce, $clientIp, $signingSecret);
             if (!hash_equals($expectedTag, $peek->bindingTag)) {
                 $this->bestEffortDelete($token->nonce);
 
@@ -463,14 +509,20 @@ final class Verifier
 
             // TOCTOU guard: the consumed instance must be the SAME challenge
             // we validated and HMAC-checked via peek. Because the v2 HMAC
-            // signs EVERY immutable parameter, full re-validation + signature
-            // re-verification on the consumed instance is the robust check —
-            // a swapped/racing record fails closed instead of verifying
-            // against bytes that were never validated.
+            // signs EVERY immutable parameter (kid included), full
+            // re-validation + signature re-verification on the consumed
+            // instance is the robust check — a swapped/racing record fails
+            // closed instead of verifying against bytes that were never
+            // validated. The signature secret is re-resolved for the
+            // CONSUMED record's kid (audit #91): an instance whose kid is
+            // unknown (or ahead of the newest configured kid) cannot be
+            // authenticated and fails closed as MalformedRecord.
+            $consumedSecret = $this->secretForKey($record, $secretKey);
             if (
                 !hash_equals($peek->challenge, $record->challenge)
+                || $consumedSecret === null
                 || !$this->validateRecord($record)
-                || !$this->verifyRecordSignature($record, $secretKey)
+                || !$this->verifyRecordSignature($record, $consumedSecret)
             ) {
                 return VerifyOutcome::invalid(VerifyError::MalformedRecord);
             }
@@ -565,6 +617,17 @@ final class Verifier
      * and the per-algorithm difficulty range. A record failing any check is
      * malformed — it cannot have come from a KiwiCaptcha issuer.
      *
+     * The difficulty guard (audit #87) is the protocol floor/ceiling pair
+     * MIN_DIFFICULTY..MAX_DIFFICULTY (1..20) applied to BOTH algorithms:
+     * the leading-zero comparison only ever runs against a validated
+     * difficulty, so the stored value cannot drive an unbounded comparison
+     * (0, 21, 256, 65535 … are all rejected here, before any hash is
+     * computed). Issuance keeps the narrower per-algorithm ceilings.
+     *
+     * The scope check enforces the narrow identifier alphabet (audit #96)
+     * — `[A-Za-z0-9._:-]+`, 1..128 bytes — subsuming the legacy '|'
+     * separator rejection.
+     *
      * Argon2id memory/time/parallelism are NOT bounded here anymore: the
      * absolute process ceilings (audit #32) apply to the SIGNED parameters
      * AFTER signature authentication ({@see self::argon2CeilingsOk()}),
@@ -581,7 +644,11 @@ final class Verifier
             return false;
         }
         $scopeLen = \strlen($record->scope);
-        if ($scopeLen < 1 || $scopeLen > 128 || \str_contains($record->scope, '|')) {
+        if (
+            $scopeLen < 1
+            || $scopeLen > 128
+            || \preg_match('/^[A-Za-z0-9._:-]+$/D', $record->scope) !== 1
+        ) {
             return false;
         }
         $nonceBytes = base64_decode($record->nonce, true);
@@ -598,11 +665,10 @@ final class Verifier
         if (!hash_equals($record->challenge.'|'.$record->salt.'|', $record->prefix)) {
             return false;
         }
-        if ($record->algorithm === PoWAlgorithm::Argon2id) {
-            if ($record->targetBits < 1 || $record->targetBits > 10) {
-                return false;
-            }
-        } elseif ($record->targetBits < 1 || $record->targetBits > 20) {
+        // Audit #87: the uniform protocol difficulty bounds (1..20) guard
+        // the leading-zero comparison for BOTH algorithms — a stored value
+        // outside the bounds is rejected here, before any hash computation.
+        if ($record->targetBits < Config::MIN_DIFFICULTY || $record->targetBits > Config::MAX_DIFFICULTY) {
             return false;
         }
 
@@ -680,6 +746,19 @@ final class Verifier
      * as given. Not part of the public verification contract — production
      * deployments configure the expectations once at construction.
      */
+    /**
+     * Public per-verification seam for the bounded-revocation-latency
+     * monitor (audit #81): sets the CURRENT security-policy epoch the
+     * verifier enforces. The monitor refreshes this from the central
+     * security-policy state with a short cache and a monotonic guard — a
+     * stale/regressed value must never be applied. Cheap; safe to call
+     * before every verification.
+     */
+    public function setExpectedPolicyVersion(int $policyVersion): void
+    {
+        $this->expectedPolicyVersion = $policyVersion;
+    }
+
     public function rotateDeploymentExpectations(?int $policyVersion, ?string $region, ?string $issuer): void
     {
         $this->expectedPolicyVersion = $policyVersion;
@@ -734,9 +813,9 @@ final class Verifier
      * Recompute the expected HMAC signature for a record (per its protocol
      * version) and compare it constant-time against the signature embedded
      * in the challenge string. Because the v2 canonical payload covers EVERY
-     * immutable parameter, a valid signature proves the whole record is
-     * authentic — used in the cheap phase AND re-applied to the CONSUMED
-     * instance (TOCTOU guard).
+     * immutable parameter (kid included — audit #91), a valid signature
+     * proves the whole record is authentic — used in the cheap phase AND
+     * re-applied to the CONSUMED instance (TOCTOU guard).
      */
     private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool
     {
@@ -765,9 +844,35 @@ final class Verifier
                 $record->policyVersion ?? 1,
                 $record->requestBinding,
                 $record->issuer,
+                $record->kid ?? 1,
             ), $secretKey);
 
         return hash_equals($expected, self::signatureFromChallenge($record->challenge));
+    }
+
+    /**
+     * Select the signature secret for a record (audit #91).
+     *
+     * With an EMPTY secretsByKid set the legacy single-secret path stays:
+     * the verify() $secretKey parameter is used for every record. With a
+     * NON-EMPTY set the secret is looked up by the record's kid, and null is
+     * returned — yielding UnknownKid — when the kid is unknown, or when it
+     * EXCEEDS the newest configured kid: the rollback/forward guard that
+     * ensures a future-keyed challenge never verifies on an older node.
+     */
+    private function secretForKey(ChallengeRecord $record, string $legacySecret): ?string
+    {
+        if ($this->secretsByKid === []) {
+            return $legacySecret;
+        }
+        if ($record->kid > max(array_keys($this->secretsByKid))) {
+            return null;
+        }
+        if (!\array_key_exists($record->kid, $this->secretsByKid)) {
+            return null;
+        }
+
+        return $this->secretsByKid[$record->kid];
     }
 
     /**

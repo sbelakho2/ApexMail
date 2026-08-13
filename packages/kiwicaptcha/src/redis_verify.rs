@@ -2,7 +2,7 @@
 //!
 //! [`RedisChallengeStore`] persists [`ChallengeRecord`]s as the language-
 //! neutral JSON schema shared with the PHP core (`packages/kiwicaptcha-php`)
-//! — the same 21 keys `ChallengeRecord::toArray()` emits — under the key
+//! — the same 22 keys `ChallengeRecord::toArray()` emits — under the key
 //! `{prefix}{nonce}` with an EX TTL of `expires_at - now + ttl_margin_secs`
 //! (min 1 s, exactly like the PHP `RedisStorage` plus the audit #22/#23 TTL
 //! margin). A PHP service and a Rust service can read each other's records
@@ -724,6 +724,12 @@ pub enum AdmissionError {
 pub struct ProductionVerifier {
     store: RedisChallengeStore,
     secret_key: String,
+    /// Optional per-key-id secrets (audit #91): `kid → master secret`. When
+    /// set, the record's `kid` selects the signing secret for the signature
+    /// (and IP-binding) checks — see [`crate::verify::VerifyContext::secrets_by_kid`]
+    /// for the UnknownKid / forward-guard semantics. `None` = the historical
+    /// single-key path (`secret_key` used unconditionally).
+    secrets_by_kid: Option<std::collections::HashMap<u32, String>>,
     argon_gate: Option<Box<dyn ArgonAdmissionGate>>,
     accept_legacy_v1: bool,
     expected_region: Option<String>,
@@ -747,6 +753,7 @@ impl ProductionVerifier {
         ProductionVerifier {
             store,
             secret_key: secret_key.into(),
+            secrets_by_kid: None,
             argon_gate: None,
             accept_legacy_v1: false,
             expected_region: None,
@@ -754,6 +761,17 @@ impl ProductionVerifier {
             expected_issuer: None,
             now_unix: real_now_unix,
         }
+    }
+
+    /// Configure key rotation (audit #91): the `kid → master secret` map
+    /// used to verify challenges signed under a rotated key. The record's
+    /// `kid` selects the secret; an unknown kid — or a kid newer than the
+    /// map's newest id (the forward/rollback guard) — is rejected with
+    /// [`VerifyError::UnknownKid`] in the cheap phase, before any consume.
+    /// Default: the single `secret_key` path.
+    pub fn with_secrets_by_kid(mut self, secrets: impl IntoIterator<Item = (u32, String)>) -> Self {
+        self.secrets_by_kid = Some(secrets.into_iter().collect());
+        self
     }
 
     /// Override the verifier's clock: `f` returns the current Unix time in
@@ -1054,12 +1072,34 @@ impl ProductionVerifier {
             return Err(VerifyError::MalformedRecord);
         }
 
+        // 3b2. Key-rotation resolution (audit #91): when a `secrets_by_kid`
+        //      map is configured, the record's kid selects the signing
+        //      secret. An unknown kid — or a kid NEWER than the map's newest
+        //      id (the forward/rollback guard: future-keyed challenges must
+        //      never verify on older nodes, even if the key were somehow
+        //      known) — is rejected with UnknownKid before any signature
+        //      work, and never consumes the record (a retry after rolling
+        //      the key set forward is legitimate).
+        let secret: &str = match &self.secrets_by_kid {
+            Some(secrets) => {
+                let max_kid = secrets.keys().max().copied().unwrap_or(0);
+                if record.kid > max_kid {
+                    return Err(VerifyError::UnknownKid);
+                }
+                match secrets.get(&record.kid) {
+                    Some(secret) => secret.as_str(),
+                    None => return Err(VerifyError::UnknownKid),
+                }
+            }
+            None => &self.secret_key,
+        };
+
         // 3c. Signature re-check over the protocol-appropriate canonical
         //     input.
         let sig = signature_from_challenge(record);
         let sig_ok = match record.protocol_version {
-            1 => verify_signature(&payload_from_record(record), sig, &self.secret_key),
-            _ => verify_signature_v2(record, sig, &self.secret_key),
+            1 => verify_signature(&payload_from_record(record), sig, secret),
+            _ => verify_signature_v2(record, sig, secret),
         };
         match sig_ok {
             Ok(true) => {}
@@ -1123,8 +1163,8 @@ impl ProductionVerifier {
         //     (IpMismatch).
         if !record.binding_tag.is_empty() {
             let expected = match record.protocol_version {
-                1 => hash_ip(client_ip, &self.secret_key),
-                _ => match binding_tag(&record.nonce, client_ip, &self.secret_key) {
+                1 => hash_ip(client_ip, secret),
+                _ => match binding_tag(&record.nonce, client_ip, secret) {
                     Ok(tag) => tag,
                     Err(_) => return Err(VerifyError::IpMismatch),
                 },
@@ -1193,6 +1233,7 @@ mod tests {
     fn sha_config(target_bits: u32) -> crate::challenge::ChallengeConfig {
         crate::challenge::ChallengeConfig {
             secret_key: SECRET.into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,

@@ -25,6 +25,7 @@ fn rust_verifies_php_issued_record() {
     let mut ctx = VerifyContext {
         record: &mut rec,
         secret_key: "0123456789abcdef0123456789abcdef",
+        secrets_by_kid: None,
         counter,
         duration_ms: 5000,
         now_unix: std::time::SystemTime::now()
@@ -53,6 +54,7 @@ fn rust_verifies_php_issued_record() {
     let mut ctx2 = VerifyContext {
         record: &mut rec2,
         secret_key: "0123456789abcdef0123456789abcdef",
+        secrets_by_kid: None,
         counter,
         duration_ms: 5000,
         now_unix: std::time::SystemTime::now()
@@ -109,6 +111,7 @@ fn rust_issues_record_for_php() {
     };
     let config = kiwicaptcha::challenge::ChallengeConfig {
         secret_key: "0123456789abcdef0123456789abcdef".into(),
+        kid: 1,
         algorithm,
         m_kib,
         t,

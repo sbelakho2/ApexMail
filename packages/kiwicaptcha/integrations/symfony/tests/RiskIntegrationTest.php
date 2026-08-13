@@ -248,9 +248,12 @@ final class RiskIntegrationTest extends TestCase
     public function testProfileResolverEscalatesWithinAlgorithmFamily(): void
     {
         // SHA app, floor 8: sha actions escalate; argon actions map to the
-        // AUDITED Argon2id profiles (16/32/64 MiB, t=3, p=1, target bits 1 —
-        // memory is the economic control) regardless of the app algorithm:
-        // the core's issueWithProfile accepts a profile directly.
+        // FIXED-ENVELOPE ladder (audit #79): ALL THREE share the
+        // server-controlled memory envelope (default 16384 KiB, t=3, p=1) —
+        // risk escalates the TARGET DIFFICULTY (expected nonce search space
+        // 1/4/8), never the server verification cost — regardless of the
+        // app algorithm: the core's issueWithProfile accepts a profile
+        // directly.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         self::assertNull($resolver->profileFor(RiskAction::Allow));
         self::assertSame(16, $resolver->profileFor(RiskAction::Sha16)?->targetBits);
@@ -258,17 +261,17 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(20, $resolver->profileFor(RiskAction::Sha20)?->targetBits);
         $argon16 = $resolver->profileFor(RiskAction::Argon16);
         self::assertSame(PoWAlgorithm::Argon2id, $argon16?->algorithm);
-        self::assertSame(1, $argon16?->targetBits, 'argon profiles must carry target bits 1, not the app argon2_difficulty_bits');
-        self::assertSame(16384, $argon16?->mKib);
+        self::assertSame(1, $argon16?->targetBits, 'Argon16 escalates to the ladder rung 1');
+        self::assertSame(16384, $argon16?->mKib, 'argon profiles share the FIXED verification envelope (audit #79)');
         self::assertSame(3, $argon16?->t);
         self::assertSame(1, $argon16?->p);
         $argon32 = $resolver->profileFor(RiskAction::Argon32);
         self::assertSame(PoWAlgorithm::Argon2id, $argon32?->algorithm);
-        self::assertSame(32768, $argon32?->mKib);
-        self::assertSame(1, $argon32?->targetBits);
+        self::assertSame(16384, $argon32?->mKib, 'Argon32 must NOT raise the memory (fixed envelope)');
+        self::assertSame(4, $argon32?->targetBits, 'Argon32 escalates the target difficulty to 4');
         $argon64 = $resolver->profileFor(RiskAction::Argon64);
-        self::assertSame(65536, $argon64?->mKib);
-        self::assertSame(1, $argon64?->targetBits);
+        self::assertSame(16384, $argon64?->mKib, 'Argon64 must NOT raise the memory (fixed envelope)');
+        self::assertSame(8, $argon64?->targetBits, 'Argon64 escalates the target difficulty to 8');
         // StepUp is application-defined and handled by the controller
         // (403 STEP_UP_REQUIRED) — it must NEVER map to a challenge profile.
         try {
@@ -285,17 +288,59 @@ final class RiskIntegrationTest extends TestCase
         self::assertNull($maxed->profileFor(RiskAction::Sha20));
         self::assertSame(PoWAlgorithm::Argon2id, $maxed->profileFor(RiskAction::Argon64)?->algorithm);
 
-        // Argon app: argon actions map to the audited profiles; sha actions
-        // are no-ops (argon is already at least as strong).
+        // Argon app: argon actions map to the fixed-envelope profiles; sha
+        // actions are no-ops (argon is already at least as strong).
         $argon = new RiskProfileResolver(PoWAlgorithm::Argon2id, 20);
-        self::assertSame(1, $argon->profileFor(RiskAction::Argon32)?->targetBits, 'the app argon2 difficulty must NOT leak into risk profiles');
+        self::assertSame(4, $argon->profileFor(RiskAction::Argon32)?->targetBits, 'the app argon2 difficulty must NOT leak into risk profiles');
         self::assertNull($argon->profileFor(RiskAction::Sha16));
-        self::assertSame(65536, $argon->profileFor(RiskAction::Argon64)?->mKib);
+        self::assertSame(16384, $argon->profileFor(RiskAction::Argon64)?->mKib, 'the envelope applies to an argon2id deployment too');
         // StepUp always throws (controller-handled).
         try {
             $argon->profileFor(RiskAction::StepUp);
             self::fail('StepUp must not map to a profile');
         } catch (\LogicException) {
+            self::assertTrue(true);
+        }
+    }
+
+    /**
+     * Audit #79's core invariant: the SERVER verification cost ceiling is
+     * risk-INDEPENDENT. Even the MAXIMUM adaptive escalation (Argon64) keeps
+     * the memory at the fixed envelope — risk only raises the expected nonce
+     * search space, which stays within the widget-solvable ceiling (target
+     * bits <= 20).
+     */
+    public function testMaximumAdaptiveEscalationKeepsMemoryAtTheEnvelope(): void
+    {
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 4, 8]);
+        $max = $resolver->profileFor(RiskAction::Argon64);
+        self::assertNotNull($max);
+        self::assertSame(16384, $max->mKib, 'the server verification memory must stay at the envelope under maximum escalation');
+        self::assertSame(3, $max->t);
+        self::assertSame(1, $max->p);
+        self::assertLessThanOrEqual(20, $max->targetBits, 'the challenge target difficulty stays within the widget-solvable ceiling');
+        self::assertSame(8, $max->targetBits);
+
+        // A custom envelope is honored across ALL rungs — the ceiling is the
+        // configured envelope, never the action.
+        $custom = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 32768, [2, 6, 10]);
+        foreach ([RiskAction::Argon16, RiskAction::Argon32, RiskAction::Argon64] as $action) {
+            $profile = $custom->profileFor($action);
+            self::assertSame(32768, $profile?->mKib, sprintf('%s must stay on the custom envelope', $action->value));
+            self::assertLessThanOrEqual(20, $profile?->targetBits ?? 0);
+        }
+
+        // The ladder needs EXACTLY 3 rungs.
+        try {
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 4]);
+            self::fail('a 2-entry ladder must be refused');
+        } catch (\InvalidArgumentException) {
+            self::assertTrue(true);
+        }
+        try {
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 4, 8, 12]);
+            self::fail('a 4-entry ladder must be refused');
+        } catch (\InvalidArgumentException) {
             self::assertTrue(true);
         }
     }
@@ -371,6 +416,109 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame('minimum', $risk['unknown_scope']['mode']);
         self::assertSame('strict', $risk['continuity_cookie']['samesite'], 'samesite is defined exactly once, default strict');
         self::assertTrue($risk['continuity_cookie']['http_only']);
+        // Audit #79: the FIXED Argon2id verification-memory envelope and the
+        // target-difficulty escalation ladder.
+        self::assertSame(16384, $risk['argon_verification_memory_kib'], 'the adaptive Argon memory envelope defaults to 16384 KiB');
+        self::assertSame([1, 4, 8], $risk['argon_escalation_target_bits'], 'the default Argon target-bits ladder is [1, 4, 8]');
+        // Audit #81: the security-epoch monitor's short cache window.
+        self::assertSame(1, $risk['security_epoch_cache_secs'], 'the central security-epoch read is cached 1 s by default');
+        // Audit #80: the Ed25519 receipt signer is OFF by default.
+        self::assertNull($risk['result_receipt_signing_key']);
+        // Audit #89: the per-scope issuance cap is OFF by default.
+        self::assertSame(0, $risk['max_challenges_per_scope_per_minute'], 'the per-scope issuance cap defaults to unlimited');
+    }
+
+    public function testArgonVerificationMemoryKibBounds(): void
+    {
+        $process = static fn (array $risk): array => (new Processor())->processConfiguration(new Configuration(), [[
+            'secret_key' => str_repeat('a', 32),
+            'risk' => $risk,
+        ]])['risk'];
+
+        self::assertSame(1024, $process(['argon_verification_memory_kib' => 1024])['argon_verification_memory_kib']);
+        self::assertSame(65536, $process(['argon_verification_memory_kib' => 65536])['argon_verification_memory_kib']);
+        foreach ([1023, 65537, 0] as $bad) {
+            try {
+                $process(['argon_verification_memory_kib' => $bad]);
+                self::fail("envelope $bad must be rejected");
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
+    public function testArgonEscalationTargetBitsValidation(): void
+    {
+        $process = static fn (array $risk): array => (new Processor())->processConfiguration(new Configuration(), [[
+            'secret_key' => str_repeat('a', 32),
+            'risk' => $risk,
+        ]])['risk'];
+
+        self::assertSame([2, 6, 10], $process(['argon_escalation_target_bits' => [2, 6, 10]])['argon_escalation_target_bits']);
+        self::assertSame([20, 20, 20], $process(['argon_escalation_target_bits' => [20, 20, 20]])['argon_escalation_target_bits'], 'each rung may reach the widget-solvable ceiling 20');
+        // Exactly 3 entries.
+        foreach ([[1, 4], [1, 4, 8, 12], []] as $bad) {
+            try {
+                $process(['argon_escalation_target_bits' => $bad]);
+                self::fail('a ladder that is not exactly 3 entries must be rejected');
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+        // Each rung within 1..20.
+        foreach ([[0, 4, 8], [1, 21, 8], [1, 4, 21]] as $bad) {
+            try {
+                $process(['argon_escalation_target_bits' => $bad]);
+                self::fail('a rung outside 1..20 must be rejected');
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
+    public function testSecurityEpochCacheSecsBounds(): void
+    {
+        $process = static fn (array $risk): array => (new Processor())->processConfiguration(new Configuration(), [[
+            'secret_key' => str_repeat('a', 32),
+            'risk' => $risk,
+        ]])['risk'];
+
+        self::assertSame(30, $process(['security_epoch_cache_secs' => 30])['security_epoch_cache_secs']);
+        foreach ([0, 31] as $bad) {
+            try {
+                $process(['security_epoch_cache_secs' => $bad]);
+                self::fail("cache window $bad must be rejected");
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
+    public function testResultReceiptSigningKeyAcceptsAValidSeed(): void
+    {
+        $seed = base64_encode(random_bytes(32));
+        $processed = (new Processor())->processConfiguration(new Configuration(), [[
+            'secret_key' => str_repeat('a', 32),
+            'risk' => ['result_receipt_signing_key' => $seed],
+        ]]);
+
+        self::assertSame($seed, $processed['risk']['result_receipt_signing_key']);
+    }
+
+    public function testMaxChallengesPerScopePerMinuteBounds(): void
+    {
+        $process = static fn (array $risk): array => (new Processor())->processConfiguration(new Configuration(), [[
+            'secret_key' => str_repeat('a', 32),
+            'risk' => $risk,
+        ]])['risk'];
+
+        self::assertSame(60, $process(['max_challenges_per_scope_per_minute' => 60])['max_challenges_per_scope_per_minute']);
+        try {
+            $process(['max_challenges_per_scope_per_minute' => -1]);
+            self::fail('a negative per-scope cap must be rejected');
+        } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+            self::assertTrue(true);
+        }
     }
 
     public function testUnknownScopeModeMinimumIsTheDefault(): void

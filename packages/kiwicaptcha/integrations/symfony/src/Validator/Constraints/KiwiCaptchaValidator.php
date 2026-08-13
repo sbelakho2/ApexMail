@@ -8,7 +8,9 @@ use BelConsulting\KiwiCaptchaBundle\Risk\AmbiguousForwardingException;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
+use BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\Risk\RiskAction;
@@ -51,6 +53,12 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     /** @var string|null the record's transaction binding of the last valid verification */
     private ?string $lastVerifiedRequestBinding = null;
 
+    /** @var string|null the last valid verification's signed receipt payload (audit #80) */
+    private ?string $lastReceiptPayload = null;
+
+    /** @var string|null the last valid verification's Ed25519 receipt signature (audit #80) */
+    private ?string $lastReceiptSignature = null;
+
     /**
      * @param Verifier $verifier KiwiCaptcha\Verifier with the bundle's
      *                           configured Argon2id admission gate wired in
@@ -81,6 +89,18 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *                                               record to (a resolver
      *                                               mismatch would fail every
      *                                               bound challenge)
+     * @param SecurityEpochMonitor|null $epochMonitor the security-epoch
+     *                                               monitor (audit #81) —
+     *                                               refreshed before every
+     *                                               verification so the
+     *                                               verifier's expected policy
+     *                                               epoch is the CURRENT
+     *                                               (monotonic, cached) one
+     * @param ResultReceiptSigner|null $receiptSigner the optional Ed25519
+     *                                               signer for EXPORTED
+     *                                               verification results
+     *                                               (audit #80) — null =
+     *                                               receipt signing disabled
      */
     public function __construct(
         private readonly Verifier $verifier,
@@ -93,6 +113,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         private readonly ?LoggerInterface $logger = null,
         private readonly ?StorageInterface $storage = null,
         private readonly ?ClientIpResolver $clientIpResolver = null,
+        private readonly ?SecurityEpochMonitor $epochMonitor = null,
+        private readonly ?ResultReceiptSigner $receiptSigner = null,
     ) {
     }
 
@@ -118,6 +140,37 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         return $this->lastVerifiedRequestBinding;
     }
 
+    /**
+     * The canonical JSON payload of the last successfully verified
+     * challenge's Ed25519 RECEIPT (audit #80): {jti, scope, binding,
+     * outcome, issued_at_ms}, or null when no verification succeeded yet or
+     * no signing key is configured (risk.result_receipt_signing_key). The
+     * payload is public by construction (no secret material); pair it with
+     * {@see verifiedReceiptSignature()} and verify against the PUBLIC key
+     * derived from the configured seed — never the private key.
+     */
+    public function verifiedReceiptPayload(): ?string
+    {
+        return $this->lastReceiptPayload;
+    }
+
+    /**
+     * The base64 Ed25519 detached signature (64 bytes) of the last
+     * successfully verified challenge's receipt payload (audit #80), or null
+     * when no verification succeeded yet or receipt signing is disabled.
+     * Verification:
+     *
+     *     sodium_crypto_sign_verify_detached(
+     *         base64_decode($signature),
+     *         $payload,
+     *         $publicKey, // base64_decode(ResultReceiptSigner::publicKeyBase64())
+     *     )
+     */
+    public function verifiedReceiptSignature(): ?string
+    {
+        return $this->lastReceiptSignature;
+    }
+
     public function validate(mixed $value, Constraint $constraint): void
     {
         if (!$constraint instanceof KiwiCaptcha) {
@@ -133,6 +186,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         if (!\is_string($value)) {
             throw new UnexpectedTypeException($value, 'string');
         }
+
+        // SECURITY-EPOCH REFRESH (audit #81): before the verification runs,
+        // re-read the central security-policy epoch (bounded by the short
+        // cache window) and rotate the verifier's expected policy version to
+        // the CURRENT monotonic max — a central policy bump revokes
+        // outstanding challenges within one cache window, a regressed or
+        // unavailable central value can never weaken the epoch.
+        $this->epochMonitor?->refresh();
 
         $request = $this->requestStack->getMainRequest();
         // The issued record is authoritative: a non-empty binding tag means
@@ -202,7 +263,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // ORIGINAL verification).
         $fromStoredResult = \method_exists($outcome, 'fromStoredResult') && $outcome->fromStoredResult();
         if ($outcome->error === VerifyError::ConsumeIndeterminate) {
-            $resolved = $this->resolveAmbiguousConsume($value, $request);
+            $resolved = $this->resolveAmbiguousConsume($value, $request, $constraint->scope);
             if ($resolved === 'success') {
                 return;
             }
@@ -361,6 +422,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 $this->lastVerifiedRequestBinding = $outcome->requestBinding();
             }
 
+            // RESULT RECEIPT (audit #80): a VALID verification can be
+            // exported as an Ed25519-signed receipt for third parties holding
+            // the PUBLIC key. The receipt is public by construction (jti,
+            // scope, binding, outcome, issued_at_ms — no secret material);
+            // the HMAC verification secret itself never leaves the server.
+            if ($this->receiptSigner !== null && $jti !== null) {
+                $receipt = $this->receiptSigner->sign($jti, $constraint->scope, $this->lastVerifiedRequestBinding, (int) round(microtime(true) * 1000));
+                if ($receipt !== null) {
+                    $this->lastReceiptPayload = $receipt['payload'];
+                    $this->lastReceiptSignature = $receipt['signature'];
+                }
+            }
+
             // Anti-stockpiling (audit #26): the source's outstanding
             // challenge counter is decremented (best-effort, floored at 0)
             // when a challenge verifies successfully — a solved challenge is
@@ -441,7 +515,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *         canonical jti + signed binding of the consumed record (the
      *         SAME outcome the original verification produced)
      */
-    private function resolveAmbiguousConsume(string $token, ?Request $request): string
+    private function resolveAmbiguousConsume(string $token, ?Request $request, string $scope): string
     {
         $record = $this->findConsumedRecord($token);
         if ($record === null) {
@@ -477,12 +551,21 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
         // The SAME success: expose the canonical jti + signed binding (the
         // application's (jti, action) idempotency key stays stable across
-        // the retry) — no re-derive, no repeated side effects.
+        // the retry) — no re-derive, no repeated side effects. The receipt
+        // is re-signed for the retry (a fresh issued_at_ms — the receipt is
+        // per-verification export, the jti inside stays stable).
         $this->lastVerifiedJti = $record->nonce;
         $request?->attributes->set(self::VERIFIED_JTI_ATTRIBUTE, $record->nonce);
         $binding = $this->consumedBindingOf($record);
         if ($binding !== null) {
             $this->lastVerifiedRequestBinding = $binding;
+        }
+        if ($this->receiptSigner !== null) {
+            $receipt = $this->receiptSigner->sign($record->nonce, $scope, $binding, (int) round(microtime(true) * 1000));
+            if ($receipt !== null) {
+                $this->lastReceiptPayload = $receipt['payload'];
+                $this->lastReceiptSignature = $receipt['signature'];
+            }
         }
 
         return 'success';

@@ -13,9 +13,15 @@ mod common;
 use std::thread;
 use std::time::Duration;
 
+use kiwicaptcha_risk::action::RiskAction;
 use kiwicaptcha_risk::event::RiskEventKind;
+use kiwicaptcha_risk::policy::RiskPolicy;
 use kiwicaptcha_risk::redis::{RedisRiskStateStore, DEFAULT_SATURATIONS};
+use kiwicaptcha_risk::resources::ResourcePressure;
+use kiwicaptcha_risk::score::{score as compute_score, RiskWeights};
+use kiwicaptcha_risk::signals::SignalVector;
 use kiwicaptcha_risk::store::{Observed, RiskStateStore, RiskStoreError};
+use serde_json::json;
 
 const HUNDRED: usize = 100;
 
@@ -490,5 +496,209 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
         (200..=250).contains(&after.vector.source_fast),
         "the storm must have moved the state by exactly one unit (got {})",
         after.vector.source_fast
+    );
+}
+
+/// Contract-default policy snapshot for the AUDIT #88 decision assertions.
+fn audit_policy() -> RiskPolicy {
+    RiskPolicy::from_config(
+        3,
+        &json!({
+            "version": 3,
+            "weights": {
+                "source_fast": 190, "source_slow": 110, "subnet_fast": 80,
+                "issue_debt": 150, "bad_proof": 220, "malformed": 260,
+                "replay": 320, "action_failure": 120, "scope_switch": 60,
+                "global_pressure": 170, "network_risk": 100,
+                "trust_credit": 130, "principal_credit": 100
+            },
+            "scopes": {
+                "1": { "base_risk": 100, "minimum": "allow", "post_solve_check": true, "degraded": "sha20" }
+            },
+            "global_floors": { "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" }
+        }),
+    )
+    .expect("audit policy parses")
+}
+
+/// AUDIT #88 (b) — POISONED SOURCE ABSOLUTE CAP: hundreds of invalid
+/// proofs (plus request velocity and replay pressure) saturate the
+/// channels; the score clamps at 1000 and the policy action reaches Deny —
+/// but NEVER exceeds either, so there is no unbounded punishment mode.
+#[test]
+fn poisoned_source_reaches_the_cap_but_never_exceeds_it() {
+    let Some(_url) = common::redis_url() else {
+        eprintln!("skipping redis concurrency test: RISK_REDIS_URL not set");
+        return;
+    };
+    let store = store();
+    let source = hex::encode([0xAA; 16]);
+    let subnet = hex::encode([0xBB; 16]);
+    let weights = RiskWeights::default();
+    let policy = audit_policy();
+
+    let mut max_score = 0u16;
+    let mut n = 0u64;
+    let mut observe = |event: RiskEventKind| {
+        let observed = store
+            .observe(&common::observation(
+                event,
+                0,
+                source.clone(),
+                subnet.clone(),
+                None,
+                None,
+                common::event_id(n),
+                common::T0,
+            ))
+            .expect("observe");
+        n += 1;
+        max_score = max_score.max(compute_score(100, &observed.vector, &weights));
+    };
+    // 100 request velocity + 300 invalid proofs + 200 replay attempts:
+    // rf/rs/bad/rep/global all saturate -> the score MUST clamp at 1000.
+    for _ in 0..100 {
+        observe(RiskEventKind::PreIssue);
+    }
+    for _ in 0..300 {
+        observe(RiskEventKind::InvalidProof);
+    }
+    for _ in 0..200 {
+        observe(RiskEventKind::ReplayAttempt);
+    }
+    assert!(
+        max_score <= 1000,
+        "the score must never exceed the 0..1000 cap while poisoning"
+    );
+
+    let final_vector = probe(&store, source, subnet, common::T0).vector;
+    let score = compute_score(100, &final_vector, &weights);
+    assert_eq!(
+        score, 1000,
+        "a fully poisoned source must reach the cap exactly"
+    );
+    for value in [
+        final_vector.source_fast,
+        final_vector.source_slow,
+        final_vector.subnet_fast,
+        final_vector.issue_debt,
+        final_vector.bad_proof,
+        final_vector.malformed,
+        final_vector.replay,
+        final_vector.action_failure,
+        final_vector.scope_switch,
+        final_vector.global_pressure,
+        final_vector.network_risk,
+        final_vector.trust_credit,
+        final_vector.principal_credit,
+    ] {
+        assert!(value <= 1000, "signal must stay bounded at 1000");
+    }
+
+    // The band action at the cap is the ladder top (Deny) — no action
+    // exists above it.
+    let decision = policy.decide(
+        1,
+        score,
+        &SignalVector::zero(),
+        &ResourcePressure::default(),
+        0,
+        common::T0,
+        0,
+    );
+    assert_eq!(
+        decision.action,
+        RiskAction::Deny,
+        "the cap action is the ladder top (Deny)"
+    );
+    assert_eq!(decision.action.rank(), RiskAction::Deny.rank());
+}
+
+/// AUDIT #88 (c) — /64-STYLE NETWORK AGGREGATE WEAK PER-SIGNAL EFFECT:
+/// many bad proofs across many IPs in ONE network saturate the shared
+/// network channel, but the network signal stays bounded at 1000 and the
+/// exact-IP signals of a single attacker dominate its score.
+#[test]
+fn network_aggregate_rises_bounded_while_exact_ip_dominates() {
+    let Some(_url) = common::redis_url() else {
+        eprintln!("skipping redis concurrency test: RISK_REDIS_URL not set");
+        return;
+    };
+    let store = store();
+    let subnet = hex::encode([0xBB; 16]);
+    let weights = RiskWeights::default();
+
+    // 200 distinct sources (IPs) in one network: each sends one request
+    // with one invalid proof into the SHARED subnet pseudonym.
+    let mut n = 0u64;
+    for ip in 1..=200u32 {
+        let source = hex::encode([ip as u8; 16]);
+        store
+            .observe(&common::observation(
+                RiskEventKind::PreIssue,
+                0,
+                source.clone(),
+                subnet.clone(),
+                None,
+                None,
+                common::event_id(n),
+                common::T0,
+            ))
+            .expect("observe");
+        n += 1;
+        store
+            .observe(&common::observation(
+                RiskEventKind::InvalidProof,
+                0,
+                source,
+                subnet.clone(),
+                None,
+                None,
+                common::event_id(n),
+                common::T0,
+            ))
+            .expect("observe");
+        n += 1;
+    }
+
+    // One attacker's exact-IP signals: 1 request + 1 bad proof (the probe
+    // adds one more request to its own source).
+    let attacker = probe(&store, hex::encode([1u8; 16]), subnet, common::T0).vector;
+    let subnet_fast = attacker.subnet_fast; // shared network velocity, 200+ requests
+    assert_eq!(subnet_fast, 1000, "the network aggregate saturates at 1000");
+    assert!(
+        subnet_fast <= 1000,
+        "the network signal must stay bounded at 1000"
+    );
+    assert!(
+        subnet_fast > 0,
+        "many bad proofs across the network DO raise the shared signal"
+    );
+
+    let exact_ip = compute_score(
+        0,
+        &SignalVector {
+            source_fast: attacker.source_fast,
+            source_slow: attacker.source_slow,
+            bad_proof: attacker.bad_proof,
+            ..Default::default()
+        },
+        &weights,
+    );
+    let network_only = compute_score(
+        0,
+        &SignalVector {
+            subnet_fast,
+            ..Default::default()
+        },
+        &weights,
+    );
+    assert!(
+        exact_ip > network_only,
+        "the exact-IP signals ({exact_ip}) must dominate the network aggregate signal ({network_only}) even at network saturation"
+    );
+    assert!(
+        exact_ip + network_only <= 1000,
+        "even combined the attacker's score is bounded"
     );
 }

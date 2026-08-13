@@ -160,6 +160,7 @@ fn parse_resp_command(buf: &[u8]) -> Option<(Vec<String>, usize)> {
 fn sha_config(target_bits: u32) -> ChallengeConfig {
     ChallengeConfig {
         secret_key: SECRET.into(),
+        kid: 1,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -181,6 +182,7 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
 fn argon_config(target_bits: u32) -> ChallengeConfig {
     ChallengeConfig {
         secret_key: SECRET.into(),
+        kid: 1,
         algorithm: PoWAlgorithm::Argon2id,
         m_kib: 128,
         t: 3,
@@ -1079,12 +1081,12 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
 
 #[test]
 fn record_json_keys_match_php_cross_language_format() {
-    // The 21 keys PHP ChallengeRecord::toArray() emits for v2 records — the
+    // The 22 keys PHP ChallengeRecord::toArray() emits for v2 records — the
     // exact key set a PHP RedisStorage writes and fromArray() reads. The
     // `region` and `issuer` keys (audits #22/#67) are ALWAYS present: null
-    // when unbound, exactly like PHP. No Redis needed: pure language-
-    // neutral schema parity.
-    const PHP_KEYS: [&str; 21] = [
+    // when unbound, exactly like PHP; `kid` (audit #91) is ALWAYS present
+    // (default 1). No Redis needed: pure language-neutral schema parity.
+    const PHP_KEYS: [&str; 22] = [
         "nonce",
         "scope",
         "binding_tag",
@@ -1106,6 +1108,7 @@ fn record_json_keys_match_php_cross_language_format() {
         "policy_version",
         "request_binding",
         "issuer",
+        "kid",
     ];
 
     let issued = issue_challenge(
@@ -1141,10 +1144,15 @@ fn record_json_keys_match_php_cross_language_format() {
         serde_json::Value::Null,
         "the issuer key must be present (null when unbound) in the Rust wire format (audit #67)"
     );
+    assert_eq!(
+        value["kid"], 1,
+        "the kid key must be present with the default 1 in the Rust wire format (audit #91)"
+    );
 
     // Reverse direction: a PHP toArray()-shaped object (same keys, including
-    // attempts_used, protocol_version, region and issuer) must deserialize
-    // into the Rust record — the shape RedisChallengeStore::consume parses.
+    // attempts_used, protocol_version, region, issuer and kid) must
+    // deserialize into the Rust record — the shape RedisChallengeStore::
+    // consume parses.
     let php_written = serde_json::json!({
         "nonce": issued.record.nonce,
         "scope": issued.record.scope,
@@ -1165,6 +1173,7 @@ fn record_json_keys_match_php_cross_language_format() {
         "protocol_version": 2,
         "region": null,
         "issuer": null,
+        "kid": 1,
     });
     let decoded: ChallengeRecord = serde_json::from_value(php_written.clone()).unwrap();
     assert_eq!(decoded.nonce, issued.record.nonce);
@@ -1174,6 +1183,12 @@ fn record_json_keys_match_php_cross_language_format() {
     assert_eq!(decoded.expires_at, issued.record.expires_at);
     assert_eq!(decoded.region, None);
     assert_eq!(decoded.issuer, None);
+    assert_eq!(decoded.kid, 1);
+    // A PHP record WITHOUT the kid key still deserializes (serde default 1).
+    let mut no_kid_written = php_written.clone();
+    no_kid_written.as_object_mut().unwrap().remove("kid");
+    let decoded: ChallengeRecord = serde_json::from_value(no_kid_written).unwrap();
+    assert_eq!(decoded.kid, 1, "missing kid must default to 1 (audit #91)");
     // A region-bound PHP record round-trips the region.
     let mut region_written = php_written.clone();
     region_written["region"] = serde_json::json!("eu");
@@ -1347,6 +1362,68 @@ fn verifier_expected_region_rejects_mismatched_and_unbound_records() {
         .with_expected_region("us")
         .without_expected_region();
     assert_eq!(cleared.expected_region(), None);
+}
+
+#[test]
+fn verifier_secrets_by_kid_selects_the_secret_and_rejects_unknown_kids() {
+    // Audit #91 at the production boundary: with_secrets_by_kid makes the
+    // record's kid select the signing secret in the cheap phase. The
+    // matching key verifies; the wrong key for the same kid is
+    // BadSignature; an unknown (or future) kid is UnknownKid — all before
+    // any consume.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("kid");
+    let key_b = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    // Issue under kid 2 with key_b as the master secret.
+    let issued = issue_challenge(
+        &ChallengeConfig {
+            kid: 2,
+            ..ChallengeConfig {
+                secret_key: key_b.into(),
+                ..sha_config(4)
+            }
+        },
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+    assert_eq!(issued.record.kid, 2);
+
+    // The matching key verifies.
+    let matching = verifier_for(&url, &prefix).with_secrets_by_kid([(2, key_b.to_string())]);
+    matching.store().store(&issued.record).unwrap();
+    assert!(
+        matches!(
+            verify_at(&matching, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "the kid-selected secret must verify"
+    );
+
+    // The wrong secret for the same kid → BadSignature.
+    let wrong =
+        verifier_for(&url, &prefix).with_secrets_by_kid([(2, "WRONG-KEY-16-bytes!".into())]);
+    wrong.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&wrong, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature)
+    );
+
+    // A verifier that never rolled forward to kid 2 → UnknownKid.
+    let older = verifier_for(&url, &prefix).with_secrets_by_kid([(1, key_b.to_string())]);
+    older.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&older, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::UnknownKid),
+        "a kid beyond the configured max must be UnknownKid (forward guard)"
+    );
 }
 
 #[test]

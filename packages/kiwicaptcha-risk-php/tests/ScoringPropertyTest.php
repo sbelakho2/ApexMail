@@ -129,4 +129,71 @@ final class ScoringPropertyTest extends TestCase
         // 100 + intdiv(500*190, 1000) = 100 + 95 = 195
         self::assertSame(195, $scorer->score(100, $vector, $weights));
     }
+
+    /**
+     * AUDIT #88 (a) — ASYMMETRIC TRUST: the exact-IP (source) signals must
+     * outweigh the subnet (network) signals in the scorer weights, so one
+     * attacker IP is always punished harder than the /64 aggregate it
+     * shares. Pinned on the contract defaults; a future symmetric-weight
+     * regression fails here.
+     */
+    public function testSourceWeightsOutweighSubnetWeights(): void
+    {
+        $weights = new RiskWeights();
+        self::assertGreaterThan(
+            $weights->subnetFast,
+            $weights->sourceFast,
+            'source_fast (exact-IP burst) must outweigh subnet_fast (network burst)'
+        );
+        self::assertGreaterThan(
+            $weights->subnetFast,
+            $weights->badProof,
+            'bad_proof (exact-IP invalid proofs) must outweigh the subnet effect'
+        );
+        // The CONTRIBUTION-level asymmetry: for the same signal value the
+        // exact-IP channel contributes strictly more score than the subnet
+        // aggregate channel.
+        $scorer = new RiskScorer();
+        $same = array_fill_keys([
+            'source_slow', 'issue_debt', 'bad_proof', 'malformed', 'replay',
+            'action_failure', 'scope_switch', 'global_pressure', 'network_risk',
+            'trust_credit', 'principal_credit',
+        ], 0);
+        $sourceOnly = SignalVector::fromArray(['source_fast' => 500] + $same);
+        $subnetOnly = SignalVector::fromArray(['subnet_fast' => 500] + $same);
+        self::assertGreaterThan(
+            $scorer->score(0, $subnetOnly, $weights),
+            $scorer->score(0, $sourceOnly, $weights),
+            'an identical exact-IP signal must contribute more than the same network aggregate signal'
+        );
+    }
+
+    /**
+     * AUDIT #88 (b) — ABSOLUTE USER-VISIBLE CAP: the score is clamped to
+     * 0..1000, so a poisoned source (every signal at saturation) reaches
+     * the cap but can NEVER exceed it — there is no unbounded punishment
+     * mode.
+     */
+    public function testSaturatedSourceReachesTheCapButNeverExceedsIt(): void
+    {
+        $scorer = new RiskScorer();
+        $weights = new RiskWeights();
+        $saturated = array_fill_keys([
+            'source_fast', 'source_slow', 'subnet_fast', 'issue_debt', 'bad_proof',
+            'malformed', 'replay', 'action_failure', 'scope_switch',
+            'global_pressure', 'network_risk',
+        ], 1000) + ['trust_credit' => 0, 'principal_credit' => 0];
+        $score = $scorer->score(100, SignalVector::fromArray($saturated), $weights);
+        self::assertSame(1000, $score, 'a fully saturated source must reach the cap');
+        self::assertLessThanOrEqual(1000, $score, 'the score must never exceed the 0..1000 cap');
+
+        // Hundreds of invalid proofs alone: bad_proof saturates at 1000 and
+        // the contribution is bounded by the weight (220/1000 of it).
+        $vector = SignalVector::fromArray(['bad_proof' => 1000] + array_fill_keys([
+            'source_fast', 'source_slow', 'subnet_fast', 'issue_debt', 'malformed',
+            'replay', 'action_failure', 'scope_switch', 'global_pressure',
+            'network_risk', 'trust_credit', 'principal_credit',
+        ], 0));
+        self::assertSame(100 + intdiv(1000 * 220, 1000), $scorer->score(100, $vector, $weights));
+    }
 }

@@ -12,6 +12,7 @@ pub mod breaker;
 pub mod calibration;
 pub mod context;
 pub mod event;
+pub mod hysteresis;
 pub mod identity;
 pub mod keys;
 pub mod metrics;
@@ -298,6 +299,7 @@ pub struct RiskEngine<S: RiskStateStore, N: NetworkClassifier> {
     metrics: Metrics,
     current_global_level: AtomicU8,
     enable_global_pressure: bool,
+    hysteresis: crate::hysteresis::ScopeActionHysteresis,
 }
 
 impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
@@ -330,6 +332,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             metrics: Metrics::new(),
             current_global_level: AtomicU8::new(0),
             enable_global_pressure: true,
+            hysteresis: crate::hysteresis::ScopeActionHysteresis::new(),
         }
     }
 
@@ -513,7 +516,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                     base = (base as i32 + bias).clamp(0, 1000) as u16;
                 }
                 let score = compute_score(base, &vector, &self.policy.weights);
-                let mut decision = self.policy.decide(
+                let mut decision = self.policy.decide_with_hysteresis(
                     ctx.scope,
                     score,
                     &vector,
@@ -521,6 +524,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                     global_level,
                     now_ms,
                     cooldown_until_ms,
+                    Some(&self.hysteresis),
                 );
                 self.merge_contributor_reasons(&mut decision, &vector);
                 self.record_decision_metrics(ctx.scope, &decision);
@@ -1227,6 +1231,63 @@ mod tests {
         }
     }
 
+    /// Store alternating boundary scores (449/451) on every observe — the
+    /// engine-level AUDIT #95 wiring check.
+    #[derive(Default)]
+    struct OscillatingStore {
+        calls: AtomicUsize,
+        outcomes: OutcomeLedger,
+    }
+
+    impl RiskStateStore for OscillatingStore {
+        fn observe(&self, _o: &RiskObservation) -> Result<Observed, RiskStoreError> {
+            let n = self.calls.fetch_add(1, Ordering::Relaxed);
+            // source_fast 900 + bad_proof 810/819 -> scores 449/451: the
+            // 450 edge of the Sha18/Sha20 bands (both signals stay below
+            // the hard-deny thresholds).
+            Ok(Observed {
+                vector: SignalVector {
+                    source_fast: 900,
+                    bad_proof: if n.is_multiple_of(2) { 810 } else { 819 },
+                    ..Default::default()
+                },
+                global_level: 0,
+                cooldown_until_ms: 0,
+                is_duplicate: false,
+            })
+        }
+
+        fn register_outcome(
+            &self,
+            decision_id: &str,
+            _scope: u32,
+            _decision_hour: i64,
+            _score: u32,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(self.outcomes.register(decision_id))
+        }
+
+        fn confirm_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<u8, RiskStoreError> {
+            Ok(self.outcomes.confirm(decision_id, legitimate))
+        }
+
+        fn correct_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(self.outcomes.correct(decision_id, legitimate))
+        }
+
+        fn last_global_level(&self) -> u8 {
+            0
+        }
+    }
+
     #[test]
     fn assess_normal_path() {
         let store = MockStore::new(
@@ -1248,6 +1309,28 @@ mod tests {
         let snapshot = engine.metrics().snapshot();
         assert!(snapshot.iter().any(|(k, _)| k == "decisions:1:sha18:1"));
         assert!(snapshot.iter().any(|(k, _)| k == "store:observe:count"));
+    }
+
+    /// AUDIT #95 — engine-level wiring: the engine passes its per-process
+    /// scope-action hysteresis map into the policy, so an oscillating
+    /// boundary score (449/451/449…) yields a STABLE action instead of a
+    /// flip-flopping challenge profile.
+    #[test]
+    fn scope_action_hysteresis_stabilizes_oscillating_boundary_scores() {
+        let engine = RiskEngine::new(OscillatingStore::default(), classifier(), policy(), keys());
+        for i in 0..8 {
+            let decision = engine.assess_pre_issue(context(), None).unwrap();
+            assert_eq!(
+                decision.score,
+                449 + i % 2 * 2,
+                "iteration {i}: the scores must oscillate at the 450 edge"
+            );
+            assert_eq!(
+                decision.action,
+                RiskAction::Sha18,
+                "iteration {i}: the oscillating boundary score must not flip the profile"
+            );
+        }
     }
 
     #[test]

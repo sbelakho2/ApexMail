@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::action::RiskAction;
+use crate::hysteresis::ScopeActionHysteresis;
 use crate::resources::ResourcePressure;
 use crate::score::RiskWeights;
 use crate::signals::SignalVector;
@@ -284,11 +285,10 @@ impl RiskPolicy {
     /// Full decision: band action, clamped to the scope minimum and the
     /// global floor, then hard overrides with reasons.
     ///
-    /// Argon re-escalation order: `action = strongest(band, minimum,
-    /// floor)` FIRST; THEN, when the FINAL action is Argon and the argon
-    /// capacity is below 300, the action steps UP to `StepUp` — the
-    /// capacity check is LAST, so floors/minimum can never reintroduce
-    /// Argon after a demotion.
+    /// Convenience wrapper without the scope-action hysteresis map (the
+    /// plain band mapping — byte-identical with the pre-audit-#95
+    /// behavior); the engine uses
+    /// [`RiskPolicy::decide_with_hysteresis`].
     #[allow(clippy::too_many_arguments)]
     pub fn decide(
         &self,
@@ -300,7 +300,49 @@ impl RiskPolicy {
         now_ms: u64,
         cooldown_until_ms: u64,
     ) -> RiskDecision {
-        let band_action = RiskAction::action_for_score(score);
+        self.decide_with_hysteresis(
+            scope,
+            score,
+            s,
+            r,
+            global_level,
+            now_ms,
+            cooldown_until_ms,
+            None,
+        )
+    }
+
+    /// Full decision: band action (with enter/exit hysteresis when the
+    /// engine's per-process scope map is passed), clamped to the scope
+    /// minimum and the global floor, then hard overrides with reasons.
+    ///
+    /// Argon re-escalation order: `action = strongest(band, minimum,
+    /// floor)` FIRST; THEN, when the FINAL action is Argon and the argon
+    /// capacity is below 300, the action steps UP to `StepUp` — the
+    /// capacity check is LAST, so floors/minimum can never reintroduce
+    /// Argon after a demotion.
+    ///
+    /// Hysteresis (audit #95): with `hysteresis` the band selection uses
+    /// the scope's previous action — escalate to the next band only at its
+    /// ENTER threshold (upper + 10), de-escalate only below its EXIT
+    /// threshold (lower − 10); fresh scopes and StepUp/Deny use the plain
+    /// mapping. The map stores the SCORE-selected action, so hard
+    /// overrides never poison the profile. `None` keeps the plain band
+    /// mapping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_with_hysteresis(
+        &self,
+        scope: u32,
+        score: u16,
+        s: &SignalVector,
+        r: &ResourcePressure,
+        global_level: u8,
+        now_ms: u64,
+        cooldown_until_ms: u64,
+        hysteresis: Option<&ScopeActionHysteresis>,
+    ) -> RiskDecision {
+        let plain = RiskAction::action_for_score(score);
+        let band_action = hysteresis.map_or(plain, |h| h.select(scope, score, plain, now_ms));
         let minimum = self.minimum(scope);
         let floor = self.global_floors[(global_level as usize).min(4)];
         let mut action = strongest(band_action, minimum, floor);
@@ -1031,5 +1073,90 @@ mod tests {
         assert_eq!(json["retry_after_ms"], Value::Null);
         assert_eq!(json["band"], 5);
         assert!(json["reasons"].is_array());
+    }
+
+    /// AUDIT #95 — the policy-level wiring: an oscillating boundary score
+    /// (449/451/449…) with the engine's hysteresis map yields a STABLE
+    /// action (no flip-flop), while the plain `decide` (no map) keeps the
+    /// pre-audit mapping.
+    #[test]
+    fn hysteresis_stabilizes_oscillating_boundary_scores() {
+        let p = policy();
+        let h = ScopeActionHysteresis::new();
+        let now = 1_700_000_000_000;
+        let mut actions = Vec::new();
+        for (i, score) in [449u16, 451, 449, 451, 449, 451].iter().enumerate() {
+            let d = p.decide_with_hysteresis(
+                1,
+                *score,
+                &zero_vector(),
+                &healthy(),
+                0,
+                now + i as u64,
+                0,
+                Some(&h),
+            );
+            actions.push(d.action);
+        }
+        assert_eq!(
+            actions,
+            vec![RiskAction::Sha18; 6],
+            "an oscillating boundary score must not flip the challenge profile"
+        );
+
+        // The plain decide (no map) still flips at the boundary: the
+        // hysteresis is only active on the engine's decision path.
+        assert_eq!(
+            p.decide(1, 449, &zero_vector(), &healthy(), 0, now, 0)
+                .action,
+            RiskAction::Sha18
+        );
+        assert_eq!(
+            p.decide(1, 451, &zero_vector(), &healthy(), 0, now, 0)
+                .action,
+            RiskAction::Sha20
+        );
+    }
+
+    /// AUDIT #95 — hysteresis never violates the scope minimum or the
+    /// global floor (the clamps apply AFTER the band selection).
+    #[test]
+    fn hysteresis_never_violates_minimum_or_floor() {
+        let p = policy();
+        for scope in [1u32, 2, 3] {
+            let h = ScopeActionHysteresis::new();
+            let mut now = 1_700_000_000_000;
+            for score in (0..=1000u16).step_by(25) {
+                let d = p.decide_with_hysteresis(
+                    scope,
+                    score,
+                    &zero_vector(),
+                    &healthy(),
+                    0,
+                    now,
+                    0,
+                    Some(&h),
+                );
+                assert!(
+                    d.action.rank() >= p.minimum(scope).rank(),
+                    "scope {scope} score {score} violated its minimum"
+                );
+                let d = p.decide_with_hysteresis(
+                    scope,
+                    score,
+                    &zero_vector(),
+                    &healthy(),
+                    3,
+                    now + 1,
+                    0,
+                    Some(&h),
+                );
+                assert!(
+                    d.action.rank() >= RiskAction::Sha20.rank(),
+                    "scope {scope} score {score} violated the global floor"
+                );
+                now += 2;
+            }
+        }
     }
 }

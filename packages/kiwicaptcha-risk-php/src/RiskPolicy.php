@@ -156,13 +156,22 @@ final class RiskPolicy
     }
 
     /**
-     * Full decision: band action, clamped to the scope minimum and the
-     * global floor, then hard overrides with reasons.
+     * Full decision: band action (with enter/exit hysteresis when the
+     * engine's per-process scope map is passed), clamped to the scope
+     * minimum and the global floor, then hard overrides with reasons.
      *
      * Argon re-escalation ordering: ladder → strongest(minimum, floor) →
      * capacity — the argon-capacity check is the LAST step, so the final
      * floor/minimum re-clamp can never reintroduce Argon. A final Argon
      * action with argonCapacity < 300 escalates to StepUp.
+     *
+     * Hysteresis (audit #95): with $hysteresis the band selection uses the
+     * scope's previous action — escalate to the next band only at its
+     * ENTER threshold (upper + 10), de-escalate only below its EXIT
+     * threshold (lower − 10); fresh scopes and StepUp/Deny use the plain
+     * mapping. The map stores the SCORE-selected action, so hard overrides
+     * never poison the profile. Passing null (the default) keeps the plain
+     * band mapping, byte-identical with the previous behavior.
      *
      * Reasons: policy override reasons first, then the top signal
      * contributors (contribution = (v * w) / 1000, sorted by contribution
@@ -178,8 +187,10 @@ final class RiskPolicy
         int $globalLevel,
         int $nowMs,
         int $cooldownUntilMs = 0,
+        ?ScopeActionHysteresis $hysteresis = null,
     ): RiskDecision {
-        $bandAction = RiskAction::actionForScore($score);
+        $plain = RiskAction::actionForScore($score);
+        $bandAction = $hysteresis !== null ? $hysteresis->select($scope, $score, $plain, $nowMs) : $plain;
         $minimum = $this->minimum($scope);
         $floor = $this->globalFloors[min(4, max(0, $globalLevel))] ?? RiskAction::Allow;
         $action = $this->strongest($bandAction, $minimum, $floor);

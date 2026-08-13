@@ -12,6 +12,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\UnknownScopeException;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
+use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\StorageInterface;
@@ -38,7 +39,10 @@ use Symfony\Component\HttpFoundation\Response;
  * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
  *
  * Hardening order: NARROW HTTP first (audit #77/#65: non-POST stays 405 —
- * an OPTIONS preflight alone never authorizes anything; Content-Encoding
+ * an OPTIONS preflight alone never authorizes anything; HTTP FRAMING is
+ * rejected before any body is read — audit #83: a request carrying BOTH
+ * Content-Length and Transfer-Encoding, or a duplicate Content-Length, is
+ * request-smuggling ambiguity and gets 400 FRAMING_REJECTED; Content-Encoding
  * other than identity and Content-Type other than application/json are
  * rejected with 415 before any body is read — no decompression bombs, no
  * form-encoded smuggling), then the query-parameter and JSON-field audit
@@ -62,8 +66,12 @@ use Symfony\Component\HttpFoundation\Response;
  * denial already scored the evidence, so NO further rate-limit event is
  * recorded — double-counting removed; an escalated action raises the
  * difficulty of the issued challenge, an unknown scope in 'reject' mode
- * returns 429 RISK_DENIED without issuing), then issuance (every minted
- * challenge increments the atomic issuance-rate counter used by the
+ * returns 429 RISK_DENIED without issuing), then the PER-SCOPE issuance cap
+ * (audit #89: when risk.max_challenges_per_scope_per_minute is set, the
+ * atomic {kiwi:<ns>}:issuance:<scope>:<minute> fixed-window counter refuses
+ * 429 SCOPE_LIMITED beyond the cap — a public site key + claimed origin can
+ * no longer create unlimited billed work per scope), then issuance (every
+ * minted challenge increments the atomic issuance-rate counter used by the
  * resource-pressure provider and is admitted into the bounded
  * outstanding-challenge counters — a cap refusal discards the minted record
  * and returns the risk-denied 429).
@@ -80,8 +88,14 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final class ChallengeController
 {
-    /** Maximum request-binding length (mirrors the core scope bound). */
-    private const MAX_REQUEST_BINDING_BYTES = 128;
+    /**
+     * The bundle's identifier charset (audit #96): scope/tenant identifiers
+     * and request bindings may only carry these characters (1..128 — the
+     * ceiling is embedded in the pattern). Stricter than the core's "no '|'"
+     * shape rule — an identifier outside the charset is refused before it
+     * can be signed into a challenge.
+     */
+    private const IDENTIFIER_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
 
     /** The ONLY JSON fields the challenge POST accepts (audit #72). */
     private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding'];
@@ -101,6 +115,7 @@ final class ChallengeController
         private readonly bool $enforceOrigin = false,
         private readonly ?ClientIpResolver $clientIpResolver = null,
         private readonly ?string $publicBaseUrl = null,
+        private readonly ?ScopeIssuanceCap $scopeIssuanceCap = null,
     ) {
     }
 
@@ -119,6 +134,23 @@ final class ChallengeController
             $response->headers->set('Allow', 'POST');
 
             return $response;
+        }
+
+        // HTTP FRAMING (audit #83): a request carrying BOTH Content-Length
+        // and Transfer-Encoding — or a DUPLICATE Content-Length — is
+        // request-smuggling ambiguity: different intermediaries will frame
+        // the body differently, so the endpoint refuses before any body is
+        // read. Symfony's HeaderBag keeps every raw header value
+        // (headers->all()), so a crafted duplicate survives into the
+        // controller; at the wire level the proxy guidance (README) rejects
+        // the ambiguity first.
+        $contentLengths = $request->headers->all('content-length');
+        $transferEncodings = $request->headers->all('transfer-encoding');
+        if (\count($contentLengths) > 1 || ($contentLengths !== [] && $transferEncodings !== [])) {
+            return $this->privateJson(
+                ['error' => ['code' => 'FRAMING_REJECTED', 'message' => 'The request carries ambiguous HTTP framing (Content-Length and Transfer-Encoding together, or a duplicate Content-Length).']],
+                Response::HTTP_BAD_REQUEST,
+            );
         }
 
         // NO DECOMPRESSION BOMBS (audit #65): a request body that was
@@ -265,22 +297,36 @@ final class ChallengeController
         }
         $scope = isset($payload['scope']) ? (string) $payload['scope'] : 'default';
 
+        // IDENTIFIER VALIDATION (audit #96): scope/tenant identifiers and
+        // request bindings must match `[A-Za-z0-9._:-]+` with the 128-char
+        // ceiling BEFORE they reach the issuer — a malformed identifier can
+        // never be signed into a challenge, and separator/control bytes can
+        // never smuggle into stored records or the canonical payload. The
+        // verification side enforces equality between the record's signed
+        // values and what the form POST carries, so a challenge minted under
+        // a valid identifier is never redeemable under a different one.
+        if (!preg_match(self::IDENTIFIER_PATTERN, $scope)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_SCOPE', 'message' => 'The scope must be 1-128 characters of [A-Za-z0-9._:-].']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+
         // Transaction binding (audit #41): the widget sends the
         // request_binding field it carries (data-kiwi-request-binding); when
         // absent, the configured static risk.request_binding applies. The
-        // value is validated here (1..128 bytes, no '|' — the same shape
-        // rule as the scope) BEFORE it reaches the issuer, so a malformed
-        // binding can never be signed into a challenge; the verification
-        // side enforces equality between the record's signed binding and the
-        // binding the form POST carries.
+        // value is validated here (1..128 bytes, the audit #96 identifier
+        // charset — the same shape rule as the scope) BEFORE it reaches the
+        // issuer, so a malformed binding can never be signed into a
+        // challenge; the verification side enforces equality between the
+        // record's signed binding and the binding the form POST carries.
         $requestBinding = isset($payload['request_binding']) && $payload['request_binding'] !== null
             ? (string) $payload['request_binding']
             : $this->defaultRequestBinding;
         if ($requestBinding !== null && $requestBinding !== '') {
-            $bindingLen = \strlen($requestBinding);
-            if ($bindingLen < 1 || $bindingLen > self::MAX_REQUEST_BINDING_BYTES || \str_contains($requestBinding, '|')) {
+            if (!preg_match(self::IDENTIFIER_PATTERN, $requestBinding)) {
                 return $this->privateJson(
-                    ['error' => ['code' => 'INVALID_REQUEST_BINDING', 'message' => 'The request binding must be 1-128 characters and must not contain "|".']],
+                    ['error' => ['code' => 'INVALID_REQUEST_BINDING', 'message' => 'The request binding must be 1-128 characters of [A-Za-z0-9._:-].']],
                     Response::HTTP_UNPROCESSABLE_ENTITY,
                 );
             }
@@ -427,6 +473,27 @@ final class ChallengeController
                 }
                 $profile = $this->risk->decisionProfile($decision);
             }
+        }
+
+        // PER-SCOPE ISSUANCE CAP (audit #89): when
+        // risk.max_challenges_per_scope_per_minute is configured, the
+        // atomic {kiwi:<ns>}:issuance:<scope>:<minute> fixed-window counter
+        // (INCR + EXPIRE 60 in one Lua script) refuses 429 SCOPE_LIMITED
+        // beyond the cap — the public site key + claimed origin can no
+        // longer create unlimited billed verification work per scope. The
+        // check CONSUMES the slot it admits (a denial below is not
+        // double-counted; a challenge minted and later discarded by the
+        // outstanding race still counted — fail-safe direction). A Redis
+        // failure propagates (fail closed: no challenge without a checked
+        // scope bound).
+        if ($this->scopeIssuanceCap !== null && !$this->scopeIssuanceCap->allow($scope)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'SCOPE_LIMITED', 'message' => 'Too many challenges issued for this scope. Try again later.']],
+                Response::HTTP_TOO_MANY_REQUESTS,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
         }
 
         try {

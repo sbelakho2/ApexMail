@@ -417,6 +417,40 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame(1, $store->calls, 'reassess must still run the full pipeline against the store');
     }
 
+    /**
+     * AUDIT #95 — engine-level wiring: the engine passes its per-process
+     * scope-action hysteresis map into the policy, so an oscillating
+     * boundary score (449/451/449…) yields a STABLE action instead of a
+     * flip-flopping challenge profile.
+     */
+    public function testScopeActionHysteresisStabilizesBoundaryScore(): void
+    {
+        $store = new class extends RiskStateStoreStub {
+            public int $calls = 0;
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                $this->calls++;
+                // source_fast 900 + bad_proof 810/819 -> scores 449/451:
+                // the 450 edge of the Sha18/Sha20 bands (both signals stay
+                // below the hard-deny thresholds).
+                return SignalVector::fromArray([
+                    'source_fast' => 900,
+                    'bad_proof' => $this->calls % 2 === 1 ? 810 : 819,
+                ]);
+            }
+        };
+        $engine = $this->engine($store);
+        for ($i = 0; $i < 8; $i++) {
+            $decision = $engine->assess($this->context());
+            self::assertSame(
+                \KiwiCaptcha\Risk\RiskAction::Sha18,
+                $decision->action,
+                sprintf('iteration %d: the oscillating boundary score must not flip the profile', $i)
+            );
+        }
+    }
+
     public function testAssessIsAliasOfAssessPreIssue(): void
     {
         $limiter = new ProcessEmergencyCap(processPerSecond: 1);

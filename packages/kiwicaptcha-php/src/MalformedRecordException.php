@@ -11,9 +11,11 @@ namespace KiwiCaptcha;
  * Thrown on any structural violation the Rust `ChallengeRecord` serde schema
  * rejects — unknown keys (deny_unknown_fields), wrong types, out-of-range or
  * negative integers, oversized strings, algorithm aliases, unexpected nulls,
- * duplicate `binding_tag`/`ip_hash` aliases, missing required fields, and
- * JSON arrays in place of objects. Storage backends catch it and treat the
- * record as absent; callers of `fromArray()` can catch it explicitly.
+ * duplicate `binding_tag`/`ip_hash` aliases, missing required fields, JSON
+ * arrays in place of objects, and identifier-alphabet violations for the
+ * deployment-bound identifiers (audit #96). Storage backends catch it and
+ * treat the record as absent; callers of `fromArray()` can catch it
+ * explicitly.
  */
 final class MalformedRecordException extends \RuntimeException
 {
@@ -73,6 +75,21 @@ final class MalformedRecordException extends \RuntimeException
         $shown = \is_string($value) ? $value : get_debug_type($value);
 
         return new self(sprintf('record algorithm must be exactly "sha256" or "argon2id", got "%s"', $shown));
+    }
+
+    /**
+     * Audit #96: a deployment-bound identifier (region, request_binding,
+     * issuer) violated the narrow identifier alphabet `[A-Za-z0-9._:-]+`
+     * or its length cap — e.g. Unicode, whitespace, invisible characters,
+     * empty strings, or the canonical `|` separator.
+     */
+    public static function invalidIdentifier(string $field): self
+    {
+        return new self(sprintf(
+            'record field "%s" must be 1-%d characters of [A-Za-z0-9._:-]',
+            $field,
+            $field === 'region' ? 64 : 128,
+        ));
     }
 
     public static function unexpectedNull(string $field): self

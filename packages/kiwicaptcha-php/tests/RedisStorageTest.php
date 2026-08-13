@@ -177,7 +177,7 @@ final class RedisStorageTest extends TestCase
 
         $data = json_decode((string) $raw, true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($data);
-        // The stored JSON is the shared language-neutral schema — the 21
+        // The stored JSON is the shared language-neutral schema — the 22
         // canonical ChallengeRecord keys (identical to the Rust serde keys,
         // including attempts_used (Rust: #[serde(default)]) so a PHP-written
         // record is complete for a Rust reader) WRAPPED with the two storage
@@ -189,13 +189,14 @@ final class RedisStorageTest extends TestCase
         // dual-key record unreadable by Rust (caught by the live
         // cross-language round trip). Round 9 added policy_version and
         // request_binding (audits #42/#41); round 10 adds issuer (audit
-        // #67) — 21 base keys + 2 runtime fields = 23 stored keys.
+        // #67); round 11 adds kid (audit #91) — 22 base keys + 2 runtime
+        // fields = 24 stored keys.
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
-            'issuer', 'state', 'consumed_result',
+            'issuer', 'kid', 'state', 'consumed_result',
         ], array_keys($data));
         self::assertSame('redis-nonce-1', $data['nonce']);
         self::assertSame('sha256', $data['algorithm']);
@@ -204,14 +205,16 @@ final class RedisStorageTest extends TestCase
         self::assertSame('abc123', $data['binding_tag']);
         self::assertArrayNotHasKey('ip_hash', $data, 'legacy ip_hash key must NOT be emitted alongside binding_tag');
         self::assertSame(2, $data['protocol_version']);
-        self::assertArrayHasKey('region', $data, 'region is part of the 21-key cross-language schema');
+        self::assertArrayHasKey('region', $data, 'region is part of the 22-key cross-language schema');
         self::assertNull($data['region'], 'an unbound record carries region: null (byte parity with Rust serde)');
-        self::assertArrayHasKey('policy_version', $data, 'policy_version is part of the 21-key cross-language schema (audit #42)');
+        self::assertArrayHasKey('policy_version', $data, 'policy_version is part of the 22-key cross-language schema (audit #42)');
         self::assertSame(1, $data['policy_version'], 'the default security-policy epoch is 1');
-        self::assertArrayHasKey('request_binding', $data, 'request_binding is part of the 21-key cross-language schema (audit #41)');
+        self::assertArrayHasKey('request_binding', $data, 'request_binding is part of the 22-key cross-language schema (audit #41)');
         self::assertNull($data['request_binding'], 'an unbound record carries request_binding: null (byte parity with Rust serde)');
-        self::assertArrayHasKey('issuer', $data, 'issuer is part of the 21-key cross-language schema (audit #67)');
+        self::assertArrayHasKey('issuer', $data, 'issuer is part of the 22-key cross-language schema (audit #67)');
         self::assertNull($data['issuer'], 'an unbound record carries issuer: null (byte parity with Rust serde)');
+        self::assertArrayHasKey('kid', $data, 'kid is part of the 22-key cross-language schema (audit #91)');
+        self::assertSame(1, $data['kid'], 'the default signing key id is 1');
         self::assertSame('pending', $data['state'], 'stored records start in the pending state (audit #74)');
         self::assertNull($data['consumed_result'], 'a pending record has no consumed_result (audit #74)');
     }

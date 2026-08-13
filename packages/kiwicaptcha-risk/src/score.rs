@@ -402,4 +402,75 @@ mod tests {
             assert_eq!(score(100, &vector, &w), before);
         }
     }
+
+    /// AUDIT #88 (a) — ASYMMETRIC TRUST: the exact-IP (source) signals must
+    /// outweigh the subnet (network) signals in the scorer weights, so one
+    /// attacker IP is always punished harder than the /64 aggregate it
+    /// shares. Pinned on the contract defaults; a future symmetric-weight
+    /// regression fails here.
+    #[test]
+    fn source_weights_outweigh_subnet_weights() {
+        let w = RiskWeights::default();
+        assert!(
+            w.source_fast > w.subnet_fast,
+            "source_fast (exact-IP burst) must outweigh subnet_fast (network burst)"
+        );
+        assert!(
+            w.bad_proof > w.subnet_fast,
+            "bad_proof (exact-IP invalid proofs) must outweigh the subnet effect"
+        );
+        // The CONTRIBUTION-level asymmetry: for the same signal value the
+        // exact-IP channel contributes strictly more score than the subnet
+        // aggregate channel.
+        let source_only = SignalVector {
+            source_fast: 500,
+            ..Default::default()
+        };
+        let subnet_only = SignalVector {
+            subnet_fast: 500,
+            ..Default::default()
+        };
+        assert!(
+            score(0, &source_only, &w) > score(0, &subnet_only, &w),
+            "an identical exact-IP signal must contribute more than the same network aggregate signal"
+        );
+    }
+
+    /// AUDIT #88 (b) — ABSOLUTE USER-VISIBLE CAP: the score is clamped to
+    /// 0..1000, so a poisoned source (every signal at saturation) reaches
+    /// the cap but can NEVER exceed it — there is no unbounded punishment
+    /// mode.
+    #[test]
+    fn saturated_source_reaches_the_cap_but_never_exceeds_it() {
+        let w = RiskWeights::default();
+        let saturated = SignalVector {
+            source_fast: 1000,
+            source_slow: 1000,
+            subnet_fast: 1000,
+            issue_debt: 1000,
+            bad_proof: 1000,
+            malformed: 1000,
+            replay: 1000,
+            action_failure: 1000,
+            scope_switch: 1000,
+            global_pressure: 1000,
+            network_risk: 1000,
+            trust_credit: 0,
+            principal_credit: 0,
+        };
+        let cap = score(100, &saturated, &w);
+        assert_eq!(cap, 1000, "a fully saturated source must reach the cap");
+        assert!(cap <= 1000, "the score must never exceed the 0..1000 cap");
+
+        // Hundreds of invalid proofs alone: bad_proof saturates at 1000 and
+        // the contribution is bounded by the weight (220/1000 of it).
+        let bad_only = SignalVector {
+            bad_proof: 1000,
+            ..Default::default()
+        };
+        assert_eq!(
+            score(100, &bad_only, &w),
+            100 + weighted(1000, w.bad_proof) as u16
+        );
+    }
 }

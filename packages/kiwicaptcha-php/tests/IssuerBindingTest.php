@@ -87,19 +87,21 @@ final class IssuerBindingTest extends TestCase
         self::assertNull(ChallengeRecord::fromArray($data)->issuer);
     }
 
-    public function testWireKeySetIncludesIssuerAsTheTwentyFirstKey(): void
+    public function testWireKeySetIncludesIssuerAndKidAsTheFinalKeys(): void
     {
         $keys = ChallengeRecord::WIRE_KEYS;
 
-        self::assertCount(21, $keys);
-        self::assertSame('issuer', $keys[20], 'issuer is the final wire key, appended after request_binding');
+        self::assertCount(22, $keys);
+        self::assertSame('issuer', $keys[20], 'issuer is the penultimate wire key, appended after request_binding');
+        self::assertSame('kid', $keys[21], 'kid is the final wire key (audit #91)');
         self::assertSame($keys, \array_keys($this->issue('prod')[1]->toArray()));
     }
 
-    public function testIssuerIsTheFinalFieldOfTheSignedCanonicalPayload(): void
+    public function testIssuerIsThePenultimateFieldOfTheSignedCanonicalPayload(): void
     {
-        // Round-10 canonical: `...|min_duration_ms|region|policy_version|
-        // request_binding|issuer` — the issuer is the FINAL segment.
+        // Round-11 canonical: `...|min_duration_ms|region|policy_version|
+        // request_binding|issuer|kid` — kid (default 1) is the FINAL
+        // segment, appended AFTER the issuer.
         [, $record] = $this->issue('staging');
 
         $canonical = Issuer::canonicalPayload(
@@ -119,15 +121,17 @@ final class IssuerBindingTest extends TestCase
             $record->policyVersion ?? 1,
             $record->requestBinding,
             $record->issuer,
+            $record->kid ?? 1,
         );
-        self::assertStringEndsWith('|staging', $canonical, 'the canonical must end with the issuer segment');
-        self::assertSame('staging', explode('|', $canonical)[16], 'issuer is the 17th (final) canonical field');
+        self::assertStringEndsWith('|staging|1', $canonical, 'the canonical must end with the issuer segment then the kid');
+        self::assertSame('staging', explode('|', $canonical)[16], 'issuer is the 17th canonical field');
+        self::assertSame('1', explode('|', $canonical)[17], 'kid is the 18th (final) canonical field');
 
         $signature = substr($record->challenge, strrpos($record->challenge, '.') + 1);
         self::assertSame(
             Issuer::signPayloadV2($canonical, Vectors::SECRET),
             $signature,
-            'the v2 signature covers the issuer — two deployments issue different signatures',
+            'the v2 signature covers the issuer and the kid — two deployments issue different signatures',
         );
 
         // Two records issued under different deployments carry different

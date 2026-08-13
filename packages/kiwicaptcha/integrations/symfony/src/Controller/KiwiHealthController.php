@@ -36,12 +36,13 @@ use Symfony\Component\HttpFoundation\Response;
  *         ABSENT the binary's own configuration is authoritative.
  *      4. the MEMORY-BUDGET invariant holds (audit #68, only when
  *         risk.container_memory_mib is configured):
- *         `argon2_max_concurrent_verifications × max-adaptive-profile-memory
- *         (64 MiB — the risk profiles' argon64 m_kib 65536 KiB) + 256 MiB
- *         headroom <= container_memory_mib`. A violated invariant refuses
- *         startup (503 memory_budget_invariant): the configured container
- *         cannot hold the worst-case memory-hard verification load plus
- *         headroom, so the process must not serve traffic. When
+ *         `argon2_max_concurrent_verifications × the FIXED Argon verification
+ *         envelope (risk.argon_verification_memory_kib — the risk ladder's
+ *         worst-case per-verification memory, audit #79; default 16384 KiB)
+ *         + 256 MiB headroom <= container_memory_mib`. A violated invariant
+ *         refuses startup (503 memory_budget_invariant): the configured
+ *         container cannot hold the worst-case memory-hard verification
+ *         load plus headroom, so the process must not serve traffic. When
  *         container_memory_mib is null (or the concurrency cap is 0 =
  *         unlimited) the check is skipped (documented — the invariant is
  *         only meaningful with a finite cap; an unlimited cap needs an
@@ -102,6 +103,15 @@ final class KiwiHealthController
      *                                                   memory_mib — null
      *                                                   (default) skips the
      *                                                   invariant
+     * @param int                        $argonEnvelopeMemoryKib the FIXED
+     *                                                   adaptive verification
+     *                                                   memory envelope
+     *                                                   (risk.argon_verification_
+     *                                                   memory_kib, audit #79)
+     *                                                   — the worst-case
+     *                                                   per-verification
+     *                                                   memory of the risk
+     *                                                   ladder, risk-independent
      */
     public function __construct(
         private readonly string $secretKey,
@@ -111,6 +121,7 @@ final class KiwiHealthController
         private $nowMs = null,
         private readonly int $argonConcurrency = 0,
         private readonly ?int $containerMemoryMib = null,
+        private readonly int $argonEnvelopeMemoryKib = 16384,
     ) {
     }
 
@@ -172,13 +183,18 @@ final class KiwiHealthController
     }
 
     /**
-     * Max adaptive-profile memory in MiB (audit #68): the risk profiles'
-     * largest m_kib is 65536 KiB = 64 MiB (ChallengeProfile::argon64) —
-     * read from the core's profile constant, never hard-coded.
+     * Max adaptive-profile memory in MiB (audit #68/#79): the risk ladder's
+     * largest per-verification memory is the FIXED verification envelope
+     * (risk.argon_verification_memory_kib) — audit #79 removed the
+     * escalating 16/32/64 MiB argon profiles, so the worst case is the
+     * single configured envelope, independent of the risk decision. Defaults
+     * to the classic argon64 65536 KiB ceiling when the knob is absent.
      */
     private function maxProfileMib(): int
     {
-        return (int) ceil(ChallengeProfile::argon64()->mKib / 1024);
+        $envelope = max(ChallengeProfile::argon64()->mKib, $this->argonEnvelopeMemoryKib);
+
+        return (int) ceil($envelope / 1024);
     }
 
     /**

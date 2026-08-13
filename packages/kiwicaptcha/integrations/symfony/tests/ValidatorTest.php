@@ -942,4 +942,59 @@ final class ValidatorTest extends TestCase
         self::assertCount(1, $violations);
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'consumed-without-result must stay indeterminate (temporary_unavailable)');
     }
+
+    // ── Round 11: QUIC IP-migration policy (audit #92) ─────────────────────
+
+    /**
+     * Audit #92 documentation test: the STRICT binding stays — a challenge
+     * bound to IP A verified from IP B fails closed with IpMismatch at the
+     * core level (the collapsed invalid_or_expired through the validator).
+     * The documented migration policy (README): exact IP -> normal; same
+     * network -> acceptable with a risk penalty (the engine's subnet
+     * dimension); different network -> fresh challenge or stronger
+     * request_binding/session check; mobile clients prefer request_binding
+     * over IP. The IP binding itself is a nonce-bound HMAC tag, never a
+     * stable identifier.
+     */
+    public function testIpMismatchFailsClosedDocumentingTheQuicMigrationPolicy(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // Same exact IP: valid.
+        self::assertTrue($verifier->verify($token, self::SECRET, 'login', '198.51.100.7')->isOk(), 'the exact bound IP verifies');
+        // A different network: the nonce-bound tag cannot match -> IpMismatch
+        // (fail closed, one-shot — the challenge is burned by the attempt).
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '203.0.113.9');
+        self::assertFalse($outcome->isOk());
+        self::assertSame(\KiwiCaptcha\VerifyError::IpMismatch, $outcome->error, 'the strict IP binding must fail closed on a different source');
+
+        // Through the validator: the same mismatch collapses to
+        // invalid_or_expired (audit #57) — the client never learns WHICH
+        // check failed (no oracle).
+        $challenge2 = $issuer->issue('login', '198.51.100.7');
+        usleep(((int) $challenge2->minDurationMs + 10) * 1000);
+        $token2 = $this->solveToken($challenge2->prefix, $challenge2->salt, $challenge2->targetBits, $challenge2->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '203.0.113.9']));
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token2;
+        $meta = $engineValidator->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engineValidator->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+    }
 }

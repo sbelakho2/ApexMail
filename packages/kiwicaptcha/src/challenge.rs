@@ -112,7 +112,7 @@ pub enum BindingMode {
 /// binding_tag, issued_at, expires_at, algorithm 'sha256'|'argon2id', m_kib,
 /// t, p, target_bits, salt, prefix, challenge, min_duration_ms, issued_at_ns,
 /// attempts_used optional, protocol_version, region, policy_version,
-/// request_binding, issuer — 21 keys). PoWAlgorithm already serializes
+/// request_binding, issuer, kid — 22 keys). PoWAlgorithm already serializes
 /// lowercase — keep it. Both languages write and read this exact
 /// shape, so a record persisted by PHP can be verified by Rust and vice
 /// versa.
@@ -210,14 +210,31 @@ pub struct ChallengeRecord {
     pub request_binding: Option<String>,
     /// Deployment identity of the ISSUING application (e.g. "auth-gateway",
     /// "signup-eu-1" — audit #67). Signed into the v2 canonical payload (the
-    /// FINAL field) so a challenge minted for one audience cannot be redeemed
-    /// in front of another verifier; a verifier configured with an expected
-    /// issuer rejects records whose issuer differs — or that carry no issuer
-    /// at all (fail closed). The JSON key is ALWAYS present for v2 records —
-    /// `null` when unset — for byte parity with the PHP `toArray()` key set
-    /// (21 keys). Absent in legacy stored records: `#[serde(default)]`.
+    /// field before the FINAL `kid`) so a challenge minted for one audience
+    /// cannot be redeemed in front of another verifier; a verifier configured
+    /// with an expected issuer rejects records whose issuer differs — or that
+    /// carry no issuer at all (fail closed). The JSON key is ALWAYS present
+    /// for v2 records — `null` when unset — for byte parity with the PHP
+    /// `toArray()` key set (22 keys). Absent in legacy stored records:
+    /// `#[serde(default)]`.
     #[serde(default)]
     pub issuer: Option<String>,
+    /// Key identifier of the signing secret this challenge was issued with
+    /// (audit #91). The FINAL v2 canonical field (`|<kid>` after the issuer);
+    /// a verifier configured with a `secrets_by_kid` map selects the signing
+    /// secret by this id and rejects unknown ids with
+    /// [`crate::verify::VerifyError::UnknownKid`] — plus the forward guard: a
+    /// record whose kid exceeds the verifier's newest configured kid is
+    /// rejected even if the key were somehow known, so future-keyed
+    /// challenges never verify on older nodes. The JSON key is ALWAYS
+    /// present (default 1 — the historical single-key deployments), so
+    /// pre-kid records keep verifying unchanged. Shared with the PHP core.
+    #[serde(default = "default_kid")]
+    pub kid: u32,
+}
+
+fn default_kid() -> u32 {
+    1
 }
 
 fn default_policy_version() -> u32 {
@@ -287,11 +304,17 @@ pub struct ChallengeConfig {
     /// metadata, never signed and never sent to the client.
     pub region: Option<String>,
     /// Issuer identity stamped into every issued challenge (audit #67): a
-    /// stable deployment string (e.g. "auth-gateway") signed as the FINAL
-    /// canonical v2 field. A verifier configured with an expected issuer
-    /// rejects records with a different — or missing — issuer
-    /// ([`VerifyError::WrongIssuer`]).
+    /// stable deployment string (e.g. "auth-gateway") signed as the v2
+    /// canonical field before the FINAL `kid`. A verifier configured with an
+    /// expected issuer rejects records with a different — or missing —
+    /// issuer ([`VerifyError::WrongIssuer`]).
     pub issuer: Option<String>,
+    /// Key identifier of the signing secret (audit #91). Stamped into every
+    /// issued record and signed as the FINAL v2 canonical field (`|<kid>`),
+    /// so the verifier can rotate secrets: it picks the signing secret by
+    /// this id from its `secrets_by_kid` map. Default 1 — the historical
+    /// single-key deployments. Must be >= 1.
+    pub kid: u32,
 }
 
 impl ChallengeConfig {
@@ -418,6 +441,21 @@ pub fn now_epoch_micros() -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether `s` is a conforming identifier (audit #96): non-empty and every
+/// byte in `[A-Za-z0-9._:-]`, at most `max_len` bytes.
+///
+/// This is the narrow alphabet shared with the PHP core for `scope`,
+/// `issuer`, `region` and `request_binding` — anything else (Unicode,
+/// spaces, `|`, control bytes, the empty string) is rejected at issuance
+/// ([`SignError`]) and by `validate_record`
+/// ([`crate::verify::VerifyError::MalformedRecord`]).
+pub(crate) fn valid_identifier(s: &str, max_len: usize) -> bool {
+    !s.is_empty()
+        && s.len() <= max_len
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+}
+
 /// The signed challenge string is `base64(canonical) || "." || hex(hmac)`.
 /// The verifier reconstructs the canonical input from the nonce + stored
 /// record and re-checks. We sign a canonical string so the binding is
@@ -435,13 +473,13 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// Protocol v2 canonical input (`protocol_version == 2`): the full parameter
 /// set so no issuance parameter can be tampered with without breaking the
 /// signature:
-/// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer`.
+/// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`.
 /// `region`, `request_binding` and `issuer` render as the EMPTY segment when
-/// unset; `issuer` is the FINAL field (audit #67), appended after
-/// `request_binding`.
+/// unset; `kid` is the FINAL field (audit #91), appended after the issuer
+/// (audit #67).
 pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
     format!(
-        "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         record.nonce,
         record.scope,
         record.binding_tag,
@@ -457,7 +495,8 @@ pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         record.region.as_deref().unwrap_or(""),
         record.policy_version,
         record.request_binding.as_deref().unwrap_or(""),
-        record.issuer.as_deref().unwrap_or("")
+        record.issuer.as_deref().unwrap_or(""),
+        record.kid
     )
 }
 
@@ -596,6 +635,17 @@ pub struct ChallengeCache {
 /// fail). Difficulty is therefore clamped to this ceiling so the auto-tuner
 /// can never issue a challenge the widget cannot solve.
 pub const SOLVER_MAX_TARGET_BITS: u32 = 20;
+
+/// Hard floor on the difficulty (`target_bits`) the VERIFIER accepts in a
+/// signed record (audit #87): 0 would accept a trivially-solvable challenge.
+/// Shared with the PHP core.
+pub const MIN_DIFFICULTY: u32 = 1;
+/// Hard ceiling on the difficulty (`target_bits`) the VERIFIER accepts in a
+/// signed record (audit #87): above the solver ceiling no legitimate widget
+/// can finish. Applied to BOTH algorithms by `validate_record` — Argon2id
+/// issuance stays stricter ([`SOLVER_MAX_ARGON2_TARGET_BITS`]), exactly like
+/// the t=7..=16 verifier-vs-issuer split. Shared with the PHP core.
+pub const MAX_DIFFICULTY: u32 = 20;
 
 /// The maximum counter value any solver may legitimately produce (the widget
 /// caps its search at 5M hashes, both WASM and the pure-JS fallback).
@@ -752,8 +802,8 @@ impl Default for ChallengeCache {
 ///
 /// - `config` — difficulty + secret key.
 /// - `scope` — the auth flow ("login", "signup", "forgot-password", etc.);
-///   must be 1..=128 bytes and must not contain `|` (the canonical payload
-///   separator) — anything else is rejected with [`SignError::InvalidScope`].
+///   must be 1..=128 bytes of `[A-Za-z0-9._:-]` (audit #96) — anything else
+///   is rejected with [`SignError::InvalidScope`].
 /// - `client_ip` — the client's IP address (hashed before storage).
 /// - `now_unix` — current Unix timestamp in seconds (injected for
 ///   testability); used for the signed payload, TTL, and the client-facing
@@ -763,6 +813,11 @@ impl Default for ChallengeCache {
 ///   suffix but the unit is microseconds, shared with PHP), used exclusively
 ///   for server-side minimum-duration enforcement.
 /// - `active_solves` — current number of active solvers (for auto-tuning).
+/// - `request_binding` — the application-supplied transaction binding
+///   (audit #41); when set, must be 1..=128 bytes of `[A-Za-z0-9._:-]`
+///   (audit #96) — anything else is rejected with
+///   [`SignError::InvalidIdentifier`]. `config.region` (<= 64 bytes) and
+///   `config.issuer` (<= 128 bytes) are validated the same way.
 ///
 /// # Deployment note (aggregate DoS)
 ///
@@ -782,8 +837,27 @@ pub fn issue_challenge(
     active_solves: u64,
     request_binding: Option<&str>,
 ) -> Result<Issued, SignError> {
-    if scope.is_empty() || scope.len() > 128 || scope.contains('|') {
+    if !valid_identifier(scope, 128) {
         return Err(SignError::InvalidScope);
+    }
+    // Audit #96: issuer/region/request_binding share the narrow identifier
+    // alphabet; a non-conforming value must never be minted into a record
+    // (the verifier would reject it as malformed — and Unicode/space
+    // identifiers would break the canonical payload's byte-contract).
+    if let Some(issuer) = &config.issuer {
+        if !valid_identifier(issuer, 128) {
+            return Err(SignError::InvalidIdentifier);
+        }
+    }
+    if let Some(region) = &config.region {
+        if !valid_identifier(region, 64) {
+            return Err(SignError::InvalidIdentifier);
+        }
+    }
+    if let Some(binding) = request_binding {
+        if !valid_identifier(binding, 128) {
+            return Err(SignError::InvalidIdentifier);
+        }
     }
     // 32-byte nonce.
     let mut nonce_bytes = [0u8; 32];
@@ -902,6 +976,7 @@ pub fn issue_challenge(
         policy_version: config.policy_version,
         request_binding: request_binding.map(str::to_string),
         issuer: config.issuer.clone(),
+        kid: config.kid,
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key)?;
@@ -999,10 +1074,16 @@ pub enum SignError {
     /// fail rather than fall back to a weak generator.
     #[error("OS cryptographic randomness unavailable")]
     Rng,
-    /// The auth scope must be 1..=128 bytes and must not contain '|' (the
-    /// canonical payload separator).
-    #[error("scope must be 1..=128 bytes and must not contain '|'")]
+    /// The auth scope must be 1..=128 bytes of `[A-Za-z0-9._:-]` (audit #96;
+    /// the historical `|` ban is subsumed — `|` is outside the alphabet).
+    #[error("scope must be 1..=128 bytes of [A-Za-z0-9._:-]")]
     InvalidScope,
+    /// Issuer, region or request_binding must be non-empty and match the
+    /// narrow identifier alphabet `[A-Za-z0-9._:-]` (audit #96) with the
+    /// length caps: issuer <= 128 bytes, request_binding <= 128 bytes,
+    /// region <= 64 bytes.
+    #[error("issuer/region/request_binding must be non-empty and match [A-Za-z0-9._:-] with the length caps (issuer 128, request_binding 128, region 64)")]
+    InvalidIdentifier,
     #[error("Argon2id parameters are invalid (m_kib must be >= 8 * p and <= SOLVER_MAX_ARGON2_M_KIB; for PHP/libsodium cross-verification t must be >= 3 and p == 1 and <= MAX_ARGON_T; argon2_target_bits must be 1..=SOLVER_MAX_ARGON2_TARGET_BITS)")]
     InvalidArgon2Params,
     /// The client IP string could not be parsed as an IPv4 or IPv6 address
@@ -1067,6 +1148,7 @@ mod tests {
     fn issued_challenge_has_correct_difficulty() {
         let config = ChallengeConfig {
             secret_key: "super-secret-key".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             argon2_target_bits: 8,
@@ -1195,6 +1277,7 @@ mod tests {
     fn scope_length_ceiling_is_enforced() {
         let config = ChallengeConfig {
             secret_key: "0123456789abcdef0123456789abcdef".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1265,6 +1348,7 @@ mod tests {
     fn each_challenge_has_unique_nonce() {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1309,6 +1393,7 @@ mod tests {
     fn auto_tune_adjusts_target_bits() {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1353,6 +1438,7 @@ mod tests {
         // a static configuration — issuance rejects it (parity).
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1392,6 +1478,7 @@ mod tests {
         // stays as-is (previously it was clamped UP to auto_tune_min_bits).
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1424,6 +1511,7 @@ mod tests {
         let issued = issue_challenge(
             &ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
+                kid: 1,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 65_536,
                 argon2_target_bits: 8,
@@ -1466,6 +1554,7 @@ mod tests {
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1515,6 +1604,7 @@ mod tests {
     fn challenge_cache_hit_returns_same_challenge() {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1553,6 +1643,7 @@ mod tests {
     fn challenge_cache_miss_on_different_scope() {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1588,6 +1679,7 @@ mod tests {
     fn profile_base_config() -> ChallengeConfig {
         ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -1652,6 +1744,7 @@ mod tests {
             let mut ctx = crate::verify::VerifyContext {
                 record: &mut record,
                 secret_key: "test-key-16-bytes!",
+                secrets_by_kid: None,
                 counter,
                 duration_ms: 5000,
                 now_unix: 1_000_001,
@@ -1702,6 +1795,7 @@ mod tests {
         let mut ctx = crate::verify::VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: 1_000_001,
@@ -1754,7 +1848,7 @@ mod tests {
         .unwrap();
         assert_eq!(unbound.record.region, None);
         // The JSON key is ALWAYS present (null when unbound) — PHP toArray()
-        // parity, 18 keys.
+        // parity, 22 keys.
         let value = serde_json::to_value(&issued.record).unwrap();
         assert_eq!(value["region"], "eu-west-1");
         let unbound_value = serde_json::to_value(&unbound.record).unwrap();
@@ -1793,21 +1887,25 @@ mod tests {
         .unwrap();
         assert_eq!(unbound.record.issuer, None);
         // The JSON key is ALWAYS present (null when unbound) — PHP toArray()
-        // parity, 21 keys.
+        // parity, 22 keys.
         let value = serde_json::to_value(&issued.record).unwrap();
         assert_eq!(value["issuer"], "auth-gw-eu");
         let unbound_value = serde_json::to_value(&unbound.record).unwrap();
         assert_eq!(unbound_value["issuer"], serde_json::Value::Null);
         assert!(unbound_value.as_object().unwrap().contains_key("issuer"));
 
-        // The issuer is the FINAL canonical v2 field (audit #67): appended
-        // after request_binding, empty when unset.
+        // The issuer is the v2 canonical field before the FINAL kid (audits
+        // #67/#91): appended after request_binding, empty when unset; the
+        // canonical always ends with `|<kid>`.
         let canonical = crate::challenge::canonical_signing_input_v2(&issued.record);
-        assert!(canonical.ends_with("|auth-gw-eu"), "canonical: {canonical}");
+        assert!(
+            canonical.ends_with("|auth-gw-eu|1"),
+            "canonical: {canonical}"
+        );
         let unbound_canonical = crate::challenge::canonical_signing_input_v2(&unbound.record);
         assert!(
-            unbound_canonical.ends_with("||"),
-            "unbound issuer renders as the empty final segment: {unbound_canonical}"
+            unbound_canonical.ends_with("||1"),
+            "unbound issuer renders as the empty segment before the final kid: {unbound_canonical}"
         );
         // The record's signature covers the issuer: tampering with it breaks
         // the v2 signature (the canonical is signed, so the issuer cannot be
@@ -1824,6 +1922,254 @@ mod tests {
             !crate::challenge::verify_signature_v2(&tampered, signature, "test-key-16-bytes!")
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn issuance_enforces_the_narrow_identifier_alphabet() {
+        // Audit #96: scope/issuer/region/request_binding must match
+        // [A-Za-z0-9._:-]+ with the length caps — issuance refuses to mint
+        // a record the verifier would declare malformed.
+        let base = profile_base_config();
+
+        // Scope: Unicode and spaces are rejected (InvalidScope); the
+        // historical `|` ban is subsumed by the alphabet.
+        for bad_scope in ["логин", "log in", "login|admin", ""] {
+            assert!(
+                matches!(
+                    issue_challenge(
+                        &base,
+                        bad_scope,
+                        "1.2.3.4",
+                        1,
+                        1_700_000_000_000_000,
+                        0,
+                        None
+                    ),
+                    Err(SignError::InvalidScope)
+                ),
+                "scope {bad_scope:?} must be rejected at issuance"
+            );
+        }
+        // Scope: 129 bytes rejected, 128 accepted (existing boundary kept).
+        assert!(matches!(
+            issue_challenge(
+                &base,
+                &"s".repeat(129),
+                "1.2.3.4",
+                1,
+                1_700_000_000_000_000,
+                0,
+                None
+            ),
+            Err(SignError::InvalidScope)
+        ));
+        assert!(issue_challenge(
+            &base,
+            &"s".repeat(128),
+            "1.2.3.4",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None
+        )
+        .is_ok());
+
+        // Issuer: Unicode, spaces, empty, and > 128 bytes are rejected.
+        for bad_issuer in [
+            Some("auth-gw-ü"),
+            Some("auth gw"),
+            Some(""),
+            Some(&"i".repeat(129)),
+        ] {
+            let config = ChallengeConfig {
+                issuer: bad_issuer.map(str::to_string),
+                ..base.clone()
+            };
+            assert!(
+                matches!(
+                    issue_challenge(
+                        &config,
+                        "login",
+                        "1.2.3.4",
+                        1,
+                        1_700_000_000_000_000,
+                        0,
+                        None
+                    ),
+                    Err(SignError::InvalidIdentifier)
+                ),
+                "issuer {bad_issuer:?} must be rejected at issuance"
+            );
+        }
+        // Issuer: 128 bytes accepted.
+        let config = ChallengeConfig {
+            issuer: Some("i".repeat(128)),
+            ..base.clone()
+        };
+        assert!(issue_challenge(
+            &config,
+            "login",
+            "1.2.3.4",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None
+        )
+        .is_ok());
+
+        // Region: Unicode, spaces, and > 64 bytes are rejected.
+        for bad_region in [
+            Some("eu-ü"),
+            Some("eu west"),
+            Some(""),
+            Some(&"r".repeat(65)),
+        ] {
+            let config = ChallengeConfig {
+                region: bad_region.map(str::to_string),
+                ..base.clone()
+            };
+            assert!(
+                matches!(
+                    issue_challenge(
+                        &config,
+                        "login",
+                        "1.2.3.4",
+                        1,
+                        1_700_000_000_000_000,
+                        0,
+                        None
+                    ),
+                    Err(SignError::InvalidIdentifier)
+                ),
+                "region {bad_region:?} must be rejected at issuance"
+            );
+        }
+        // Region: 64 bytes accepted.
+        let config = ChallengeConfig {
+            region: Some("r".repeat(64)),
+            ..base.clone()
+        };
+        assert!(issue_challenge(
+            &config,
+            "login",
+            "1.2.3.4",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None
+        )
+        .is_ok());
+
+        // request_binding: Unicode, spaces, empty, and > 128 bytes rejected.
+        for bad_binding in [
+            Some("交易"),
+            Some("req id"),
+            Some(""),
+            Some(&"b".repeat(129)),
+        ] {
+            assert!(
+                matches!(
+                    issue_challenge(
+                        &base,
+                        "login",
+                        "1.2.3.4",
+                        1,
+                        1_700_000_000_000_000,
+                        0,
+                        bad_binding
+                    ),
+                    Err(SignError::InvalidIdentifier)
+                ),
+                "request_binding {bad_binding:?} must be rejected at issuance"
+            );
+        }
+        // request_binding: 128 bytes accepted.
+        assert!(issue_challenge(
+            &base,
+            "login",
+            "1.2.3.4",
+            1,
+            1_700_000_000_000_000,
+            0,
+            Some(&"b".repeat(128))
+        )
+        .is_ok());
+
+        // The full allowed alphabet passes end to end.
+        let config = ChallengeConfig {
+            issuer: Some("auth-gw:eu-1._a".into()),
+            region: Some("eu-west-1".into()),
+            ..base.clone()
+        };
+        let issued = issue_challenge(
+            &config,
+            "login",
+            "1.2.3.4",
+            1,
+            1_700_000_000_000_000,
+            0,
+            Some("req_1:abc.de-2"),
+        )
+        .unwrap();
+        assert_eq!(issued.record.issuer.as_deref(), Some("auth-gw:eu-1._a"));
+        assert_eq!(issued.record.region.as_deref(), Some("eu-west-1"));
+        assert_eq!(
+            issued.record.request_binding.as_deref(),
+            Some("req_1:abc.de-2")
+        );
+    }
+
+    #[test]
+    fn issuance_stamps_and_signs_the_kid() {
+        // Audit #91: config.kid is stamped on the record and signed as the
+        // FINAL canonical field — the record JSON carries it (22 keys) and
+        // the signed challenge string embeds it byte-exactly.
+        let base = profile_base_config();
+        let with_kid = ChallengeConfig {
+            kid: 5,
+            ..base.clone()
+        };
+        let issued = issue_challenge(
+            &with_kid,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(issued.record.kid, 5);
+        let canonical = crate::challenge::canonical_signing_input_v2(&issued.record);
+        assert!(
+            canonical.ends_with("|5"),
+            "the kid must be the FINAL canonical field: {canonical}"
+        );
+        // The challenge's base64 half is byte-exactly the canonical.
+        let b64 = issued.record.challenge.split('.').next().unwrap();
+        assert_eq!(B64.decode(b64).unwrap(), canonical.as_bytes());
+
+        // The record JSON always carries kid (default 1 when unset).
+        let value = serde_json::to_value(&issued.record).unwrap();
+        assert_eq!(value["kid"], 5);
+        let default_kid = issue_challenge(
+            &base,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(default_kid.record.kid, 1, "default kid is 1");
+        let value = serde_json::to_value(&default_kid.record).unwrap();
+        assert_eq!(value["kid"], 1);
+        // A record JSON WITHOUT the kid key deserializes with kid = 1.
+        let mut no_kid = value;
+        no_kid.as_object_mut().unwrap().remove("kid");
+        let decoded: ChallengeRecord = serde_json::from_value(no_kid).unwrap();
+        assert_eq!(decoded.kid, 1, "missing kid must default to 1");
     }
 
     #[test]

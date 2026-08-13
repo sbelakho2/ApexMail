@@ -14,7 +14,7 @@ namespace KiwiCaptcha;
  * `'sha256'|'argon2id'`, `m_kib`, `t`, `p`, `target_bits`, `salt`,
  * `prefix`, `challenge`, `min_duration_ms`, `issued_at_ns`,
  * `protocol_version`, `attempts_used`, `region`, `policy_version`,
- * `request_binding`, `issuer` — 21 keys).
+ * `request_binding`, `issuer`, `kid` — 22 keys).
  *
  * Protocol v2 migration: v2 records carry `binding_tag` (a nonce-bound
  * HMAC, never a stable IP-derived identifier — see
@@ -70,6 +70,18 @@ namespace KiwiCaptcha;
  * `toArray()`; `policy_version` serializes as 1 when the ctor value is null
  * (a null would be unreadable by the Rust u32 reader).
  *
+ * `kid` (audit #91) is the signing key id the challenge was issued under
+ * (Rust: `kid: u32` with serde default 1 — missing defaults to 1, so
+ * pre-kid records keep their 659-corpus acceptance). Like `policy_version`
+ * it is NEVER null on the wire: `toArray()` emits 1 when the ctor value is
+ * null (a null would be unreadable by the Rust u32 reader). It is signed
+ * as the FINAL v2 canonical field (appended AFTER `issuer` — see
+ * {@see Issuer::canonicalPayload()}), and a verifier configured with a
+ * kid-keyed secret set selects the signature secret per kid — rejecting
+ * unknown kids and any record whose kid exceeds the newest configured kid
+ * ({@see \KiwiCaptcha\VerifyError::UnknownKid}, the rollback/forward
+ * guard).
+ *
  * `fromArray()` is the strict serde-mirror parser (audit #56): it accepts
  * EXACTLY what the Rust `serde_json::from_str::<ChallengeRecord>` accepts —
  * whitelisted keys only, exact lowercase algorithm values, strict integer
@@ -83,18 +95,19 @@ namespace KiwiCaptcha;
 final class ChallengeRecord
 {
     /**
-     * The 21-key wire schema, mirroring the Rust serde struct fields
+     * The 22-key wire schema, mirroring the Rust serde struct fields
      * (deny_unknown_fields). `ip_hash` is the legacy v1 alias for
      * `binding_tag` (serde `#[serde(alias = "ip_hash")]`). `issuer`
      * (audit #67) is the deployment identity — always present, null when
-     * unset.
+     * unset. `kid` (audit #91) is the signing key id — always present,
+     * default 1.
      */
     public const WIRE_KEYS = [
         'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
         'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
         'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
         'attempts_used', 'region', 'policy_version', 'request_binding',
-        'issuer',
+        'issuer', 'kid',
     ];
 
     /**
@@ -130,6 +143,7 @@ final class ChallengeRecord
         public readonly ?int $policyVersion = 1,
         public readonly ?string $requestBinding = null,
         public readonly ?string $issuer = null,
+        public readonly ?int $kid = 1,
     ) {
     }
 
@@ -189,6 +203,11 @@ final class ChallengeRecord
             // Deployment identity (audit #67) — ALWAYS present (null when
             // unset) for byte parity with the Rust serde schema.
             'issuer' => $this->issuer,
+            // Signing key id (audit #91) — ALWAYS present. The Rust field is
+            // u32 and never serializes null — a null ctor value degrades to
+            // the default key id 1 so PHP-written records stay readable by
+            // Rust (mirror of policy_version).
+            'kid' => $this->kid ?? 1,
         ];
     }
 
@@ -197,21 +216,31 @@ final class ChallengeRecord
      * serde-mirror parser (audit #56).
      *
      * Accepts exactly what the Rust `ChallengeRecord` serde schema accepts:
-     * - only the 21 whitelisted keys (plus the legacy `ip_hash` alias, which
+     * - only the 22 whitelisted keys (plus the legacy `ip_hash` alias, which
      *   must not appear alongside `binding_tag`); unknown keys — including
      *   trailing garbage — throw {@see MalformedRecordException};
      * - required fields must be present; optional fields default
      *   (`issued_at_ns` 0, `attempts_used` 0, `protocol_version` 1,
      *   `region` null, `policy_version` 1, `request_binding` null,
-     *   `issuer` null);
+     *   `issuer` null, `kid` 1);
      * - integers must be real JSON integers within the Rust type ranges
      *   (u8 for protocol_version, u32 for m_kib/t/p/target_bits/
-     *   attempts_used/policy_version, u64 for the timestamps) — negatives,
-     *   floats, booleans, numeric strings, and overflow are rejected;
+     *   attempts_used/policy_version/kid, u64 for the timestamps) —
+     *   negatives, floats, booleans, numeric strings, and overflow are
+     *   rejected;
      * - strings must be JSON strings of at most 4096 bytes;
      * - `algorithm` must be exactly `sha256` or `argon2id` (no aliases);
      * - null is only legal for `region`, `request_binding` and `issuer`
-     *   (Option fields).
+     *   (Option fields);
+     * - the deployment-bound identifiers `region`, `request_binding` and
+     *   `issuer` must match the narrow identifier alphabet
+     *   `[A-Za-z0-9._:-]+` (audit #96) with their length caps (64 / 128 /
+     *   128 bytes) — Unicode, whitespace, invisible characters, empty
+     *   strings and canonical separators are rejected. `scope` is
+     *   deliberately NOT validated here: serde treats it as an opaque
+     *   string, and the differential fuzz corpus pins both parsers to the
+     *   same acceptance split — the verifier's validateRecord enforces the
+     *   scope alphabet at verification time.
      *
      * base64 is deliberately NOT validated for `nonce`/`salt`: serde treats
      * them as plain strings at parse time, and the differential fuzz corpus
@@ -263,7 +292,7 @@ final class ChallengeRecord
             0,
             PHP_INT_MAX,
         );
-        // m_kib/t/p/target_bits/attempts_used/policy_version: u32 (defaults 0/0/0/0/1).
+        // m_kib/t/p/target_bits/attempts_used/policy_version/kid: u32.
         foreach (['m_kib', 't', 'p', 'target_bits', 'attempts_used'] as $field) {
             self::requireInt(
                 \array_key_exists($field, $data) ? $data[$field] : 0,
@@ -272,12 +301,14 @@ final class ChallengeRecord
                 4_294_967_295,
             );
         }
-        self::requireInt(
-            \array_key_exists('policy_version', $data) ? $data['policy_version'] : 1,
-            'policy_version',
-            0,
-            4_294_967_295,
-        );
+        foreach (['policy_version', 'kid'] as $field) {
+            self::requireInt(
+                \array_key_exists($field, $data) ? $data[$field] : 1,
+                $field,
+                0,
+                4_294_967_295,
+            );
+        }
         // protocol_version: u8 (default 1 — serde's default_protocol_version).
         self::requireInt(
             \array_key_exists('protocol_version', $data) ? $data['protocol_version'] : 1,
@@ -292,9 +323,18 @@ final class ChallengeRecord
         }
 
         // Option fields: null or string (region, request_binding, issuer).
+        // The deployment-bound identifiers must also match the narrow
+        // alphabet (audit #96) with their length caps: region <= 64,
+        // request_binding <= 128, issuer <= 128. NOTE: scope is exempt —
+        // serde treats it as an opaque string and the fuzz corpus pins both
+        // parsers to the same 659-accepted split (the verifier's
+        // validateRecord enforces the scope alphabet instead).
         foreach (['region', 'request_binding', 'issuer'] as $field) {
             if (isset($data[$field]) && $data[$field] !== null) {
                 self::requireString($data[$field], $field);
+                if (!Config::isValidIdentifier($data[$field], $field === 'region' ? 64 : 128)) {
+                    throw MalformedRecordException::invalidIdentifier($field);
+                }
             }
         }
 
@@ -319,6 +359,7 @@ final class ChallengeRecord
             policyVersion: $data['policy_version'] ?? 1,
             requestBinding: $data['request_binding'] ?? null,
             issuer: $data['issuer'] ?? null,
+            kid: $data['kid'] ?? 1,
         );
     }
 

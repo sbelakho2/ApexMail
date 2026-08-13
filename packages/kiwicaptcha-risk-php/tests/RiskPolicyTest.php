@@ -374,4 +374,32 @@ final class RiskPolicyTest extends TestCase
         self::assertSame(5, $json['band']);
         self::assertIsArray($json['reasons']);
     }
+
+    /**
+     * AUDIT #88 (b) — ABSOLUTE USER-VISIBLE CAP: the adaptive escalation is
+     * bounded. The policy's maximum action across every scope, every
+     * global floor and every possible score is the configured ladder top
+     * (Deny) — and never above it, so there is no unbounded punishment
+     * mode.
+     */
+    public function testMaxActionNeverExceedsTheLadderTop(): void
+    {
+        $policy = RiskPolicy::fromConfig($this->config());
+        $maxRank = -1;
+        foreach ([1, 2, 3, 999] as $scope) {
+            foreach ([0, 1, 2, 3, 4] as $level) {
+                for ($score = 0; $score <= 1000; $score += 1) {
+                    $d = $policy->decide($scope, $score, $this->zeroVector(), $this->healthy(), $level, 1_700_000_000_000);
+                    self::assertLessThanOrEqual(
+                        RiskAction::Deny->rank(),
+                        $d->action->rank(),
+                        sprintf('scope %d level %d score %d exceeded the ladder top', $scope, $level, $score)
+                    );
+                    $maxRank = max($maxRank, $d->action->rank());
+                }
+            }
+        }
+        self::assertSame(RiskAction::Deny->rank(), $maxRank, 'the ladder top must actually be reachable');
+        self::assertSame(RiskAction::Deny, RiskAction::actionForScore(1000), 'the cap action is Deny at the top score');
+    }
 }

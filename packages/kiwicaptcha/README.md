@@ -15,7 +15,7 @@ Browser behavioral telemetry is a **supplement, not the security boundary** — 
 - **Difficulty derived per algorithm** — SHA-256 scales to 20 bits (~1M hashes); Argon2id is capped at 10 bits because every memory-hard hash is ~1000x more expensive.
 - **Server-side minimum solve duration** — a **timing-anomaly heuristic**, not a proof of human behavior: PoW is probabilistic (a valid solution can occur at counter 0) and a fast bot can wait before submitting, so the floor only rejects solves that **arrive** faster than the theoretical minimum, measured **server-side** from challenge issuance to verification receipt (high-resolution issuance timestamp vs server receipt time). The client-reported duration is forgeable (a custom client can submit `duration_ms=5000`) and is used **only as telemetry**. Clock policy: when the verifier clock is behind the issuer clock, a skew within 5 s (`SKEW_TOLERANCE_US`) skips the floor heuristic (the apparent negative elapsed time carries no signal) and a larger skew is rejected as `TooFast`; records without a high-resolution issuance timestamp (`issued_at_ns == 0`) are **malformed** — the legacy client-duration fallback was removed.
 - **Comprehensive record validation before any hash** — `verify_solution` runs `validate_record` first (right after attempt accounting): scope bounds, nonce = 32 bytes, salt = 16 bytes, `expires_at - issued_at <= 300 s`, `prefix == challenge|salt|`, SHA-256 difficulty 1..=20, Argon2id difficulty 1..=10 with `p == 1`, `t` 3..=6, `m_kib` 8..=65536. A malformed or attacker-crafted record is rejected as `MalformedRecord` before any signature or hash work.
-- **HMAC-signed challenges, protocol v2** — the signed canonical input covers the full parameter set (`v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer`, with `region`/`request_binding`/`issuer` rendering as the EMPTY segment when unset — issuer is the FINAL field, audit #67), so no issuance parameter can be tampered with without breaking the signature. The challenge string is `base64(canonical).hex_tag` for both protocol versions; v1 records (legacy canonical `nonce|scope|ip_hash|issued_at`) keep verifying during the migration window (max TTL). The TTL check also rejects challenges issued more than `MAX_CLOCK_SKEW_SECS` (60) in the future (audit #76).
+- **HMAC-signed challenges, protocol v2** — the signed canonical input covers the full parameter set (`v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`, with `region`/`request_binding`/`issuer` rendering as the EMPTY segment when unset — kid is the FINAL field, audits #67/#91), so no issuance parameter can be tampered with without breaking the signature. The challenge string is `base64(canonical).hex_tag` for both protocol versions; v1 records (legacy canonical `nonce|scope|ip_hash|issued_at`) keep verifying during the migration window (max TTL). The TTL check also rejects challenges issued more than `MAX_CLOCK_SKEW_SECS` (60) in the future (audit #76). Key rotation (audit #91): the record's `kid` selects the signing secret from the verifier's `secrets_by_kid` map — an unknown kid, or a kid newer than the map's newest id (the forward/rollback guard), rejects with `UnknownKid`.
 - **Nonce-bound IP binding** — the record stores `binding_tag`, an HMAC over the nonce + canonical IP bytes (IPv4-mapped IPv6 normalized to 4-byte IPv4). The tag changes with every nonce, so the record **creates no stable IP-derived identifier**. Verification recomputes the tag from the submitting IP and compares in constant time; an empty `binding_tag` (i.e. the challenge was issued with `BindingMode::None`) disables the check; a `None` client IP with a NON-EMPTY tag fails closed with `MissingClientIp`. This is a **relay mitigation, not a guarantee**: IPs legitimately change behind NAT/proxies, and operators can disable the check.
 - **POST-DERIVE final re-validation (audit #59)** — after the proof derives successfully and BEFORE the outcome is declared valid, the verifier re-checks the CURRENT server time and the CURRENT expectations (policy epoch, region, issuer): a challenge that expired DURING the expensive derivation is `Expired` even though the record was already consumed. The production verifier re-reads the clock at this final step.
 - **Single-use with bounded verification cost** — verification consumes the challenge, and the verification path includes per-nonce attempt accounting (`max_attempts`) that bounds the server-side cost of wrong candidates (critical for memory-hard Argon2id verification). Per-nonce attempt caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) ships both: `rate_limit` (per-IP issuance window, optionally Redis/PSR-6 backed) and `argon2_max_concurrent_verifications` (per-process semaphore). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. the consumed-state Lua transition in `RedisChallengeStore` — the record is KEPT with a storage-level `state` and the winner's committed outcome, so a concurrent loser returns the SAME outcome instead of re-deriving, audit #74).
@@ -75,6 +75,7 @@ use kiwicaptcha::{ChallengeConfig, PoWAlgorithm, issue_challenge};
 // (a) SHA-256 — the default choice: CPU-bound, extremely cheap server verification.
 let config = ChallengeConfig {
     secret_key: "replace-with-32-random-bytes".into(), // >= 16 bytes required
+    kid: 1,                     // key id (audit #91); the FINAL signed canonical field
     algorithm: PoWAlgorithm::Sha256,
     m_kib: 0,                // Argon2id memory (KiB); ignored for SHA-256
     t: 1,                    // time cost; irrelevant for SHA-256
@@ -99,6 +100,7 @@ let config = ChallengeConfig {
 // Low-memory / mobile — 8 MiB memory, 6 bits (~64 Argon2id hashes):
 let argon2_mobile = ChallengeConfig {
     secret_key: "replace-with-32-random-bytes".into(),
+    kid: 1,                     // key id (audit #91)
     algorithm: PoWAlgorithm::Argon2id,
     m_kib: 8192,               // 8 MiB; >= 8 * p; browser-solvable
     t: 3,                      // KiwiCaptcha's required minimum (t >= 3)
@@ -115,6 +117,7 @@ let argon2_mobile = ChallengeConfig {
 // Desktop — 64 MiB memory (the WASM heap ceiling), 8 bits (~256 hashes):
 let argon2_desktop = ChallengeConfig {
     secret_key: "replace-with-32-random-bytes".into(),
+    kid: 1,                     // key id (audit #91)
     algorithm: PoWAlgorithm::Argon2id,
     m_kib: 65536,              // 64 MiB — the wasm heap ceiling
     t: 3,
@@ -129,7 +132,7 @@ let argon2_desktop = ChallengeConfig {
 };
 
 // issue_challenge(&config, scope, client_ip, now_unix, now_ns, active_solves)
-//   scope       — 1..=128 bytes, no '|' (e.g. "login", "signup")
+//   scope       — 1..=128 bytes of [A-Za-z0-9._:-] (audit #96; e.g. "login", "signup")
 //   client_ip   — hashed before storage (never stored raw)
 //   now_unix    — current Unix time in SECONDS (signed payload + TTL)
 //   now_ns      — high-resolution issuance timestamp in EPOCH MICROSECONDS
@@ -215,6 +218,7 @@ let mut record: ChallengeRecord = redis.get(&format!("kcaptcha:{}", solution.non
 let mut ctx = VerifyContext {
     record: &mut record,
     secret_key: &config.secret_key, // must match issuance; >= 16 bytes
+    secrets_by_kid: None,        // Some(&{kid: secret, ..}) for key rotation (audit #91)
     counter: solution.counter,
     duration_ms: solution.duration_ms, // client-reported — telemetry only
     now_unix,                          // TTL check (seconds)

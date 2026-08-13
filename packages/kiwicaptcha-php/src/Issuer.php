@@ -17,10 +17,11 @@ namespace KiwiCaptcha;
  *   canonical  = "v2|{nonce}|{scope}|{binding_tag}|{issued_at}|{expires_at}|
  *                {algorithm}|{m_kib}|{t}|{p}|{target_bits}|{salt}|
  *                {min_duration_ms}|{region}|{policy_version}|
- *                {request_binding}|{issuer}" — region, request_binding and
- *                issuer render as the empty segment when unset,
+ *                {request_binding}|{issuer}|{kid}" — region, request_binding
+ *                and issuer render as the empty segment when unset,
  *                policy_version as the configured security-policy epoch
- *                (audits #42/#41/#67)
+ *                (audits #42/#41/#67), kid as the configured signing key id
+ *                (audit #91) — the FINAL canonical field
  *   signature  = hex(hmac_sha256(K_challenge, canonical)) — HKDF-derived
  *                purpose key (audit #21, {@see DerivedKeys}); the master
  *                secret is never used directly as the signing key
@@ -55,10 +56,16 @@ final class Issuer
          * Null = region-unbound. The record's `region` JSON key is always
          * present (null when unbound) for parity with the Rust schema; a
          * verifier configured with an expected region rejects records whose
-         * region does not match exactly.
+         * region does not match exactly. Must match the narrow identifier
+         * alphabet (audit #96) — at most 64 bytes of [A-Za-z0-9._:-].
          */
         private readonly ?string $region = null,
     ) {
+        if ($region !== null && !Config::isValidIdentifier($region, 64)) {
+            throw new \InvalidArgumentException(
+                'region must be 1-64 characters of [A-Za-z0-9._:-] when set'
+            );
+        }
     }
 
     public function config(): Config
@@ -68,7 +75,11 @@ final class Issuer
 
     /**
      * @throws \InvalidArgumentException when the scope is empty, longer than
-     *                                   128 bytes, or contains '|'
+     *                                   128 bytes, or outside the identifier
+     *                                   alphabet [A-Za-z0-9._:-] (audit #96);
+     *                                   when the request binding is longer
+     *                                   than 128 bytes or outside the same
+     *                                   alphabet
      */
     public function issue(string $scope, string $clientIp, ?string $requestBinding = null): Challenge
     {
@@ -76,8 +87,15 @@ final class Issuer
         if ($scopeLen < 1 || $scopeLen > 128) {
             throw new \InvalidArgumentException('scope must be 1-128 bytes');
         }
-        if (\str_contains($scope, '|')) {
-            throw new \InvalidArgumentException('scope must not contain "|"');
+        // Audit #96: the narrow identifier alphabet subsumes the legacy '|'
+        // separator check — no scope can smuggle a canonical separator,
+        // whitespace, invisible characters, or multi-byte text into the
+        // signed payload.
+        if (!\preg_match('/^[A-Za-z0-9._:-]+$/D', $scope)) {
+            throw new \InvalidArgumentException('scope must contain only [A-Za-z0-9._:-] characters');
+        }
+        if ($requestBinding !== null && !Config::isValidIdentifier($requestBinding, 128)) {
+            throw new \InvalidArgumentException('request binding must be 1-128 characters of [A-Za-z0-9._:-]');
         }
         $now = $this->nowUnix();
 
@@ -114,6 +132,7 @@ final class Issuer
             $this->config->policyVersion,
             $requestBinding,
             $this->config->issuer,
+            $this->config->kid,
         );
         $signature = self::signPayloadV2($payload, $this->config->secretKey);
 
@@ -146,6 +165,7 @@ final class Issuer
             policyVersion: $this->config->policyVersion,
             requestBinding: $requestBinding,
             issuer: $this->config->issuer,
+            kid: $this->config->kid,
         );
         $this->storage->store($record);
 
@@ -237,6 +257,7 @@ final class Issuer
             bindingMode: $this->config->bindingMode,
             policyVersion: $this->config->policyVersion,
             issuer: $this->config->issuer,
+            kid: $this->config->kid,
         );
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
@@ -305,16 +326,18 @@ final class Issuer
      * and base64-encoded into the challenge. Shared with the verifier so
      * issuance and verification can never drift apart.
      *
-     * Round-10 layout (audits #41/#42/#67), byte-identical to the Rust
+     * Round-11 layout (audits #41/#42/#67/#91), byte-identical to the Rust
      * crate's `canonical_signing_input_v2`:
      *
      *     v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|
      *       p|target_bits|salt|min_duration_ms|region|policy_version|
-     *       request_binding|issuer
+     *       request_binding|issuer|kid
      *
      * with `region`, `request_binding` and `issuer` rendering as the EMPTY
      * segment when unset — so a null region + policy 1 + null binding +
-     * null issuer ends the canonical with `|0||1||`.
+     * null issuer + kid 1 ends the canonical with `|0||1|||1`. `kid` is
+     * the FINAL field (audit #91), appended AFTER `issuer`; it is ALWAYS
+     * present (the configured signing key id, default 1).
      */
     public static function canonicalPayload(
         string $nonce,
@@ -333,9 +356,10 @@ final class Issuer
         int $policyVersion = 1,
         ?string $requestBinding = null,
         ?string $issuer = null,
+        int $kid = 1,
     ): string {
         return sprintf(
-            'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s',
+            'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
             $nonce,
             $scope,
             $bindingTag,
@@ -352,6 +376,7 @@ final class Issuer
             $policyVersion,
             $requestBinding ?? '',
             $issuer ?? '',
+            $kid,
         );
     }
 

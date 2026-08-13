@@ -17,8 +17,9 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
  *
  * Pipeline: emergency limiter (single per-process window, before any state
  * backend) -> observation -> circuit breaker -> state store (EVALSHA) ->
- * scorer -> policy. Backend failure degrades instead of failing the
- * request.
+ * scorer -> policy (with the per-process scope-action hysteresis map:
+ * enter/exit smoothing of the score band selection, audit #95) -> decision.
+ * Backend failure degrades instead of failing the request.
  *
  * assessPreIssue() is the PRE-ISSUE path (emergency limiter + request
  * velocity + decision); reassess() is the POST-SOLVE recheck (identical
@@ -80,6 +81,7 @@ final class AdaptiveRiskEngine
         private readonly RiskMetrics $metrics = new RiskMetrics(),
         private readonly ?CalibrationStore $calibration = null,
         private readonly bool $enableGlobalPressure = true,
+        private readonly ScopeActionHysteresis $hysteresis = new ScopeActionHysteresis(),
     ) {
     }
 
@@ -209,6 +211,7 @@ final class AdaptiveRiskEngine
             globalLevel: $this->storeGlobalLevel(),
             nowMs: $nowMs,
             cooldownUntilMs: $this->storeCooldownUntilMs(),
+            hysteresis: $this->hysteresis,
         );
 
         $this->metrics->gauge('global:level', $decision->globalLevel);

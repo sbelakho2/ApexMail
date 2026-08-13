@@ -12,10 +12,11 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 use crate::challenge::{
     binding_tag, hash_ip, payload_from_record, verify_signature, verify_signature_v2,
-    ChallengeRecord, PoWAlgorithm, SOLVER_MAX_ARGON2_TARGET_BITS, SOLVER_MAX_TARGET_BITS,
+    ChallengeRecord, PoWAlgorithm,
 };
 
 /// Clock-skew tolerance (microseconds) for the server-side minimum-duration
@@ -95,6 +96,15 @@ pub struct VerifyContext<'a> {
     pub record: &'a mut ChallengeRecord,
     /// The HMAC secret key (to re-verify the challenge signature).
     pub secret_key: &'a str,
+    /// Optional per-key-id secrets (audit #91): `kid → master secret`. When
+    /// present, the record's `kid` selects the secret for the signature (and
+    /// IP-binding) checks — the secret rotation map. An unknown kid — or a
+    /// kid beyond the map's NEWEST configured id (the forward/rollback guard:
+    /// future-keyed challenges must never verify on older nodes, even if the
+    /// key were somehow known) — rejects with
+    /// [`VerifyError::UnknownKid`]. When `None`, `secret_key` is used
+    /// unconditionally (the historical single-key path).
+    pub secrets_by_kid: Option<&'a HashMap<u32, String>>,
     /// The client's claimed counter.
     pub counter: u64,
     /// The client's reported solve duration in milliseconds. This value is
@@ -246,6 +256,14 @@ pub enum VerifyError {
     /// revocation) is no longer in force, so the challenge is invalid.
     #[error("challenge was issued under a different security-policy epoch")]
     WrongPolicyVersion,
+    /// The record's key id (`kid`, audit #91) is unknown to this verifier —
+    /// either absent from its `secrets_by_kid` map, or NEWER than the
+    /// newest configured key (the forward/rollback guard: a challenge keyed
+    /// with a future kid must never verify on an older node, even if the
+    /// key were somehow known). The deployment must roll forward its key
+    /// set (or the challenge is foreign) before this record can verify.
+    #[error("challenge was issued with an unknown key id (kid)")]
+    UnknownKid,
     #[error("too many verification attempts against this challenge")]
     TooManyAttempts,
     #[error("proof-of-work hash does not meet the difficulty target")]
@@ -284,15 +302,20 @@ pub enum VerifyError {
 /// Runs as the FIRST check of [`verify_solution`] (after attempt accounting),
 /// before any hash is derived, so a malformed or attacker-crafted record can
 /// never drive an expensive verification:
-/// - `scope` non-empty, at most 128 bytes, no `|`;
+/// - `scope` 1..=128 bytes of `[A-Za-z0-9._:-]` (audit #96);
+/// - `issuer` / `region` / `request_binding`, when set, match the same
+///   narrow alphabet with the length caps (issuer 128, request_binding 128,
+///   region 64 — audit #96);
 /// - `nonce` decodes as base64 to exactly 32 bytes;
 /// - `salt` decodes as base64 to exactly 16 bytes;
 /// - `expires_at > issued_at` and `expires_at - issued_at <= MAX_TTL_SECS`;
 /// - `prefix` is exactly `challenge|salt|`;
-/// - SHA-256: `target_bits` 1..=SOLVER_MAX_TARGET_BITS;
-/// - Argon2id: `target_bits` 1..=SOLVER_MAX_ARGON2_TARGET_BITS and the hard
-///   parameter ceilings (audit #32): `m_kib` 8..=65536, `t` 3..=16,
-///   `p` 1..=4.
+/// - `target_bits` 1..=MAX_DIFFICULTY for BOTH algorithms (audit #87 — the
+///   Argon2id issuance ceiling stays stricter at
+///   [`SOLVER_MAX_ARGON2_TARGET_BITS`], exactly like the t=7..=16
+///   verifier-vs-issuer split);
+/// - Argon2id: the hard parameter ceilings (audit #32): `m_kib` 8..=65536,
+///   `t` 3..=16, `p` 1..=4.
 ///
 /// Returns [`VerifyError::MalformedRecord`] on any violation.
 pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
@@ -302,8 +325,26 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     if record.protocol_version != 1 && record.protocol_version != 2 {
         return Err(VerifyError::MalformedRecord);
     }
-    if record.scope.is_empty() || record.scope.len() > 128 || record.scope.contains('|') {
+    if !crate::challenge::valid_identifier(&record.scope, 128) {
         return Err(VerifyError::MalformedRecord);
+    }
+    // Audit #96: the same narrow identifier alphabet applies to the optional
+    // identifiers — a non-conforming value (Unicode, spaces, empty string)
+    // is a malformed record.
+    if let Some(issuer) = record.issuer.as_deref() {
+        if !crate::challenge::valid_identifier(issuer, 128) {
+            return Err(VerifyError::MalformedRecord);
+        }
+    }
+    if let Some(region) = record.region.as_deref() {
+        if !crate::challenge::valid_identifier(region, 64) {
+            return Err(VerifyError::MalformedRecord);
+        }
+    }
+    if let Some(binding) = record.request_binding.as_deref() {
+        if !crate::challenge::valid_identifier(binding, 128) {
+            return Err(VerifyError::MalformedRecord);
+        }
     }
     match B64.decode(&record.nonce) {
         Ok(bytes) if bytes.len() == 32 => {}
@@ -322,16 +363,16 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     if record.prefix != format!("{}|{}|", record.challenge, record.salt) {
         return Err(VerifyError::MalformedRecord);
     }
+    // Audit #87: the difficulty bounds are explicit constants, applied to
+    // BOTH algorithms — 0 would accept a trivially-solvable challenge and
+    // anything above the solver ceiling can never be produced by a widget.
+    use crate::challenge::{MAX_DIFFICULTY, MIN_DIFFICULTY};
+    if record.target_bits < MIN_DIFFICULTY || record.target_bits > MAX_DIFFICULTY {
+        return Err(VerifyError::MalformedRecord);
+    }
     match record.algorithm {
-        PoWAlgorithm::Sha256 => {
-            if record.target_bits == 0 || record.target_bits > SOLVER_MAX_TARGET_BITS {
-                return Err(VerifyError::MalformedRecord);
-            }
-        }
+        PoWAlgorithm::Sha256 => {}
         PoWAlgorithm::Argon2id => {
-            if record.target_bits == 0 || record.target_bits > SOLVER_MAX_ARGON2_TARGET_BITS {
-                return Err(VerifyError::MalformedRecord);
-            }
             check_argon2_ceilings(record)?;
         }
     }
@@ -381,7 +422,10 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 ///    records can never drive expensive verification work.
 /// 3. Re-verify the HMAC signature over the protocol-appropriate canonical
 ///    input (v1 for `protocol_version == 1` records, v2 otherwise; v2
-///    signatures use the HKDF-derived challenge key, audit #21).
+///    signatures use the HKDF-derived challenge key, audit #21). When
+///    `secrets_by_kid` is configured, the record's `kid` selects the secret
+///    (audit #91): an unknown — or future — kid rejects with
+///    [`VerifyError::UnknownKid`] before any signature work.
 /// 4. Hard Argon2id parameter ceilings (audit #32) — after signature
 ///    authentication, before any `Params::new`/allocation.
 /// 5. Check the TTL (defends against stale challenges).
@@ -435,14 +479,34 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
     }
 
+    // 1a. Key-rotation resolution (audit #91): when a `secrets_by_kid` map
+    //     is configured, the record's kid selects the signing secret. An
+    //     unknown kid — or a kid NEWER than the map's newest id (the
+    //     forward/rollback guard: future-keyed challenges must never verify
+    //     on older nodes, even if the key were somehow known) — is rejected
+    //     with UnknownKid BEFORE any signature work.
+    let secret: &str = match ctx.secrets_by_kid {
+        Some(secrets) => {
+            let max_kid = secrets.keys().max().copied().unwrap_or(0);
+            if ctx.record.kid > max_kid {
+                return VerifyOutcome::Invalid(VerifyError::UnknownKid);
+            }
+            match secrets.get(&ctx.record.kid) {
+                Some(secret) => secret.as_str(),
+                None => return VerifyOutcome::Invalid(VerifyError::UnknownKid),
+            }
+        }
+        None => ctx.secret_key,
+    };
+
     // 1b. Signature re-check over the protocol-appropriate canonical input.
     let sig = signature_from_challenge(ctx.record);
     let sig_ok = match ctx.record.protocol_version {
         // Legacy v1 records: `nonce|scope|ip_hash|issued_at` (the binding
         // field carried the legacy hash_ip). Verified for the migration
         // window (max TTL) alongside v2.
-        1 => verify_signature(&payload_from_record(ctx.record), sig, ctx.secret_key),
-        _ => verify_signature_v2(ctx.record, sig, ctx.secret_key),
+        1 => verify_signature(&payload_from_record(ctx.record), sig, secret),
+        _ => verify_signature_v2(ctx.record, sig, secret),
     };
     match sig_ok {
         Ok(true) => {}
@@ -526,8 +590,8 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
             return VerifyOutcome::Invalid(VerifyError::MissingClientIp);
         };
         let expected = match ctx.record.protocol_version {
-            1 => hash_ip(client_ip, ctx.secret_key),
-            _ => match binding_tag(&ctx.record.nonce, client_ip, ctx.secret_key) {
+            1 => hash_ip(client_ip, secret),
+            _ => match binding_tag(&ctx.record.nonce, client_ip, secret) {
                 Ok(tag) => tag,
                 Err(_) => return VerifyOutcome::Invalid(VerifyError::IpMismatch),
             },
@@ -872,6 +936,7 @@ mod tests {
     fn make_record(target_bits: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 100,
             t: 1,
@@ -897,6 +962,7 @@ mod tests {
     fn make_argon2_record(target_bits: u32, m_kib: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib,
             t: 3, // libsodium-representable (t >= 3, p == 1) — issuance rejects t < 3
@@ -923,6 +989,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms,
             now_unix: NOW_UNIX + 1,
@@ -977,6 +1044,7 @@ mod tests {
         // m_kib < 8 * p must fail at issuance, not at verification time.
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 4,
             t: 3,
@@ -1004,6 +1072,7 @@ mod tests {
         for t in [0u32, 1, 2] {
             let config = ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
+                kid: 1,
                 algorithm: PoWAlgorithm::Argon2id,
                 m_kib: 128,
                 t,
@@ -1035,6 +1104,7 @@ mod tests {
         // checks expiry before the floor).
         let base = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -1072,6 +1142,7 @@ mod tests {
         // record it would later declare malformed.
         let base = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -1108,6 +1179,7 @@ mod tests {
         // must refuse it (PHP Config already does; Rust must match).
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 7,
@@ -1135,6 +1207,7 @@ mod tests {
     fn argon2_issuance_rejects_libsodium_unrepresentable_p() {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 3,
@@ -1161,6 +1234,7 @@ mod tests {
         // (64 MiB — the wasm heap ceiling); issuance must never mint one.
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1,
             t: 3,
@@ -1203,6 +1277,7 @@ mod tests {
         for bits in [0u32, 11] {
             let config = ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
+                kid: 1,
                 algorithm: PoWAlgorithm::Argon2id,
                 m_kib: 128,
                 t: 3,
@@ -1231,6 +1306,7 @@ mod tests {
         // The maximum is accepted.
         let max_bits = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 3,
@@ -1284,6 +1360,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 121, // past TTL
@@ -1317,6 +1394,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 60_000, // client forges a 60 s solve — must NOT help
             now_unix: NOW_UNIX + 1,
@@ -1350,6 +1428,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000, // forged
             now_unix: NOW_UNIX,
@@ -1391,6 +1470,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "WRONG-KEY-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1422,6 +1502,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "x", // 1 byte — below the hard minimum
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1453,6 +1534,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1484,6 +1566,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1509,6 +1592,7 @@ mod tests {
         // properly so the v2 signature (which covers the tag) stays valid.
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -1533,6 +1617,7 @@ mod tests {
         let mut ctx2 = VerifyContext {
             record: &mut unbound,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter: counter2,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1564,6 +1649,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter: wrong,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1587,6 +1673,7 @@ mod tests {
         let mut ctx2 = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1618,6 +1705,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter: wrong,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1639,6 +1727,7 @@ mod tests {
         let mut ctx2 = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1671,6 +1760,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1701,6 +1791,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1734,6 +1825,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1758,6 +1850,7 @@ mod tests {
             accept_legacy_v1: false,
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1788,6 +1881,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1819,6 +1913,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1850,6 +1945,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1883,6 +1979,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 60_000, // a forged long client duration must NOT resurrect the legacy path
             now_unix: NOW_UNIX + 1,
@@ -1915,6 +2012,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1945,6 +2043,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2181,6 +2280,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: 1_000_001,
@@ -2210,6 +2310,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: expires_at, // exactly at expiry
@@ -2239,6 +2340,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: expires_at - 1,
@@ -2335,6 +2437,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2357,6 +2460,7 @@ mod tests {
         let mut ctx_fast = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 60_000, // forged long client duration must NOT help
             now_unix: NOW_UNIX + 1,
@@ -2502,6 +2606,7 @@ mod tests {
     fn sha_zero_target_bits_rejected_at_issuance() {
         let config = ChallengeConfig {
             secret_key: "0123456789abcdef0123456789abcdef".into(),
+            kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2575,6 +2680,7 @@ mod tests {
         let issued = issue_challenge(
             &ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
+                kid: 1,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 100,
                 t: 1,
@@ -2605,6 +2711,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut issued.record.clone(),
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2633,6 +2740,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2669,6 +2777,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2700,6 +2809,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2731,6 +2841,7 @@ mod tests {
         let mut ctx_match = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2755,6 +2866,7 @@ mod tests {
         let mut ctx_none = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2790,6 +2902,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2822,6 +2935,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2853,6 +2967,7 @@ mod tests {
         let mut ctx_match = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2877,6 +2992,7 @@ mod tests {
         let mut ctx_none = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2900,9 +3016,9 @@ mod tests {
 
     #[test]
     fn v2_fixture_with_issuer_set_verifies() {
-        // The issuer is the FINAL canonical field (audit #67): a fixture
-        // record with an issuer set re-signs and verifies — the byte-exact
-        // anchor the PHP side pins too.
+        // The issuer is the field before the FINAL kid (audits #67/#91): a
+        // fixture record with an issuer set re-signs and verifies — the
+        // byte-exact anchor the PHP side pins too.
         let mut record = fixture_record(2);
         record.issuer = Some("auth-gw".into());
         resign_v2(&mut record, FIXTURE_SECRET);
@@ -2910,6 +3026,453 @@ mod tests {
             verify_fixture(&mut record, false),
             VerifyOutcome::Valid { .. }
         ));
+    }
+
+    // ── Round-11 audit: key rotation (audit #91) ──────────────────────
+
+    /// Issue a SHA-256 record under `kid` with the given master secret.
+    fn make_record_with_kid(target_bits: u32, kid: u32, secret: &str) -> ChallengeRecord {
+        let config = ChallengeConfig {
+            secret_key: secret.into(),
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits,
+            argon2_target_bits: 8,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 24,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+            kid,
+        };
+        issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None)
+            .unwrap()
+            .record
+    }
+
+    #[test]
+    fn kid_selects_the_secret_for_signature_and_binding() {
+        // Audit #91: with `secrets_by_kid` configured, the record's kid
+        // selects the signing secret — a challenge issued under kid 2 with
+        // secret B verifies ONLY against B, never against the other keys.
+        let key_b = "0123456789abcdef0123456789abcdef";
+        let mut record = make_record_with_kid(8, 2, key_b);
+        assert_eq!(
+            record.kid, 2,
+            "the config kid must be stamped on the record"
+        );
+        let counter = solve_for_test(&record).unwrap();
+
+        // The matching key verifies.
+        let mut secrets: HashMap<u32, String> = HashMap::new();
+        secrets.insert(2, key_b.to_string());
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "WRONG-KEY-16-bytes!",
+            secrets_by_kid: Some(&secrets),
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(
+            matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
+            "the kid-selected secret must verify the signature AND the binding tag"
+        );
+
+        // The same kid with a DIFFERENT secret → BadSignature (the secret
+        // selection is real, not cosmetic).
+        let mut wrong: HashMap<u32, String> = HashMap::new();
+        wrong.insert(2, "WRONG-KEY-16-bytes!".to_string());
+        let mut ctx_wrong = VerifyContext {
+            record: &mut record,
+            secret_key: "WRONG-KEY-16-bytes!",
+            secrets_by_kid: Some(&wrong),
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx_wrong),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+
+        // No map → the single secret_key path applies unconditionally.
+        let mut ctx_plain = VerifyContext {
+            record: &mut record,
+            secret_key: key_b,
+            secrets_by_kid: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx_plain),
+            VerifyOutcome::Valid { .. }
+        ));
+    }
+
+    #[test]
+    fn unknown_kid_is_rejected_with_unknown_kid() {
+        // Audit #91: a record whose kid is absent from the verifier's key
+        // map is rejected with UnknownKid — before any signature work (the
+        // correct signature for a DIFFERENT kid can never rescue it).
+        let key_a = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let mut record = make_record_with_kid(8, 1, key_a);
+        let counter = solve_for_test(&record).unwrap();
+
+        // The map holds ONLY kid 2 — kid 1 is unknown to this verifier.
+        let mut secrets: HashMap<u32, String> = HashMap::new();
+        secrets.insert(2, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".to_string());
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: key_a, // the correct key — must NOT rescue the record
+            secrets_by_kid: Some(&secrets),
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::UnknownKid)
+        );
+        // An EMPTY map rejects every kid (max configured = 0).
+        let empty: HashMap<u32, String> = HashMap::new();
+        let mut ctx_empty = VerifyContext {
+            record: &mut record,
+            secret_key: key_a,
+            secrets_by_kid: Some(&empty),
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx_empty),
+            VerifyOutcome::Invalid(VerifyError::UnknownKid)
+        );
+    }
+
+    #[test]
+    fn future_kid_is_rejected_by_the_forward_guard() {
+        // Audit #91 forward/rollback guard: a record keyed with a kid NEWER
+        // than the verifier's newest configured kid must never verify on an
+        // older node — UnknownKid fires even though the record is otherwise
+        // perfectly signed and the node holds the older keys.
+        let key = "0123456789abcdef0123456789abcdef";
+        let mut record = make_record_with_kid(8, 3, key);
+        let counter = solve_for_test(&record).unwrap();
+
+        // This node has rolled forward only to kid 2 — a kid-3 record from a
+        // future deployment must be rejected.
+        let mut secrets: HashMap<u32, String> = HashMap::new();
+        secrets.insert(1, key.to_string());
+        secrets.insert(2, key.to_string());
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: key,
+            secrets_by_kid: Some(&secrets),
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::UnknownKid),
+            "kid 3 > the configured max kid (2) must be rejected on an older node"
+        );
+
+        // The guard's boundary: a record AT the newest configured kid
+        // verifies once the key is known.
+        let mut record2 = make_record_with_kid(8, 2, key);
+        let counter2 = solve_for_test(&record2).unwrap();
+        let mut ctx_boundary = VerifyContext {
+            record: &mut record2,
+            secret_key: key,
+            secrets_by_kid: Some(&secrets),
+            counter: counter2,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx_boundary),
+            VerifyOutcome::Valid { .. }
+        ));
+
+        // Rolling the node forward to kid 3 makes the same record verify —
+        // the guard is about the node's newest configured kid, not the
+        // record's.
+        let mut rolled_forward: HashMap<u32, String> = secrets.clone();
+        rolled_forward.insert(3, key.to_string());
+        let mut ctx_rolled = VerifyContext {
+            record: &mut record,
+            secret_key: key,
+            secrets_by_kid: Some(&rolled_forward),
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx_rolled),
+            VerifyOutcome::Valid { .. }
+        ));
+    }
+
+    #[test]
+    fn tampering_with_kid_breaks_the_v2_signature() {
+        // The kid is the FINAL signed canonical field: swapping it must
+        // invalidate the signature (a kid-1 challenge cannot be replayed as
+        // kid-2).
+        let key = "0123456789abcdef0123456789abcdef";
+        let record = make_record_with_kid(8, 1, key);
+        let signature = record
+            .challenge
+            .rsplit_once('.')
+            .map(|(_, sig)| sig)
+            .unwrap()
+            .to_string();
+        let mut tampered = record.clone();
+        tampered.kid = 2;
+        assert!(
+            !crate::challenge::verify_signature_v2(&tampered, &signature, key).unwrap(),
+            "kid is signed — tampering with it must break the signature"
+        );
+    }
+
+    // ── Round-11 audit: explicit difficulty bounds (audit #87) ────────
+
+    #[test]
+    fn validate_record_enforces_the_explicit_difficulty_bounds() {
+        // Audit #87: MIN_DIFFICULTY = 1 and MAX_DIFFICULTY = 20 apply to BOTH
+        // algorithms — 0, 21, 256 and 65535 are rejected, 1 and 20 accepted.
+        use crate::challenge::{MAX_DIFFICULTY, MIN_DIFFICULTY};
+        assert_eq!(MIN_DIFFICULTY, 1);
+        assert_eq!(MAX_DIFFICULTY, 20);
+        for bad in [0u32, 21, 256, 65_535] {
+            let mut sha = make_record(8);
+            sha.target_bits = bad;
+            assert_eq!(
+                validate_record(&sha),
+                Err(VerifyError::MalformedRecord),
+                "sha target_bits={bad} must be rejected"
+            );
+            let mut argon = make_argon2_record(4, 128);
+            argon.target_bits = bad;
+            assert_eq!(
+                validate_record(&argon),
+                Err(VerifyError::MalformedRecord),
+                "argon2 target_bits={bad} must be rejected"
+            );
+        }
+        for good in [1u32, 20] {
+            let mut sha = make_record(8);
+            sha.target_bits = good;
+            assert_eq!(
+                validate_record(&sha),
+                Ok(()),
+                "sha target_bits={good} must be accepted"
+            );
+            let mut argon = make_argon2_record(4, 128);
+            argon.target_bits = good;
+            assert_eq!(
+                validate_record(&argon),
+                Ok(()),
+                "argon2 target_bits={good} must be accepted (verifier bound; issuance stays stricter)"
+            );
+        }
+    }
+
+    #[test]
+    fn difficulty_bounds_reject_before_any_hash_computation() {
+        // The ceiling-test pattern: solve with a SANE record, then verify
+        // against an out-of-bounds-difficulty record with the VALID counter —
+        // MalformedRecord must fire in validate_record (pre-hash), never
+        // reach derive_hash. A hash-based path would ACCEPT the valid
+        // counter; only the pre-hash gate can reject it.
+        for bad in [0u32, 21, 256, 65_535] {
+            let mut sha = make_record(8);
+            let counter = solve_for_test(&sha).unwrap();
+            sha.target_bits = bad;
+            assert_eq!(
+                verify(&mut sha, counter, 5000),
+                VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+                "sha target_bits={bad} must be rejected before hashing"
+            );
+            let mut argon = make_argon2_record(4, 128);
+            let counter = solve_for_test(&argon).unwrap();
+            argon.target_bits = bad;
+            assert_eq!(
+                verify(&mut argon, counter, 5000),
+                VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+                "argon2 target_bits={bad} must be rejected before hashing"
+            );
+        }
+    }
+
+    // ── Round-11 audit: narrow identifier alphabet (audit #96) ────────
+
+    #[test]
+    fn validate_record_rejects_non_conforming_identifiers() {
+        // Audit #96: scope, issuer, region and request_binding must match
+        // [A-Za-z0-9._:-]+ — Unicode, spaces and the empty string are
+        // malformed records.
+        let mut unicode_scope = make_record(8);
+        unicode_scope.scope = "логин".into();
+        assert_eq!(
+            validate_record(&unicode_scope),
+            Err(VerifyError::MalformedRecord),
+            "Unicode scope must be rejected"
+        );
+
+        let mut space_scope = make_record(8);
+        space_scope.scope = "log in".into();
+        assert_eq!(
+            validate_record(&space_scope),
+            Err(VerifyError::MalformedRecord),
+            "scope with a space must be rejected"
+        );
+
+        let mut empty_issuer = make_record(8);
+        empty_issuer.issuer = Some(String::new());
+        assert_eq!(
+            validate_record(&empty_issuer),
+            Err(VerifyError::MalformedRecord),
+            "an empty issuer string must be rejected (None is the only unbound form)"
+        );
+
+        let mut unicode_issuer = make_record(8);
+        unicode_issuer.issuer = Some("auth-gw-ü".into());
+        assert_eq!(
+            validate_record(&unicode_issuer),
+            Err(VerifyError::MalformedRecord),
+            "Unicode issuer must be rejected"
+        );
+
+        let mut space_region = make_record(8);
+        space_region.region = Some("eu west".into());
+        assert_eq!(
+            validate_record(&space_region),
+            Err(VerifyError::MalformedRecord),
+            "region with a space must be rejected"
+        );
+
+        let mut unicode_binding = make_record(8);
+        unicode_binding.request_binding = Some("交易".into());
+        assert_eq!(
+            validate_record(&unicode_binding),
+            Err(VerifyError::MalformedRecord),
+            "Unicode request_binding must be rejected"
+        );
+
+        let mut long_region = make_record(8);
+        long_region.region = Some("r".repeat(65));
+        assert_eq!(
+            validate_record(&long_region),
+            Err(VerifyError::MalformedRecord),
+            "region above 64 bytes must be rejected"
+        );
+
+        // The boundary values and the allowed alphabet pass.
+        let mut ok_region = make_record(8);
+        ok_region.region = Some("r".repeat(64));
+        assert_eq!(validate_record(&ok_region), Ok(()));
+        let mut ok = make_record(8);
+        ok.issuer = Some("auth-gw:eu-1._a".into());
+        ok.region = Some("eu-west-1".into());
+        ok.request_binding = Some("req_1:abc.de-2".into());
+        assert_eq!(validate_record(&ok), Ok(()));
     }
 
     // ── Round-10 audit: future-time bound (audit #76) ─────────────────
@@ -2928,6 +3491,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1, // issued_at > now + 60 → invalid
@@ -2958,6 +3522,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2995,6 +3560,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: cheap_now,
@@ -3043,6 +3609,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix,
@@ -3200,15 +3767,16 @@ mod tests {
     // scope = "login"; issued_at = 1700000000; expires_at = 1700000120;
     // min_duration_ms = 0; Sha256: target_bits = 8, m_kib = 0, t = 1, p = 1;
     // ip = "192.168.1.5"; protocol_version = 2 (v1 vector below);
-    // region/request_binding/issuer all unset → the canonical ends `|0||1||`
-    // (audit #67: issuer is the FINAL field, empty when unset).
+    // region/request_binding/issuer all unset, kid = 1 → the canonical ends
+    // `|0||1|||1` (audit #67: issuer is the penultimate field, empty when
+    // unset; audit #91: kid is the FINAL field, 1 when unset).
     const FIXTURE_SECRET: &str = "0123456789abcdef0123456789abcdef";
     const FIXTURE_NONCE: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=";
     const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
     const FIXTURE_BINDING_TAG: &str =
         "5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f";
-    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1||";
-    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWIxMDU0MjRmZTNhNWNmYTNhZmRjY2RhOTVmNzM0YzllNjZlZTcwM2U4YjhkNDI2YTA3Y2ZlMWNiOWM4OTU0ZnwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDB8fDF8fA==.4dfe8d37360bbcf9de71ffc39d3840e6e938d2c4a39b7192e225976b04032505";
+    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|||1";
+    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWIxMDU0MjRmZTNhNWNmYTNhZmRjY2RhOTVmNzM0YzllNjZlZTcwM2U4YjhkNDI2YTA3Y2ZlMWNiOWM4OTU0ZnwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDB8fDF8fHwx.145669d338579ed579537accc7be3f9b4004e01af9bc5a5ede4e5761df9bde88";
     const FIXTURE_LEGACY_IP_HASH: &str =
         "5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf";
     const FIXTURE_CANONICAL_V1: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf|1700000000";
@@ -3250,6 +3818,7 @@ mod tests {
             policy_version: 1,
             request_binding: None,
             issuer: None,
+            kid: 1,
         }
     }
 
@@ -3258,6 +3827,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record,
             secret_key: FIXTURE_SECRET,
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: 1_700_000_100, // before expires_at 1_700_000_120
@@ -3343,6 +3913,7 @@ mod tests {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: FIXTURE_SECRET,
+            secrets_by_kid: None,
             counter,
             duration_ms: 5000,
             now_unix: 1_700_000_100,

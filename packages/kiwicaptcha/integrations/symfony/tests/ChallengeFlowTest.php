@@ -506,6 +506,41 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame(200, $response->getStatusCode());
     }
 
+    // ── Round 11: identifier validation (audit #96) ───────────────────────
+
+    /**
+     * Audit #96: scope/tenant identifiers and request bindings are
+     * validated against `[A-Za-z0-9._:-]+` with the 128-char ceiling BEFORE
+     * they reach the issuer — separator, control and out-of-charset bytes
+     * can never be signed into a challenge record.
+     */
+    public function testIdentifiersAreValidatedAgainstTheAudit96Charset(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        // Scope: out-of-charset bytes are refused (no '|' needed — '@',
+        // spaces, control bytes and non-ASCII all fail the charset).
+        foreach (['log@in', 'login admin', "login\nadmin", 'login/tenant', 'scöpé', str_repeat('x', 129)] as $badScope) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['scope' => $badScope])));
+            self::assertSame(422, $response->getStatusCode(), sprintf('scope %s must be refused', var_export($badScope, true)));
+            self::assertSame('INVALID_SCOPE', json_decode((string) $response->getContent(), true)['error']['code']);
+        }
+
+        // The full charset is accepted: letters, digits, '.', '_', ':', '-'
+        // (and the default scope).
+        foreach (['login', 'default', 'Login_v2', 'tenant:eu-1', 'a.b_c-d', '1'] as $goodScope) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['scope' => $goodScope])));
+            self::assertSame(200, $response->getStatusCode(), sprintf('scope %s must be accepted', $goodScope));
+        }
+
+        // Request binding: same charset + ceiling.
+        foreach (['txn abc', 'txn/42', 'txn:ok'] as $binding) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['scope' => 'login', 'request_binding' => $binding])));
+            $expected = $binding === 'txn:ok' ? 200 : 422;
+            self::assertSame($expected, $response->getStatusCode(), sprintf('binding %s must be %s', var_export($binding, true), $expected));
+        }
+    }
+
     public function testStaticDefaultRequestBindingAppliesWhenThePayloadOmitsIt(): void
     {
         $storage = new ArrayStorage();
@@ -862,5 +897,152 @@ final class ChallengeFlowTest extends TestCase
         $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
         self::assertSame(429, $response->getStatusCode());
         self::assertSame('RATE_LIMITED', json_decode((string) $response->getContent(), true)['error']['code']);
+    }
+
+    // ── Round 11: HTTP framing (audit #83) ────────────────────────────────
+
+    private function framingRequest(array $headers): Request
+    {
+        $request = JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        foreach ($headers as $name => $value) {
+            $request->headers->set($name, $value, false);
+        }
+
+        return $request;
+    }
+
+    /**
+     * Audit #83: a request carrying BOTH Content-Length and
+     * Transfer-Encoding is request-smuggling ambiguity (intermediaries will
+     * frame the body differently) — refused with 400 FRAMING_REJECTED
+     * BEFORE any body is read.
+     */
+    public function testContentLengthPlusTransferEncodingIs400FramingRejected(): void
+    {
+        $storage = new ArrayStorage();
+        $controller = new ChallengeController(new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage));
+        $request = $this->framingRequest(['content-length' => '13', 'transfer-encoding' => 'chunked']);
+
+        $response = $controller->challenge($request);
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame('FRAMING_REJECTED', json_decode((string) $response->getContent(), true)['error']['code']);
+        self::assertSame([], $this->storedRecords($storage), 'a framing-ambiguous request must never reach issuance');
+    }
+
+    /**
+     * Audit #83: a DUPLICATE Content-Length (two values) is equally
+     * ambiguous — refused with 400 FRAMING_REJECTED.
+     */
+    public function testDuplicateContentLengthIs400FramingRejected(): void
+    {
+        $storage = new ArrayStorage();
+        $controller = new ChallengeController(new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage));
+        $request = $this->framingRequest(['content-length' => ['13', '14']]);
+
+        $response = $controller->challenge($request);
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame('FRAMING_REJECTED', json_decode((string) $response->getContent(), true)['error']['code']);
+        self::assertSame([], $this->storedRecords($storage));
+    }
+
+    /**
+     * Audit #83: a SINGLE Content-Length is the normal framing — the
+     * endpoint must keep issuing.
+     */
+    public function testSingleContentLengthStillIssues(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+        $request = $this->framingRequest(['content-length' => '13']);
+
+        $response = $controller->challenge($request);
+        self::assertSame(200, $response->getStatusCode());
+        self::assertArrayHasKey('nonce', json_decode((string) $response->getContent(), true));
+    }
+
+    /**
+     * Audit #83: the framing check runs FIRST — before the content-type /
+     * content-encoding checks (a framing-ambiguous request with a wrong
+     * content type still gets FRAMING_REJECTED, never 415).
+     */
+    public function testFramingRejectionPrecedesBodyChecks(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+        $request = $this->framingRequest(['content-length' => '13', 'transfer-encoding' => 'chunked']);
+        $request->headers->set('Content-Type', 'text/plain');
+
+        $response = $controller->challenge($request);
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame('FRAMING_REJECTED', json_decode((string) $response->getContent(), true)['error']['code']);
+    }
+
+    /**
+     * Audit #83: a duplicate Content-Length reaches the controller as TWO
+     * raw header values (Symfony's HeaderBag keeps every value) — the
+     * detection is count-based, not value-based (two IDENTICAL values are
+     * still a duplicate framing).
+     */
+    public function testIdenticalDuplicateContentLengthStillRejected(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+        $request = $this->framingRequest(['content-length' => ['13', '13']]);
+
+        $response = $controller->challenge($request);
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame('FRAMING_REJECTED', json_decode((string) $response->getContent(), true)['error']['code']);
+    }
+
+    // ── Round 11: sitekey publicity (audit #82) ───────────────────────────
+
+    /**
+     * Audit #82: NO client-visible identifier confers any privileged
+     * capability. The challenge endpoint accepts no client-supplied
+     * identifier AT ALL — a payload carrying a "site_key", "secret" or
+     * "api_key" field is an unknown-field probe (422 UNKNOWN_FIELDS), and
+     * the endpoint succeeds without any privileged identifier (a plain
+     * {"scope":"login"} POST — {@see testChallengeControllerIssuesValidChallenge}).
+     */
+    public function testClientSuppliedIdentifiersGrantNoPrivilege(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+        foreach (['site_key', 'api_key', 'secret', 'admin_key', 'tenant_id'] as $field) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['scope' => 'login', $field => 'client-supplied-value'])));
+            self::assertSame(422, $response->getStatusCode(), sprintf('a client-supplied "%s" must never be accepted as an identifier', $field));
+            self::assertSame('UNKNOWN_FIELDS', json_decode((string) $response->getContent(), true)['error']['code']);
+        }
+
+        // The same request WITHOUT any identifier succeeds — the endpoint is
+        // fully public, keyed on nothing client-supplied.
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode());
+    }
+
+    /**
+     * Audit #82: no ADMIN endpoint keys off a client-supplied identifier.
+     * The bundle's route surface is exactly challenge + health (both
+     * fully public by design) — there is no control-plane route that could
+     * be reached with a client-provided credential.
+     */
+    public function testNoAdminEndpointExistsForKeyingOffAClientIdentifier(): void
+    {
+        $loader = new \BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader('/kiwi-captcha');
+        $routes = $loader->load(null, 'kiwicaptcha');
+
+        $names = array_keys($routes->all());
+        sort($names);
+        self::assertSame(['kiwicaptcha_challenge', 'kiwicaptcha_health_live', 'kiwicaptcha_health_ready'], $names, 'the bundle exposes ONLY the public challenge + health surface — no admin/control-plane routes');
+
+        foreach ($routes->all() as $route) {
+            self::assertNotSame('admin', $route->getDefault('_controller')[1] ?? null);
+        }
+    }
+
+    /**
+     * @return list<\KiwiCaptcha\ChallengeRecord>
+     */
+    private function storedRecords(ArrayStorage $storage): array
+    {
+        $prop = new \ReflectionProperty(ArrayStorage::class, 'records');
+
+        return array_values($prop->getValue($storage));
     }
 }

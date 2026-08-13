@@ -42,6 +42,24 @@ final class Config
     public const MAX_ARGON2_TARGET_BITS = 10;
 
     /**
+     * Absolute protocol difficulty floor for a STORED record's target bits
+     * (audit #87): validation rejects 0 — "no work at all" cannot be
+     * distinguished from an uninitialized misconfiguration.
+     */
+    public const MIN_DIFFICULTY = 1;
+
+    /**
+     * Absolute protocol difficulty ceiling for a STORED record's target
+     * bits (audit #87) — the SOLVER ceiling shared by both algorithms:
+     * the verifier's validate_record guard accepts 1..MAX_DIFFICULTY for
+     * SHA-256 AND Argon2id records, so the leading-zero comparison is only
+     * ever run against a bounded, validated difficulty. (Issuance keeps
+     * the narrower per-algorithm ceilings: MAX_SHA_TARGET_BITS and
+     * MAX_ARGON2_TARGET_BITS.)
+     */
+    public const MAX_DIFFICULTY = 20;
+
+    /**
      * Hard ceiling for a challenge's lifetime (expires_at - issued_at).
      * The verifier rejects any stored record with a longer lifetime as
      * malformed (it cannot have come from a KiwiCaptcha issuer), so
@@ -81,6 +99,14 @@ final class Config
      *                                      deployment (WrongIssuer): a compartment that
      *                                      holds even when deployments share secret keys.
      *                                      Null (default) stamps an unbound record.
+     * @param int      $kid                 Signing key id stamped into every issued record
+     *                                      (audit #91; mirrors Rust ChallengeConfig.kid,
+     *                                      default 1) and signed as the FINAL v2 canonical
+     *                                      field (`|<kid>`). The verifier selects the
+     *                                      signature secret per kid via `secretsByKid`
+     *                                      (UnknownKid when the record's kid is unknown or
+     *                                      ahead of the newest configured kid — the
+     *                                      rollback/forward guard).
      */
     public function __construct(
         public readonly string $secretKey,
@@ -96,9 +122,20 @@ final class Config
         public readonly BindingMode $bindingMode = BindingMode::Bound,
         public readonly int $policyVersion = 1,
         public readonly ?string $issuer = null,
+        public readonly int $kid = 1,
     ) {
         if (\strlen($secretKey) < 16) {
             throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');
+        }
+        if ($kid < 1 || $kid > 4_294_967_295) {
+            throw new \InvalidArgumentException(
+                sprintf('signing key id (kid) must be within 1..4294967295 (got %d)', $kid)
+            );
+        }
+        if ($issuer !== null && !self::isValidIdentifier($issuer, 128)) {
+            throw new \InvalidArgumentException(
+                'issuer must be 1-128 characters of [A-Za-z0-9._:-] when set'
+            );
         }
         if ($t < 1) {
             throw new \InvalidArgumentException('Argon2id time cost t must be >= 1');
@@ -164,5 +201,23 @@ final class Config
                 )
             );
         }
+    }
+
+    /**
+     * The narrow security-identifier alphabet (audit #96): the deployment-
+     * bound identifiers (issuer, region, request_binding, scope) must match
+     * `[A-Za-z0-9._:-]+` so no identifier can smuggle canonical separators
+     * ('|'), whitespace, invisible characters, or multi-byte text into a
+     * signed payload segment. Shared by Config (issuer), the Issuer
+     * (region/scope/request_binding) and the ChallengeRecord parser
+     * (region/request_binding/issuer).
+     */
+    public static function isValidIdentifier(string $value, int $maxBytes): bool
+    {
+        $len = \strlen($value);
+
+        return $len >= 1
+            && $len <= $maxBytes
+            && \preg_match('/^[A-Za-z0-9._:-]+$/D', $value) === 1;
     }
 }

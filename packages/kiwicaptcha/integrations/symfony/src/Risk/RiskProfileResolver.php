@@ -20,11 +20,18 @@ use KiwiCaptcha\Risk\RiskAction;
  *    the configured algorithm is sha256 and the action exceeds the app's
  *    difficulty_bits; no-op otherwise — an argon2id deployment is already
  *    at least as strong).
- *  - argon16/32/64      -> the audited Argon2id profiles (m = 16/32/64 MiB,
- *    t = 3, p = 1, target bits 1 — memory cost is the economic control, NOT
- *    the app's argon2_difficulty_bits). The core's issueWithProfile accepts
- *    a profile directly regardless of the app default, so a SHA-configured
- *    deployment can still issue Argon work via the risk ladder.
+ *  - argon16/32/64      -> the FIXED-ENVELOPE Argon2id ladder (audit #79):
+ *    ALL three actions use the SAME server-controlled memory envelope
+ *    (risk.argon_verification_memory_kib, default 16384 KiB, t=3, p=1) —
+ *    the adaptive risk engine NEVER increases the server verification cost
+ *    as its difficulty mechanism. Escalation happens purely in the TARGET
+ *    DIFFICULTY: the expected nonce search space rises along
+ *    risk.argon_escalation_target_bits ([1, 4, 8] by default — Argon16 ->
+ *    1, Argon32 -> 4, Argon64 -> 8), so the server's per-verification
+ *    memory cost is bounded by one value regardless of the decision. The
+ *    core's issueWithProfile accepts a profile directly regardless of the
+ *    app default, so a SHA-configured deployment can still issue Argon
+ *    work via the risk ladder.
  *  - step_up            -> the strongest profile of the configured family
  *    (sha20 / argon64). The bundle cannot perform application-level step-up
  *    (MFA etc.); the hardest challenge is its closest approximation, and
@@ -37,10 +44,26 @@ use KiwiCaptcha\Risk\RiskAction;
  */
 final class RiskProfileResolver
 {
+    /**
+     * @param int   $argonEnvelopeMemoryKib the FIXED Argon2id memory envelope
+     *                                      (risk.argon_verification_memory_kib)
+     *                                      for ALL adaptive Argon actions —
+     *                                      never the escalation mechanism
+     * @param list<int> $argonTargetBits    the 3-rung target-bits ladder
+     *                                      (risk.argon_escalation_target_bits):
+     *                                      [Argon16, Argon32, Argon64]
+     */
     public function __construct(
         private readonly PoWAlgorithm $algorithm,
         private readonly int $shaFloorBits,
+        private readonly int $argonEnvelopeMemoryKib = 16384,
+        private readonly array $argonTargetBits = [1, 4, 8],
     ) {
+        if (\count($this->argonTargetBits) !== 3) {
+            throw new \InvalidArgumentException(
+                'argonTargetBits must have EXACTLY 3 entries (the Argon16/32/64 ladder)'
+            );
+        }
     }
 
     public function profileFor(RiskAction $action): ?ChallengeProfile
@@ -50,10 +73,13 @@ final class RiskProfileResolver
             RiskAction::Sha16 => $this->sha(16),
             RiskAction::Sha18 => $this->sha(18),
             RiskAction::Sha20 => $this->sha(20),
-            // Audited profiles: target bits 1, t=3, p=1, memory is the cost.
-            RiskAction::Argon16 => ChallengeProfile::argon16(),
-            RiskAction::Argon32 => ChallengeProfile::argon32(),
-            RiskAction::Argon64 => ChallengeProfile::argon64(),
+            // Fixed-envelope ladder (audit #79): the memory NEVER escalates
+            // with risk — all three actions share the server-controlled
+            // envelope at t=3, p=1; only the expected nonce search space
+            // (target bits) rises along the configured ladder.
+            RiskAction::Argon16 => $this->argon($this->argonTargetBits[0]),
+            RiskAction::Argon32 => $this->argon($this->argonTargetBits[1]),
+            RiskAction::Argon64 => $this->argon($this->argonTargetBits[2]),
             // StepUp is handled by the controller (403 STEP_UP_REQUIRED) and
             // must never be mapped to a challenge profile.
             RiskAction::StepUp => throw new \LogicException('StepUp is handled by the controller, not mapped to a profile'),
@@ -68,5 +94,14 @@ final class RiskProfileResolver
         }
 
         return ChallengeProfile::sha($bits);
+    }
+
+    /**
+     * One rung of the fixed-envelope Argon ladder: the configured envelope
+     * memory at t=3, p=1 with the action's escalating target bits.
+     */
+    private function argon(int $targetBits): ChallengeProfile
+    {
+        return new ChallengeProfile(PoWAlgorithm::Argon2id, $targetBits, $this->argonEnvelopeMemoryKib, 3, 1);
     }
 }

@@ -411,11 +411,142 @@ final class RiskWiringTest extends TestCase
             self::assertStringContainsString('request_binding', $e->getMessage());
         }
 
+        // Audit #96: out-of-charset bytes are refused at compile time too.
+        try {
+            $risk = $this->riskDefaults();
+            $risk['request_binding'] = 'static binding';
+            $this->load($risk);
+            self::fail('a static request binding with out-of-charset bytes must be refused at compile time');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('request_binding', $e->getMessage());
+        }
+
         // Valid static bindings load fine.
         $risk = $this->riskDefaults();
         $risk['request_binding'] = 'static-txn';
         $this->load($risk);
         self::assertTrue(true);
+    }
+
+    public function testResolverReceivesFixedEnvelopeAndEscalationLadder(): void
+    {
+        $container = $this->load($this->riskDefaults());
+        $resolver = $container->getDefinition('kiwi_captcha.risk.resolver');
+        $args = $resolver->getArguments();
+        self::assertSame(16384, $args[2], 'arg 2 = risk.argon_verification_memory_kib (the FIXED envelope, default 16384)');
+        self::assertSame([1, 4, 8], $args[3], 'arg 3 = risk.argon_escalation_target_bits (default [1, 4, 8])');
+
+        $risk = $this->riskDefaults();
+        $risk['argon_verification_memory_kib'] = 32768;
+        $risk['argon_escalation_target_bits'] = [2, 6, 10];
+        $args = $this->load($risk)->getDefinition('kiwi_captcha.risk.resolver')->getArguments();
+        self::assertSame(32768, $args[2], 'the configured envelope reaches the resolver');
+        self::assertSame([2, 6, 10], $args[3], 'the configured ladder reaches the resolver');
+    }
+
+    public function testSecurityEpochMonitorWiredIntoVerifierAndValidator(): void
+    {
+        $risk = $this->riskDefaults();
+        $risk['policy_version'] = 2;
+        $risk['security_epoch_cache_secs'] = 3;
+        $risk['region'] = 'eu-central-1';
+        $container = $this->load($risk, ['redis_service' => 'fake_redis']);
+
+        $monitor = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        self::assertSame('kiwi_captcha.verifier', (string) $monitor->getArgument(0), 'the monitor rotates the SHARED verifier');
+        self::assertSame('fake_redis', (string) $monitor->getArgument(1), 'the monitor reads the central policy state from the security Redis');
+        self::assertSame('wiring-test', $monitor->getArgument(2), 'the monitor uses the risk namespace ({kiwi:<ns>}:security-policy)');
+        self::assertSame(2, $monitor->getArgument(3), 'the monitor floors at risk.policy_version');
+        self::assertSame(3, $monitor->getArgument(4), 'the monitor uses risk.security_epoch_cache_secs');
+        self::assertSame('eu-central-1', $monitor->getArgument('$region'), 'the monitor re-applies the verifier region on every rotation');
+
+        // The VALIDATOR receives the monitor (per-verification refresh).
+        $validator = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator::class);
+        self::assertSame(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class, (string) $validator->getArgument('$epochMonitor'), 'the validator must refresh the epoch monitor before every verification');
+
+        // Wired even when the risk ENGINE is off (the central state exists
+        // independently; the monitor serves the configured epoch without
+        // Redis).
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        (new KiwiCaptchaExtension())->load([['secret_key' => self::SECRET, 'risk' => ['enabled' => false]]], $container);
+        $monitor = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        self::assertNull($monitor->getArgument(1), 'no Redis client: the monitor serves the configured epoch');
+        self::assertSame(1, $monitor->getArgument(3));
+    }
+
+    public function testResultReceiptSignerWiredIntoValidator(): void
+    {
+        // Default: signing disabled.
+        $container = $this->load($this->riskDefaults());
+        $signer = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner::class);
+        self::assertNull($signer->getArgument(0), 'risk.result_receipt_signing_key defaults to null (disabled)');
+        $validator = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator::class);
+        self::assertSame(\BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner::class, (string) $validator->getArgument('$receiptSigner'), 'the validator receives the signer (disabled by default)');
+
+        // A valid seed is wired.
+        $seed = base64_encode(random_bytes(32));
+        $risk = $this->riskDefaults();
+        $risk['result_receipt_signing_key'] = $seed;
+        $signer = $this->load($risk)->getDefinition(\BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner::class);
+        self::assertSame($seed, $signer->getArgument(0), 'the configured Ed25519 seed reaches the signer');
+
+        // A malformed seed fails at COMPILE time.
+        foreach ([base64_encode(random_bytes(16)), 'not-base64!!'] as $bad) {
+            try {
+                $risk = $this->riskDefaults();
+                $risk['result_receipt_signing_key'] = $bad;
+                $this->load($risk);
+                self::fail('a malformed Ed25519 seed must be refused at compile time');
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('result_receipt_signing_key', $e->getMessage());
+            }
+        }
+    }
+
+    public function testScopeIssuanceCapWiredWhenConfiguredAndFailFastWithoutRedis(): void
+    {
+        // Cap > 0 with a Redis client: the service is wired into the
+        // controller with the risk namespace key prefix.
+        $risk = $this->riskDefaults();
+        $risk['max_challenges_per_scope_per_minute'] = 50;
+        $container = $this->load($risk);
+        $cap = $container->getDefinition('kiwi_captcha.risk.scope_issuance_cap');
+        self::assertSame('fake_redis', (string) $cap->getArgument(0), 'the cap uses the risk Redis client');
+        self::assertSame('{kiwi:wiring-test}:issuance:', $cap->getArgument(1), 'the cap keys live in the risk hash-tag family');
+        self::assertSame(50, $cap->getArgument(2), 'the cap reaches the service');
+        $controllerArgs = $container->getDefinition(ChallengeController::class)->getArguments();
+        self::assertSame('kiwi_captcha.risk.scope_issuance_cap', (string) $controllerArgs['$scopeIssuanceCap'], 'the controller receives the scope cap');
+
+        // Cap > 0 WITHOUT any Redis client: fail fast at compile time.
+        try {
+            $risk = $this->riskDefaults();
+            $risk['enabled'] = false;
+            $risk['max_challenges_per_scope_per_minute'] = 10;
+            $container = new ContainerBuilder();
+            $container->setParameter('kernel.environment', 'test');
+            (new KiwiCaptchaExtension())->load([['secret_key' => self::SECRET, 'risk' => $risk]], $container);
+            self::fail('a per-scope cap without any Redis client must be refused at compile time');
+        } catch (\LogicException $e) {
+            self::assertStringContainsString('max_challenges_per_scope_per_minute', $e->getMessage());
+        }
+
+        // Default (0 = unlimited): no cap service, controller gets null.
+        $container = $this->load($this->riskDefaults());
+        self::assertFalse($container->hasDefinition('kiwi_captcha.risk.scope_issuance_cap'));
+        self::assertNull($container->getDefinition(ChallengeController::class)->getArgument('$scopeIssuanceCap'));
+    }
+
+    public function testHealthControllerReceivesTheVerificationEnvelope(): void
+    {
+        $container = $this->load($this->riskDefaults());
+        $health = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class);
+        self::assertSame(16384, $health->getArgument('$argonEnvelopeMemoryKib'), 'the memory-budget invariant uses the FIXED verification envelope (audit #79)');
+
+        $risk = $this->riskDefaults();
+        $risk['argon_verification_memory_kib'] = 65536;
+        $health = $this->load($risk)->getDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class);
+        self::assertSame(65536, $health->getArgument('$argonEnvelopeMemoryKib'));
     }
 
     public function testHealthControllerWiringAndRouteLoaderFlag(): void

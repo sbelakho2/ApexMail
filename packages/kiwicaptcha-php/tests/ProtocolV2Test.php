@@ -110,18 +110,18 @@ final class ProtocolV2Test extends TestCase
             5,
         );
 
-        // Round-10 layout (audits #41/#42/#67): the canonical carries region
-        // (empty when unset), policy_version, request_binding (empty when
-        // unset), and the FINAL issuer segment (empty when unset) —
-        // byte-identical to the Rust canonical_signing_input_v2.
-        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1||', $canonical);
+        // Round-11 layout (audits #41/#42/#67/#91): the canonical carries
+        // region (empty when unset), policy_version, request_binding (empty
+        // when unset), issuer (empty when unset), and the FINAL kid segment
+        // (default 1) — byte-identical to the Rust canonical_signing_input_v2.
+        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1|||1', $canonical);
     }
 
-    public function testCanonicalPayloadCarriesIssuerAsFinalSegment(): void
+    public function testCanonicalPayloadCarriesIssuerThenKidAsFinalSegments(): void
     {
-        // Audit #67: the issuer is appended AFTER request_binding as the
-        // FINAL canonical field — issuer "prod" ends the canonical with
-        // |prod.
+        // Audits #67/#91: the issuer is appended AFTER request_binding, and
+        // kid is the FINAL canonical field — issuer "prod" + kid 3 end the
+        // canonical with |prod|3.
         $canonical = Issuer::canonicalPayload(
             'nonce123',
             'login',
@@ -139,9 +139,30 @@ final class ProtocolV2Test extends TestCase
             2,
             'txn-1',
             'prod',
+            3,
         );
 
-        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||2|txn-1|prod', $canonical);
+        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||2|txn-1|prod|3', $canonical);
+    }
+
+    public function testCanonicalPayloadKidDefaultsToOne(): void
+    {
+        $canonical = Issuer::canonicalPayload(
+            'nonce123',
+            'login',
+            'tag456',
+            111,
+            222,
+            PoWAlgorithm::Sha256,
+            0,
+            1,
+            1,
+            8,
+            'c2FsdA==',
+            5,
+        );
+
+        self::assertStringEndsWith('|1', $canonical, 'kid defaults to 1 and is always the final canonical field');
     }
 
     public function testNewRecordDefaultsToProtocolV2(): void
@@ -166,6 +187,7 @@ final class ProtocolV2Test extends TestCase
         // readers still ACCEPT ip_hash-only legacy records.
         self::assertArrayNotHasKey('ip_hash', $data);
         self::assertSame(2, $data['protocol_version']);
+        self::assertSame(1, $data['kid'], 'toArray must always emit the kid key (audit #91)');
     }
 
     public function testFromArrayBindingTagDefaultsToProtocolV2(): void

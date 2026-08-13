@@ -19,7 +19,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class StrictParserTest extends TestCase
 {
-    /** @return array<string, mixed> a fully valid 21-key record array */
+    /** @return array<string, mixed> a fully valid 22-key record array */
     private static function base(): array
     {
         return [
@@ -44,6 +44,7 @@ final class StrictParserTest extends TestCase
             'policy_version' => 1,
             'request_binding' => null,
             'issuer' => null,
+            'kid' => 1,
         ];
     }
 
@@ -75,8 +76,10 @@ final class StrictParserTest extends TestCase
         self::assertSame(1, $record->policyVersion);
         self::assertNull($record->requestBinding);
         self::assertNull($record->issuer);
-        self::assertSame(21, \count(ChallengeRecord::WIRE_KEYS));
+        self::assertSame(1, $record->kid, 'kid defaults to 1 on the wire');
+        self::assertSame(22, \count(ChallengeRecord::WIRE_KEYS));
         self::assertSame(ChallengeRecord::WIRE_KEYS, \array_keys($record->toArray()));
+        self::assertSame(1, $record->toArray()['kid'], 'the kid key is ALWAYS present (audit #91)');
     }
 
     /**
@@ -186,6 +189,32 @@ final class StrictParserTest extends TestCase
             self::base() + ['ip_hash' => 'legacyhash'],
             'both "binding_tag" and its legacy alias "ip_hash"',
         ];
+
+        yield 'kid as string rejected' => [self::mutate('kid', '1'), 'must be an integer'];
+
+        yield 'kid as float rejected' => [self::mutate('kid', 1.0), 'must be an integer'];
+
+        yield 'null kid rejected' => [self::mutate('kid', null), 'must be an integer'];
+
+        yield 'u32 overflow kid' => [self::mutate('kid', 4_294_967_296), 'must be within'];
+
+        yield 'region with space rejected (alphabet)' => [self::mutate('region', 'eu west'), 'must be 1-64 characters of [A-Za-z0-9._:-]'];
+
+        yield 'region with unicode rejected (alphabet)' => [self::mutate('region', 'eu\u00eb'), 'must be 1-64 characters of [A-Za-z0-9._:-]'];
+
+        yield 'region empty string rejected (alphabet)' => [self::mutate('region', ''), 'must be 1-64 characters of [A-Za-z0-9._:-]'];
+
+        yield 'region with invisible char rejected (alphabet)' => [self::mutate('region', "eu\x00"), 'must be 1-64 characters of [A-Za-z0-9._:-]'];
+
+        yield 'request_binding with pipe rejected (alphabet)' => [self::mutate('request_binding', 'txn|1'), 'must be 1-128 characters of [A-Za-z0-9._:-]'];
+
+        yield 'issuer with unicode rejected (alphabet)' => [self::mutate('issuer', 'pr\u00f6d'), 'must be 1-128 characters of [A-Za-z0-9._:-]'];
+
+        yield 'issuer with space rejected (alphabet)' => [self::mutate('issuer', 'prod one'), 'must be 1-128 characters of [A-Za-z0-9._:-]'];
+
+        yield 'issuer empty string rejected (alphabet)' => [self::mutate('issuer', ''), 'must be 1-128 characters of [A-Za-z0-9._:-]'];
+
+        yield 'issuer with invisible char rejected (alphabet)' => [self::mutate('issuer', "prod\x1f"), 'must be 1-128 characters of [A-Za-z0-9._:-]'];
     }
 
     public function testLegacyIpHashAliasIsAcceptedInPlaceOfBindingTag(): void
@@ -244,7 +273,7 @@ final class StrictParserTest extends TestCase
     public function testAbsentOptionalFieldsDefault(): void
     {
         $data = self::base();
-        unset($data['issued_at_ns'], $data['attempts_used'], $data['region'], $data['policy_version'], $data['request_binding'], $data['issuer'], $data['protocol_version']);
+        unset($data['issued_at_ns'], $data['attempts_used'], $data['region'], $data['policy_version'], $data['request_binding'], $data['issuer'], $data['protocol_version'], $data['kid']);
 
         $record = ChallengeRecord::fromArray($data);
 
@@ -254,6 +283,17 @@ final class StrictParserTest extends TestCase
         self::assertSame(1, $record->policyVersion, 'serde default policy_version is 1');
         self::assertNull($record->requestBinding);
         self::assertNull($record->issuer, 'a missing issuer key defaults to null (the fuzz corpus has no issuer field)');
+        self::assertSame(1, $record->kid, 'a missing kid key defaults to 1 (serde default — the fuzz corpus has no kid field)');
+    }
+
+    public function testKidRoundTripsThroughToArrayAndFromArray(): void
+    {
+        $data = self::mutate('kid', 7);
+
+        $record = ChallengeRecord::fromArray($data);
+        self::assertSame(7, $record->kid);
+        self::assertSame(7, $record->toArray()['kid']);
+        self::assertSame(7, ChallengeRecord::fromArray($record->toArray())->kid);
     }
 
     public function testProtocolVersionWithinU8RangeIsAccepted(): void
@@ -275,14 +315,14 @@ final class StrictParserTest extends TestCase
         self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
     }
 
-    public function testWireKeySetIsPinnedTo21(): void
+    public function testWireKeySetIsPinnedTo22(): void
     {
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
-            'issuer',
+            'issuer', 'kid',
         ], ChallengeRecord::WIRE_KEYS);
     }
 
