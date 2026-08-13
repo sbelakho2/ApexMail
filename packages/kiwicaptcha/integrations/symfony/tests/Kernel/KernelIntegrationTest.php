@@ -148,6 +148,32 @@ final class KernelIntegrationTest extends TestCase
         $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['telemetry' => 'bogus']);
     }
 
+    public function testFormRequestBindingOptionRendersTheWidgetAttribute(): void
+    {
+        $factory = $this->container()->get('form.factory');
+        $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, [
+            'scope' => 'login',
+            'request_binding' => 'txn-abc',
+        ]);
+
+        $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
+        self::assertStringContainsString('data-kiwi-request-binding="txn-abc"', $html, 'the form-level transaction binding must render on the widget container (audit #41)');
+
+        // Without the option the attribute is absent (the static config
+        // default is null in the test kernel).
+        $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['scope' => 'login']);
+        $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
+        // The driver script always mentions the attribute; the CONTAINER
+        // must not carry it when no binding is configured.
+        self::assertStringContainsString('data-kiwi-telemetry="off">', $html, 'without the option the widget container must not render data-kiwi-request-binding');
+    }
+
+    public function testStandaloneWidgetRequestBindingContext(): void
+    {
+        $html = $this->twig()->render('@Test/widget-function.html.twig', ['nonce' => 'n-csp-xyz', 'request_binding' => 'standalone-txn']);
+        self::assertStringContainsString('data-kiwi-request-binding="standalone-txn"', $html);
+    }
+
     public function testChallengeControllerReturnsJsonShape(): void
     {
         $controller = $this->container()->get(ChallengeController::class);

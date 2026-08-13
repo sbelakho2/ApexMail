@@ -1,6 +1,14 @@
 (function() {
   var encoder = new TextEncoder();
 
+  // ── Solver build id (audit #53) ─────────────────────────────────────
+  // Bumped manually at build time. The worker reports the SAME id in its
+  // `ready`/`done` handshake messages; the driver refuses any worker whose
+  // id differs (a stale cached worker must never contribute a solution).
+  // Integrators must serve the driver, worker and wasm from the SAME build
+  // (see SECURITY.md — versioned-resource expectation).
+  var KIWI_SOLVER_BUILD_ID = "2026-08-r1";
+
   // ── Argon2id worker source (embedded) ───────────────────────────────
   // Same-origin Web Worker for the memory-hard Argon2id solver. The worker
   // must run off the main thread (each 64 MiB hash blocks the UI for tens of
@@ -15,6 +23,11 @@
   // into pages by the renderers).
   var KIWI_WORKER_SRC = `(function () {
   "use strict";
+
+  // Solver build id (audit #53): MUST equal the widget driver's
+  // KIWI_SOLVER_BUILD_ID constant. Reported in the ready/done handshake
+  // messages so the driver can refuse a stale cached worker.
+  var KIWI_SOLVER_BUILD_ID = "2026-08-r1";
 
   var loader = null;
   try { importScripts("kiwicaptcha-wasm.js"); } catch (e) {}
@@ -187,7 +200,7 @@
         var res = w.solve_argon2_chunk(pp, prefix.length, sp, salt.length, targetBits, mKib, t, p, counter, 1);
         if (res !== -1) {
           free(w, pp, prefix.length); free(w, sp, salt.length);
-          post({ type: "done", counter: res });
+          post({ type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID });
           return;
         }
         counter += 1;
@@ -224,7 +237,7 @@
           var res = w.solve_sha256_chunk(pp, prefix.length, sp, salt.length, targetBits, counter, 1000);
           if (res !== -1) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
-            post({ type: "done", counter: res });
+            post({ type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID });
             return;
           }
           counter += 1000;
@@ -238,7 +251,7 @@
         for (; counter < end; counter++) {
           if (leadingZeros(deriveHash(prefix, counter, salt)) >= targetBits) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
-            post({ type: "done", counter: counter });
+            post({ type: "done", counter: counter, buildId: KIWI_SOLVER_BUILD_ID });
             return;
           }
         }
@@ -268,6 +281,10 @@
       post({ type: "failed", reason: "error: " + (e && e.message) });
     }
   };
+
+  // Startup handshake (audit #53): announce this worker's solver build id
+  // BEFORE any solve work so the driver can refuse a stale worker outright.
+  post({ type: "ready", buildId: KIWI_SOLVER_BUILD_ID });
 })();
 `;
 
@@ -530,11 +547,25 @@
       worker.onmessage = function(ev) {
         var msg = ev.data;
         if (!msg || typeof msg !== "object" || msg.v !== 1) return;
+        if (msg.type === "ready") {
+          // Startup handshake (audit #53): the worker must report the SAME
+          // solver build id as this driver. A stale cached worker is
+          // refused — it never contributes a solution and there is no
+          // fallback (the main-thread solver is this driver's own build).
+          if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_BUILD_ID) {
+            if (!settled) { settled = true; worker.terminate(); resolve({ mismatch: true }); }
+          }
+          return;
+        }
         if (msg.type === "progress") {
           if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
           onProgress(Math.min(95, (msg.counter * 100) / expectedHashes));
         } else if (msg.type === "done") {
           if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
+          if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_BUILD_ID) {
+            if (!settled) { settled = true; worker.terminate(); resolve({ mismatch: true }); }
+            return;
+          }
           settled = true;
           worker.terminate();
           resolve({ counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
@@ -667,13 +698,75 @@
     }
     
     var countdownTimer = null;
+    var retryCount = 0;
+    var RETRY_LIMIT = 2;
     function startCountdown(ttlSecs) {
       var remaining = ttlSecs;
       var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : "expired"; };
       tick(); clearInterval(countdownTimer);
       countdownTimer = setInterval(function() { remaining--; tick(); if (remaining <= 0) clearInterval(countdownTimer); }, 1000);
     }
-    function fail(msg) { setStatus(msg || "Failed", "Error", "failed"); setHint("Please reload to retry."); setProgress(0); if (tokenEl) tokenEl.value = ""; clearInterval(countdownTimer); telemetry.stop(); }
+    // Request binding (audit #41): a hidden input carrying the bound value,
+    // placed next to the token input (mirroring how the token is written).
+    function setBinding(value) {
+      if (!tokenEl) return;
+      var host = tokenEl.parentNode;
+      var input = host ? host.querySelector('input[name="kiwi_request_binding"]') : null;
+      if (!input) {
+        input = document.createElement("input");
+        input.type = "hidden";
+        input.name = "kiwi_request_binding";
+        if (host) host.insertBefore(input, tokenEl.nextSibling);
+      }
+      input.value = value || "";
+    }
+    function resetToIdle() {
+      clearInterval(countdownTimer);
+      telemetry.stop();
+      if (tokenEl) tokenEl.value = "";
+      setBinding("");
+      if (countdownEl) countdownEl.textContent = "";
+      setStatus("Security Check", "Idle", "idle");
+      setHint("Protected");
+      setProgress(0);
+    }
+    // Failure recovery (audit #55): an error never leaves the widget stuck
+    // in "failed" — it resets to idle, retries a bounded number of times
+    // with backoff, then settles idle and reacquires on the next
+    // interaction (click the widget, or the page re-inits it).
+    function fail(msg) {
+      resetToIdle();
+      if (retryCount < RETRY_LIMIT) {
+        retryCount++;
+        setHint("Challenge failed (" + msg + ") \u2014 retrying\u2026");
+        setTimeout(run, 1000 * retryCount);
+      } else {
+        setHint("Challenge failed (" + msg + ") \u2014 click the widget to retry.");
+        delete W.dataset.kiwiStarted;
+      }
+    }
+    // Build-id mismatch (audit #53): the worker reported a solver build id
+    // different from this driver's constant. The stale worker must NEVER
+    // contribute a solution, and there is no fallback (retrying cannot
+    // change the cached worker the page was served).
+    function solverMismatch() {
+      clearInterval(countdownTimer);
+      telemetry.stop();
+      if (tokenEl) tokenEl.value = "";
+      setBinding("");
+      if (countdownEl) countdownEl.textContent = "";
+      setStatus("Solver version mismatch", "Version Error", "kiwi:solver-mismatch");
+      setHint("The solver worker is out of date \u2014 reload the page to load the current version.");
+      setProgress(0);
+    }
+    // BFCache restore (audit #54): a persisted pageshow must NOT auto-solve —
+    // it clears the solved state and leaves the widget idle, ready to
+    // reacquire on the next interaction or page re-init.
+    function reset() {
+      resetToIdle();
+      delete W.dataset.kiwiStarted;
+    }
+    kiwiResetHooks.push({ el: W, reset: reset });
 
     async function run() {
       try {
@@ -687,8 +780,10 @@
           else if (p.indexOf("forgot")>=0) scope="forgot-password";
         }
         var algorithm = W.getAttribute("data-kiwi-algorithm") || container.getAttribute("data-kiwi-algorithm") || "sha256";
+        var requestBinding = W.getAttribute("data-kiwi-request-binding") || container.getAttribute("data-kiwi-request-binding");
         var reqBody = { scope: scope };
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
+        if (requestBinding) reqBody.request_binding = requestBinding;
         var resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody) });
         if (!resp.ok) throw new Error("Challenge failed");
         var data = await resp.json();
@@ -699,12 +794,15 @@
           // Memory-hard challenges run in a same-origin worker when
           // available; the synchronous CHUNK=1 path is the fallback.
           result = await solveWithWorker(data, setProgress, container);
+          if (result && result.mismatch) { solverMismatch(); return; }
           if (!result) result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "argon2id", data.mKib||0, data.t||1, data.p||1, setProgress);
         } else {
           result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress);
         }
         if (!result) throw new Error("Exhausted");
         tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()));
+        setBinding(requestBinding || "");
+        retryCount = 0;
         setStatus("Verified", "Success", "done"); setHint("Proof-of-work verified locally."); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
         telemetry.stop();
       } catch (e) { fail(e.message); }
@@ -712,7 +810,33 @@
     run();
   }
 
-  window.KiwiCaptcha = { init: initWidget, render: function(s) { document.querySelectorAll(s).forEach(initWidget); }, workerSource: KIWI_WORKER_SRC };
-  var runInit = function() { document.querySelectorAll("[data-kiwi-widget]").forEach(initWidget); };
+  // ── BFCache restore (audit #54) ─────────────────────────────────────
+  // A persisted pageshow restores the page WITHOUT re-running the driver
+  // init, so a previously solved widget would otherwise keep its stale
+  // token. Reset every live widget: clear the solved state and reacquire
+  // on the next interaction instead of auto-solving on restore.
+  var kiwiResetHooks = [];
+  window.addEventListener("pageshow", function (e) {
+    if (!e.persisted) return;
+    for (var i = 0; i < kiwiResetHooks.length; i++) {
+      try { kiwiResetHooks[i].reset(); } catch (err) {}
+    }
+  });
+
+  window.KiwiCaptcha = { init: initWidget, render: function(s) { document.querySelectorAll(s).forEach(initWidget); }, workerSource: KIWI_WORKER_SRC, buildId: KIWI_SOLVER_BUILD_ID };
+  var runInit = function() {
+    document.querySelectorAll("[data-kiwi-widget]").forEach(function (W) {
+      // Click-to-reacquire: after a reset or a settled failure the widget
+      // is idle and ready for a fresh challenge on the next interaction
+      // (audit #54/#55). Bound once per element.
+      if (!W.dataset.kiwiRetryBound) {
+        W.dataset.kiwiRetryBound = "1";
+        W.addEventListener("pointerdown", function () {
+          if (!W.dataset.kiwiStarted) initWidget(W);
+        });
+      }
+      initWidget(W);
+    });
+  };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", runInit); else runInit();
 })();

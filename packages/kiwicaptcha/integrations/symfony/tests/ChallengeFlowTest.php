@@ -362,6 +362,145 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
+     * Audit #43: the FULL origin-normalization audit list. Structured
+     * normalization compares (scheme, host, effective port) with the host
+     * lowercased, trailing dots stripped and IDN converted to punycode
+     * (when ext-intl is available).
+     */
+    public function testOriginNormalizationAuditList(): void
+    {
+        $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://example.com', 'https://[2001:db8::1]:8443']);
+
+        $accepted = [
+            'https://example.com' => 'the allowlisted origin itself',
+            'https://example.com:443' => 'explicit default port equals the implicit one',
+            'https://EXAMPLE.COM' => 'host case-insensitivity (DNS)',
+            'https://EXAMPLE.COM:443' => 'case + explicit default port',
+            'https://example.com.' => 'trailing dot is DNS-equivalent',
+            'https://[2001:db8::1]:8443' => 'IPv6 literal kept bracketed',
+        ];
+        foreach ($accepted as $origin => $why) {
+            $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => $origin], '{"scope":"login"}'));
+            self::assertSame(200, $response->getStatusCode(), $why.' must be accepted');
+        }
+
+        $rejected = [
+            'http://example.com' => 'scheme differs (http vs https)',
+            'https://example.com:444' => 'non-default port differs',
+            'https://evil-example.com' => 'different host',
+            'https://example.com.evil.com' => 'suffix host is not the host',
+            'https://[2001:db8::1]' => 'IPv6 without the port differs',
+            'https://[2001:db8::2]:8443' => 'different IPv6 literal',
+        ];
+        foreach ($rejected as $origin => $why) {
+            $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => $origin], '{"scope":"login"}'));
+            self::assertSame(403, $response->getStatusCode(), $why.' must be rejected');
+            self::assertSame('origin_rejected', json_decode((string) $response->getContent(), true)['error']['code'], $why);
+        }
+    }
+
+    public function testOriginNormalizationUnicodePunycodeWhenIntlAvailable(): void
+    {
+        if (!\function_exists('idn_to_ascii')) {
+            self::markTestSkipped('ext-intl is not available — IDN normalization cannot be tested');
+        }
+        $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://bücher.example']);
+
+        // The Unicode spelling and its punycode form normalize identically.
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://bücher.example'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'the Unicode spelling must match its own allowlisted form');
+
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://xn--bcher-kva.example'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'the punycode spelling must match the Unicode allowlist entry');
+
+        // A different Unicode host must NOT match.
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://kaufen.example'], '{"scope":"login"}'));
+        self::assertSame(403, $response->getStatusCode(), 'a different IDN host must be rejected');
+    }
+
+    public function testEnforceOriginRejectsMissingAndNullOrigins(): void
+    {
+        // enforce_origin with an EMPTY allowlist: the Origin is required but
+        // anything non-null is accepted (no allowlist to match).
+        $controller = new ChallengeController($this->issuer(), null, false, null, null, null, null, [], false, null, null, true);
+
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(403, $response->getStatusCode(), 'a MISSING Origin must be rejected when enforce_origin is true');
+        self::assertSame('origin_rejected', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'null'], '{"scope":"login"}'));
+        self::assertSame(403, $response->getStatusCode(), 'the literal "null" Origin (opaque/sandboxed) must be rejected when enforced');
+        self::assertSame('origin_rejected', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        // A usable Origin passes (no allowlist).
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://anything.example'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode());
+
+        // With an allowlist, the required Origin must ALSO be allowlisted.
+        $strict = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com'], false, null, null, true);
+        $response = $strict->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://other.example'], '{"scope":"login"}'));
+        self::assertSame(403, $response->getStatusCode(), 'enforced + allowlisted: a non-allowlisted Origin must be rejected');
+        $response = $strict->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_ORIGIN' => 'https://app.example.com'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode());
+
+        // NOT enforced (default): a missing Origin with an allowlist falls
+        // back to the Referer as before (server-to-server trusted mode).
+        $lax = new ChallengeController($this->issuer(), null, false, null, null, null, null, ['https://app.example.com']);
+        $response = $lax->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_REFERER' => 'https://app.example.com/contact'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'enforce_origin=false keeps the Referer-origin fallback (documented trusted mode for server-to-server)');
+    }
+
+    public function testChallengeAcceptsRequestBindingAndBakesItIntoTheRecord(): void
+    {
+        $storage = new ArrayStorage();
+        $controller = new ChallengeController(new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage));
+
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"txn-abc-123"}'));
+        self::assertSame(200, $response->getStatusCode());
+
+        $data = json_decode((string) $response->getContent(), true);
+        $record = $storage->find($data['nonce']);
+        self::assertNotNull($record);
+        self::assertSame('txn-abc-123', $record->requestBinding, 'the request binding must be signed into the stored record (audit #41)');
+    }
+
+    public function testChallengeRejectsMalformedRequestBinding(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        // '|' is the canonical-payload separator — never allowed in a binding.
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"a|b"}'));
+        self::assertSame(422, $response->getStatusCode());
+        self::assertSame('INVALID_REQUEST_BINDING', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        // Longer than 128 chars.
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"'.str_repeat('x', 129).'"}'));
+        self::assertSame(422, $response->getStatusCode());
+        self::assertSame('INVALID_REQUEST_BINDING', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        // Empty string is treated as absent.
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":""}'));
+        self::assertSame(200, $response->getStatusCode());
+    }
+
+    public function testStaticDefaultRequestBindingAppliesWhenThePayloadOmitsIt(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $controller = new ChallengeController($issuer, null, false, null, null, null, null, [], false, $storage, 'static-binding');
+
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode((string) $response->getContent(), true);
+        self::assertSame('static-binding', $storage->find($data['nonce'])?->requestBinding, 'the configured static binding must apply when the request sends none');
+
+        // The request's own field WINS over the static default.
+        $response = $controller->challenge(Request::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","request_binding":"per-request"}'));
+        $data = json_decode((string) $response->getContent(), true);
+        self::assertSame('per-request', $storage->find($data['nonce'])?->requestBinding, 'the per-request binding overrides the static default');
+    }
+
+    /**
      * A source that issues more challenges than max_outstanding_challenges
      * gets the 429 risk-denied response; the minted-but-refused record is
      * discarded (never handed out, never left outstanding).

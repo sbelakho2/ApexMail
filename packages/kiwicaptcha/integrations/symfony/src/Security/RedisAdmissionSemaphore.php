@@ -38,32 +38,57 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
     private const DEFAULT_LEASE_MS = 45_000;
 
     /**
-     * Atomic acquire with the bounded WAITERS guard (audit #31):
-     *   KEYS[1]  = lease set key
+     * Atomic acquire with the bounded WAITERS guard (audit #31) AND the
+     * PER-SCOPE budget (audit #47):
+     *   KEYS[1]  = lease set key (global)
      *   KEYS[2]  = waiters counter key
-     *   ARGV[1]  = max concurrent leases (cap)
+     *   KEYS[3]  = per-scope lease set key ('' = no scope)
+     *   ARGV[1]  = max concurrent leases (global cap)
      *   ARGV[2]  = lease lifetime in ms (LEASE_MS)
      *   ARGV[3]  = unique lease token
      *   ARGV[4]  = max waiters (argon2_max_waiters)
+     *   ARGV[5]  = per-scope cap (argon2_max_per_tenant)
+     *   ARGV[6]  = 1 when KEYS[3] is a live per-scope set, else 0
      *
      * Lease semantics are unchanged: expired leases are pruned, the lease is
-     * granted when a slot is free. A granted caller is a served waiter, so
-     * the waiters counter is decremented (floored at 0) in the same script.
-     * When the cap is saturated the caller WOULD block behind the gate: the
-     * waiters counter is incremented with the lease lifetime's TTL; once the
-     * waiter count EXCEEDS maxWaiters the acquire returns null IMMEDIATELY
-     * (the caller is refused without queueing — CapacityExceeded surfaces as
-     * the 429/violation) and its waiter entry is removed in the same script,
-     * so the counter can never grow unboundedly under a saturation storm.
+     * granted when a slot is free. The per-scope set is checked IN ADDITION
+     * to the global cap: a scope whose own set is full is refused even when
+     * the global set has room (per-tenant fairness — one busy scope can
+     * never starve the others' Argon budget), and the global cap always
+     * wins (the deployment-wide memory invariant). A granted caller is a
+     * served waiter, so the waiters counter is decremented (floored at 0)
+     * in the same script. When a cap is saturated the caller WOULD block
+     * behind the gate: the GLOBAL waiters counter is incremented with the
+     * lease lifetime's TTL; once the waiter count EXCEEDS maxWaiters the
+     * acquire returns null IMMEDIATELY (the caller is refused without
+     * queueing — CapacityExceeded surfaces as the 429/violation) and its
+     * waiter entry is removed in the same script, so the counter can never
+     * grow unboundedly under a saturation storm. The waiters guard stays
+     * global — one shared bounded queue regardless of which cap refused.
      * Returns 1 when the lease was granted, 0 when refused.
      */
     private const ACQUIRE_SCRIPT = <<<'LUA'
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
+local has_scope = tonumber(ARGV[6]) == 1
+local scope_cap = tonumber(ARGV[5])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+if has_scope and scope_cap > 0 then
+    redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now)
+end
+local admitted = false
 if redis.call('ZCARD', KEYS[1]) < tonumber(ARGV[1]) then
-    redis.call('ZADD', KEYS[1], now + tonumber(ARGV[2]), ARGV[3])
-    redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2])*2)
+    if not has_scope or scope_cap <= 0 or redis.call('ZCARD', KEYS[3]) < scope_cap then
+        redis.call('ZADD', KEYS[1], now + tonumber(ARGV[2]), ARGV[3])
+        redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2])*2)
+        if has_scope and scope_cap > 0 then
+            redis.call('ZADD', KEYS[3], now + tonumber(ARGV[2]), ARGV[3])
+            redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[2])*2)
+        end
+        admitted = true
+    end
+end
+if admitted then
     local waiters = tonumber(redis.call('GET', KEYS[2]) or '0')
     if waiters > 0 then redis.call('DECR', KEYS[2]) end
     return 1
@@ -79,14 +104,22 @@ LUA;
 
     /**
      * Atomic release (exact audit semantics): removes exactly the lease
-     * token. ZREM of an absent member is a no-op, so stale releases cannot
-     * remove a newer lease.
+     * token from the global set AND — when the token carries a per-scope
+     * suffix — from that scope's set. ZREM of an absent member is a no-op,
+     * so stale releases cannot remove a newer lease.
      *
-     * KEYS[1] = lease set key
+     * KEYS[1] = lease set key (global)
+     * KEYS[2] = per-scope lease set key ('' = no scope)
      * ARGV[1] = lease token to release
+     * ARGV[2] = 1 when KEYS[2] is a live per-scope set, else 0
      */
     private const RELEASE_SCRIPT = <<<'LUA'
-return redis.call('ZREM', KEYS[1], ARGV[1])
+-- Admission release with per-scope lease removal
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+if tonumber(ARGV[2]) == 1 then
+    redis.call('ZREM', KEYS[2], ARGV[1])
+end
+return removed
 LUA;
 
     /**
@@ -123,10 +156,15 @@ LUA;
      *                                             [A-Za-z0-9_.-])
      * @param int                   $maxWaiters    bounded waiters guard
      *                                             (argon2_max_waiters, >= 1):
-     *                                             when the cap is saturated and
+     *                                             when a cap is saturated and
      *                                             the waiter count exceeds it,
      *                                             acquire() refuses immediately
      *                                             instead of queueing
+     * @param int                   $maxPerScope   PER-SCOPE budget
+     *                                             (argon2_max_per_tenant, >= 1):
+     *                                             each scope string has its
+     *                                             own lease set checked in
+     *                                             addition to the global cap
      */
     public function __construct(
         private readonly \Redis|\Predis\Client $client,
@@ -134,12 +172,16 @@ LUA;
         string $namespace = 'default',
         private readonly int $leaseMs = self::DEFAULT_LEASE_MS,
         private readonly int $maxWaiters = 64,
+        private readonly int $maxPerScope = 8,
     ) {
         if ($leaseMs < 1_000) {
             throw new \InvalidArgumentException('leaseMs must be >= 1000');
         }
         if ($maxWaiters < 1) {
             throw new \InvalidArgumentException('maxWaiters must be >= 1');
+        }
+        if ($maxPerScope < 1) {
+            throw new \InvalidArgumentException('maxPerScope must be >= 1');
         }
         $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'default';
         $this->key = 'kiwicaptcha:argon2:leases:'.$suffix;
@@ -149,13 +191,41 @@ LUA;
         $this->waitersKey = '{kiwicaptcha:argon2:leases:'.$suffix.'}:sem:waiters';
     }
 
-    public function acquire(): ?string
+    /**
+     * Acquire an Argon2id admission slot.
+     *
+     * @param string|null $scope the scope string (the challenge's scope) for
+     *                           the PER-SCOPE budget (audit #47): the scope's
+     *                           own lease set ({kiwicaptcha:argon2:leases:
+     *                           <ns>}:<scope>) is checked against
+     *                           argon2_max_per_tenant IN ADDITION to the
+     *                           global cap. Null = no per-scope attribution
+     *                           (only the global cap applies) — the core
+     *                           verifier passes the STORED record's scope.
+     */
+    public function acquire(?string $scope = null): ?string
     {
         if ($this->maxConcurrent <= 0) {
             return 'disabled';
         }
         $token = bin2hex(random_bytes(16));
-        $result = $this->eval(self::ACQUIRE_SCRIPT, [$this->key, $this->waitersKey], [(string) $this->maxConcurrent, (string) $this->leaseMs, $token, (string) $this->maxWaiters]);
+        $scopeKey = '';
+        $hasScope = false;
+        if ($scope !== null && $scope !== '') {
+            // Per-scope set: {kiwicaptcha:argon2:leases:<ns>}:<scope> —
+            // hash-tagged with the same family as the waiters counter
+            // (Cluster safe). The token carries the sanitized scope suffix
+            // so release() can remove the lease from BOTH sets.
+            $scopeSuffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $scope) ?: 'scope';
+            $scopeKey = '{'.$this->key.'}:'.$scopeSuffix;
+            $token .= '.'.$scopeSuffix;
+            $hasScope = true;
+        }
+        $result = $this->eval(
+            self::ACQUIRE_SCRIPT,
+            [$this->key, $this->waitersKey, $scopeKey],
+            [(string) $this->maxConcurrent, (string) $this->leaseMs, $token, (string) $this->maxWaiters, (string) $this->maxPerScope, $hasScope ? '1' : '0'],
+        );
 
         return $result === 1 ? $token : null;
     }
@@ -165,7 +235,19 @@ LUA;
         if ($lease === 'disabled') {
             return;
         }
-        $this->eval(self::RELEASE_SCRIPT, [$this->key], [$lease]);
+        // A scoped lease token carries ".<sanitized-scope>" after the hex
+        // nonce; the scope suffix rebuilds the per-scope set key.
+        $scopeKey = '';
+        $hasScope = false;
+        $sep = strpos($lease, '.');
+        if ($sep !== false) {
+            $scope = substr($lease, $sep + 1);
+            if ($scope !== '') {
+                $scopeKey = '{'.$this->key.'}:'.$scope;
+                $hasScope = true;
+            }
+        }
+        $this->eval(self::RELEASE_SCRIPT, [$this->key, $scopeKey], [$lease, $hasScope ? '1' : '0']);
     }
 
     /** The configured concurrency cap (0 = disabled). */

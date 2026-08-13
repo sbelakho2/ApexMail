@@ -15,6 +15,7 @@ enum VerifyError: string
     case IpMismatch = 'ip_mismatch';
     case MissingClientIp = 'missing_client_ip';
     case WrongRegion = 'wrong_region';
+    case WrongPolicyVersion = 'challenge was issued under a different security-policy epoch';
     case TooFast = 'too_fast';
     case InsufficientWork = 'insufficient_work';
     case MalformedRecord = 'malformed_record';

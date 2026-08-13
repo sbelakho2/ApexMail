@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Round-8 security audits #25, #27, #28.
+// Round-8 security audits #25, #27, #28 + Round-9 audits #41, #53, #54, #55.
 //
 // This file is canonical at packages/kiwicaptcha-wasm/tests/browser/specs/
 // and MUST be copied into the public repo's tests/browser/specs/ during
@@ -90,8 +90,8 @@ test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
     }
 
     // The only postMessage traffic is worker-internal: the driver posts the
-    // solve request to its own worker, the worker posts progress/done/failed
-    // back, and the MessageChannel yield is fully internal.
+    // solve request to its own worker, the worker posts ready/progress/
+    // done/failed back, and the MessageChannel yield is fully internal.
     expect(src).toMatch(/worker\.postMessage\(/);
     expect(src).toMatch(/worker\.onmessage\s*=/);
   });
@@ -119,6 +119,8 @@ test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
     // SAME worker source in isolation and verify the onmessage schema guard:
     // messages without the version field or with an unknown type must never
     // produce a reply (the pre-guard code would have replied "failed").
+    // The worker's own startup "ready" handshake is expected and filtered
+    // out — it is not a reply to any posted message.
     const guardResult = await page.evaluate(async (workerSrc) => {
       const replies = [];
       const worker = new Worker(
@@ -143,11 +145,15 @@ test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
       worker.postMessage({ v: 1, type: 'solve', prefix: 'p' });
       await sleep(150);
 
-      const repliesAtGuard = replies.length;
+      const repliesAtGuard = replies.filter((r) => r.type !== 'ready').length;
+      const handshakeSeen = replies.some(
+        (r) => r.type === 'ready' && typeof r.buildId === 'string'
+      );
       worker.terminate();
-      return repliesAtGuard;
+      return { repliesAtGuard, handshakeSeen };
     }, workerSource());
-    expect(guardResult, 'no rogue message may produce a worker reply').toBe(0);
+    expect(guardResult.repliesAtGuard, 'no rogue message may produce a worker reply').toBe(0);
+    expect(guardResult.handshakeSeen, 'the worker must announce its build id on startup (audit #53)').toBe(true);
   });
 });
 
@@ -158,8 +164,9 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
     expect(src).toMatch(/redirect\s*:\s*["']error["']/);
 
     // redirect:"error" rejects ANY redirect — even a same-origin one. The
-    // widget must fail closed (no token, failed state) instead of following
-    // the redirect.
+    // widget must fail closed (no token, idle state) instead of following
+    // the redirect (audit #55: the error path resets to idle; bounded
+    // retries may re-attempt, so at least one request is expected).
     const challenged = [];
     await page.route('**/challenge', async (route) => {
       challenged.push(route.request().url());
@@ -169,11 +176,12 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
       });
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
       timeout: 30_000,
     });
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
-    expect(challenged).toHaveLength(1);
+    expect(challenged.length).toBeGreaterThanOrEqual(1);
   });
 
   test('a cross-origin redirect target is never contacted', async ({ page }) => {
@@ -188,9 +196,10 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
       });
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
       timeout: 30_000,
     });
+    await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     expect(foreign, 'redirect:"error" must never leak the request to the cross-origin target').toEqual([]);
   });
 
@@ -203,13 +212,12 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
       'data-kiwi-endpoint': 'http://127.0.0.1:9999/challenge',
       'data-kiwi-scope': 'login',
     });
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
       timeout: 30_000,
     });
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     expect(foreign, 'the cross-origin endpoint must be refused before any request').toEqual([]);
-    const badge = await page.locator('[data-kiwi-badge]').textContent();
-    expect(badge).toMatch(/Error/i);
   });
 });
 
@@ -260,5 +268,196 @@ test.describe('KiwiCaptcha calibration floor (audit #25)', () => {
     for (const field of FORBIDDEN) {
       expect(body, `the argon2id request must not suggest ${field}`).not.toHaveProperty(field);
     }
+  });
+});
+
+test.describe('KiwiCaptcha BFCache recovery (audit #54)', () => {
+  test('driver registers a persisted-pageshow reset and keeps the token in memory only (static source assertion)', () => {
+    const src = driverSource();
+    expect(src).toMatch(/addEventListener\(\s*["']pageshow["']\s*,\s*function\s*\(e\)/);
+    expect(src).toMatch(/e\.persisted/);
+    // The result token must live in memory only — no web storage anywhere.
+    expect(src, 'the driver must never touch localStorage').not.toMatch(/localStorage/);
+    expect(src, 'the driver must never touch sessionStorage').not.toMatch(/sessionStorage/);
+  });
+
+  test('a persisted pageshow clears the solved state and does NOT auto-solve on restore (runtime)', async ({ page }) => {
+    const challenges = [];
+    await page.route('**/challenge', async (route) => {
+      challenges.push(route.request().url());
+      await route.continue();
+    });
+    await serveWidgetPage(page, {
+      'data-kiwi-endpoint': '/challenge',
+      'data-kiwi-scope': 'login',
+    });
+    const widgetEl = page.locator('[data-kiwi-widget]');
+    await expect(widgetEl).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const tokenInput = page.locator('[data-kiwi-token]');
+    const token = await tokenInput.inputValue();
+    expect(token.length, 'the widget must have produced a token before the restore').toBeGreaterThan(0);
+
+    // Simulate a BFCache restore. The real event fires AT window (and
+    // propagates down); a synthetic dispatch must therefore target window —
+    // document.dispatchEvent never reaches window listeners in Chromium.
+    await page.evaluate(() => {
+      window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+    });
+
+    await expect(widgetEl).toHaveAttribute('data-state', 'idle');
+    await expect(tokenInput).toHaveValue('');
+    // No reacquire on restore: the widget must not issue a new challenge
+    // until the next interaction.
+    await page.waitForTimeout(800);
+    expect(challenges, 'a persisted restore must not auto-solve').toHaveLength(1);
+  });
+});
+
+test.describe('KiwiCaptcha failure recovery (audit #55)', () => {
+  test('a rejected challenge response leaves the widget idle with no token (rejected-token recovery)', async ({ page }) => {
+    let calls = 0;
+    await page.route('**/challenge', async (route) => {
+      calls++;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: '{"error":"down"}',
+      });
+    });
+    await page.goto('/');
+    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+      timeout: 30_000,
+    });
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
+    expect(calls, 'bounded retries must have been attempted before settling').toBeGreaterThanOrEqual(1);
+  });
+
+  test('the widget reacquires a fresh challenge after transient failures (auto-recovery)', async ({ page }) => {
+    let calls = 0;
+    await page.route('**/challenge', async (route) => {
+      calls++;
+      if (calls <= 2) {
+        await route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: '{"error":"down"}',
+        });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto('/');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
+      timeout: 60_000,
+    });
+    expect(calls).toBeGreaterThanOrEqual(3);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+  });
+
+  test('after settling idle the widget reacquires on the next interaction (click-to-retry)', async ({ page }) => {
+    let failing = true;
+    await page.route('**/challenge', async (route) => {
+      if (failing) {
+        await route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: '{"error":"down"}',
+        });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto('/');
+    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+      timeout: 30_000,
+    });
+    failing = false;
+    await page.locator('[data-kiwi-widget]').click();
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
+      timeout: 60_000,
+    });
+    await expect(page.locator('[data-kiwi-token]')).not.toHaveValue('');
+  });
+});
+
+test.describe('KiwiCaptcha request binding (audit #41)', () => {
+  test('data-kiwi-request-binding is forwarded in the challenge body and echoed as a hidden input next to the token (static + runtime)', async ({ page }) => {
+    const src = driverSource();
+    // Static: the driver reads the attribute and includes request_binding
+    // in the body; the hidden input mirrors the token-input write path.
+    expect(src).toMatch(/data-kiwi-request-binding/);
+    expect(src).toMatch(/reqBody\.request_binding/);
+    expect(src).toMatch(/kiwi_request_binding/);
+
+    const bodies = [];
+    await page.route('**/challenge', async (route) => {
+      bodies.push(route.request().postDataJSON() ?? {});
+      await route.continue();
+    });
+    await serveWidgetPage(page, {
+      'data-kiwi-endpoint': '/challenge',
+      'data-kiwi-scope': 'login',
+      'data-kiwi-request-binding': 'form-42-abc',
+    });
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
+      timeout: 60_000,
+    });
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].request_binding).toBe('form-42-abc');
+
+    const hidden = page.locator('input[name="kiwi_request_binding"]');
+    await expect(hidden).toHaveValue('form-42-abc');
+    const adjacency = await page.evaluate(() => {
+      const token = document.querySelector('[data-kiwi-token]');
+      const next = token && token.nextElementSibling;
+      return !!(next && next.name === 'kiwi_request_binding');
+    });
+    expect(adjacency, 'the binding input must sit directly next to the token input').toBe(true);
+  });
+});
+
+test.describe('KiwiCaptcha solver version coupling (audit #53)', () => {
+  test('worker handshake carries the solver build id and the driver validates it (static source assertion)', () => {
+    const src = driverSource();
+    const worker = workerSource();
+
+    // The build id constant must exist in the driver and the worker, and
+    // both must agree.
+    const driverBuildId = src.match(/KIWI_SOLVER_BUILD_ID\s*=\s*"([^"]+)"/)?.[1];
+    const workerBuildId = worker.match(/KIWI_SOLVER_BUILD_ID\s*=\s*"([^"]+)"/)?.[1];
+    expect(driverBuildId).toBeTruthy();
+    expect(workerBuildId).toBe(driverBuildId);
+
+    // The worker reports the id on startup (ready) and on success (done);
+    // the embedded copy in the driver matches the standalone asset.
+    const handshake = /post\(\{ type: "ready", buildId: KIWI_SOLVER_BUILD_ID \}\)/;
+    expect(worker).toMatch(handshake);
+    expect(src).toMatch(handshake);
+    expect(worker).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID/);
+    expect(src).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID/);
+    expect(src).toMatch(/type: "done", counter: counter, buildId: KIWI_SOLVER_BUILD_ID/);
+
+    // The driver validates against its own constant and enters a controlled
+    // mismatch state — a mismatched worker must never yield a solution.
+    expect(src).toMatch(/msg\.type === "ready"/);
+    expect(src).toMatch(/msg\.buildId !== KIWI_SOLVER_BUILD_ID/);
+    expect(src).toMatch(/mismatch: true/);
+    expect(src).toMatch(/kiwi:solver-mismatch/);
+  });
+
+  test('a stale worker build id yields the controlled kiwi:solver-mismatch state (runtime)', async ({ page }) => {
+    // /kiwi-worker-stale.js is the real worker asset with the build id
+    // rewritten to a different value (see router.php). The driver must
+    // refuse it: controlled mismatch state, clear message, no token.
+    await page.goto('/?worker-stale=1&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute(
+      'data-state',
+      'kiwi:solver-mismatch',
+      { timeout: 60_000 }
+    );
+    await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
+    await expect(page.locator('[data-kiwi-info]')).toContainText('out of date');
   });
 });

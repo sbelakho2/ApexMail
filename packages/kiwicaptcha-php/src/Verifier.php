@@ -138,6 +138,14 @@ final class Verifier
          * unbound record. Null (default) disables the check entirely.
          */
         private readonly ?string $region = null,
+        /**
+         * The CURRENT security-policy epoch (audit #42). When non-null, a
+         * record whose `policy_version` differs is rejected with
+         * WrongPolicyVersion — outstanding challenges die immediately on
+         * policy revocation (origin/action-policy changes, emergency
+         * revocation, compromised tenant). Null (default) disables the check.
+         */
+        private readonly ?int $expectedPolicyVersion = null,
     ) {
         // BC shim: pre-gate callers passed the clock override positionally
         // as the second argument. A Closure in that slot is $now, not an
@@ -290,6 +298,15 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::WrongRegion);
         }
 
+        // 5c. Security-policy epoch (audit #42): the policy that authorized
+        //     this challenge must still be in force — the verifier rejects
+        //     records issued under a different epoch (WrongPolicyVersion).
+        if ($this->expectedPolicyVersion !== null && ($peek->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+            $this->bestEffortDelete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
+        }
+
         // 6. Minimum duration, measured on the SERVER: elapsed_us is the gap
         //    between the record's high-resolution issuance timestamp (epoch
         //    microseconds) and the verification receipt time. The
@@ -387,6 +404,14 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::UnsupportedArgon2Params);
             }
 
+            // Security-policy epoch on the CONSUMED instance (audit #42): a
+            // racing swap that replaced the record between peek and consume
+            // must fail closed here too — the instance that actually proves
+            // the PoW must be from the current policy epoch.
+            if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+                return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
+            }
+
             $hash = $this->deriveHash($record, $token->counter);
             if ($hash === null) {
                 // An Argon2id record whose parameters are within the ceilings
@@ -402,7 +427,7 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::InsufficientWork);
             }
 
-            return VerifyOutcome::valid($token->nonce);
+            return VerifyOutcome::valid($record->nonce, $record->requestBinding);
         } finally {
             if ($lease !== null) {
                 try {
@@ -586,6 +611,9 @@ final class Verifier
                 $record->targetBits,
                 $record->salt,
                 $record->minDurationMs,
+                $record->region,
+                $record->policyVersion ?? 1,
+                $record->requestBinding,
             ), $secretKey);
 
         return hash_equals($expected, self::signatureFromChallenge($record->challenge));

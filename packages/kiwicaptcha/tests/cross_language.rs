@@ -32,6 +32,7 @@ fn rust_verifies_php_issued_record() {
         min_duration_ms: 0,
         expected_scope: Some("login"),
         expected_region: None,
+        expected_policy_version: None,
         client_ip: Some("198.51.100.7"),
         telemetry: None,
         enforce_telemetry: false,
@@ -55,6 +56,7 @@ fn rust_verifies_php_issued_record() {
         min_duration_ms: 0,
         expected_scope: Some("login"),
         expected_region: None,
+        expected_policy_version: None,
         client_ip: Some("9.9.9.9"),
         telemetry: None,
         enforce_telemetry: false,
@@ -112,6 +114,7 @@ fn rust_issues_record_for_php() {
         auto_tune_max_bits: 20,
         binding_mode: kiwicaptcha::challenge::BindingMode::Bound,
         region: None,
+        policy_version: 1,
     };
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -128,6 +131,7 @@ fn rust_issues_record_for_php() {
         now_unix,
         now_ns,
         0,
+        None,
     )
     .expect("issue");
     std::fs::write(

@@ -256,7 +256,15 @@
           if (p.indexOf("signup")>=0||p.indexOf("register")>=0) scope="signup";
           else if (p.indexOf("forgot")>=0) scope="forgot-password";
         }
-        var resp = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({scope:scope}) });
+        /* Transaction binding (audit #41): the container's optional
+           data-kiwi-request-binding is sent with the challenge request AND
+           carried into the form as a hidden kiwi_request_binding input next
+           to the token — the final POST must present the SAME binding the
+           challenge was minted for, or verification rejects it. */
+        var requestBinding = W.getAttribute("data-kiwi-request-binding") || container.getAttribute("data-kiwi-request-binding") || "";
+        var body = { scope: scope };
+        if (requestBinding) body.request_binding = requestBinding;
+        var resp = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
         if (!resp.ok) throw new Error("Challenge failed");
         var data = await resp.json();
         if (data.ttlSecs) startCountdown(data.ttlSecs);
@@ -265,6 +273,16 @@
         if (!result) throw new Error("Exhausted");
         var telemetry = { wd: navigator.webdriver===true, hc: navigator.hardwareConcurrency||0, dm: navigator.deviceMemory||0, me: mouseEvents, ke: keyEvents, et: eventTimings, sw: window.screen.width, sh: window.screen.height };
         tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry));
+        if (requestBinding && tokenEl.form) {
+          var bindInput = tokenEl.form.querySelector("input[name='kiwi_request_binding']");
+          if (!bindInput) {
+            bindInput = document.createElement("input");
+            bindInput.type = "hidden";
+            bindInput.name = "kiwi_request_binding";
+            tokenEl.form.appendChild(bindInput);
+          }
+          bindInput.value = requestBinding;
+        }
         setStatus("Verified", "Success", "done"); setHint("Proof-of-work verified locally."); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
       } catch (e) { fail(e.message); }
     }

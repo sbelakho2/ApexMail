@@ -32,6 +32,7 @@ final class KiwiCaptchaRuntime
         private readonly ?string $assetDir = null,
         private readonly string $template = self::DEFAULT_TEMPLATE,
         private readonly string $telemetry = 'off',
+        private readonly ?string $requestBinding = null,
     ) {
         $assetDir ??= \dirname(__DIR__, 2).'/Resources/public';
         $this->css = $this->readAsset($assetDir, 'widget.css');
@@ -77,6 +78,11 @@ final class KiwiCaptchaRuntime
             'scope' => $context['scope'] ?? 'login',
             'nonce' => $context['nonce'] ?? null,
             'telemetry' => $context['telemetry'] ?? $this->telemetry,
+            // Audit #41: the transaction binding rendered into
+            // data-kiwi-request-binding (defaults to the configured static
+            // risk.request_binding; the app may pass a dynamic per-render
+            // binding).
+            'request_binding' => $context['request_binding'] ?? $this->requestBinding,
             // Standalone renders have no form view vars; provide working defaults.
             'id' => $context['id'] ?? '',
             'full_name' => $context['full_name'] ?? 'kiwi__token',

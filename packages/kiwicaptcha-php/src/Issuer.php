@@ -16,7 +16,10 @@ namespace KiwiCaptcha;
  *                binding is never a stable IP-derived identifier
  *   canonical  = "v2|{nonce}|{scope}|{binding_tag}|{issued_at}|{expires_at}|
  *                {algorithm}|{m_kib}|{t}|{p}|{target_bits}|{salt}|
- *                {min_duration_ms}"
+ *                {min_duration_ms}|{region}|{policy_version}|
+ *                {request_binding}" — region and request_binding render as
+ *                the empty segment when unset, policy_version as the
+ *                configured security-policy epoch (audits #42/#41)
  *   signature  = hex(hmac_sha256(K_challenge, canonical)) — HKDF-derived
  *                purpose key (audit #21, {@see DerivedKeys}); the master
  *                secret is never used directly as the signing key
@@ -66,7 +69,7 @@ final class Issuer
      * @throws \InvalidArgumentException when the scope is empty, longer than
      *                                   128 bytes, or contains '|'
      */
-    public function issue(string $scope, string $clientIp): Challenge
+    public function issue(string $scope, string $clientIp, ?string $requestBinding = null): Challenge
     {
         $scopeLen = \strlen($scope);
         if ($scopeLen < 1 || $scopeLen > 128) {
@@ -106,6 +109,9 @@ final class Issuer
             $targetBits,
             $salt,
             $minDurationMs,
+            $this->region,
+            $this->config->policyVersion,
+            $requestBinding,
         );
         $signature = self::signPayloadV2($payload, $this->config->secretKey);
 
@@ -135,6 +141,8 @@ final class Issuer
             issuedAtNs: (int) (microtime(true) * 1_000_000),
             protocolVersion: 2,
             region: $this->region,
+            policyVersion: $this->config->policyVersion,
+            requestBinding: $requestBinding,
         );
         $this->storage->store($record);
 
@@ -176,6 +184,7 @@ final class Issuer
         string $clientIp,
         ChallengeProfile $profile,
         ?int $now = null,
+        ?string $requestBinding = null,
     ): Challenge {
         $profile->validate();
 
@@ -223,10 +232,11 @@ final class Issuer
             minDurationMs: $this->config->minDurationMs,
             solverMaxHashes: $this->config->solverMaxHashes,
             bindingMode: $this->config->bindingMode,
+            policyVersion: $this->config->policyVersion,
         );
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
-        return (new self($config, $this->storage, $nowFn, $this->region))->issue($scope, $clientIp);
+        return (new self($config, $this->storage, $nowFn, $this->region))->issue($scope, $clientIp, $requestBinding);
     }
 
     /**
@@ -290,6 +300,17 @@ final class Issuer
      * Canonical protocol v2 payload — the exact byte string that is signed
      * and base64-encoded into the challenge. Shared with the verifier so
      * issuance and verification can never drift apart.
+     *
+     * Round-9 layout (audits #41/#42), byte-identical to the Rust crate's
+     * `canonical_signing_input_v2`:
+     *
+     *     v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|
+     *       p|target_bits|salt|min_duration_ms|region|policy_version|
+     *       request_binding
+     *
+     * with `region` and `request_binding` rendering as the EMPTY segment
+     * when unset — so a null region + policy 1 + null binding ends the
+     * canonical with `|0||1|`.
      */
     public static function canonicalPayload(
         string $nonce,
@@ -304,9 +325,12 @@ final class Issuer
         int $targetBits,
         string $salt,
         int $minDurationMs,
+        ?string $region = null,
+        int $policyVersion = 1,
+        ?string $requestBinding = null,
     ): string {
         return sprintf(
-            'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d',
+            'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s',
             $nonce,
             $scope,
             $bindingTag,
@@ -319,6 +343,9 @@ final class Issuer
             $targetBits,
             $salt,
             $minDurationMs,
+            $region ?? '',
+            $policyVersion,
+            $requestBinding ?? '',
         );
     }
 

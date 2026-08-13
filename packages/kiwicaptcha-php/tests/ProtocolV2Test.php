@@ -110,7 +110,10 @@ final class ProtocolV2Test extends TestCase
             5,
         );
 
-        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5', $canonical);
+        // Round-9 layout (audits #41/#42): the canonical carries region
+        // (empty when unset), policy_version, and request_binding (empty
+        // when unset) — byte-identical to the Rust canonical_signing_input_v2.
+        self::assertSame('v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1|', $canonical);
     }
 
     public function testNewRecordDefaultsToProtocolV2(): void
@@ -159,15 +162,20 @@ final class ProtocolV2Test extends TestCase
         self::assertSame('legacyhash', $record->ipHash());
     }
 
-    public function testFromArrayPrefersBindingTagOverIpHash(): void
+    public function testFromArrayRejectsBindingTagAlongsideIpHashAlias(): void
     {
+        // The Rust reader uses serde #[serde(alias = "ip_hash")] and rejects
+        // a struct carrying BOTH the field and its alias as a duplicate
+        // field — the strict parser mirrors that (audit #56).
         $data = $this->record()->toArray();
         $data['ip_hash'] = 'stale-mirror';
 
-        $record = ChallengeRecord::fromArray($data);
-
-        self::assertSame(2, $record->protocolVersion);
-        self::assertSame('tag123', $record->bindingTag, 'binding_tag wins over the legacy ip_hash mirror');
+        try {
+            ChallengeRecord::fromArray($data);
+            self::fail('a record carrying both binding_tag and ip_hash must be rejected');
+        } catch (\KiwiCaptcha\MalformedRecordException $e) {
+            self::assertStringContainsString('binding_tag', $e->getMessage());
+        }
     }
 
     public function testBindingModeNoneIssuesEmptyBindingTagAndVerifies(): void

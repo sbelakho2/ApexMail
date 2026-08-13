@@ -67,6 +67,12 @@ final class Config
      * @param int      $ttlSecs             Challenge lifetime in seconds.
      * @param int|null $minDurationMs       Minimum solve duration (null = derive from difficulty).
      * @param int      $solverMaxHashes     Solver cap used by the widget (informational).
+     * @param int      $policyVersion       Security-policy epoch stamped into every issued
+     *                                      record (audit #42; mirrors Rust
+     *                                      ChallengeConfig.policy_version). The verifier
+     *                                      rejects records issued under a different epoch
+     *                                      (WrongPolicyVersion). Cosmetic configuration
+     *                                      changes must NOT bump it.
      */
     public function __construct(
         public readonly string $secretKey,
@@ -80,6 +86,7 @@ final class Config
         public readonly ?int $minDurationMs = null,
         public readonly int $solverMaxHashes = 5_000_000,
         public readonly BindingMode $bindingMode = BindingMode::Bound,
+        public readonly int $policyVersion = 1,
     ) {
         if (\strlen($secretKey) < 16) {
             throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');

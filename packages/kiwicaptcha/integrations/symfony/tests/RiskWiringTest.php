@@ -357,4 +357,99 @@ final class RiskWiringTest extends TestCase
         self::assertFalse($args[8]);
         self::assertSame('my.redis.storage', (string) $args[9]);
     }
+
+    public function testControllerReceivesDefaultRequestBindingAndEnforceOrigin(): void
+    {
+        $risk = $this->riskDefaults();
+        $risk['request_binding'] = 'static-txn';
+        $risk['enforce_origin'] = true;
+        $container = $this->load($risk);
+
+        $args = $container->getDefinition(ChallengeController::class)->getArguments();
+        self::assertSame('static-txn', $args[10], 'risk.request_binding must reach the controller as the static default (audit #41)');
+        self::assertTrue($args[11], 'risk.enforce_origin must reach the controller (audit #43)');
+
+        // Defaults: no static binding, origin enforcement off.
+        $args = $this->load($this->riskDefaults())->getDefinition(ChallengeController::class)->getArguments();
+        self::assertNull($args[10]);
+        self::assertFalse($args[11]);
+    }
+
+    public function testPolicyVersionFlowsIntoConfigAndVerifier(): void
+    {
+        $container = $this->load($this->riskDefaults());
+
+        self::assertSame(1, $container->getDefinition('kiwi_captcha.config')->getArgument('$policyVersion'), 'risk.policy_version (default 1) must reach the core Config (audit #42)');
+        self::assertSame(1, $container->getDefinition('kiwi_captcha.verifier')->getArgument('$expectedPolicyVersion'), 'risk.policy_version must reach the core Verifier as expectedPolicyVersion');
+
+        $risk = $this->riskDefaults();
+        $risk['policy_version'] = 2;
+        $container = $this->load($risk);
+        self::assertSame(2, $container->getDefinition('kiwi_captcha.config')->getArgument('$policyVersion'), 'a bumped epoch must reach the issuer Config');
+        self::assertSame(2, $container->getDefinition('kiwi_captcha.verifier')->getArgument('$expectedPolicyVersion'), 'a bumped epoch must reach the verifier (outstanding challenges die immediately)');
+    }
+
+    public function testStaticRequestBindingIsValidatedAtCompileTime(): void
+    {
+        // A static binding containing '|' (the canonical-payload separator)
+        // would 422 every challenge request — refused at compile time.
+        try {
+            $risk = $this->riskDefaults();
+            $risk['request_binding'] = 'bad|binding';
+            $this->load($risk);
+            self::fail('a static request binding containing "|" must be refused at compile time');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('request_binding', $e->getMessage());
+        }
+
+        try {
+            $risk = $this->riskDefaults();
+            $risk['request_binding'] = str_repeat('x', 129);
+            $this->load($risk);
+            self::fail('a static request binding longer than 128 chars must be refused at compile time');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('request_binding', $e->getMessage());
+        }
+
+        // Valid static bindings load fine.
+        $risk = $this->riskDefaults();
+        $risk['request_binding'] = 'static-txn';
+        $this->load($risk);
+        self::assertTrue(true);
+    }
+
+    public function testHealthControllerWiringAndRouteLoaderFlag(): void
+    {
+        $risk = $this->riskDefaults();
+        $risk['policy_version'] = 2;
+        $container = $this->load($risk, ['redis_service' => 'fake_redis']);
+
+        $health = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class);
+        self::assertSame(self::SECRET, $health->getArgument(0), 'the health controller receives the signing secret (key-configured leg)');
+        self::assertSame('fake_redis', (string) $health->getArgument(1), 'the health controller probes the bundle\'s security Redis');
+        self::assertSame('wiring-test', $health->getArgument(2), 'the health controller uses the risk namespace for the central policy key');
+        self::assertSame(2, $health->getArgument(3), 'the health controller compares min_policy_epoch against risk.policy_version');
+
+        // The route loader registers the health routes when enabled.
+        $loaderArgs = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader::class)->getArguments();
+        self::assertTrue($loaderArgs[1], 'risk.health.enabled (default true) must reach the route loader');
+
+        $risk = $this->riskDefaults();
+        $risk['health'] = ['enabled' => false];
+        $loaderArgs = $this->load($risk)->getDefinition(\BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader::class)->getArguments();
+        self::assertFalse($loaderArgs[1], 'risk.health.enabled=false must disable the health routes');
+    }
+
+    public function testHealthControllerWiredEvenWhenRiskEngineIsOff(): void
+    {
+        // The health endpoints live under the risk.* config namespace but
+        // must work without the risk ENGINE (no state store needed).
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        (new KiwiCaptchaExtension())->load([['secret_key' => self::SECRET, 'risk' => ['enabled' => false]]], $container);
+        self::assertTrue($container->hasDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class), 'health must be wired even when the risk engine is off');
+        $health = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class);
+        self::assertNull($health->getArgument(1), 'no Redis client: the health controller gets null (Redis legs vacuous)');
+        self::assertSame(1, $health->getArgument(3), 'the default risk.policy_version (1) reaches the health controller');
+    }
 }

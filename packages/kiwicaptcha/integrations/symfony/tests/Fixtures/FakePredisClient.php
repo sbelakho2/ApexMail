@@ -126,8 +126,27 @@ final class FakePredisClient extends \Predis\Client
             'GETDEL' => $this->fakeGetdel($arguments),
             'SET' => $this->fakeSet($arguments),
             'HINCRBYFLOAT' => $this->fakeHincrbyfloat($arguments),
+            'HGETALL' => $this->fakeHgetall($arguments),
+            'PING' => $this->pingOk() ? 'PONG' : throw new \RuntimeException('connection refused (fake)'),
             default => null,
         };
+    }
+
+    /** @internal test hook: make PING fail (health probe tests). */
+    public bool $pingFails = false;
+
+    private function pingOk(): bool
+    {
+        return !$this->pingFails;
+    }
+
+    /**
+     * HGETALL: the full hash (the central security-policy state read by the
+     * readiness probe), or an empty array when the key does not exist.
+     */
+    private function fakeHgetall(array $arguments): array
+    {
+        return $this->hashes[(string) $arguments[0]] ?? [];
     }
 
     /**
@@ -361,24 +380,44 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'waiters')) {
-            // Acquire with the bounded WAITERS guard: KEYS[1] lease set,
-            // KEYS[2] waiters counter; ARGV[1] cap, ARGV[2] leaseMs,
-            // ARGV[3] token, ARGV[4] maxWaiters. Grant (and serve one
-            // waiter) when a slot is free; saturated acquires are counted
-            // with the lease TTL and refused-without-queueing (entry
-            // removed in the same script) once the count exceeds
-            // maxWaiters.
+            // Acquire with the bounded WAITERS guard (audit #31) + the
+            // PER-SCOPE budget (audit #47): KEYS[1] global lease set,
+            // KEYS[2] waiters counter, KEYS[3] per-scope lease set ('' =
+            // no scope); ARGV[1] global cap, ARGV[2] leaseMs, ARGV[3]
+            // token, ARGV[4] maxWaiters, ARGV[5] per-scope cap, ARGV[6]
+            // hasScope. Grant (and serve one waiter) when the GLOBAL slot
+            // is free AND the scope budget (when present) has room; the
+            // lease is recorded in BOTH sets. Saturated acquires (either
+            // cap) are counted in the GLOBAL waiters counter with the lease
+            // TTL and refused-without-queueing (entry removed in the same
+            // script) once the count exceeds maxWaiters.
             $key = (string) $keys[0];
             $waitersKey = (string) $keys[1];
+            $scopeKey = (string) $keys[2];
             $cap = (int) $rest[0];
             $leaseMs = (int) $rest[1];
             $token = (string) $rest[2];
             $maxWaiters = (int) $rest[3];
+            $scopeCap = (int) $rest[4];
+            $hasScope = (int) $rest[5] === 1;
             $now = $this->timeMs();
             $this->fakeZremrangebyscore([$key, '-inf', (string) $now]);
+            if ($hasScope && $scopeCap > 0) {
+                $this->fakeZremrangebyscore([$scopeKey, '-inf', (string) $now]);
+            }
+            $admitted = false;
             if ($this->zcard($key) < $cap) {
-                $this->fakeZadd([$key, (string) ($now + $leaseMs), $token]);
-                $this->fakePexpire([$key, (string) ($leaseMs * 2)]);
+                if (!$hasScope || $scopeCap <= 0 || $this->zcard($scopeKey) < $scopeCap) {
+                    $this->fakeZadd([$key, (string) ($now + $leaseMs), $token]);
+                    $this->fakePexpire([$key, (string) ($leaseMs * 2)]);
+                    if ($hasScope && $scopeCap > 0) {
+                        $this->fakeZadd([$scopeKey, (string) ($now + $leaseMs), $token]);
+                        $this->fakePexpire([$scopeKey, (string) ($leaseMs * 2)]);
+                    }
+                    $admitted = true;
+                }
+            }
+            if ($admitted) {
                 if (($this->counters[$waitersKey] ?? 0) > 0) {
                     $this->fakeDecr([$waitersKey]);
                 }
@@ -394,6 +433,18 @@ final class FakePredisClient extends \Predis\Client
             }
 
             return 0;
+        }
+
+        if (str_contains($script, 'per-scope lease removal')) {
+            // Release with the PER-SCOPE budget (audit #47): KEYS[1] global
+            // set, KEYS[2] per-scope set ('' = no scope); ARGV[1] token,
+            // ARGV[2] hasScope. Removes the token from BOTH sets.
+            $removed = $this->fakeZrem([$keys[0], $rest[0]]);
+            if ((int) $rest[1] === 1) {
+                $this->fakeZrem([$keys[1], $rest[0]]);
+            }
+
+            return $removed;
         }
 
         if (str_contains($script, 'return redis.call(\'ZCARD\', KEYS[1])')) {

@@ -403,4 +403,47 @@ final class ConfigurationTest extends TestCase
         self::assertFalse($this->process()['risk']['enforce_fetch_metadata'], 'enforce_fetch_metadata defaults to false (defense-in-depth only)');
         self::assertTrue($this->process(['risk' => ['enforce_fetch_metadata' => true]])['risk']['enforce_fetch_metadata']);
     }
+
+    public function testArgon2MaxPerTenantDefaultsAndBounds(): void
+    {
+        self::assertSame(8, $this->process()['argon2_max_per_tenant'], 'argon2_max_per_tenant defaults to 8 (per-scope Argon budget, audit #47)');
+        self::assertSame(1, $this->process(['argon2_max_per_tenant' => 1])['argon2_max_per_tenant']);
+        self::assertSame(25, $this->process(['argon2_max_per_tenant' => 25])['argon2_max_per_tenant']);
+    }
+
+    public function testArgon2MaxPerTenantBelowOneIsRejected(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['argon2_max_per_tenant' => 0]);
+    }
+
+    public function testRiskPolicyVersionIsTheChallengeSecurityEpoch(): void
+    {
+        self::assertSame(1, $this->process()['risk']['policy_version'], 'risk.policy_version defaults to 1 (the CHALLENGE security-policy epoch — independent of the risk-v1 contract version)');
+        self::assertSame(2, $this->process(['risk' => ['policy_version' => 2]])['risk']['policy_version'], 'bumping the epoch invalidates outstanding challenges (audit #42)');
+    }
+
+    public function testRiskPolicyVersionBelowOneIsRejected(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['risk' => ['policy_version' => 0]]);
+    }
+
+    public function testRiskRequestBindingDefaultsToNullAndAcceptsAStaticBinding(): void
+    {
+        self::assertNull($this->process()['risk']['request_binding'], 'risk.request_binding defaults to null (no static transaction binding, audit #41)');
+        self::assertSame('static-txn', $this->process(['risk' => ['request_binding' => 'static-txn']])['risk']['request_binding']);
+    }
+
+    public function testEnforceOriginDefaultsToFalse(): void
+    {
+        self::assertFalse($this->process()['risk']['enforce_origin'], 'risk.enforce_origin defaults to false (server-to-server integrations cannot send an Origin)');
+        self::assertTrue($this->process(['risk' => ['enforce_origin' => true]])['risk']['enforce_origin']);
+    }
+
+    public function testRiskHealthEnabledDefaultsToTrue(): void
+    {
+        self::assertTrue($this->process()['risk']['health']['enabled'], 'risk.health.enabled defaults to true (live/ready routes registered)');
+        self::assertFalse($this->process(['risk' => ['health' => ['enabled' => false]]])['risk']['health']['enabled']);
+    }
 }

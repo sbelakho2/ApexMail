@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
@@ -17,6 +18,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
+use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaExtension as TwigExtension;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
@@ -142,6 +144,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 'a floor at or above the TTL leaves no acceptable submission time'
             );
         }
+        // Audit #41: a STATIC transaction binding must satisfy the same
+        // shape rule the controller enforces per request (1..128 bytes, no
+        // '|' — the canonical-payload separator) — refuse a broken static
+        // value at compile time instead of 422-ing every challenge request.
+        $staticBinding = $config['risk']['request_binding'];
+        if ($staticBinding !== null && ($staticBinding === '' || \strlen($staticBinding) > 128 || \str_contains($staticBinding, '|'))) {
+            throw new \InvalidArgumentException(
+                'kiwi_captcha.risk.request_binding must be 1-128 characters and must not contain "|"'
+            );
+        }
 
         $container->setParameter('kiwi_captcha.secret_key', $config['secret_key']);
         $container->setParameter('kiwi_captcha.route_prefix', $config['route_prefix']);
@@ -189,6 +201,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$bindingMode', $config['binding_mode'] === 'none'
                 ? BindingMode::None
                 : BindingMode::Bound)
+            // Audit #42: the security-policy epoch (risk.policy_version) is
+            // stamped into every issued challenge record.
+            ->setArgument('$policyVersion', $config['risk']['policy_version'])
             ->setPublic(true);
         $container->setDefinition('kiwi_captcha.config', $configDef);
 
@@ -233,9 +248,24 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $config['argon2_semaphore_namespace'],
                         $config['argon2_lease_ms'],
                         $config['argon2_max_waiters'],
+                        // Audit #47: per-scope budget (argon2_max_per_tenant)
+                        // — the semaphore checks the scope's own lease set in
+                        // addition to the global cap.
+                        $config['argon2_max_per_tenant'],
                     ]))->setPublic(true),
                 );
-                $gateRef = new Reference('kiwi_captcha.argon2_redis_semaphore');
+                // The VERIFIER consumes the gate through the
+                // request-scope-aware wrapper (audit #47): the validator
+                // stamps the constraint scope into the request and the
+                // wrapper forwards it into acquire(), so the per-scope
+                // budget engages on top of the global cap. The raw
+                // semaphore stays public for the resource-pressure provider
+                // (usage is global either way).
+                $container->setDefinition('kiwi_captcha.argon2_scope_gate', (new Definition(RequestScopeAdmissionGate::class, [
+                    new Reference('kiwi_captcha.argon2_redis_semaphore'),
+                    new Reference('request_stack'),
+                ]))->setPublic(true));
+                $gateRef = new Reference('kiwi_captcha.argon2_scope_gate');
             } else {
                 $container->setDefinition('kiwi_captcha.argon2_inprocess_gate', (new Definition(InProcessArgonGate::class, [
                     $config['argon2_max_concurrent_verifications'],
@@ -246,7 +276,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $container->setDefinition('kiwi_captcha.verifier', (new Definition(Verifier::class, [
             $storageRef,
             $gateRef,
-        ]))->setPublic(true));
+        ]))
+            // Audit #42: the verifier's expected security-policy epoch — a
+            // record issued under any other epoch is rejected
+            // (WrongPolicyVersion) so bumping risk.policy_version invalidates
+            // outstanding challenges immediately.
+            ->setArgument('$expectedPolicyVersion', $config['risk']['policy_version'])
+            ->setPublic(true));
         if ($config['risk']['region'] !== null) {
             $container->getDefinition('kiwi_captcha.verifier')
                 ->setArgument('$region', $config['risk']['region']);
@@ -285,6 +321,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // time otherwise. The engine runs PRE-ISSUE (decide difficulty or
         // deny), records issuances, and receives POST-SOLVE outcome feedback
         // from the validator.
+        // A logger (when the app has one) receives the risk gateway's
+        // internal diagnostics and the validator's collapsed-verification
+        // detail (audit #57) — resolved once, used by both.
+        $loggerRef = $container->hasDefinition('logger') || $container->hasAlias('logger')
+            ? new Reference('logger')
+            : null;
         $riskConfig = $config['risk'];
         $riskGatewayRef = null;
         $riskCookieRef = null;
@@ -468,9 +510,6 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $issuanceKeyPrefix,
                 $config['resource_capacity']['issuance_per_second'],
             ]));
-            $loggerRef = $container->hasDefinition('logger') || $container->hasAlias('logger')
-                ? new Reference('logger')
-                : null;
             $container->setDefinition(RiskGateway::class, (new Definition(RiskGateway::class, [
                 new Reference('kiwi_captcha.risk.engine'),
                 new Reference('kiwi_captcha.risk.classifier'),
@@ -520,25 +559,57 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['risk']['challenge_origin_allowlist'],
             $config['risk']['enforce_fetch_metadata'],
             $storageRef,
+            // Audit #41: static transaction-binding fallback — the widget
+            // sends its own request_binding field when it carries one; this
+            // default applies when the request does not.
+            $config['risk']['request_binding'],
+            // Audit #43: when enforced, a challenge POST without a usable
+            // Origin header is rejected with 403 origin_rejected.
+            $config['risk']['enforce_origin'],
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──
         $container->setDefinition(KiwiCaptchaRouteLoader::class, (new Definition(KiwiCaptchaRouteLoader::class, [
             '%kiwi_captcha.route_prefix%',
+            // Audit #51/#58: the /health/live + /health/ready routes follow
+            // risk.health.enabled (default true).
+            $config['risk']['health']['enabled'],
         ]))->addTag('routing.loader'));
+
+        // ── Health endpoints (audit #51/#58) ──
+        // /health/live: always 200 while the process runs. /health/ready:
+        // 200 only when the signing keys are configured, the security Redis
+        // answers a (cached) PING and the CENTRAL security-policy state is
+        // compatible ({kiwi:<ns>}:security-policy: min_protocol_version <= 2
+        // AND min_policy_epoch <= risk.policy_version; key absent = the
+        // binary's own config is authoritative). Argon queue fullness and
+        // transient probe timeouts never fail readiness.
+        $healthNamespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
+        $container->setDefinition(KiwiHealthController::class, (new Definition(KiwiHealthController::class, [
+            $config['secret_key'],
+            $redisRef,
+            $healthNamespace,
+            $config['risk']['policy_version'],
+        ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Form type (renders the widget through the form theme) ──
         // The route prefix is injected so the default 'endpoint' option
         // follows the ACTUAL registered route (the standalone Twig widget
         // derives its endpoint from the same prefix); the telemetry mode
-        // follows the (strict-enforced) config.
+        // follows the (strict-enforced) config; the request_binding option
+        // follows the static risk.request_binding default (audit #41).
         $container->setDefinition(KiwiCaptchaType::class, (new Definition(KiwiCaptchaType::class, [
             new Reference(KiwiCaptchaRuntime::class),
             '%kiwi_captcha.route_prefix%',
             $config['telemetry'],
+            $config['risk']['request_binding'],
         ]))->addTag('form.type'));
 
         // ── Validator (local verification, no external calls) ──
+        // The logger receives the INTERNAL verification detail on failures
+        // (audit #57): the public violation code is collapsed
+        // (invalid_or_expired / rate_limited / temporary_unavailable), the
+        // precise core reason stays in the logs.
         $container->setDefinition(KiwiCaptchaValidator::class, (new Definition(KiwiCaptchaValidator::class, [
             new Reference('kiwi_captcha.verifier'),
             new Reference('request_stack'),
@@ -547,7 +618,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $riskGatewayRef,
             $riskCookieRef,
             $outstandingRef,
-        ]))->addTag('validator.constraint_validator'));
+        ]))
+            ->setArgument('$logger', $loggerRef)
+            ->addTag('validator.constraint_validator'));
 
         // ── Twig widget runtime + twig function (embeds the shared widget assets) ──
         $container->setDefinition(KiwiCaptchaRuntime::class, (new Definition(KiwiCaptchaRuntime::class, [
@@ -555,6 +628,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             null,
             KiwiCaptchaRuntime::DEFAULT_TEMPLATE,
             $config['telemetry'],
+            // Audit #41: the static transaction binding is the standalone
+            // widget's data-kiwi-request-binding default.
+            $config['risk']['request_binding'],
         ]))->addTag('twig.runtime'));
         $container->setDefinition(TwigExtension::class, (new Definition(TwigExtension::class))
             ->addTag('twig.extension'));
@@ -697,19 +773,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      */
     private function buildRiskPolicy(array $riskConfig): array
     {
-        // RiskPolicy::fromConfig enforces version equality: the policy
-        // config's version must equal the package's contract version
-        // (RiskPolicy::CONTRACT_VERSION). The operator's policy_version
-        // knob is the value written into decisions — it must agree with the
-        // contract the package parses, so refuse a mismatch at compile time.
-        if ($riskConfig['policy_version'] !== RiskPolicy::CONTRACT_VERSION) {
-            throw new \InvalidArgumentException(sprintf(
-                'kiwi_captcha.risk.policy_version must equal the risk package contract version %d (got %d) — '.
-                'the risk-v1 policy parser only accepts its current contract version',
-                RiskPolicy::CONTRACT_VERSION,
-                $riskConfig['policy_version'],
-            ));
-        }
+        // The risk-v1 policy contract version is internal to the risk
+        // package (RiskPolicy::CONTRACT_VERSION): the policy handed to the
+        // engine always carries it. The operator's risk.policy_version knob
+        // is now the CHALLENGE security-policy epoch (audit #42) — stamped
+        // into issued records and enforced at verification — completely
+        // independent of the risk-v1 contract.
         $policyConfig = [
             'version' => RiskPolicy::CONTRACT_VERSION,
             'weights' => $riskConfig['weights'],

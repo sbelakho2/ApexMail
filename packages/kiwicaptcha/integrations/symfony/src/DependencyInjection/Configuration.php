@@ -6,7 +6,6 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Risk\RiskAction;
-use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskWeights;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
@@ -166,6 +165,11 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue(64)
                     ->min(1)
                 ->end()
+                ->integerNode('argon2_max_per_tenant')
+                    ->info('PER-SCOPE budget of the Redis-backed Argon2id admission semaphore (default 8): each scope string gets its OWN lease set ({kiwicaptcha:argon2:leases:<ns>}:<scope>, checked IN ADDITION to the global argon2_max_concurrent_verifications cap), so one busy scope can never starve the other scopes\' Argon capacity while the global cap stays the deployment-wide invariant. The waiters guard stays global. Fairness knob for multi-tenant deployments (a tenant/endpoint mapped to a scope gets a guaranteed share of the memory-hard budget).')
+                    ->defaultValue(8)
+                    ->min(1)
+                ->end()
                 ->arrayNode('resource_capacity')
                     ->info('Deployment-wide issuance capacity (the shared Redis counter denominator of the resource-pressure provider\'s issuanceCapacity headroom). Separate from the per-process emergency cap (risk.hard_limits.process_per_second), which only bounds the in-process ProcessEmergencyCap admission layer.')
                     ->addDefaultsIfNotSet()
@@ -271,8 +275,8 @@ final class Configuration implements ConfigurationInterface
                             ->end()
                         ->end()
                         ->integerNode('policy_version')
-                            ->info('Version tag written into every decision (log/metrics only — the risk-v1 contract keeps it informational). MUST equal the risk package\'s policy contract version (RiskPolicy::CONTRACT_VERSION): the policy parser refuses any other version, so the extension validates the match at compile time.')
-                            ->defaultValue(RiskPolicy::CONTRACT_VERSION)
+                            ->info("SECURITY-POLICY EPOCH stamped (signed) into every issued challenge record and enforced at verification: bumping it (origin/action-policy changes, emergency revocation, compromised tenant) immediately invalidates ALL outstanding challenges — the verifier rejects any record whose policy_version differs from the configured value with WrongPolicyVersion. Cosmetic configuration changes must NOT bump it. The risk-v1 policy CONTRACT version is internal to the risk package (RiskPolicy::CONTRACT_VERSION) and independent of this knob.")
+                            ->defaultValue(1)
                             ->min(1)
                         ->end()
                         ->arrayNode('global_floors')
@@ -479,9 +483,13 @@ final class Configuration implements ConfigurationInterface
                             ->min(1)
                         ->end()
                         ->arrayNode('challenge_origin_allowlist')
-                            ->info('Origin laundering defense: when NON-EMPTY, the challenge POST must carry an Origin header (or Referer-origin fallback) whose scheme+host+port exactly matches one allowlisted origin — otherwise the request is rejected with HTTP 403 origin_rejected BEFORE any CAPTCHA is issued (never a rate-limit hit, no state written). Requests with neither header cannot be matched and are rejected. Compare is exact scheme/host/port (host case-insensitive, default ports normalized). Entries: e.g. https://app.example.com.')
+                            ->info('Origin laundering defense: when NON-EMPTY, the challenge POST must carry an Origin header (or Referer-origin fallback) whose scheme+host+port exactly matches one allowlisted origin — otherwise the request is rejected with HTTP 403 origin_rejected BEFORE any CAPTCHA is issued (never a rate-limit hit, no state written). Requests with neither header cannot be matched and are rejected. Comparison is STRUCTURED NORMALIZATION (audit #43): scheme/host/effective-port, host lowercased, default ports normalized (https 443 / http 80), trailing dots stripped, IDN hosts converted to punycode when ext-intl is available, IPv6 literals kept bracketed — so "https://example.com" matches "https://example.com:443", "https://EXAMPLE.COM." and "https://bücher.example" (as "xn--bcher-kva.example"), but never "https://example.com:444", "http://example.com" or "https://evil-example.com". Server-to-server integrations that cannot send an Origin keep enforce_origin=false (the Referer fallback or a bypassed check is the documented trusted mode).')
                             ->scalarPrototype()->end()
                             ->defaultValue([])
+                        ->end()
+                        ->booleanNode('enforce_origin')
+                            ->info('When true, challenge requests WITHOUT an Origin header — or carrying the literal "null" Origin (opaque/sandboxed origins) — are rejected with HTTP 403 origin_rejected, even when the allowlist is empty. When the allowlist is NON-EMPTY the (required) Origin must additionally be allowlisted (structured normalization). Browser-laundering defense: a framed/cross-site request either lacks a usable Origin or carries one that cannot match. Server-to-server integrations (no Origin header) MUST keep this false — the explicitly trusted mode.')
+                            ->defaultValue(false)
                         ->end()
                         ->booleanNode('enforce_fetch_metadata')
                             ->info('When true, challenge requests whose Sec-Fetch-Site header is PRESENT and equals "cross-site" are rejected with HTTP 403 CROSS_SITE_REJECTED — a browser-laundering signal. Raw HTTP bots lack the header and are unaffected, so this is defense-in-depth only (never the security boundary).')
@@ -490,6 +498,17 @@ final class Configuration implements ConfigurationInterface
                         ->scalarNode('network_classifier_file')
                             ->info('Optional path to a CIDR classifier file ("cidr,flag1,flag2" per line; flags: reserved, hosting, proxy, tor, blocked). Sources in flagged blocks raise the network_risk signal (e.g. 1000 for hosting/proxy/blocked, 600 for Tor exits). Default null = no network flags.')
                             ->defaultNull()
+                        ->end()
+                        ->scalarNode('request_binding')
+                            ->info('OPTIONAL STATIC transaction binding (audit #41): a fixed string (1..128 chars, no "|") baked (signed) into every issued challenge when the challenge request carries no request_binding field of its own. For DYNAMIC per-transaction bindings (recommended: a random nonce per page load) the application supplies the binding per request — the widget reads data-kiwi-request-binding, sends it with the challenge POST, carries it in the hidden kiwi_request_binding form field, and the controller/validator enforce it (a challenge bound to one transaction is never redeemable for another). Static binding is the fallback for server-side integrations that never send the field.')
+                            ->defaultNull()
+                        ->end()
+                        ->arrayNode('health')
+                            ->info('Rollback-resistant readiness (audit #51/#58): /health/live is always 200 while the process runs; /health/ready returns 200 only when the signing keys are configured, the security Redis answers a PING (probe cached ~1 s; transient probe timeouts are absorbed by the cache — a single blip never flips a healthy deployment, Argon queue fullness is NEVER consulted), and the CENTRAL security-policy state ({kiwi:<ns>}:security-policy hash: min_protocol_version, min_policy_epoch) is compatible — when the key is present, ready requires min_protocol_version <= 2 (this binary\'s max protocol) AND min_policy_epoch <= risk.policy_version; when absent, the binary\'s own configuration is authoritative. Operators set the hash to protect mixed-version rolling deployments and rollbacks (see README).')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->booleanNode('enabled')->defaultTrue()->end()
+                            ->end()
                         ->end()
                     ->end()
                 ->end()

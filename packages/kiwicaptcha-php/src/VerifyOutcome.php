@@ -12,6 +12,12 @@ namespace KiwiCaptcha;
  * it so the consuming application can correlate accepted proofs. Null for
  * every non-valid outcome (including MalformedToken, where no nonce could
  * be decoded).
+ *
+ * A VALID outcome also exposes the consumed record's application-supplied
+ * transaction binding (audit #41) via {@see self::requestBinding()} — the
+ * host application generated this nonce at issuance and must present it
+ * again on the final protected POST, correlating the CAPTCHA result with
+ * the exact application transaction.
  */
 final class VerifyOutcome
 {
@@ -20,22 +26,23 @@ final class VerifyOutcome
         public readonly ?VerifyError $error,
         public readonly ?string $detail,
         public readonly ?string $nonce,
+        public readonly ?string $requestBinding,
     ) {
     }
 
-    public static function valid(?string $nonce = null): self
+    public static function valid(?string $nonce = null, ?string $requestBinding = null): self
     {
-        return new self(true, null, null, $nonce);
+        return new self(true, null, null, $nonce, $requestBinding);
     }
 
     public static function invalid(VerifyError $error): self
     {
-        return new self(false, $error, null, null);
+        return new self(false, $error, null, null, null);
     }
 
     public static function malformedToken(string $detail): self
     {
-        return new self(false, VerifyError::MalformedToken, $detail, null);
+        return new self(false, VerifyError::MalformedToken, $detail, null, null);
     }
 
     public function isOk(): bool
@@ -56,5 +63,14 @@ final class VerifyOutcome
     public function nonce(): ?string
     {
         return $this->nonce;
+    }
+
+    /**
+     * The consumed record's application-supplied transaction binding when
+     * the outcome is valid (audit #41), else null.
+     */
+    public function requestBinding(): ?string
+    {
+        return $this->requestBinding;
     }
 }

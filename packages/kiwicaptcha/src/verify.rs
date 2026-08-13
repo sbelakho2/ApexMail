@@ -129,6 +129,11 @@ pub struct VerifyContext<'a> {
     /// deployment fails closed on region-unbound challenges). When `None`,
     /// the record's region is not checked.
     pub expected_region: Option<&'a str>,
+    /// The CURRENT security-policy epoch. When set, a record whose
+    /// `policy_version` differs is rejected with
+    /// [`VerifyError::WrongPolicyVersion`] — outstanding challenges die
+    /// immediately on policy revocation.
+    pub expected_policy_version: Option<u32>,
     /// The current client's IP address. When [`Some`], the challenge is
     /// rejected if the stored `ip_hash` does not match
     /// `hash_ip(client_ip, secret_key)` — enforcing the IP binding that was
@@ -170,8 +175,13 @@ pub enum VerifyOutcome {
     /// with the storage key and any downstream result token without
     /// re-decoding the solution.
     Valid {
-        /// The consumed challenge's canonical base64 nonce.
+        /// The consumed challenge's canonical base64 nonce (the jti).
         nonce: String,
+        /// The application-supplied transaction binding (round 9, audit
+        /// #41): the host application generated this nonce and must present
+        /// it again on the final protected POST — correlating the CAPTCHA
+        /// result with the exact application transaction.
+        request_binding: Option<String>,
     },
     /// The solution is invalid; the reason explains why.
     Invalid(VerifyError),
@@ -182,7 +192,18 @@ impl VerifyOutcome {
     /// `None`.
     pub fn nonce(&self) -> Option<&str> {
         match self {
-            VerifyOutcome::Valid { nonce } => Some(nonce),
+            VerifyOutcome::Valid { nonce, .. } => Some(nonce),
+            VerifyOutcome::Invalid(_) => None,
+        }
+    }
+
+    /// The record's application-supplied transaction binding when the
+    /// outcome is valid.
+    pub fn request_binding(&self) -> Option<&str> {
+        match self {
+            VerifyOutcome::Valid {
+                request_binding, ..
+            } => request_binding.as_deref(),
             VerifyOutcome::Invalid(_) => None,
         }
     }
@@ -207,6 +228,12 @@ pub enum VerifyError {
     WrongScope,
     #[error("challenge was issued for a different region")]
     WrongRegion,
+    /// The stored record was issued under a DIFFERENT security-policy epoch
+    /// than the verifier's configured current version — the policy that
+    /// authorized the challenge (origin/action rules, difficulty floors,
+    /// revocation) is no longer in force, so the challenge is invalid.
+    #[error("challenge was issued under a different security-policy epoch")]
+    WrongPolicyVersion,
     #[error("too many verification attempts against this challenge")]
     TooManyAttempts,
     #[error("proof-of-work hash does not meet the difficulty target")]
@@ -443,6 +470,14 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         }
     }
 
+    // 7b. Security-policy epoch: the policy that authorized this challenge
+    //     must still be in force.
+    if let Some(expected) = ctx.expected_policy_version {
+        if ctx.record.policy_version != expected {
+            return VerifyOutcome::Invalid(VerifyError::WrongPolicyVersion);
+        }
+    }
+
     // 2c. IP binding: the challenge was issued to a client IP; a different
     //     submission IP means the token was relayed. Enforced here (not just
     //     at the route layer) so the secure behavior cannot be forgotten.
@@ -540,6 +575,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         // can correlate the result without re-decoding the solution.
         VerifyOutcome::Valid {
             nonce: ctx.record.nonce.clone(),
+            request_binding: ctx.record.request_binding.clone(),
         }
     } else {
         VerifyOutcome::Invalid(VerifyError::InsufficientWork)
@@ -755,8 +791,11 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
-        let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
+        let issued =
+            issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).unwrap();
         issued.record
     }
 
@@ -776,8 +815,11 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
-        let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
+        let issued =
+            issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).unwrap();
         issued.record
     }
 
@@ -792,6 +834,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: None,
+            expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
             enforce_telemetry: false,
@@ -805,34 +848,11 @@ mod tests {
     /// VALID v2 signature — the ceiling checks (audit #32) must fire on
     /// properly signed records, not on signature failures.
     fn resign_v2(record: &mut ChallengeRecord, secret: &str) {
-        use hmac::Mac;
-        let canonical = format!(
-            "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-            record.nonce,
-            record.scope,
-            record.binding_tag,
-            record.issued_at,
-            record.expires_at,
-            record.algorithm.as_str(),
-            record.m_kib,
-            record.t,
-            record.p,
-            record.target_bits,
-            record.salt,
-            record.min_duration_ms
-        );
-        let derived = crate::keys::DerivedKeys::from_master(secret, None);
-        let key = derived.challenge_key();
-        let mut mac = hmac::Hmac::<Sha256>::new_from_slice(key).expect("key fits");
-        mac.update(canonical.as_bytes());
-        let sig = mac
-            .finalize()
-            .into_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-        record.challenge = format!("{}.{}", B64.encode(&canonical), sig);
-        record.prefix = format!("{}|{}|", record.challenge, record.salt);
+        let canonical = super::super::challenge::canonical_signing_input_v2(record);
+        let sig = super::super::challenge::sign_canonical_v2(&canonical, secret).unwrap();
+        let challenge = format!("{}.{}", B64.encode(canonical.as_bytes()), sig);
+        record.challenge = challenge.clone();
+        record.prefix = format!("{challenge}|{}|", record.salt);
     }
 
     #[test]
@@ -873,8 +893,10 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
-        assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err());
+        assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_err());
     }
 
     #[test]
@@ -897,9 +919,11 @@ mod tests {
                 auto_tune_max_bits: 24,
                 binding_mode: BindingMode::Bound,
                 region: None,
+
+                policy_version: 1,
             };
             assert!(
-                issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
+                issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_err(),
                 "Argon2id t={t} must be rejected at issuance"
             );
         }
@@ -925,18 +949,20 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         for ms in [10_000u64, 20_000, 100_000] {
             let mut cfg = base.clone();
             cfg.min_duration_ms = Some(ms);
             assert!(
-                issue_challenge(&cfg, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
+                issue_challenge(&cfg, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_err(),
                 "min_duration_ms={ms} with ttl 10s must be rejected"
             );
         }
         let mut ok = base.clone();
         ok.min_duration_ms = Some(9_999);
-        assert!(issue_challenge(&ok, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
+        assert!(issue_challenge(&ok, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_ok());
     }
 
     #[test]
@@ -959,18 +985,20 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         for ttl in [0u64, 301, 60_000] {
             let mut cfg = base.clone();
             cfg.ttl_secs = ttl;
             assert!(
-                issue_challenge(&cfg, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
+                issue_challenge(&cfg, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_err(),
                 "ttl={ttl} must be rejected at issuance"
             );
         }
         let mut ok = base.clone();
         ok.ttl_secs = 300;
-        assert!(issue_challenge(&ok, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
+        assert!(issue_challenge(&ok, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_ok());
     }
 
     #[test]
@@ -992,9 +1020,11 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         assert!(
-            issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
+            issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_err(),
             "Argon2id t=7 must be rejected at issuance"
         );
     }
@@ -1016,8 +1046,10 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
-        assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err());
+        assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_err());
     }
 
     #[test]
@@ -1039,10 +1071,12 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         assert!(
             matches!(
-                issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0),
+                issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None),
                 Err(SignError::InvalidArgon2Params)
             ),
             "m_kib above the 64 MiB ceiling must be rejected at issuance"
@@ -1052,7 +1086,9 @@ mod tests {
             m_kib: crate::challenge::SOLVER_MAX_ARGON2_M_KIB,
             ..config
         };
-        assert!(issue_challenge(&at_ceiling, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
+        assert!(
+            issue_challenge(&at_ceiling, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_ok()
+        );
     }
 
     #[test]
@@ -1076,10 +1112,12 @@ mod tests {
                 auto_tune_max_bits: 24,
                 binding_mode: BindingMode::Bound,
                 region: None,
+
+                policy_version: 1,
             };
             assert!(
                 matches!(
-                    issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0),
+                    issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None),
                     Err(SignError::InvalidArgon2Params)
                 ),
                 "argon2_target_bits={bits} must be rejected at issuance"
@@ -1101,8 +1139,10 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
-        assert!(issue_challenge(&max_bits, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
+        assert!(issue_challenge(&max_bits, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_ok());
     }
 
     #[test]
@@ -1146,6 +1186,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1177,6 +1218,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1208,6 +1250,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1247,6 +1290,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1276,6 +1320,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1305,6 +1350,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1334,6 +1380,7 @@ mod tests {
             expected_scope: None,
             client_ip: None,
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1362,8 +1409,11 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::None,
             region: None,
+
+            policy_version: 1,
         };
-        let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
+        let issued =
+            issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).unwrap();
         let mut unbound = issued.record;
         let counter2 = solve_for_test(&unbound).unwrap();
         let mut ctx2 = VerifyContext {
@@ -1378,6 +1428,7 @@ mod tests {
             client_ip: Some("1.2.3.4"),
 
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1406,6 +1457,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
@@ -1427,6 +1479,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
@@ -1456,6 +1509,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
@@ -1475,6 +1529,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
@@ -1505,6 +1560,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1533,6 +1589,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1564,6 +1621,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: Some(&json!({})),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1586,6 +1644,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: Some(&json!([])),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1614,6 +1673,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: Some(&json!(null)),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1643,6 +1703,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: Some(&json!({
                 "wd": false, "hc": 8, "dm": 8, "me": 5, "ke": 2, "et": []
             })),
@@ -1672,6 +1733,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1703,6 +1765,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1733,6 +1796,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1761,6 +1825,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1995,6 +2060,7 @@ mod tests {
             expected_scope: Some("signup"),
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2022,6 +2088,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2049,6 +2116,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2143,6 +2211,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2163,6 +2232,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2311,10 +2381,12 @@ mod tests {
             auto_tune_max_bits: 20,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         assert!(
             matches!(
-                issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0),
+                issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None),
                 Err(SignError::InvalidDifficulty)
             ),
             "SHA target_bits 0 must be rejected at issuance with InvalidDifficulty"
@@ -2381,12 +2453,15 @@ mod tests {
                 auto_tune_max_bits: 20,
                 binding_mode: BindingMode::None,
                 region: None,
+
+                policy_version: 1,
             },
             "login",
             "1.2.3.4",
             NOW_UNIX,
             NOW_NS,
             0,
+            None,
         )
         .unwrap();
         assert!(issued.record.binding_tag.is_empty());
@@ -2402,6 +2477,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2428,6 +2504,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2449,6 +2526,7 @@ mod tests {
         // rejects challenges issued for another region.
         let mut record = make_record(8);
         record.region = Some("eu".into());
+        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed (round 9)
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
@@ -2460,6 +2538,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: Some("us"),
+            expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
             enforce_telemetry: false,
@@ -2489,6 +2568,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: Some("us"),
+            expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
             enforce_telemetry: false,
@@ -2505,6 +2585,7 @@ mod tests {
     fn matching_region_verifies_and_unmatched_expectation_never_fires() {
         let mut record = make_record(8);
         record.region = Some("us".into());
+        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed (round 9)
         let counter = solve_for_test(&record).unwrap();
 
         let mut ctx_match = VerifyContext {
@@ -2517,6 +2598,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: Some("us"),
+            expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
             enforce_telemetry: false,
@@ -2539,6 +2621,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_region: None,
+            expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
             enforce_telemetry: false,
@@ -2563,7 +2646,8 @@ mod tests {
         assert_eq!(
             outcome,
             VerifyOutcome::Valid {
-                nonce: expected_nonce
+                nonce: expected_nonce,
+                request_binding: None
             }
         );
         let invalid = VerifyOutcome::Invalid(VerifyError::Expired);
@@ -2651,8 +2735,8 @@ mod tests {
     const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
     const FIXTURE_BINDING_TAG: &str =
         "5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f";
-    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0";
-    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWIxMDU0MjRmZTNhNWNmYTNhZmRjY2RhOTVmNzM0YzllNjZlZTcwM2U4YjhkNDI2YTA3Y2ZlMWNiOWM4OTU0ZnwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDA=.37bee30d7320977fbd902205f313b77187b85c29831f20e59d775b878fdb2c63";
+    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|";
+    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWIxMDU0MjRmZTNhNWNmYTNhZmRjY2RhOTVmNzM0YzllNjZlZTcwM2U4YjhkNDI2YTA3Y2ZlMWNiOWM4OTU0ZnwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDB8fDF8.98136b8110b9dd49b1b873816516e6e1e7b85da5b11a8a8835a54a318af269f8";
     const FIXTURE_LEGACY_IP_HASH: &str =
         "5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf";
     const FIXTURE_CANONICAL_V1: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf|1700000000";
@@ -2691,6 +2775,8 @@ mod tests {
             attempts_used: 0,
             protocol_version,
             region: None,
+            policy_version: 1,
+            request_binding: None,
         }
     }
 
@@ -2707,6 +2793,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("192.168.1.5"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2790,6 +2877,7 @@ mod tests {
             expected_scope: Some("signup"),
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,

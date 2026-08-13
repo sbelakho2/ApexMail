@@ -173,6 +173,7 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
         auto_tune_max_bits: 20,
         binding_mode: BindingMode::Bound,
         region: None,
+        policy_version: 1,
     }
 }
 
@@ -192,6 +193,7 @@ fn argon_config(target_bits: u32) -> ChallengeConfig {
         auto_tune_max_bits: 20,
         binding_mode: BindingMode::Bound,
         region: None,
+        policy_version: 1,
     }
 }
 
@@ -223,7 +225,16 @@ fn verify_at(verifier: &ProductionVerifier, token: &str, issued_at_ns: u64) -> V
 fn valid_solution_verifies_and_wire_format_is_language_neutral() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("valid");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
 
     let store = store_for(&url, &prefix);
@@ -268,7 +279,16 @@ fn valid_solution_verifies_and_wire_format_is_language_neutral() {
 fn two_concurrent_verifies_exactly_one_wins() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("race");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
@@ -311,7 +331,16 @@ fn two_concurrent_verifies_exactly_one_wins() {
 fn replay_after_valid_verify_is_record_not_found() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("replay");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
@@ -334,7 +363,16 @@ fn replay_after_valid_verify_is_record_not_found() {
 fn wrong_counter_is_insufficient_work_and_burns_the_record() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("wrong-counter");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let valid = solve_for_test(&issued.record).expect("4-bit sha solves");
     let wrong = if valid == 0 { 1 } else { 0 };
     let issued_at_ns = issued.record.issued_at_ns;
@@ -380,6 +418,7 @@ fn expired_record_returns_expired() {
             now_unix().saturating_sub(121),
             now_micros(),
             0,
+            None,
         )
         .unwrap();
         let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
@@ -400,7 +439,16 @@ fn expired_record_returns_expired() {
 fn tampered_record_signature_is_rejected() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("tamper");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
 
     // Tamper the stored record: append to the embedded signature and keep
@@ -427,8 +475,16 @@ fn tampered_record_signature_is_rejected() {
 fn gate_rejection_does_not_consume_the_record() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("gate-noconsume");
-    let issued =
-        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
@@ -457,7 +513,16 @@ fn gate_rejection_does_not_consume_the_record() {
 fn cheap_validation_failure_consumes_the_record() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("cheap-noconsume");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let issued_at_ns = issued.record.issued_at_ns;
 
@@ -511,8 +576,16 @@ fn argon_gate_rejects_before_derivation_and_accepts_when_clear() {
     let prefix = prefix("argon-gate");
 
     // Gate refuses capacity: CapacityExceeded, no hash derivation.
-    let issued =
-        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
     let issued_at_ns = issued.record.issued_at_ns;
     let rejecting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(false));
@@ -527,8 +600,16 @@ fn argon_gate_rejects_before_derivation_and_accepts_when_clear() {
     );
 
     // Gate grants capacity: the record derives once and verifies.
-    let issued =
-        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
     let issued_at_ns = issued.record.issued_at_ns;
     let accepting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(true));
@@ -547,8 +628,16 @@ fn argon_gate_rejects_before_derivation_and_accepts_when_clear() {
 fn argon_lease_is_held_during_verify_and_released_by_drop() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("lease-hold");
-    let issued =
-        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
@@ -603,8 +692,16 @@ fn argon_lease_is_held_during_verify_and_released_by_drop() {
 fn gate_ok_none_is_capacity_exceeded_and_does_not_consume() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("gate-ok-none");
-    let issued =
-        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
@@ -647,8 +744,16 @@ fn gate_ok_none_is_capacity_exceeded_and_does_not_consume() {
 fn gate_error_is_admission_unavailable_and_does_not_consume() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("gate-unavailable");
-    let issued =
-        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
@@ -677,7 +782,16 @@ fn gate_error_is_admission_unavailable_and_does_not_consume() {
 fn sha256_records_are_never_gated() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("sha-ungated");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
@@ -699,7 +813,16 @@ fn sha256_records_are_never_gated() {
 fn connection_pool_reuses_connections_round_robin() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("pool");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
@@ -740,7 +863,16 @@ fn connection_pool_reuses_connections_round_robin() {
 fn pool_reuses_the_same_slots_across_operations() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("pool-reuse");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let issued_at_ns = issued.record.issued_at_ns;
 
@@ -799,7 +931,16 @@ fn unreachable_store_maps_find_error_to_storage_unavailable() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
 
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let verifier = verifier_for(&format!("redis://127.0.0.1:{port}/"), &prefix("dead"));
     assert_eq!(
         verifier.verify(
@@ -815,7 +956,16 @@ fn unreachable_store_maps_find_error_to_storage_unavailable() {
 
 #[test]
 fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let record_json = serde_json::to_string(&issued.record).unwrap();
     let nonce = issued.record.nonce.clone();
@@ -895,9 +1045,20 @@ fn record_json_keys_match_php_cross_language_format() {
         "attempts_used",
         "protocol_version",
         "region",
+        "policy_version",
+        "request_binding",
     ];
 
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let value = serde_json::to_value(&issued.record).unwrap();
     let keys: BTreeSet<&str> = value
         .as_object()
@@ -968,7 +1129,16 @@ fn replica_wait_store_succeeds_without_replicas() {
     // still persists the record.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("wait");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let store = store_for(&url, &prefix).with_wait(1, 1000);
     assert_eq!(store.wait_config(), (1, 1000));
     store.store(&issued.record).unwrap();
@@ -995,7 +1165,16 @@ fn ttl_margin_extends_the_redis_ttl_only() {
     // readable across replica lag / clock skew.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("margin");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let store = store_for(&url, &prefix).with_ttl_margin(30);
     assert_eq!(store.ttl_margin_secs(), 30);
     store.store(&issued.record).unwrap();
@@ -1041,7 +1220,7 @@ fn verifier_expected_region_rejects_mismatched_and_unbound_records() {
         region: Some("eu".into()),
         ..sha_config(4)
     };
-    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let token = encode_token(&issued.record.nonce, counter);
     let issued_at_ns = issued.record.issued_at_ns;
@@ -1064,8 +1243,16 @@ fn verifier_expected_region_rejects_mismatched_and_unbound_records() {
     ));
 
     // Unbound record + expecting region → fail closed.
-    let unbound =
-        issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let unbound = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter2 = solve_for_test(&unbound.record).expect("4-bit sha solves");
     let token2 = encode_token(&unbound.record.nonce, counter2);
     expecting_eu.store().store(&unbound.record).unwrap();
@@ -1094,7 +1281,16 @@ fn valid_outcome_exposes_the_consumed_nonce() {
     // (jti) of the consumed record.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("jti");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let verifier = verifier_for(&url, &prefix);
     verifier.store().store(&issued.record).unwrap();
@@ -1115,7 +1311,16 @@ fn noncanonical_tokens_reach_the_verifier_as_malformed_token() {
     // (all decode errors map to MalformedToken).
     let Some(url) = redis_url() else { return };
     let prefix = prefix("strict-token");
-    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let verifier = verifier_for(&url, &prefix);
     verifier.store().store(&issued.record).unwrap();

@@ -7,8 +7,9 @@ declare(strict_types=1);
  * language-neutral record JSON to KC_PHP_RECORD (env). The Rust job then
  * loads it, solves it, and verifies it with verify_solution.
  *
- * The record JSON carries the full 18-key schema (including `region`,
- * always present — null when unbound). KC_PHP_REGION optionally binds the
+ * The record JSON carries the full 20-key schema (including `region`,
+ * always present — null when unbound, plus `policy_version` and
+ * `request_binding`, audits #42/#41). KC_PHP_REGION optionally binds the
  * issued records to a region so the cross-language region interop is
  * exercised too.
  *

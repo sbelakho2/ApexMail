@@ -367,6 +367,109 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         new RedisAdmissionSemaphore($client, 1, 'default', self::LEASE_MS, 0);
     }
 
+    // ── Round 9: per-scope budget (audit #47) ─────────────────────────────
+
+    /** The per-scope lease set key of a namespace + scope (mirrors the semaphore's derivation). */
+    private function scopeKey(string $scope, string $namespace = 'default'): string
+    {
+        return '{kiwicaptcha:argon2:leases:'.$namespace.'}:'.$scope;
+    }
+
+    public function testOneScopeFillsItsBudgetAndAnotherScopeStillAcquires(): void
+    {
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 100, 'scope-fair', self::LEASE_MS, 64, 2);
+
+        // Scope 'login' fills its own budget (2) while the global cap (100)
+        // is nowhere near full.
+        self::assertIsString($semaphore->acquire('login'));
+        self::assertIsString($semaphore->acquire('login'));
+        self::assertNull($semaphore->acquire('login'), 'the 3rd login acquire must be refused by the PER-SCOPE budget');
+        self::assertSame(2, $client->zcard($this->scopeKey('login', 'scope-fair')), 'the scope set holds exactly its budget');
+
+        // A DIFFERENT scope still acquires within its own budget — one
+        // scope's fullness never starves the others.
+        self::assertIsString($semaphore->acquire('signup'), 'a second scope must acquire within its own budget');
+        self::assertIsString($semaphore->acquire('signup'));
+        self::assertNull($semaphore->acquire('signup'), 'signup has its own budget of 2');
+        self::assertSame(2, $client->zcard($this->scopeKey('signup', 'scope-fair')));
+        self::assertSame(4, $this->leases($client, 'scope-fair'), 'the global set holds both scopes\' leases');
+    }
+
+    public function testGlobalCapStillEnforcedOnTopOfPerScopeBudgets(): void
+    {
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 3, 'scope-global', self::LEASE_MS, 64, 10);
+
+        // Per-scope budgets (10) are generous; the GLOBAL cap (3) is the
+        // deployment-wide invariant and must bind first.
+        self::assertIsString($semaphore->acquire('a'));
+        self::assertIsString($semaphore->acquire('a'));
+        self::assertIsString($semaphore->acquire('b'));
+        self::assertNull($semaphore->acquire('c'), 'the 4th lease must be refused by the GLOBAL cap even though scope c has budget');
+        self::assertSame(3, $this->leases($client, 'scope-global'));
+    }
+
+    public function testScopedReleaseRemovesTheLeaseFromBothSets(): void
+    {
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 10, 'scope-release', self::LEASE_MS, 64, 2);
+
+        $token = $semaphore->acquire('login');
+        self::assertIsString($token);
+        self::assertSame(1, $client->zcard($this->scopeKey('login', 'scope-release')));
+        self::assertSame(1, $this->leases($client, 'scope-release'));
+
+        $semaphore->release($token);
+        self::assertSame(0, $client->zcard($this->scopeKey('login', 'scope-release')), 'release must remove the lease from the PER-SCOPE set too');
+        self::assertSame(0, $this->leases($client, 'scope-release'));
+
+        // The scope budget is free again immediately (no TTL wait).
+        self::assertIsString($semaphore->acquire('login'));
+    }
+
+    public function testScopedTokenCarriesTheScopeAndUnscopedAcquiresStayHexOnly(): void
+    {
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 10, 'scope-token', self::LEASE_MS, 64, 2);
+
+        $token = $semaphore->acquire('login');
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}\.login$/', $token, 'a scoped lease token carries the sanitized scope suffix (release rebuilds the scope key from it)');
+
+        $unscoped = $semaphore->acquire();
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $unscoped, 'an unscoped acquire keeps the plain hex token');
+    }
+
+    public function testHostileScopeNamesAreSanitizedIntoTheKey(): void
+    {
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 10, 'scope-sanitize', self::LEASE_MS, 64, 2);
+
+        $token = $semaphore->acquire('my/scope:weird|login');
+        self::assertIsString($token);
+        self::assertSame(1, $client->zcard($this->scopeKey('my_scope_weird_login', 'scope-sanitize')), 'hostile scope characters collapse to underscores in the per-scope key');
+        $semaphore->release($token);
+        self::assertSame(0, $client->zcard($this->scopeKey('my_scope_weird_login', 'scope-sanitize')));
+    }
+
+    public function testScopeBudgetKeysAreIndependentAcrossNamespaces(): void
+    {
+        $client = $this->requirePredis();
+        $a = new RedisAdmissionSemaphore($client, 10, 'scope-ns-a', self::LEASE_MS, 64, 1);
+        $b = new RedisAdmissionSemaphore($client, 10, 'scope-ns-b', self::LEASE_MS, 64, 1);
+
+        self::assertIsString($a->acquire('login'));
+        self::assertNull($a->acquire('login'), 'namespace A scope login is full');
+        self::assertIsString($b->acquire('login'), 'namespace B has its own scope budget');
+    }
+
+    public function testMaxPerScopeBelowOneIsRejected(): void
+    {
+        $client = $this->requirePredis();
+        $this->expectException(\InvalidArgumentException::class);
+        new RedisAdmissionSemaphore($client, 1, 'default', self::LEASE_MS, 64, 0);
+    }
+
     private function solveSha256(string $prefix, string $salt, int $targetBits, string $nonce): string
     {
         $counter = 0;

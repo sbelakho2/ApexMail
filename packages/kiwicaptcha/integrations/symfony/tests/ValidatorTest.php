@@ -281,7 +281,9 @@ final class ValidatorTest extends TestCase
             $violations = $engine->validate($dto);
 
             self::assertCount(1, $violations);
-            self::assertSame(KiwiCaptcha::NOT_SOLVED_ERROR, $violations[0]->getCode());
+            // Audit #57: capacity exhaustion keeps its DISTINCT public code
+            // (rate_limited — a retryable refusal, not a burned token).
+            self::assertSame(KiwiCaptcha::RATE_LIMITED_ERROR, $violations[0]->getCode());
         } finally {
             \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate::resetForTests();
         }
@@ -382,5 +384,267 @@ final class ValidatorTest extends TestCase
         $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'signup']));
         self::assertCount(1, $engine->validate($dto2));
         self::assertSame(1, $client->counters[$sourceKey], 'a failed verification must not decrement the outstanding counter');
+    }
+
+    // ── Round 9: transaction binding (audit #41) ──────────────────────────
+
+    /**
+     * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
+     */
+    private function buildBindingEngine(?Verifier $verifier = null, string $requestBinding = 'txn-123', bool $asAttribute = true): array
+    {
+        $stack = new RequestStack();
+        $request = Request::create('/', 'POST', ['kiwi_request_binding' => $requestBinding], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+        if ($asAttribute) {
+            // The application controller copies the POSTed field into the
+            // request attribute before validation (the documented contract).
+            $request->attributes->set(KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE, $requestBinding);
+        }
+        $stack->push($request);
+
+        $validator = new KiwiCaptchaValidator($verifier ?? $this->verifier, $stack, self::SECRET);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+        return [$engine, $stack, $validator];
+    }
+
+    public function testBoundChallengeWithMatchingBindingPasses(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine] = $this->buildBindingEngine($verifier, 'txn-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(0, $engine->validate($dto), 'a bound challenge with the matching request binding must pass');
+    }
+
+    public function testBoundChallengeWithMismatchedBindingFailsInvalidOrExpired(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine] = $this->buildBindingEngine($verifier, 'txn-OTHER');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'a binding mismatch must collapse to the SAME invalid_or_expired code (audit #57)');
+    }
+
+    public function testBoundChallengeWithNoRequestBindingFails(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // Request carries neither the attribute nor the POSTed field.
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations, 'a bound record with NO request binding must fail closed');
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+    }
+
+    public function testUnboundChallengeIgnoresTheRequestBinding(): void
+    {
+        // The record has NO binding (issue without requestBinding): the
+        // request may carry a binding (or not) — no check applies.
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine] = $this->buildBindingEngine(requestBinding: 'txn-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(0, $engine->validate($dto), 'an unbound record must pass regardless of the request binding');
+    }
+
+    public function testPostFieldFallbackCarriesTheBindingWithoutTheAttribute(): void
+    {
+        // The documented attribute is preferred, but the plain POSTed field
+        // (the widget's hidden kiwi_request_binding input) must work out of
+        // the box when the application controller does not copy it.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine] = $this->buildBindingEngine($verifier, 'txn-123', asAttribute: false);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(0, $engine->validate($dto), 'the POSTed kiwi_request_binding field must satisfy the binding without the attribute');
+    }
+
+    public function testBindingMismatchNeverExposesJtiOrBinding(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine, $stack, $validator] = $this->buildBindingEngine($verifier, 'txn-OTHER');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(1, $engine->validate($dto));
+        self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'a binding-mismatch validation must not expose a jti');
+        self::assertNull($validator->verifiedJti());
+        self::assertNull($validator->verifiedRequestBinding());
+    }
+
+    public function testValidSolveExposesTheVerifiedRequestBinding(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-123');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$engine, , $validator] = $this->buildBindingEngine($verifier, 'txn-123');
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(0, $engine->validate($dto));
+        self::assertSame('txn-123', $validator->verifiedRequestBinding(), 'the record\'s SIGNED request binding must be exposed after a valid solve (audit #41)');
+    }
+
+    // ── Round 9: security-policy epoch (audit #42) ─────────────────────────
+
+    public function testWrongPolicyVersionSurfacesAsInvalidOrExpired(): void
+    {
+        // Issue at policy_version 1 (the default), verify with an expected
+        // epoch of 2 — the verifier rejects the record (WrongPolicyVersion)
+        // and the validator collapses it to invalid_or_expired.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $verifier = new Verifier($storage, null, null, false, null, 2);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'WrongPolicyVersion must collapse to invalid_or_expired (audit #57)');
+        self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'a policy-rejected solve must not expose a jti');
+    }
+
+    public function testSamePolicyVersionVerifies(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $verifier = new Verifier($storage, null, null, false, null, 1);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(0, $engine->validate($dto), 'a record issued at the expected policy epoch must verify');
+    }
+
+    // ── Round 9: public code collapsing (audit #57) ────────────────────────
+
+    public function testTokenLevelFailuresCollapseToInvalidOrExpired(): void
+    {
+        // WrongScope (a token-level failure) must surface as
+        // invalid_or_expired — the client gets no oracle for WHICH check
+        // failed.
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $violations = $this->validate($dto, ['captcha' => [new KiwiCaptcha(['scope' => 'signup'])]]);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'WrongScope must collapse to invalid_or_expired');
+
+        // Garbage token: MalformedToken -> invalid_or_expired too.
+        $dto = new class {
+            public ?string $captcha = 'not-a-token';
+        };
+        $violations = $this->validate($dto, ['captcha' => [new KiwiCaptcha()]]);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
     }
 }

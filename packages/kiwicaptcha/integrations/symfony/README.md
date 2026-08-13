@@ -144,6 +144,11 @@ kiwi_captcha:
     # size this to available memory. With a Redis client the cap is enforced
     # across ALL PHP-FPM workers (see the Argon2 section below).
     # argon2_max_concurrent_verifications: 2
+    # argon2_max_waiters: 64             # bounded waiters guard (see below)
+    # argon2_max_per_tenant: 8           # PER-SCOPE Argon2 budget: each scope
+    #                                    # gets its own lease set in addition
+    #                                    # to the global cap (multi-tenant
+    #                                    # fairness; audit #47)
     # argon2_semaphore_namespace: '%kernel.project_dir%'
     #                                       # per-deployment discriminator for
     #                                       # the Redis lease set and the
@@ -266,13 +271,60 @@ kiwi_captcha:
         # challenge_origin_allowlist:       # origin-laundering defense: when
         #     - https://app.example.com     # non-empty, challenge POSTs must
         #                                   # carry an allowlisted Origin (or
-        #                                   # Referer origin); everything else
-        #                                   # gets 403 origin_rejected
+        #                                   # Referer origin when
+        #                                   # enforce_origin is false);
+        #                                   # everything else gets 403
+        #                                   # origin_rejected. Comparison is
+        #                                   # STRUCTURED NORMALIZATION:
+        #                                   # scheme/host/effective-port,
+        #                                   # host lowercased, default ports
+        #                                   # normalized (https 443 / http
+        #                                   # 80), trailing dots stripped,
+        #                                   # IDN -> punycode (ext-intl),
+        #                                   # IPv6 kept bracketed —
+        #                                   # "https://example.com" matches
+        #                                   # "https://example.com:443",
+        #                                   # "https://EXAMPLE.COM." and the
+        #                                   # IDN/punycode spellings, never
+        #                                   # ":444" / "http://" /
+        #                                   # "evil-example.com"
+        # enforce_origin: false             # true = Origin REQUIRED: missing
+        #                                   # or "null" Origin -> 403
+        #                                   # origin_rejected even without an
+        #                                   # allowlist. Server-to-server
+        #                                   # integrations (no Origin) keep
+        #                                   # this false — the explicitly
+        #                                   # trusted mode
         # enforce_fetch_metadata: false     # reject Sec-Fetch-Site:
         #                                   # cross-site challenge requests
         #                                   # (browser-laundering signal;
         #                                   # defense-in-depth only)
-        policy_version: 1
+        # request_binding: null             # OPTIONAL STATIC transaction
+        #                                   # binding (1..128 chars, no "|"):
+        #                                   # signed into every challenge when
+        #                                   # the request sends no
+        #                                   # request_binding field. For
+        #                                   # DYNAMIC per-transaction
+        #                                   # bindings the application
+        #                                   # supplies one per request (the
+        #                                   # widget carries it end-to-end,
+        #                                   # see "Transaction binding")
+        # health:
+        #     enabled: true                 # registers {prefix}/health/live
+        #                                   # + /health/ready (rollback-
+        #                                   # resistant readiness split)
+        policy_version: 1                  # CHALLENGE security-policy epoch
+                                           # (audit #42): signed into every
+                                           # issued record and enforced at
+                                           # verification — BUMP it to
+                                           # immediately invalidate ALL
+                                           # outstanding challenges
+                                           # (origin/action-policy changes,
+                                           # emergency revocation,
+                                           # compromised tenant); cosmetic
+                                           # changes must NOT bump it.
+                                           # Independent of the risk-v1
+                                           # contract version.
         # weights: { ... }                  # 13 risk-v1 weights (defaults = contract)
         # global_floors:                    # minimum action per global level
         #     1: sha16
@@ -485,23 +537,99 @@ Bounded memory: an attacker can never stockpile an unbounded number of live
 challenges for one source or one deployment — the counters cap the aggregate
 outstanding verification work an attacker can hoard.
 
-### Origin laundering defense
+### Origin laundering defense (structured normalization)
 
 - `risk.challenge_origin_allowlist` (default `[]`): when NON-EMPTY, the
   challenge POST must carry an `Origin` header (or a `Referer`-origin
-  fallback) whose scheme+host+port EXACTLY matches one allowlisted origin —
-  otherwise HTTP 403 `{"error":{"code":"origin_rejected"}}` **before any
-  CAPTCHA is issued** (no state written, no rate-limit budget consumed).
-  Requests with neither header cannot be matched and are rejected. Exact
-  scheme/host/port comparison (host case-insensitive, default ports
-  normalized). A launderer framing a victim browser cannot control the
-  Origin of a cross-site request; raw HTTP bots without the header are
-  rejected too.
+  fallback when `enforce_origin` is false) whose NORMALIZED
+  scheme+host+effective-port matches one allowlisted origin — otherwise
+  HTTP 403 `{"error":{"code":"origin_rejected"}}` **before any CAPTCHA is
+  issued** (no state written, no rate-limit budget consumed). Requests with
+  neither header cannot be matched and are rejected. A launderer framing a
+  victim browser cannot control the Origin of a cross-site request; raw
+  HTTP bots without the header are rejected too.
+  **Structured normalization (audit #43)** — both sides of the comparison
+  are canonicalized component-wise: scheme lowercased; host lowercased with
+  the trailing dot stripped and IDN converted to punycode when ext-intl is
+  available; the effective port defaulted per scheme (https 443, http 80);
+  IPv6 literals kept bracketed. So `https://example.com` matches
+  `https://example.com:443`, `https://EXAMPLE.COM`, `https://example.com.`
+  and the `https://bücher.example` / `https://xn--bcher-kva.example`
+  spellings — but never `https://example.com:444`, `http://example.com`,
+  `https://evil-example.com` or `https://example.com.evil.com`.
+- `risk.enforce_origin` (default `false`): when TRUE, a request WITHOUT an
+  `Origin` header — or carrying the literal `"null"` Origin (opaque/
+  sandboxed origins) — is rejected with 403 `origin_rejected` even when the
+  allowlist is empty; with an allowlist the required Origin must additionally
+  be allowlisted. **Server-to-server integrations** (raw HTTP, no Origin)
+  MUST keep `enforce_origin: false` — that is the explicitly trusted mode
+  (the Referer-origin fallback or no check at all).
 - `risk.enforce_fetch_metadata` (default `false`): when true, challenge
   requests whose `Sec-Fetch-Site` header is present and equals `cross-site`
   are rejected with HTTP 403 `{"error":{"code":"CROSS_SITE_REJECTED"}}` — a
   browser-laundering signal. Raw HTTP bots lack the header and are
   unaffected, so this is defense-in-depth only, never the security boundary.
+
+### Security-policy epoch (emergency revocation)
+
+`risk.policy_version` (default **1**, min 1) is the CHALLENGE security-policy
+epoch (audit #42): the core Issuer signs it into every issued challenge
+record, and the core Verifier — constructed with
+`expectedPolicyVersion = risk.policy_version` — rejects any record whose
+epoch differs (`WrongPolicyVersion`, collapsed to `invalid_or_expired` by
+the validator). **Bumping it immediately invalidates ALL outstanding
+challenges** — the emergency-revocation knob for origin/action-policy
+changes, a compromised tenant, or a protocol incident. Cosmetic
+configuration changes must NOT bump it (every bump forces every live
+visitor to re-solve). It is independent of the risk-v1 contract version
+(which stays internal to the risk package) and of the readiness
+`min_policy_epoch` (see "Health endpoints" below).
+
+### Transaction binding (audit #41)
+
+A challenge can be bound to ONE application transaction: the issuing side
+signs a `request_binding` (1..128 chars, no `|`) into the record, and
+verification only accepts the solve when the final POST presents the SAME
+binding — a challenge minted for one transaction is never redeemable for
+another. The widget carries the binding end-to-end:
+
+- **Config** — `risk.request_binding` sets a STATIC binding used whenever
+  the request sends no `request_binding` field (e.g. server-side
+  integrations). For DYNAMIC per-transaction bindings (recommended: a
+  random nonce per page load) the application supplies the value per
+  request/form:
+  - `KiwiCaptchaType` option `'request_binding' => $txnId` (defaults to the
+    static config) → rendered as `data-kiwi-request-binding` on the widget
+    container;
+  - the standalone widget accepts `'request_binding'` in the
+    `kiwi_captcha_widget({...})` context.
+- **Widget flow** — the driver reads `data-kiwi-request-binding`, includes
+  `request_binding` in the challenge POST body (the controller validates
+  1..128 chars / no `|`, 422 `INVALID_REQUEST_BINDING` otherwise, then
+  passes it to the core Issuer, which signs it into the record), and — on a
+  successful solve — creates the hidden `kiwi_request_binding` input in the
+  form, next to the token input.
+- **Verification** — after a VALID verification, the validator compares the
+  consumed record's signed binding against the request binding. The
+  application controller copies the POSTed field into the request attribute
+  before validating:
+
+  ```php
+  $request->attributes->set(
+      KiwiCaptchaValidator::REQUEST_BINDING_ATTRIBUTE,
+      (string) $request->request->get('kiwi_request_binding'),
+  );
+  $form->handleRequest($request);
+  ```
+
+  (The validator also falls back to the raw POSTed `kiwi_request_binding`
+  field, so the plain widget flow works without the shim.) A bound record
+  with a missing or mismatched binding fails with the SAME
+  `invalid_or_expired` violation — no jti is exposed, the solve is burned
+  (single-use), and the client re-solves. An UNBOUND record skips the check
+  entirely. The verified binding is exposed via
+  `KiwiCaptchaValidator::verifiedRequestBinding()`
+  (`VerifyOutcome::requestBinding()`).
 
 ### Argon2 admission wait-queue bound
 
@@ -514,6 +642,61 @@ violation / 429) instead of queueing behind the saturated gate. A waiter is
 removed when a lease is granted or the acquire returns null (best-effort,
 same Lua). During an Argon2id saturation storm the waiters counter can never
 grow unboundedly.
+
+### Per-scope Argon2 fairness (audit #47)
+
+`argon2_max_per_tenant` (default 8, min 1) gives every SCOPE string its own
+Argon2id admission budget: the semaphore checks a per-scope lease set
+(`{kiwicaptcha:argon2:leases:<ns>}:<scope>`) IN ADDITION to the global
+`argon2_max_concurrent_verifications` cap. One busy scope (tenant/endpoint
+mapped to a scope) can fill its own budget without starving the other
+scopes' share of the memory-hard capacity, while the global cap stays the
+deployment-wide memory invariant. The validator passes the constraint scope
+into `acquire()` (via the request-scope-aware gate wrapper); the waiters
+guard stays global. The in-process fallback gate has no per-scope budget
+(per-process, single-worker best-effort).
+
+### Health endpoints (rollback-resistant readiness)
+
+`risk.health.enabled` (default true) registers two GET endpoints under the
+route prefix:
+
+- **`{prefix}/health/live`** — ALWAYS 200 while the process runs. Never tied
+  to saturation, Redis, or policy state: the orchestrator only learns
+  "process up" vs "process gone".
+- **`{prefix}/health/ready`** — 200 ONLY when:
+  1. the issuer/verifier signing keys are configured (the bundle secret);
+  2. the security Redis answers a PING (probe cached ~1 s in-process;
+     TRANSIENT probe timeouts never fail readiness on their own — the first
+     failure is debounced for one cache window, two consecutive failures
+     flip readiness);
+  3. the CENTRAL security-policy state is compatible: the Redis hash
+     `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`,
+     `min_policy_epoch`) — when PRESENT, ready requires
+     `min_protocol_version <= 2` (this binary's max protocol) AND
+     `min_policy_epoch <= risk.policy_version`; when ABSENT, the binary's
+     own configuration is authoritative.
+
+Argon queue fullness and transient timeouts NEVER fail readiness. All
+responses carry `Cache-Control: no-store` + `Pragma: no-cache`.
+
+**Operator contract (mixed-version deployments):** set the policy hash on
+the security Redis to keep OLD binaries out of the pool during a rolling
+upgrade, and to protect ROLLBACKS after a protocol/policy bump:
+
+```bash
+# The fleet is moving to protocol v2 / policy epoch 2: old binaries
+# (max protocol 1, or policy_version 1) must not serve traffic.
+redis-cli HSET "{kiwi:<namespace>}:security-policy" \
+    min_protocol_version 2 min_policy_epoch 2
+```
+
+A binary whose max protocol or configured `risk.policy_version` is below
+the hash exits readiness (503) and is drained by the load balancer BEFORE it
+can issue or verify challenges it cannot honor. Remove the key (or lower
+the fields) only after every node runs a compatible binary. When the key is
+absent, every binary's own configuration is authoritative (the pre-round-9
+behavior).
 
 ## Usage
 
@@ -531,6 +714,10 @@ public function buildForm(FormBuilderInterface $builder, array $options): void
             'scope' => 'login', // optional; defaults to 'login'
             'nonce' => $cspNonce, // optional CSP nonce for the inline style/script tags
             'telemetry' => 'off', // optional; defaults to the bundle config (strict: 'off')
+            'request_binding' => $txnId, // optional transaction binding (audit #41);
+                                        // defaults to the configured static
+                                        // risk.request_binding; a random
+                                        // nonce per page load is recommended
         ]);
 ```
 
@@ -540,7 +727,23 @@ The widget posts to `route_prefix . '/challenge'` by default — the form's
 endpoint follows the configured prefix like the standalone widget does — and
 stays overridable per form with the `endpoint` option. The telemetry mode is
 rendered as `data-kiwi-telemetry` on the widget container (default `off`);
-invalid values are rejected by the options resolver.
+invalid values are rejected by the options resolver. With a
+`request_binding` the widget container carries
+`data-kiwi-request-binding`, the challenge POST sends the field, and the
+driver writes the hidden `kiwi_request_binding` input into the form (see
+"Transaction binding" above).
+
+**Public violation codes (audit #57):** token-level failures — wrong scope,
+IP mismatch, expired, malformed/badly-signed tokens, too-fast solves, wrong
+region, wrong policy epoch, missing client IP, counter/length violations,
+insufficient work, indeterminate consumption — ALL collapse to the single
+public code **`invalid_or_expired`** (the client gets no oracle for which
+check failed; the precise reason stays in the logs). Two refusals stay
+distinct: **`rate_limited`** (the Argon2id admission budget is saturated —
+retryable, the challenge is NOT burned) and
+**`temporary_unavailable`** (the security storage or admission backend is
+unavailable). The risk-decision codes stay as-is:
+`kiwi.post_solve_rejected` / `kiwi.post_solve_step_up_required`.
 
 ### Verified-token jti and the (jti, action) idempotency contract
 
@@ -593,7 +796,7 @@ Alternatively, render a standalone widget anywhere. Pass a `nonce` option to
 emit CSP-safe markup:
 
 ```twig
-{{ kiwi_captcha_widget({ 'endpoint': path('kiwicaptcha_challenge'), 'scope': 'login', 'nonce': csp_nonce('script') }) }}
+{{ kiwi_captcha_widget({ 'endpoint': path('kiwicaptcha_challenge'), 'scope': 'login', 'nonce': csp_nonce('script'), 'request_binding': txn_id }) }}
 ```
 
 With a nonce, the emitted `<style>` and `<script>` tags carry `nonce="..."`;
@@ -662,7 +865,28 @@ X-Content-Type-Options: nosniff
 
 Challenge bytes and rate-limit signals are never cached or mirrored, no
 referrer leaks from the widget context, and the JSON can never be re-sniffed
-as HTML.
+as HTML. The health responses (`/health/live`, `/health/ready`) carry the
+same `Cache-Control: no-store` + `Pragma: no-cache` contract (audit #40).
+
+**Caching/CDN guidance (audit #40).** The bundle's DYNAMIC endpoints —
+`POST {prefix}/challenge` and the health routes — must NEVER be served from
+a cache: every response is explicitly `Cache-Control: no-store` +
+`Pragma: no-cache` (the latter for older intermediaries that ignore
+`Cache-Control`), and the application's reverse proxy / CDN must bypass
+them entirely (e.g. `proxy_cache_bypass` / `Cache-Control` passthrough on
+the location). The widget's static assets, in contrast, are CONTENT-
+ADDRESSED or versioned and are the only KiwiCaptcha material worth caching:
+serve them with
+
+```
+Cache-Control: public, max-age=31536000, immutable
+```
+
+If you host the widget assets separately (they are inlined by the bundle by
+default — nothing to cache), use Symfony's `asset()` versioning /
+`assets.version` (or a content-hash filename) so every deployment of the
+assets gets a NEW URL and `immutable` can never serve a stale solver/
+driver; never apply `immutable` to any non-versioned URL.
 
 **Same-origin enforcement.** When `same_origin_only` is true (default, and
 forced under strict), requests whose `Origin` header is not the
@@ -737,7 +961,13 @@ and only after the cheap validation checks. Two gate backends:
   `{..}:sem:waiters` counter (lease-lifetime TTL, hash-tagged with the lease
   set) and refused immediately once the count exceeds the bound — the
   wait-queue behind a saturated gate can never grow unboundedly (see the
-  risk section above).
+  risk section above). The acquire script also enforces the PER-SCOPE
+  budget (`argon2_max_per_tenant`, default 8): the validator passes the
+  constraint scope into `acquire()` (request-scope-aware gate wrapper), and
+  the scope's own lease set (`{kiwicaptcha:argon2:leases:<ns>}:<scope>`)
+  is checked in ADDITION to the global cap — one busy scope can never
+  starve the other scopes' share of the memory-hard budget (see the risk
+  section above). The waiters guard stays global.
   For the cap to be an absolute operational invariant, the maximum
   verification request runtime must stay BELOW the lease lifetime
   (`argon2_lease_ms`, default 45000 ms) — otherwise a lease can expire while

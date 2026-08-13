@@ -36,6 +36,11 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('KIWI_WASM_B64', $html);
         // Driver inlined
         self::assertStringContainsString('window.KiwiCaptcha = { init:', $html);
+        // Audit #41: the driver sends the container's request binding with
+        // the challenge POST and writes the hidden kiwi_request_binding form
+        // field next to the token.
+        self::assertStringContainsString('request_binding', $html, 'the driver must include the request_binding challenge field');
+        self::assertStringContainsString("input[name='kiwi_request_binding']", $html, 'the driver must create the hidden kiwi_request_binding form input');
         // No external requests: no <link>, no <script src>, no fetchable URLs
         // (the SVG xmlns is an XML namespace, not a network fetch).
         self::assertStringNotContainsString('<link ', $html);
@@ -74,6 +79,30 @@ final class TwigRuntimeTest extends TestCase
         ]);
 
         return [$env = new Environment($loader), new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', telemetry: $telemetry)];
+    }
+
+    public function testRequestBindingRenderedFromRuntimeDefaultAndContext(): void
+    {
+        [$env, $runtime] = $this->runtime();
+        $html = $runtime->renderWidget($env, []);
+        // The driver script always mentions the attribute; the CONTAINER
+        // must not carry it when no binding is configured.
+        self::assertStringContainsString('data-kiwi-telemetry="off">', $html, 'no binding configured: the container must not render data-kiwi-request-binding');
+
+        // The static risk.request_binding config default renders into the
+        // widget container.
+        $loader = new ArrayLoader([
+            '@KiwiCaptcha/form_div_layout.html.twig' => file_get_contents(__DIR__.'/../src/Resources/views/form_div_layout.html.twig'),
+        ]);
+        $env = new Environment($loader);
+        $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', requestBinding: 'static-txn');
+        $html = $runtime->renderWidget($env, []);
+        self::assertStringContainsString('data-kiwi-request-binding="static-txn"', $html, 'the static binding must render as data-kiwi-request-binding (audit #41)');
+
+        // A dynamic per-render binding overrides the runtime default.
+        $html = $runtime->renderWidget($env, ['request_binding' => 'per-transaction']);
+        self::assertStringContainsString('data-kiwi-request-binding="per-transaction"', $html);
+        self::assertStringNotContainsString('data-kiwi-request-binding="static-txn"', $html);
     }
 
     public function testMissingAssetThrows(): void

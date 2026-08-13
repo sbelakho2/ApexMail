@@ -42,6 +42,7 @@ class KiwiCaptchaType extends AbstractType
         private readonly ?KiwiCaptchaRuntime $runtime = null,
         private readonly string $routePrefix = '/kiwi-captcha',
         private readonly string $telemetry = 'off',
+        private readonly ?string $requestBinding = null,
     ) {
     }
 
@@ -51,6 +52,7 @@ class KiwiCaptchaType extends AbstractType
         $view->vars['scope'] = $options['scope'];
         $view->vars['nonce'] = $options['nonce'];
         $view->vars['telemetry'] = $options['telemetry'];
+        $view->vars['request_binding'] = $options['request_binding'];
 
         // The form theme inlines the shared widget assets; provide them from
         // the bundle runtime so the rendered form markup is self-contained.
@@ -70,6 +72,13 @@ class KiwiCaptchaType extends AbstractType
             // Telemetry mode rendered into data-kiwi-telemetry; follows the
             // bundle config (forced 'off' under strict privacy mode).
             'telemetry' => $this->telemetry,
+            // Transaction binding (audit #41): rendered into
+            // data-kiwi-request-binding; the widget sends it with the
+            // challenge POST and carries it in the hidden
+            // kiwi_request_binding form field. Defaults to the configured
+            // static risk.request_binding; the application may supply a
+            // DYNAMIC per-transaction binding per form.
+            'request_binding' => $this->requestBinding,
             // The constraint's expected scope follows the form's scope option.
             'constraints' => static fn (Options $options): array => [
                 new KiwiCaptcha(['scope' => $options['scope']]),
@@ -81,6 +90,7 @@ class KiwiCaptchaType extends AbstractType
         $resolver->setAllowedTypes('endpoint', 'string');
         $resolver->setAllowedTypes('scope', 'string');
         $resolver->setAllowedTypes('nonce', ['string', 'null']);
+        $resolver->setAllowedTypes('request_binding', ['string', 'null']);
         $resolver->setAllowedValues('telemetry', ['off', 'minimal', 'full']);
     }
 

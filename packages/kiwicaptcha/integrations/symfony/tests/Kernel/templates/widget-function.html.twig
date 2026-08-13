@@ -1,1 +1,1 @@
-{{ kiwi_captcha_widget({'endpoint': '/kiwi-captcha/challenge', 'scope': 'login', 'nonce': nonce|default('')}) }}
+{{ kiwi_captcha_widget({'endpoint': '/kiwi-captcha/challenge', 'scope': 'login', 'nonce': nonce|default(''), 'request_binding': request_binding|default('')}) }}

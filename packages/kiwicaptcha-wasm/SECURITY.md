@@ -1,0 +1,144 @@
+# KiwiCaptcha WASM — Security & Supply-Chain Notes
+
+This package ships three browser assets (`assets/`):
+
+| Asset | Purpose |
+|---|---|
+| `kiwicaptcha-wasm.js` | wasm-bindgen glue with the Argon2id/SHA-256 solver wasm inlined as base64 |
+| `kiwi-worker.js` | standalone same-origin worker solver (`data-kiwi-worker-src`) |
+| `widget-driver.js` | the widget driver; embeds the worker source and the solver build id |
+
+Everything below is guidance for integrators who serve these assets (self-hosted
+or via a CDN). The exact release URLs are the integrator's choice — this file
+gives the patterns and the hash command.
+
+## 1. SRI (Subresource Integrity)
+
+Compute the sha384-base64 hashes with the bundled tool:
+
+```sh
+node packages/kiwicaptcha-wasm/tools/sri-hashes.mjs
+```
+
+Example output (run against a build):
+
+```
+kiwicaptcha-wasm.js  sha384-lYQhEK3o/D8piurwe1556/gKHmzDoNv5gumBBIKUCsKQ0ogSvB1HySZm6NeNVdzq
+kiwi-worker.js       sha384-bz5IPxD4I2OK/gEaeUsMGXB0A5caYw5LwU/fQXbxpzQ048kk8K2NsWM/GO3EL9Ii
+widget-driver.js     sha384-osA8vjEQw8Gbqp8Z7Ap9Avv1rH03DOAJVKB7bFMvDSbgZ7N+UU7zFEdKrMfocdQR
+```
+
+Use the SRI script-tag pattern for every asset you serve:
+
+```html
+<script src="https://cdn.example.com/kiwicaptcha/2026-08-r1/widget-driver.js"
+        integrity="sha384-osA8vjEQw8Gbqp8Z7Ap9Avv1rH03DOAJVKB7bFMvDSbgZ7N+UU7zFEdKrMfocdQR"
+        crossorigin="anonymous"></script>
+```
+
+Notes:
+
+- `integrity` + `crossorigin="anonymous"` are a pair — an SRI-protected
+  cross-origin script without `crossorigin` will be blocked.
+- Re-run the tool after every rebuild and update the tags; a hash mismatch
+  means the bytes on the wire are not the bytes you pinned.
+
+## 2. Immutable versioned URLs — never a mutable `latest.js`
+
+- Every asset must be served from an immutable, versioned URL path. The
+  version is the solver build id (see §5), e.g.
+  `/kiwicaptcha/2026-08-r1/widget-driver.js`.
+- Never publish a mutable `latest.js`/`latest.css` alias: a compromised or
+  replaced "latest" file is indistinguishable from a release to SRI pinning
+  that follows the URL.
+- Content-addressed naming is the strongest form: the solver wasm is
+  published as `argon-solver.<hash>.wasm` (e.g.
+  `argon-solver.8f3a...b1c.wasm`), where `<hash>` is a sha256 of the artifact.
+  A URL change then *proves* a content change, and SRI on top of it is
+  belt-and-braces. Apply the same `<name>.<hash>.<ext>` pattern to the
+  `kiwicaptcha-wasm.js` glue if your CDN supports it.
+- The stable asset names in this package (`assets/kiwicaptcha-wasm.js`,
+  `assets/kiwi-worker.js`, `assets/widget-driver.js`) stay unchanged between
+  builds; the bundle's own asset versioning content-addresses them. That is
+  why SRI is mandatory — the filename alone never proves which build you
+  served.
+
+## 3. Self-hosting guidance
+
+- Self-host the assets: the widget refuses cross-origin challenge endpoints
+  and self-hosting means no third party ever executes script on your pages.
+  Download the release artifacts once, verify the hashes below, and serve
+  them from your own origin (or a CDN you control) at a versioned path.
+- Pin exact build tool versions. `build.sh` pins `wasm-bindgen` 0.2.127 and
+  verifies the binaryen (`wasm-opt`) tarball by SHA-256 before extracting it
+  (see the `known_wasm_opt_sha256` table).
+- Commit lockfiles: `Cargo.lock` (this package and `tools/embed`) pins every
+  Rust dependency; the browser-test suite commits `package-lock.json`; the
+  PHP bundle commits `composer.lock`. A supply-chain change to any pinned
+  dependency then shows up as a lockfile diff in review.
+- Rebuilds must be reproducible and reviewed: the only artifacts that are
+  allowed to reach production are those produced by the pinned pipeline in
+  `build.sh`.
+
+## 4. Release hashes + artifact attestations
+
+For each release:
+
+1. Build, then record hashes:
+   ```sh
+   shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js
+   node tools/sri-hashes.mjs
+   ```
+2. Publish the hash list in the release notes (SHA-256 for artifact
+   verification, sha384 SRI form for script tags).
+3. Attest the artifacts with GitHub artifact attestations:
+   ```sh
+   gh attestation create assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js \
+     --repo <org>/<repo> --predicate-type https://slsa.dev/provenance/v1
+   ```
+   Verifiers check the signature chain back to the repository:
+   ```sh
+   gh attestation verify assets/kiwicaptcha-wasm.js --repo <org>/<repo>
+   ```
+4. Publish the build id (see §5) alongside the hashes so integrators can
+   tell which driver/worker pair a release contains.
+
+## 5. Solver build-id coupling (versioned-resource expectation)
+
+The widget driver embeds a solver build id constant:
+
+```js
+var KIWI_SOLVER_BUILD_ID = "2026-08-r1";   // widget-driver.js
+```
+
+The worker (both the standalone `kiwi-worker.js` and the copy embedded in the
+driver) declares the same constant and reports it in its handshake messages:
+
+- on startup: `{ type: "ready", v: 1, buildId: "2026-08-r1" }`
+- on success: `{ type: "done", v: 1, counter: <n>, buildId: "2026-08-r1" }`
+
+The driver validates the worker's build id against its own constant. On a
+mismatch the widget enters the controlled `kiwi:solver-mismatch` state with a
+clear error message and **never** accepts a solution from the mismatched
+worker (no invalid tokens are produced, and there is no fallback to a stale
+worker).
+
+Expectation for integrators: the driver, the worker, and the wasm glue served
+to a page must come from the **same build id**. Mixed versions (e.g. a cached
+`kiwi-worker.js` from an older release next to a new driver) produce the
+controlled mismatch state until the serving layer is corrected. When the
+solver is bumped, bump `KIWI_SOLVER_BUILD_ID` in `widget-driver.js` and
+`kiwi-worker.js` (they must stay identical), rebuild, and re-run the SRI tool.
+
+## 6. Widget runtime guarantees (recap)
+
+- The result token lives in memory only — no `localStorage`/`sessionStorage`.
+- A persisted `pageshow` (BFCache restore) clears the solved state and
+  reacquires on the next interaction; it never auto-solves on restore.
+- Any failed/expired challenge response resets the widget to idle and it
+  reacquires (bounded retries, then click-to-retry) — it never sticks in a
+  failed state.
+- `data-kiwi-request-binding` (when set on the container) is forwarded as
+  `request_binding` in the challenge request body and echoed into a hidden
+  `kiwi_request_binding` input next to the token input. Server-side binding
+  enforcement is the bundle's job.

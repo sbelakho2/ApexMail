@@ -13,14 +13,16 @@ namespace KiwiCaptcha;
  * (`nonce`, `scope`, `binding_tag`, `issued_at`, `expires_at`, `algorithm`
  * `'sha256'|'argon2id'`, `m_kib`, `t`, `p`, `target_bits`, `salt`,
  * `prefix`, `challenge`, `min_duration_ms`, `issued_at_ns`,
- * `protocol_version`, `attempts_used`, `region` — 18 keys).
+ * `protocol_version`, `attempts_used`, `region`, `policy_version`,
+ * `request_binding` — 20 keys).
  *
  * Protocol v2 migration: v2 records carry `binding_tag` (a nonce-bound
  * HMAC, never a stable IP-derived identifier — see
  * {@see Issuer::bindingTag()}) and `protocol_version` (2). `toArray()`
- * ALSO emits the legacy `ip_hash` key with the same value for one release
- * so old Rust readers keep loading v2 records, and `fromArray()` accepts
- * either key. Legacy records carrying only `ip_hash` decode as
+ * emits the v2 key set only, and `fromArray()` accepts either `binding_tag`
+ * or the legacy `ip_hash` key (serde `#[serde(alias = "ip_hash")]` — the
+ * two must never appear together, exactly like serde's duplicate-field
+ * rejection). Legacy records carrying only `ip_hash` decode as
  * `protocol_version` 1.
  *
  * `attempts_used` is emitted by {@see self::toArray()} as 0 for schema
@@ -41,15 +43,60 @@ namespace KiwiCaptcha;
  * the client-reported duration.
  *
  * `region` is server-side deployment metadata (like `issuedAtNs` — never
- * signed, never sent to the client): the region the challenge was issued
- * for, or null when unbound. The JSON key is ALWAYS present (null when
- * unbound) for byte parity with the Rust serde schema (18 keys), which the
- * Rust reader requires via `#[serde(default)]` for legacy records. A
- * verifier configured with an expected region rejects records whose region
- * does not match exactly ({@see \KiwiCaptcha\VerifyError::WrongRegion}).
+ * signed into the challenge, though it IS part of the v2 canonical payload
+ * since round 9; see {@see Issuer::canonicalPayload()}): the region the
+ * challenge was issued for, or null when unbound. The JSON key is ALWAYS
+ * present (null when unbound) for byte parity with the Rust serde schema
+ * (20 keys), which the Rust reader requires via `#[serde(default)]` for
+ * legacy records. A verifier configured with an expected region rejects
+ * records whose region does not match exactly
+ * ({@see \KiwiCaptcha\VerifyError::WrongRegion}).
+ *
+ * `policyVersion` (audit #42) is the security-policy epoch that authorized
+ * this challenge — the Rust field is `policy_version: u32` with default 1,
+ * never null on the wire. `requestBinding` (audit #41) is the
+ * application-supplied transaction binding nonce the host must present
+ * again on the final protected POST (Rust: `request_binding:
+ * Option<String>`, null when unset). Both keys are ALWAYS present in
+ * `toArray()`; `policy_version` serializes as 1 when the ctor value is null
+ * (a null would be unreadable by the Rust u32 reader).
+ *
+ * `fromArray()` is the strict serde-mirror parser (audit #56): it accepts
+ * EXACTLY what the Rust `serde_json::from_str::<ChallengeRecord>` accepts —
+ * whitelisted keys only, exact lowercase algorithm values, strict integer
+ * types and ranges, strings capped at 4096 bytes, nulls only where
+ * `Option` allows them. Anything else throws
+ * {@see \KiwiCaptcha\MalformedRecordException}. NOTE: base64 is NOT
+ * validated here — serde treats `nonce`/`salt` as plain strings at parse
+ * time, and the differential fuzz corpus (1000 deterministic mutations)
+ * pins both parsers to the same 659-accepted split.
  */
 final class ChallengeRecord
 {
+    /**
+     * The 20-key wire schema, mirroring the Rust serde struct fields
+     * (deny_unknown_fields). `ip_hash` is the legacy v1 alias for
+     * `binding_tag` (serde `#[serde(alias = "ip_hash")]`).
+     */
+    public const WIRE_KEYS = [
+        'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
+        'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
+        'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
+        'attempts_used', 'region', 'policy_version', 'request_binding',
+    ];
+
+    /**
+     * Fields serde requires (no `#[serde(default)]`).
+     */
+    private const REQUIRED_KEYS = [
+        'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
+        'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
+        'challenge', 'min_duration_ms',
+    ];
+
+    /** Maximum byte length of any wire string (audit #56 ceiling). */
+    public const MAX_STRING_BYTES = 4096;
+
     public function __construct(
         public readonly string $nonce,
         public readonly string $scope,
@@ -68,6 +115,8 @@ final class ChallengeRecord
         public readonly int $issuedAtNs = 0,
         public readonly int $protocolVersion = 2,
         public readonly ?string $region = null,
+        public readonly ?int $policyVersion = 1,
+        public readonly ?string $requestBinding = null,
     ) {
     }
 
@@ -118,52 +167,159 @@ final class ChallengeRecord
             // Deployment metadata — ALWAYS present (null when the challenge
             // is region-unbound) for byte parity with the Rust serde schema.
             'region' => $this->region,
+            // Security-policy epoch (audit #42). The Rust field is u32 and
+            // never serializes null — a null ctor value degrades to the
+            // default epoch so PHP-written records stay readable by Rust.
+            'policy_version' => $this->policyVersion ?? 1,
+            // Application transaction binding (audit #41) — null when unset.
+            'request_binding' => $this->requestBinding,
         ];
     }
 
     /**
-     * Rebuild a record from persisted (JSON-decoded) data.
+     * Rebuild a record from persisted (JSON-decoded) data — the strict
+     * serde-mirror parser (audit #56).
      *
-     * Unknown and absent keys are ignored gracefully — including
-     * `attempts_used`, which the Rust verifier writes and PHP's one-shot
-     * model does not use (accepted optionally, default 0). The binding
-     * field is read from `binding_tag` (v2) or the legacy `ip_hash` (v1);
-     * the protocol version defaults to 2 for records carrying
-     * `binding_tag` and to 1 for legacy records carrying `ip_hash` only.
+     * Accepts exactly what the Rust `ChallengeRecord` serde schema accepts:
+     * - only the 20 whitelisted keys (plus the legacy `ip_hash` alias, which
+     *   must not appear alongside `binding_tag`); unknown keys — including
+     *   trailing garbage — throw {@see MalformedRecordException};
+     * - required fields must be present; optional fields default
+     *   (`issued_at_ns` 0, `attempts_used` 0, `protocol_version` 1,
+     *   `region` null, `policy_version` 1, `request_binding` null);
+     * - integers must be real JSON integers within the Rust type ranges
+     *   (u8 for protocol_version, u32 for m_kib/t/p/target_bits/
+     *   attempts_used/policy_version, u64 for the timestamps) — negatives,
+     *   floats, booleans, numeric strings, and overflow are rejected;
+     * - strings must be JSON strings of at most 4096 bytes;
+     * - `algorithm` must be exactly `sha256` or `argon2id` (no aliases);
+     * - null is only legal for `region` and `request_binding` (Option fields).
+     *
+     * base64 is deliberately NOT validated for `nonce`/`salt`: serde treats
+     * them as plain strings at parse time, and the differential fuzz corpus
+     * pins both parsers to the same acceptance split.
      *
      * @param array<string, mixed> $data
+     *
+     * @throws MalformedRecordException on any structural violation
      */
     public static function fromArray(array $data): self
     {
-        $protocolVersion = \array_key_exists('binding_tag', $data)
-            ? (int) ($data['protocol_version'] ?? 2)
-            : 1;
+        // serde deny_unknown_fields: every key must be a whitelisted string
+        // (the legacy `ip_hash` alias is remapped below, before validation).
+        // A JSON array (integer keys) can never map to the record struct.
+        foreach ($data as $key => $value) {
+            if (!\is_string($key) || ($key !== 'ip_hash' && !\in_array($key, self::WIRE_KEYS, true))) {
+                throw MalformedRecordException::unknownKey((string) $key);
+            }
+        }
 
-        // All reads are null-safe: corrupt/foreign stored data must never
-        // raise warnings or exceptions here — unknown algorithm VALUES still
-        // throw from PoWAlgorithm::from() (the storages catch that and treat
-        // the record as absent), and structurally incomplete data degrades
-        // into a record that the verifier's validateRecord() rejects.
-        return new self(
-            nonce: (string) ($data['nonce'] ?? ''),
-            scope: (string) ($data['scope'] ?? ''),
-            bindingTag: (string) ($data['binding_tag'] ?? $data['ip_hash'] ?? ''),
-            issuedAt: (int) ($data['issued_at'] ?? 0),
-            expiresAt: (int) ($data['expires_at'] ?? 0),
-            algorithm: PoWAlgorithm::from((string) ($data['algorithm'] ?? '')),
-            mKib: (int) ($data['m_kib'] ?? 0),
-            t: (int) ($data['t'] ?? 1),
-            p: (int) ($data['p'] ?? 1),
-            targetBits: (int) ($data['target_bits'] ?? 0),
-            salt: (string) ($data['salt'] ?? ''),
-            prefix: (string) ($data['prefix'] ?? ''),
-            challenge: (string) ($data['challenge'] ?? ''),
-            minDurationMs: (int) ($data['min_duration_ms'] ?? 0),
-            issuedAtNs: (int) ($data['issued_at_ns'] ?? 0),
-            protocolVersion: $protocolVersion,
-            // Absent (legacy Rust records) or JSON-null decode as null; any
-            // present non-null value is cast like the other string fields.
-            region: isset($data['region']) ? (string) $data['region'] : null,
+        // Legacy v1 alias (serde #[serde(alias = "ip_hash")]): accepted in
+        // place of binding_tag, never alongside it (serde rejects a struct
+        // carrying both the field and its alias as a duplicate field).
+        if (\array_key_exists('ip_hash', $data)) {
+            if (\array_key_exists('binding_tag', $data)) {
+                throw MalformedRecordException::duplicateAlias('binding_tag', 'ip_hash');
+            }
+            $data['binding_tag'] = $data['ip_hash'];
+        }
+
+        foreach (self::REQUIRED_KEYS as $field) {
+            if (!\array_key_exists($field, $data)) {
+                throw MalformedRecordException::missingField($field);
+            }
+        }
+
+        foreach (['nonce', 'scope', 'binding_tag', 'salt', 'prefix', 'challenge'] as $field) {
+            self::requireString($data[$field], $field);
+        }
+
+        foreach (['issued_at', 'expires_at', 'min_duration_ms'] as $field) {
+            self::requireInt($data[$field], $field, 0, PHP_INT_MAX);
+        }
+        // Optional u64/u32/u8 fields: serde defaults when ABSENT, but a
+        // present JSON null is still a type error — distinguish the two.
+        self::requireInt(
+            \array_key_exists('issued_at_ns', $data) ? $data['issued_at_ns'] : 0,
+            'issued_at_ns',
+            0,
+            PHP_INT_MAX,
         );
+        // m_kib/t/p/target_bits/attempts_used/policy_version: u32 (defaults 0/0/0/0/1).
+        foreach (['m_kib', 't', 'p', 'target_bits', 'attempts_used'] as $field) {
+            self::requireInt(
+                \array_key_exists($field, $data) ? $data[$field] : 0,
+                $field,
+                0,
+                4_294_967_295,
+            );
+        }
+        self::requireInt(
+            \array_key_exists('policy_version', $data) ? $data['policy_version'] : 1,
+            'policy_version',
+            0,
+            4_294_967_295,
+        );
+        // protocol_version: u8 (default 1 — serde's default_protocol_version).
+        self::requireInt(
+            \array_key_exists('protocol_version', $data) ? $data['protocol_version'] : 1,
+            'protocol_version',
+            0,
+            255,
+        );
+
+        $algorithm = $data['algorithm'];
+        if ($algorithm !== 'sha256' && $algorithm !== 'argon2id') {
+            throw MalformedRecordException::invalidAlgorithm($algorithm);
+        }
+
+        // Option fields: null or string (region, request_binding).
+        foreach (['region', 'request_binding'] as $field) {
+            if (isset($data[$field]) && $data[$field] !== null) {
+                self::requireString($data[$field], $field);
+            }
+        }
+
+        return new self(
+            nonce: $data['nonce'],
+            scope: $data['scope'],
+            bindingTag: $data['binding_tag'],
+            issuedAt: $data['issued_at'],
+            expiresAt: $data['expires_at'],
+            algorithm: PoWAlgorithm::from($algorithm),
+            mKib: $data['m_kib'],
+            t: $data['t'],
+            p: $data['p'],
+            targetBits: $data['target_bits'],
+            salt: $data['salt'],
+            prefix: $data['prefix'],
+            challenge: $data['challenge'],
+            minDurationMs: $data['min_duration_ms'],
+            issuedAtNs: $data['issued_at_ns'] ?? 0,
+            protocolVersion: $data['protocol_version'] ?? 1,
+            region: $data['region'] ?? null,
+            policyVersion: $data['policy_version'] ?? 1,
+            requestBinding: $data['request_binding'] ?? null,
+        );
+    }
+
+    private static function requireString(mixed $value, string $field): void
+    {
+        if (!\is_string($value)) {
+            throw MalformedRecordException::wrongType($field, 'a string', $value);
+        }
+        if (\strlen($value) > self::MAX_STRING_BYTES) {
+            throw MalformedRecordException::oversized($field, \strlen($value));
+        }
+    }
+
+    private static function requireInt(mixed $value, string $field, int $min, int $max): void
+    {
+        if (!\is_int($value)) {
+            throw MalformedRecordException::wrongType($field, "an integer within $min..$max", $value);
+        }
+        if ($value < $min || $value > $max) {
+            throw MalformedRecordException::outOfRange($field, $min, $max, $value);
+        }
     }
 }

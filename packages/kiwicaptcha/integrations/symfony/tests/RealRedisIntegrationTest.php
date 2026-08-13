@@ -250,4 +250,73 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame('1', (string) $this->client->get($waitersKey), 'a granted caller was a served waiter — the counter decrements');
         $sem->release($next);
     }
+
+    public function testPerScopeBudgetAndGlobalCapAgainstRealRedis(): void
+    {
+        $sem = new RedisAdmissionSemaphore($this->client, 100, 'ci-scope', 45_000, 64, 2);
+        $scopeKey = '{kiwicaptcha:argon2:leases:ci-scope}:login';
+
+        // Scope 'login' fills its own budget of 2 while the global cap is
+        // nowhere near full; a second scope still acquires (fairness).
+        self::assertNotNull($sem->acquire('login'));
+        self::assertNotNull($sem->acquire('login'));
+        self::assertNull($sem->acquire('login'), 'the 3rd login acquire must be refused by the per-scope budget');
+        self::assertSame('2', (string) $this->client->zcard($scopeKey), 'the per-scope set holds exactly its budget');
+        self::assertNotNull($sem->acquire('signup'), 'a second scope acquires within its own budget');
+
+        // Release removes the lease from BOTH sets (no TTL wait for the
+        // scope budget).
+        $tokens = [];
+        for ($i = 0; $i < 2; $i++) {
+            $t = $sem->acquire('admin');
+            self::assertNotNull($t);
+            $tokens[] = $t;
+        }
+        self::assertNull($sem->acquire('admin'));
+        $sem->release($tokens[0]);
+        $sem->release($tokens[1]);
+        self::assertSame('0', (string) $this->client->zcard('{kiwicaptcha:argon2:leases:ci-scope}:admin'), 'scoped release must free the scope set');
+        self::assertNotNull($sem->acquire('admin'), 'the freed scope budget admits again immediately');
+
+        // Global cap still binds on top of the per-scope budgets.
+        $globalKey = 'kiwicaptcha:argon2:leases:ci-scope-global';
+        $global = new RedisAdmissionSemaphore($this->client, 2, 'ci-scope-global', 45_000, 64, 10);
+        self::assertNotNull($global->acquire('a'));
+        self::assertNotNull($global->acquire('b'));
+        self::assertNull($global->acquire('c'), 'the global cap must bind even though scope c has per-scope budget');
+        self::assertSame('2', (string) $this->client->zcard($globalKey), 'the deployment-wide global cap is the invariant');
+    }
+
+    public function testReadinessPolicyGateAgainstRealRedis(): void
+    {
+        // A FRESH controller per probe: the ~1s in-process policy cache is
+        // per instance, so each mutation below is observed immediately.
+        $controller = fn (): \BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController => new \BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController(
+            '0123456789abcdef0123456789abcdef',
+            $this->client,
+            'ci-health',
+            1,
+        );
+
+        // No central policy key: the binary's own config is authoritative.
+        $this->client->del('{kiwi:ci-health}:security-policy');
+        self::assertSame(200, $controller()->ready()->getStatusCode(), 'ready without a central policy key');
+
+        // Compatible central policy (protocol 2, epoch 1).
+        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '2', 'min_policy_epoch', '1');
+        self::assertSame(200, $controller()->ready()->getStatusCode(), 'ready with a compatible central policy');
+
+        // A newer protocol or epoch takes the binary out of the pool.
+        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '1');
+        self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_protocol_version 3 > the binary max (2)');
+
+        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '2', 'min_policy_epoch', '2');
+        self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_policy_epoch 2 > the configured risk.policy_version 1');
+
+        // Live stays 200 while ready fails.
+        self::assertSame(200, $controller()->live()->getStatusCode(), 'live must stay 200 while ready fails');
+
+        // Cleanup for the next test run.
+        $this->client->del('{kiwi:ci-health}:security-policy');
+    }
 }

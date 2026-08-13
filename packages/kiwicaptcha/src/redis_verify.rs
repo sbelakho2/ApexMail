@@ -540,6 +540,7 @@ impl ProductionVerifier {
             argon_gate: None,
             accept_legacy_v1: false,
             expected_region: None,
+            expected_policy_version: None,
         }
     }
 
@@ -713,6 +714,7 @@ impl ProductionVerifier {
             // and downstream result tokens.
             VerifyOutcome::Valid {
                 nonce: record.nonce,
+                request_binding: record.request_binding,
             }
         } else {
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
@@ -775,6 +777,14 @@ impl ProductionVerifier {
         if let Some(expected) = self.expected_region.as_deref() {
             if record.region.as_deref() != Some(expected) {
                 return Err(VerifyError::WrongRegion);
+            }
+        }
+
+        // 3e3. Security-policy epoch (audit #42): the policy that authorized
+        //      this challenge must still be in force.
+        if let Some(expected) = self.expected_policy_version {
+            if record.policy_version != expected {
+                return Err(VerifyError::WrongPolicyVersion);
             }
         }
 

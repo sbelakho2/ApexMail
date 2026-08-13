@@ -55,6 +55,9 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final class ChallengeController
 {
+    /** Maximum request-binding length (mirrors the core scope bound). */
+    private const MAX_REQUEST_BINDING_BYTES = 128;
+
     public function __construct(
         private readonly Issuer $issuer,
         private readonly ?IssuanceRateLimiter $rateLimiter = null,
@@ -66,6 +69,8 @@ final class ChallengeController
         private readonly array $challengeOriginAllowlist = [],
         private readonly bool $enforceFetchMetadata = false,
         private readonly ?StorageInterface $storage = null,
+        private readonly ?string $defaultRequestBinding = null,
+        private readonly bool $enforceOrigin = false,
     ) {
     }
 
@@ -81,12 +86,25 @@ final class ChallengeController
         // Origin laundering defense (audit #27): when an origin allowlist is
         // configured, the challenge POST MUST be attributable to one of the
         // allowlisted origins (Origin header, or the Referer origin as
-        // fallback — the exact scheme/host/port must match). A launderer
-        // framing a victim's browser into fetching this endpoint has no way
-        // to control the Origin of a cross-site request; raw HTTP bots that
-        // never send the header cannot be matched and are rejected too.
+        // fallback). Audit #43: the comparison is STRUCTURED NORMALIZATION —
+        // scheme/host/effective-port, host lowercased, default ports
+        // normalized, trailing dots stripped, IDN converted to punycode when
+        // ext-intl is available, IPv6 literals kept bracketed. Audit #43
+        // enforce_origin: when true, a request WITHOUT a usable Origin
+        // header — or carrying the literal "null" origin (opaque/sandboxed)
+        // — is rejected outright, before the allowlist is even consulted.
+        // A launderer framing a victim's browser into fetching this endpoint
+        // has no way to control the Origin of a cross-site request; raw HTTP
+        // bots that never send the header are rejected too (when enforced).
         // Refused BEFORE any state is written, rate-limit budget or CAPTCHA
         // issuance.
+        $origin = $request->headers->get('Origin');
+        if ($this->enforceOrigin && ($origin === null || $origin === '' || $origin === 'null')) {
+            return $this->privateJson(
+                ['error' => ['code' => 'origin_rejected', 'message' => 'The challenge request carries no usable Origin header.']],
+                Response::HTTP_FORBIDDEN,
+            );
+        }
         if ($this->challengeOriginAllowlist !== [] && !$this->originIsAllowlisted($request)) {
             return $this->privateJson(
                 ['error' => ['code' => 'origin_rejected', 'message' => 'The challenge request origin is not allowlisted.']],
@@ -111,6 +129,29 @@ final class ChallengeController
         $clientIp = (string) ($request->getClientIp() ?? '');
         $payload = json_decode((string) $request->getContent(), true);
         $scope = \is_array($payload) && isset($payload['scope']) ? (string) $payload['scope'] : 'default';
+
+        // Transaction binding (audit #41): the widget sends the
+        // request_binding field it carries (data-kiwi-request-binding); when
+        // absent, the configured static risk.request_binding applies. The
+        // value is validated here (1..128 bytes, no '|' — the same shape
+        // rule as the scope) BEFORE it reaches the issuer, so a malformed
+        // binding can never be signed into a challenge; the verification
+        // side enforces equality between the record's signed binding and the
+        // binding the form POST carries.
+        $requestBinding = \is_array($payload) && isset($payload['request_binding']) && $payload['request_binding'] !== null
+            ? (string) $payload['request_binding']
+            : $this->defaultRequestBinding;
+        if ($requestBinding !== null && $requestBinding !== '') {
+            $bindingLen = \strlen($requestBinding);
+            if ($bindingLen < 1 || $bindingLen > self::MAX_REQUEST_BINDING_BYTES || \str_contains($requestBinding, '|')) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'INVALID_REQUEST_BINDING', 'message' => 'The request binding must be 1-128 characters and must not contain "|".']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                );
+            }
+        } else {
+            $requestBinding = null;
+        }
 
         // The continuity session is read up front (pure, no side effects) so
         // the rate-limit-hit feedback can attribute the refusal to the same
@@ -230,8 +271,8 @@ final class ChallengeController
 
         try {
             $challenge = $profile !== null
-                ? $this->issuer->issueWithProfile($scope, $clientIp, $profile)
-                : $this->issuer->issue($scope, $clientIp);
+                ? $this->issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding)
+                : $this->issuer->issue($scope, $clientIp, $requestBinding);
         } catch (\InvalidArgumentException $e) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
@@ -310,17 +351,29 @@ final class ChallengeController
 
     /**
      * Origin laundering defense: the request must carry an Origin header
-     * (or a Referer whose URL yields an origin) whose scheme+host+port
-     * EXACTLY matches one allowlisted origin. Comparison is component-wise
-     * (scheme lowercase, host lowercase — DNS is case-insensitive; an absent
-     * port defaults to the scheme's default), so "https://app.example.com"
-     * matches Origin "https://app.example.com" and "https://APP.EXAMPLE.COM"
-     * but never "https://app.example.com:8443" or "http://app.example.com".
+     * (or a Referer whose URL yields an origin) whose NORMALIZED
+     * scheme+host+port matches one allowlisted origin. Comparison is
+     * component-wise over the STRUCTURED normalization of both sides
+     * (audit #43 — {@see self::normalizeOrigin()}: scheme lowercase, host
+     * lowercased with the trailing dot stripped and IDN converted to
+     * punycode when ext-intl is available, the effective port defaulted per
+     * scheme, IPv6 literals kept bracketed), so "https://app.example.com"
+     * matches Origin "https://app.example.com", "https://APP.EXAMPLE.COM",
+     * "https://app.example.com:443" and "https://app.example.com." — but
+     * never "https://app.example.com:8443", "http://app.example.com",
+     * "https://evil-example.com" or "https://example.com.evil.com".
      */
     private function originIsAllowlisted(Request $request): bool
     {
         $origin = $request->headers->get('Origin');
-        if ($origin === null || $origin === '') {
+        if ($origin === null || $origin === '' || $origin === 'null') {
+            if ($this->enforceOrigin) {
+                // Audit #43: with enforce_origin, a request without a usable
+                // Origin is rejected BEFORE the Referer fallback — the
+                // strict mode never trusts a Referer the browser would not
+                // attach to a cross-site fetch.
+                return false;
+            }
             // Referer-origin fallback: the scheme+host+port of the Referer
             // URL (no path, no query).
             $referer = $request->headers->get('Referer');
@@ -334,20 +387,17 @@ final class ChallengeController
             $origin = $parts['scheme'].'://'.$parts['host'].(isset($parts['port']) ? ':'.$parts['port'] : '');
         }
 
-        $candidate = self::originComponents($origin);
+        $candidate = self::normalizeOrigin($origin);
         if ($candidate === null) {
             return false;
         }
 
         foreach ($this->challengeOriginAllowlist as $allowlisted) {
-            $allowed = self::originComponents((string) $allowlisted);
+            $allowed = self::normalizeOrigin((string) $allowlisted);
             if ($allowed === null) {
                 continue;
             }
-            if ($candidate['scheme'] === $allowed['scheme']
-                && $candidate['host'] === $allowed['host']
-                && $candidate['port'] === $allowed['port']
-            ) {
+            if ($candidate === $allowed) {
                 return true;
             }
         }
@@ -356,14 +406,20 @@ final class ChallengeController
     }
 
     /**
-     * Parse an origin string into its exact comparison components:
-     * ['scheme', 'host', 'port'] with the host lowercased and an absent
-     * port defaulted per scheme (https 443, http 80 — "exact scheme/host/
-     * port" comparison treats an explicit default port as equal).
+     * Parse and NORMALIZE an origin string into its exact comparison
+     * components (audit #43): a canonical "{scheme}://{host}:{port}" string
+     * with
+     *  - scheme lowercased,
+     *  - host lowercased, trailing dot stripped, IDN converted to punycode
+     *    (idn_to_ascii when ext-intl is available), IPv6 literals kept
+     *    bracketed exactly as parse_url returns them,
+     *  - the effective port: an absent port defaults per scheme (https 443,
+     *    http 80 — "exact scheme/host/port" treats an explicit default port
+     *    as equal); any other scheme is not an origin.
      *
-     * @return array{scheme: string, host: string, port: int}|null
+     * @throws nothing — malformed origins return null
      */
-    private static function originComponents(string $origin): ?array
+    private static function normalizeOrigin(string $origin): ?string
     {
         $parts = parse_url($origin);
         if (!\is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
@@ -373,11 +429,28 @@ final class ChallengeController
         $port = isset($parts['port'])
             ? (int) $parts['port']
             : ($scheme === 'https' ? 443 : ($scheme === 'http' ? 80 : -1));
-        if ($port < 1) {
+        if ($port < 1 || ($scheme !== 'https' && $scheme !== 'http')) {
             return null;
         }
 
-        return ['scheme' => $scheme, 'host' => strtolower((string) $parts['host']), 'port' => $port];
+        $host = strtolower((string) $parts['host']);
+        // A trailing dot is DNS-equivalent to the bare name ("example.com."
+        // and "example.com" are the same host) — strip it before comparing.
+        $host = rtrim($host, '.');
+        if ($host === '') {
+            return null;
+        }
+        // IDN -> punycode (ext-intl): "bücher.example" and
+        // "xn--bcher-kva.example" are the same DNS name. The conversion is
+        // skipped when ext-intl is absent (ASCII origins are unaffected).
+        if (\function_exists('idn_to_ascii')) {
+            $ascii = idn_to_ascii($host, IDNA_DEFAULT, INTL_IDNA_VARIANT_UTS46);
+            if (\is_string($ascii) && $ascii !== '') {
+                $host = $ascii;
+            }
+        }
+
+        return $scheme.'://'.$host.':'.$port;
     }
 
     /**

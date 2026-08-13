@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
+use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
@@ -62,9 +63,14 @@ final class RedisSemaphoreWiringTest extends TestCase
         self::assertSame('deployment-a', $semaphore->getArgument(2), 'the configured namespace must reach the semaphore');
         self::assertSame(64, $semaphore->getArgument(4), 'argon2_max_waiters (default 64) must reach the semaphore\'s bounded waiters guard');
 
+        // The verifier consumes the gate through the request-scope-aware
+        // wrapper (audit #47: the validator passes the scope into acquire).
         $verifier = $container->getDefinition('kiwi_captcha.verifier');
         self::assertSame(Verifier::class, $verifier->getClass());
-        self::assertEquals(new Reference('kiwi_captcha.argon2_redis_semaphore'), $verifier->getArgument(1));
+        self::assertSame('kiwi_captcha.argon2_scope_gate', (string) $verifier->getArgument(1), 'the verifier must be wired with the scope-aware gate');
+        $scopeGate = $container->getDefinition('kiwi_captcha.argon2_scope_gate');
+        self::assertSame(RequestScopeAdmissionGate::class, $scopeGate->getClass());
+        self::assertEquals(new Reference('kiwi_captcha.argon2_redis_semaphore'), $scopeGate->getArgument(0), 'the scope gate wraps the Redis semaphore');
     }
 
     public function testArgon2MaxWaitersFlowsToTheRedisSemaphore(): void
@@ -79,6 +85,28 @@ final class RedisSemaphoreWiringTest extends TestCase
 
         $semaphore = $container->getDefinition('kiwi_captcha.argon2_redis_semaphore');
         self::assertSame(12, $semaphore->getArgument(4), 'the configured argon2_max_waiters must reach the semaphore');
+    }
+
+    public function testArgon2MaxPerTenantFlowsToTheRedisSemaphore(): void
+    {
+        $container = $this->load(self::ARGON2 + [
+            'argon2_max_concurrent_verifications' => 2,
+            'argon2_max_per_tenant' => 15,
+            'redis_service' => 'my.redis.client',
+        ], static function (ContainerBuilder $c): void {
+            $c->register('my.redis.client', \Redis::class);
+        });
+
+        $semaphore = $container->getDefinition('kiwi_captcha.argon2_redis_semaphore');
+        self::assertSame(15, $semaphore->getArgument(5), 'the configured argon2_max_per_tenant must reach the semaphore (audit #47)');
+
+        $container = $this->load(self::ARGON2 + [
+            'argon2_max_concurrent_verifications' => 2,
+            'redis_service' => 'my.redis.client',
+        ], static function (ContainerBuilder $c): void {
+            $c->register('my.redis.client', \Redis::class);
+        });
+        self::assertSame(8, $container->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(5), 'argon2_max_per_tenant defaults to 8');
     }
 
     public function testRedisStorageStorageWiresRedisSemaphoreFromItsClient(): void
@@ -100,7 +128,7 @@ final class RedisSemaphoreWiringTest extends TestCase
         self::assertEquals(new Reference('my.redis.client'), $semaphore->getArgument(0));
 
         $verifier = $container->getDefinition('kiwi_captcha.verifier');
-        self::assertEquals(new Reference('kiwi_captcha.argon2_redis_semaphore'), $verifier->getArgument(1));
+        self::assertEquals(new Reference('kiwi_captcha.argon2_scope_gate'), $verifier->getArgument(1));
     }
 
     public function testNonRedisStorageFallsBackToInProcessGate(): void

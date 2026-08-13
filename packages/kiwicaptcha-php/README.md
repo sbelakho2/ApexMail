@@ -13,7 +13,9 @@ Byte-for-byte compatible with the reference implementation in
 
 **Protocol v2** (current issuance, `protocol_version` 2):
 
-- canonical payload = `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms`
+- canonical payload = `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding`
+  (round 9: `region`/`request_binding` render as empty segments when unset,
+  `policy_version` is the security-policy epoch, default 1)
 - challenge = `base64(canonical_payload) + "." + hex(hmac_sha256(secret, canonical_payload))` —
   **full-parameter signing**: every record field that shapes verification is
   covered by the HMAC, so a tampered record can never pass

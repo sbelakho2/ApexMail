@@ -11,8 +11,9 @@
  *          targetBits, mKib, t, p, startCounter, maxHashes }
  *        prefix/salt are base64 strings (the driver passes the decoded byte
  *        lengths alongside); the worker decodes them itself.
- *   out: { type: "progress", counter } every 1000 hashes
- *        { type: "done", counter }  |  { type: "failed", reason }
+ *   out: { type: "ready", buildId } on startup (build-id handshake, audit #53)
+ *        { type: "progress", counter } every 1000 hashes
+ *        { type: "done", counter, buildId }  |  { type: "failed", reason }
  *
  * SHA-256 is solved via the wasm exports (solve_sha256_chunk) with a
  * pure-JS SHA-256 fallback; Argon2id is solved via solve_argon2_chunk (the
@@ -20,6 +21,11 @@
  */
 (function () {
   "use strict";
+
+  // Solver build id (audit #53): MUST equal the widget driver's
+  // KIWI_SOLVER_BUILD_ID constant. Reported in the ready/done handshake
+  // messages so the driver can refuse a stale cached worker.
+  var KIWI_SOLVER_BUILD_ID = "2026-08-r1";
 
   // The wasm glue exposes itself as `window.__kiwiCaptchaWasm`, so the
   // worker establishes the `window` alias (same prelude the widget driver
@@ -201,7 +207,7 @@
         var res = w.solve_argon2_chunk(pp, prefix.length, sp, salt.length, targetBits, mKib, t, p, counter, 1);
         if (res !== -1) {
           free(w, pp, prefix.length); free(w, sp, salt.length);
-          post({ type: "done", counter: res });
+          post({ type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID });
           return;
         }
         counter += 1;
@@ -238,7 +244,7 @@
           var res = w.solve_sha256_chunk(pp, prefix.length, sp, salt.length, targetBits, counter, 1000);
           if (res !== -1) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
-            post({ type: "done", counter: res });
+            post({ type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID });
             return;
           }
           counter += 1000;
@@ -252,7 +258,7 @@
         for (; counter < end; counter++) {
           if (leadingZeros(deriveHash(prefix, counter, salt)) >= targetBits) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
-            post({ type: "done", counter: counter });
+            post({ type: "done", counter: counter, buildId: KIWI_SOLVER_BUILD_ID });
             return;
           }
         }
@@ -282,4 +288,8 @@
       post({ type: "failed", reason: "error: " + (e && e.message) });
     }
   };
+
+  // Startup handshake (audit #53): announce this worker's solver build id
+  // BEFORE any solve work so the driver can refuse a stale worker outright.
+  post({ type: "ready", buildId: KIWI_SOLVER_BUILD_ID });
 })();

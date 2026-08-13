@@ -16,7 +16,15 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hmac::{Hmac, Mac};
-use rand::{thread_rng, RngCore};
+/// OS-backed cryptographic randomness for all security identities
+/// (nonce, Argon salt, request bindings, lease ids). Failures are
+/// PROPAGATED — challenge creation must fail rather than fall back to a
+/// weak generator.
+pub fn security_random<const N: usize>() -> Result<[u8; N], getrandom::Error> {
+    let mut buf = [0u8; N];
+    getrandom::getrandom(&mut buf)?;
+    Ok(buf)
+}
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -117,6 +125,7 @@ pub enum BindingMode {
 /// - `protocol_version == 2` (current): signed with the v2 full-parameter
 ///   canonical input and a nonce-bound `binding_tag`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChallengeRecord {
     pub nonce: String,
     pub scope: String,
@@ -185,6 +194,23 @@ pub struct ChallengeRecord {
     /// (18 keys). Absent in legacy stored records: `#[serde(default)]`.
     #[serde(default)]
     pub region: Option<String>,
+    /// Security-policy epoch that authorized this challenge (signed). On
+    /// redemption the CURRENT security policy version must match — bumping
+    /// it (origin/action-policy changes, emergency revocation, compromised
+    /// tenant) immediately invalidates outstanding challenges. Cosmetic
+    /// configuration changes must NOT bump it.
+    #[serde(default = "default_policy_version")]
+    pub policy_version: u32,
+    /// Application-supplied transaction binding: a random nonce the host
+    /// application generates and must present again on the final protected
+    /// POST — turning a Kiwi result from "permission to perform action X
+    /// somewhere" into "permission to continue THIS transaction".
+    #[serde(default)]
+    pub request_binding: Option<String>,
+}
+
+fn default_policy_version() -> u32 {
+    1
 }
 
 fn default_protocol_version() -> u8 {
@@ -239,6 +265,10 @@ pub struct ChallengeConfig {
     /// ([`BindingMode::Bound`]) or not ([`BindingMode::None`], which stores an
     /// empty `binding_tag` and skips the binding check at verification).
     pub binding_mode: BindingMode,
+    /// Security-policy epoch stamped into every issued challenge. The
+    /// verifier rejects records whose policy_version differs from the
+    /// configured current version (see the record field docs).
+    pub policy_version: u32,
     /// Region the issued challenge is bound to (e.g. "eu", "us-east-1").
     /// Carried on the record's `region` key (always present in the record
     /// JSON, `null` when `None`) and enforced by a verifier configured with
@@ -389,9 +419,9 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// set so no issuance parameter can be tampered with without breaking the
 /// signature:
 /// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms`.
-fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
+pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
     format!(
-        "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         record.nonce,
         record.scope,
         record.binding_tag,
@@ -403,7 +433,10 @@ fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         record.p,
         record.target_bits,
         record.salt,
-        record.min_duration_ms
+        record.min_duration_ms,
+        record.region.as_deref().unwrap_or(""),
+        record.policy_version,
+        record.request_binding.as_deref().unwrap_or("")
     )
 }
 
@@ -428,7 +461,7 @@ fn sign_canonical(canonical: &str, secret_key: &str) -> Result<String, SignError
 /// Sign a canonical input with the HKDF-derived challenge-signing purpose key
 /// (`K_challenge`, audit #21 — protocol v2). The master secret is never used
 /// directly as the signing key.
-fn sign_canonical_v2(canonical: &str, secret_key: &str) -> Result<String, SignError> {
+pub(crate) fn sign_canonical_v2(canonical: &str, secret_key: &str) -> Result<String, SignError> {
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
@@ -711,6 +744,7 @@ impl Default for ChallengeCache {
 /// challenge issuance and cap concurrent Argon2id verification (e.g. a
 /// semaphore sized to the available memory), otherwise an attacker who mints
 /// many challenges can still drive unbounded aggregate memory-hard work.
+#[allow(clippy::too_many_arguments)]
 pub fn issue_challenge(
     config: &ChallengeConfig,
     scope: &str,
@@ -718,18 +752,19 @@ pub fn issue_challenge(
     now_unix: u64,
     now_ns: u64,
     active_solves: u64,
+    request_binding: Option<&str>,
 ) -> Result<Issued, SignError> {
     if scope.is_empty() || scope.len() > 128 || scope.contains('|') {
         return Err(SignError::InvalidScope);
     }
     // 32-byte nonce.
     let mut nonce_bytes = [0u8; 32];
-    thread_rng().fill_bytes(&mut nonce_bytes);
+    nonce_bytes.copy_from_slice(&security_random::<32>().map_err(|_| SignError::Rng)?);
     let nonce = B64.encode(nonce_bytes);
 
     // 16-byte salt.
     let mut salt_bytes = [0u8; 16];
-    thread_rng().fill_bytes(&mut salt_bytes);
+    salt_bytes.copy_from_slice(&security_random::<16>().map_err(|_| SignError::Rng)?);
     let salt = B64.encode(salt_bytes);
 
     let algorithm = config.algorithm;
@@ -836,6 +871,8 @@ pub fn issue_challenge(
         attempts_used: 0,
         protocol_version: 2,
         region: config.region.clone(),
+        policy_version: config.policy_version,
+        request_binding: request_binding.map(str::to_string),
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key)?;
@@ -876,6 +913,7 @@ pub fn issue_challenge(
 /// an invalid profile is rejected before anything is issued. Delegates to
 /// [`issue_challenge`], so the wire format, signing, and storage are
 /// IDENTICAL to a regular issue — only the parameters differ.
+#[allow(clippy::too_many_arguments)]
 pub fn issue_challenge_with_profile(
     config: &ChallengeConfig,
     scope: &str,
@@ -884,6 +922,7 @@ pub fn issue_challenge_with_profile(
     now_ns: u64,
     active_solves: u64,
     profile: &ChallengeProfile,
+    request_binding: Option<&str>,
 ) -> Result<Issued, SignError> {
     profile.validate().map_err(|e| match e {
         ProfileError::InvalidShaTargetBits(_) => SignError::InvalidDifficulty,
@@ -906,6 +945,7 @@ pub fn issue_challenge_with_profile(
         now_unix,
         now_ns,
         active_solves,
+        request_binding,
     )
 }
 
@@ -926,6 +966,10 @@ pub enum SignError {
     /// enforces the same minimum); 32 random bytes is the recommended size.
     #[error("HMAC secret key is too short (minimum 16 bytes; 32 random bytes recommended)")]
     KeyTooShort,
+    /// The OS cryptographic random source failed — challenge creation MUST
+    /// fail rather than fall back to a weak generator.
+    #[error("OS cryptographic randomness unavailable")]
+    Rng,
     /// The auth scope must be 1..=128 bytes and must not contain '|' (the
     /// canonical payload separator).
     #[error("scope must be 1..=128 bytes and must not contain '|'")]
@@ -1007,6 +1051,8 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         let issued = issue_challenge(
             &config,
@@ -1015,6 +1061,7 @@ mod tests {
             1_000_000,
             1_700_000_000_000_000,
             0,
+            None,
         )
         .unwrap();
         assert_eq!(issued.challenge.m_kib, 65_536);
@@ -1131,11 +1178,13 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         // Empty scope and 129-byte scope must be rejected…
         assert!(
             matches!(
-                issue_challenge(&config, "", "1.2.3.4", 1, 1_700_000_000_000_000, 0),
+                issue_challenge(&config, "", "1.2.3.4", 1, 1_700_000_000_000_000, 0, None),
                 Err(SignError::InvalidScope)
             ),
             "empty scope must be rejected"
@@ -1143,7 +1192,15 @@ mod tests {
         let long_scope = "s".repeat(129);
         assert!(
             matches!(
-                issue_challenge(&config, &long_scope, "1.2.3.4", 1, 1_700_000_000_000_000, 0),
+                issue_challenge(
+                    &config,
+                    &long_scope,
+                    "1.2.3.4",
+                    1,
+                    1_700_000_000_000_000,
+                    0,
+                    None
+                ),
                 Err(SignError::InvalidScope)
             ),
             "129-byte scope must be rejected"
@@ -1156,7 +1213,8 @@ mod tests {
             "1.2.3.4",
             1,
             1_700_000_000_000_000,
-            0
+            0,
+            None
         )
         .is_ok());
         // The '|' separator is still rejected within the allowed length.
@@ -1166,7 +1224,8 @@ mod tests {
             "1.2.3.4",
             1,
             1_700_000_000_000_000,
-            0
+            0,
+            None
         )
         .is_err());
     }
@@ -1188,9 +1247,29 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
-        let a = issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
-        let b = issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
+        let a = issue_challenge(
+            &config,
+            "login",
+            "1.1.1.1",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        let b = issue_challenge(
+            &config,
+            "login",
+            "1.1.1.1",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
         assert_ne!(a.record.nonce, b.record.nonce);
     }
 
@@ -1211,17 +1290,27 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         // Idle — should be at min.
-        let idle =
-            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
+        let idle = issue_challenge(
+            &config,
+            "login",
+            "1.1.1.1",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(idle.challenge.target_bits, 10);
         // Moderate load — roughly midway between min and the solver ceiling.
-        let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 25).unwrap();
+        let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 25, None).unwrap();
         assert!(mid.challenge.target_bits >= 14 && mid.challenge.target_bits <= 16);
         // Peak load — clamped to SOLVER_MAX_TARGET_BITS (not 24), because the
         // browser solver's 5M-hash cap would fail ~74% of solves at 24 bits.
-        let peak = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 50).unwrap();
+        let peak = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 50, None).unwrap();
         assert_eq!(peak.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
     }
 
@@ -1244,9 +1333,20 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         assert!(
-            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).is_err(),
+            issue_challenge(
+                &config,
+                "login",
+                "1.1.1.1",
+                1,
+                1_700_000_000_000_000,
+                0,
+                None
+            )
+            .is_err(),
             "a STATIC target_bits above the solver cap must be rejected, not clamped (PHP parity)"
         );
     }
@@ -1271,6 +1371,8 @@ mod tests {
             auto_tune_max_bits: 20,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
         assert_eq!(config.tuned_target_bits(0), 8);
         // The solver ceiling still applies when disabled.
@@ -1300,12 +1402,15 @@ mod tests {
                 auto_tune_max_bits: 24,
                 binding_mode: BindingMode::Bound,
                 region: None,
+
+                policy_version: 1,
             },
             "login",
             "1.1.1.1",
             1,
             1_000_000_000,
             0,
+            None,
         )
         .unwrap();
         cache.put("hash1", "login", issued);
@@ -1338,13 +1443,31 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
-        let issued =
-            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
+        let issued = issue_challenge(
+            &config,
+            "login",
+            "1.1.1.1",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
         cache.put("old", "login", issued);
         cache.age_entries_for_test(Duration::from_secs(61));
-        let issued2 =
-            issue_challenge(&config, "signup", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
+        let issued2 = issue_challenge(
+            &config,
+            "signup",
+            "1.1.1.1",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
         cache.put("new", "signup", issued2);
         // The expired "old" entry must not linger after put.
         assert!(cache.get("old", "login").is_none());
@@ -1368,9 +1491,19 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
-        let issued =
-            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
+        let issued = issue_challenge(
+            &config,
+            "login",
+            "1.1.1.1",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
         let mut cache = ChallengeCache::new();
         cache.put("hash1", "login", issued.clone());
         let cached = cache.get("hash1", "login").unwrap();
@@ -1395,9 +1528,19 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         };
-        let issued =
-            issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
+        let issued = issue_challenge(
+            &config,
+            "login",
+            "1.1.1.1",
+            1,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
         let mut cache = ChallengeCache::new();
         cache.put("hash1", "login", issued);
         assert!(cache.get("hash1", "signup").is_none());
@@ -1419,6 +1562,8 @@ mod tests {
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
             region: None,
+
+            policy_version: 1,
         }
     }
 
@@ -1433,6 +1578,7 @@ mod tests {
                 1_700_000_000_000_000,
                 0,
                 &ChallengeProfile::sha(bits),
+                None,
             )
             .unwrap();
             assert_eq!(issued.challenge.algorithm, PoWAlgorithm::Sha256);
@@ -1457,6 +1603,7 @@ mod tests {
                 1_700_000_000_000_000,
                 0,
                 &ChallengeProfile::sha(bits),
+                None,
             )
             .unwrap();
             let mut record = issued.record.clone();
@@ -1473,6 +1620,7 @@ mod tests {
                 expected_scope: None,
                 client_ip: Some("1.2.3.4"),
                 expected_region: None,
+                expected_policy_version: None,
                 telemetry: None,
                 enforce_telemetry: false,
                 max_attempts: 0,
@@ -1498,6 +1646,7 @@ mod tests {
             1_700_000_000_000_000,
             0,
             &ChallengeProfile::argon16(),
+            None,
         )
         .unwrap();
         assert_eq!(issued.challenge.algorithm, PoWAlgorithm::Argon2id);
@@ -1520,6 +1669,7 @@ mod tests {
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
             expected_region: None,
+            expected_policy_version: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1545,6 +1695,7 @@ mod tests {
             1_000_000,
             1_700_000_000_000_000,
             0,
+            None,
         )
         .unwrap();
         assert_eq!(issued.record.region.as_deref(), Some("eu-west-1"));
@@ -1556,6 +1707,7 @@ mod tests {
             1_000_000,
             1_700_000_000_000_000,
             0,
+            None,
         )
         .unwrap();
         assert_eq!(unbound.record.region, None);
@@ -1614,6 +1766,7 @@ mod tests {
                         1_700_000_000_000_000,
                         0,
                         &profile,
+                        None
                     ),
                     Err(SignError::InvalidArgon2Params)
                 ),
@@ -1633,6 +1786,7 @@ mod tests {
             1_700_000_000_000_000,
             0,
             &ChallengeProfile::sha(16),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1655,6 +1809,7 @@ mod tests {
                 1_700_000_000_000_000,
                 0,
                 &ChallengeProfile::sha(21),
+                None
             ),
             Err(SignError::InvalidDifficulty)
         ));
@@ -1667,6 +1822,7 @@ mod tests {
                 1_700_000_000_000_000,
                 0,
                 &ChallengeProfile::sha(0),
+                None
             ),
             Err(SignError::InvalidDifficulty)
         ));
@@ -1719,6 +1875,7 @@ mod tests {
                         1_700_000_000_000_000,
                         0,
                         &profile,
+                        None
                     ),
                     Err(SignError::InvalidArgon2Params)
                 ),

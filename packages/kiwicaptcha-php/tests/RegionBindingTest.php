@@ -17,7 +17,7 @@ use PHPUnit\Framework\TestCase;
 /**
  * Region binding (audit #22, Option A): the issued record carries an
  * optional region (NULL = unbound), the record JSON always includes the
- * `region` key (byte parity with the Rust serde schema — 18 keys), and a
+ * `region` key (byte parity with the Rust serde schema — 20 keys), and a
  * verifier configured with an expected region rejects any record whose
  * region does not match EXACTLY (WrongRegion), including unbound records.
  */
@@ -142,12 +142,14 @@ final class RegionBindingTest extends TestCase
         self::assertSame('wrong_region', VerifyError::WrongRegion->value);
     }
 
-    public function testRegionIsNotPartOfTheSignedCanonicalPayload(): void
+    public function testRegionIsPartOfTheSignedCanonicalPayload(): void
     {
-        // Region is server-side deployment metadata — it never enters the
-        // signed canonical payload: each record's embedded signature must
-        // equal the v2 signature over its canonical fields ALONE (the
-        // region, present on both records, is not among them).
+        // Round 9 (audit #42): region, policy_version, and request_binding
+        // ARE part of the signed canonical payload — the v2 signature covers
+        // the FULL canonical (`...|min_duration_ms|region|policy_version|
+        // request_binding`), so a record's embedded signature must equal the
+        // v2 signature over its canonical INCLUDING the region, and two
+        // records issued for different regions carry different signatures.
         [, $recordA] = $this->issue('eu');
         [, $recordB] = $this->issue('us');
 
@@ -166,6 +168,9 @@ final class RegionBindingTest extends TestCase
             $recordA->targetBits,
             $recordA->salt,
             $recordA->minDurationMs,
+            $recordA->region,
+            $recordA->policyVersion ?? 1,
+            $recordA->requestBinding,
         );
         $canonicalB = Issuer::canonicalPayload(
             $recordB->nonce,
@@ -180,17 +185,19 @@ final class RegionBindingTest extends TestCase
             $recordB->targetBits,
             $recordB->salt,
             $recordB->minDurationMs,
+            $recordB->region,
+            $recordB->policyVersion ?? 1,
+            $recordB->requestBinding,
         );
-        foreach ([[$recordA, $canonicalA], [$recordB, $canonicalB]] as [$record, $canonical]) {
+        foreach ([[$recordA, $canonicalA, 'eu'], [$recordB, $canonicalB, 'us']] as [$record, $canonical, $region]) {
+            self::assertStringContainsString('|'.$region.'|1|', $canonical, 'the canonical must carry region then policy_version');
             $signature = substr($record->challenge, strrpos($record->challenge, '.') + 1);
             self::assertSame(
                 Issuer::signPayloadV2($canonical, Vectors::SECRET),
                 $signature,
-                'the v2 signature covers only the canonical payload — the region never enters it',
+                'the v2 signature covers the full canonical — region, policy_version, and request_binding included',
             );
         }
-        self::assertSame($recordA->region, 'eu');
-        self::assertSame($recordB->region, 'us');
     }
 
     public function testIssueWithProfileCarriesTheIssuerRegion(): void

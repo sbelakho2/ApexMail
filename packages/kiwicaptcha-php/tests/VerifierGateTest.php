@@ -611,7 +611,9 @@ final class VerifierGateTest extends TestCase
         $ip = '192.168.1.5';
         $bindingTag = Issuer::bindingTag($nonce, $ip, $secret);
 
-        $canonicalV2 = 'v2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0';
+        // Round-9 canonical (audits #41/#42): the 15-field layout with
+        // region/request_binding as empty segments and policy_version 1.
+        $canonicalV2 = 'v2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|';
         self::assertSame(
             $canonicalV2,
             Issuer::canonicalPayload(

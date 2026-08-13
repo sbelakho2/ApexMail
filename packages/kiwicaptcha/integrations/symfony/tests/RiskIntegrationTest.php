@@ -337,7 +337,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(900, $risk['source_epoch_secs']);
         self::assertSame(1800, $risk['state_ttl_secs']);
         self::assertSame(60, $risk['dedupe_ttl_secs']);
-        self::assertSame(RiskPolicy::CONTRACT_VERSION, $risk['policy_version']);
+        self::assertSame(1, $risk['policy_version'], 'policy_version is the CHALLENGE security-policy epoch (audit #42) — default 1, independent of the risk-v1 contract version ('.RiskPolicy::CONTRACT_VERSION.')');
         self::assertSame(8000, $risk['saturations']['src_fast']);
         self::assertSame(70000, $risk['saturations']['global']);
         self::assertSame(190, $risk['weights']['source_fast']);

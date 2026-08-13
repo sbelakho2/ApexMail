@@ -1,0 +1,257 @@
+<?php
+
+declare(strict_types=1);
+
+namespace KiwiCaptcha\Tests;
+
+use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\MalformedRecordException;
+use KiwiCaptcha\PoWAlgorithm;
+use KiwiCaptcha\Tests\Fixtures\Vectors;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * Strict serde-mirror record parser (audit #56): ChallengeRecord::fromArray
+ * must reject exactly what the Rust `ChallengeRecord` serde schema rejects —
+ * unknown keys (deny_unknown_fields), out-of-range/negative integers, wrong
+ * types, oversized strings, algorithm aliases, unexpected nulls, duplicate
+ * binding aliases, and missing required fields.
+ */
+final class StrictParserTest extends TestCase
+{
+    /** @return array<string, mixed> a fully valid 20-key record array */
+    private static function base(): array
+    {
+        return [
+            'nonce' => '2l0IVh1xuKNjzcCDyV+X0lrceMHlHvmqCs5MdDw8tw0=',
+            'scope' => 'login',
+            'binding_tag' => 'tag123',
+            'issued_at' => 1_800_000_000,
+            'expires_at' => 1_800_000_120,
+            'algorithm' => 'sha256',
+            'm_kib' => 0,
+            't' => 1,
+            'p' => 1,
+            'target_bits' => 8,
+            'salt' => 'c2FsdA==',
+            'prefix' => 'prefix',
+            'challenge' => 'challenge',
+            'min_duration_ms' => 0,
+            'issued_at_ns' => 1_800_000_000_000_000,
+            'attempts_used' => 0,
+            'protocol_version' => 2,
+            'region' => null,
+            'policy_version' => 1,
+            'request_binding' => null,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private static function mutate(string $key, mixed $value): array
+    {
+        $data = self::base();
+        $data[$key] = $value;
+
+        return $data;
+    }
+
+    /** @return array<string, mixed> */
+    private static function omit(string $key): array
+    {
+        $data = self::base();
+        unset($data[$key]);
+
+        return $data;
+    }
+
+    public function testValidRecordRoundTrips(): void
+    {
+        $record = ChallengeRecord::fromArray(self::base());
+
+        self::assertSame('login', $record->scope);
+        self::assertSame(PoWAlgorithm::Sha256, $record->algorithm);
+        self::assertSame(2, $record->protocolVersion);
+        self::assertSame(1, $record->policyVersion);
+        self::assertNull($record->requestBinding);
+        self::assertSame(20, \count(ChallengeRecord::WIRE_KEYS));
+        self::assertSame(ChallengeRecord::WIRE_KEYS, \array_keys($record->toArray()));
+    }
+
+    /**
+     * @dataProvider rejectionProvider
+     *
+     * @param array<string, mixed> $data
+     */
+    public function testRejects(array $data, string $expectedMessageSubstring): void
+    {
+        try {
+            ChallengeRecord::fromArray($data);
+            self::fail('fromArray must reject the mutated record');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString($expectedMessageSubstring, $e->getMessage());
+        }
+    }
+
+    /** @return iterable<string, array{array<string, mixed>, string}> */
+    public static function rejectionProvider(): iterable
+    {
+        yield 'unknown key (trailing garbage)' => [self::base() + ['trailing' => 'garbage'], 'unknown record key'];
+
+        yield 'json array in place of object' => [
+            [0 => 'x', 1 => 'y'],
+            'unknown record key',
+        ];
+
+        yield 'missing required field' => [self::omit('scope'), 'missing required record field'];
+
+        yield 'missing nonce' => [self::omit('nonce'), 'missing required record field'];
+
+        yield 'missing challenge' => [self::omit('challenge'), 'missing required record field'];
+
+        yield 'non-string nonce' => [self::mutate('nonce', 123), 'must be a string'];
+
+        yield 'non-string scope (bool)' => [self::mutate('scope', true), 'must be a string'];
+
+        yield 'integer in place of string salt' => [self::mutate('salt', 7), 'must be a string'];
+
+        yield 'oversized scope (> 4096)' => [
+            self::mutate('scope', str_repeat('a', 4097)),
+            'exceeds the 4096-byte ceiling',
+        ];
+
+        yield 'oversized binding_tag (> 4096)' => [
+            self::mutate('binding_tag', str_repeat('b', 5000)),
+            'exceeds the 4096-byte ceiling',
+        ];
+
+        yield 'negative issued_at' => [self::mutate('issued_at', -1), 'must be within'];
+
+        yield 'float issued_at' => [self::mutate('issued_at', 1_800_000_000.0), 'must be an integer'];
+
+        yield 'bool p' => [self::mutate('p', true), 'must be an integer'];
+
+        yield 'numeric string target_bits' => [self::mutate('target_bits', '8'), 'must be an integer'];
+
+        yield 'u32 overflow m_kib' => [self::mutate('m_kib', 4_294_967_296), 'must be within'];
+
+        yield 'u32 overflow policy_version' => [
+            self::mutate('policy_version', 4_294_967_296),
+            'must be within',
+        ];
+
+        yield 'u8 overflow protocol_version' => [self::mutate('protocol_version', 256), 'must be within'];
+
+        yield 'negative min_duration_ms' => [self::mutate('min_duration_ms', -5), 'must be within'];
+
+        yield 'negative issued_at_ns' => [self::mutate('issued_at_ns', -1), 'must be within'];
+
+        yield 'null nonce' => [self::mutate('nonce', null), 'must be a string'];
+
+        yield 'null issued_at' => [self::mutate('issued_at', null), 'must be an integer'];
+
+        yield 'null optional issued_at_ns' => [self::mutate('issued_at_ns', null), 'must be an integer'];
+
+        yield 'null optional attempts_used' => [self::mutate('attempts_used', null), 'must be an integer'];
+
+        yield 'null optional policy_version' => [self::mutate('policy_version', null), 'must be an integer'];
+
+        yield 'null algorithm' => [self::mutate('algorithm', null), 'must be exactly'];
+
+        yield 'null salt' => [self::mutate('salt', null), 'must be a string'];
+
+        yield 'algorithm alias uppercase' => [self::mutate('algorithm', 'SHA256'), 'must be exactly'];
+
+        yield 'algorithm alias hyphenated' => [self::mutate('algorithm', 'sha-256'), 'must be exactly'];
+
+        yield 'algorithm alias mixed case' => [self::mutate('algorithm', 'Sha256'), 'must be exactly'];
+
+        yield 'algorithm alias trailing space' => [self::mutate('algorithm', 'sha256 '), 'must be exactly'];
+
+        yield 'algorithm alias argon2' => [self::mutate('algorithm', 'argon2'), 'must be exactly'];
+
+        yield 'binding_tag and ip_hash together rejected' => [
+            self::base() + ['ip_hash' => 'legacyhash'],
+            'both "binding_tag" and its legacy alias "ip_hash"',
+        ];
+    }
+
+    public function testLegacyIpHashAliasIsAcceptedInPlaceOfBindingTag(): void
+    {
+        $data = self::omit('binding_tag');
+        $data['ip_hash'] = 'legacyhash';
+
+        $record = ChallengeRecord::fromArray($data);
+
+        self::assertSame('legacyhash', $record->bindingTag);
+        self::assertSame('legacyhash', $record->ipHash());
+    }
+
+    public function testNullRegionAndRequestBindingAreAccepted(): void
+    {
+        $record = ChallengeRecord::fromArray(self::base());
+
+        self::assertNull($record->region);
+        self::assertNull($record->requestBinding);
+    }
+
+    public function testStringRegionAndRequestBindingAreAccepted(): void
+    {
+        $data = self::mutate('region', 'eu');
+        $data['request_binding'] = 'txn-42';
+
+        $record = ChallengeRecord::fromArray($data);
+
+        self::assertSame('eu', $record->region);
+        self::assertSame('txn-42', $record->requestBinding);
+    }
+
+    public function testAbsentOptionalFieldsDefault(): void
+    {
+        $data = self::base();
+        unset($data['issued_at_ns'], $data['attempts_used'], $data['region'], $data['policy_version'], $data['request_binding'], $data['protocol_version']);
+
+        $record = ChallengeRecord::fromArray($data);
+
+        self::assertSame(0, $record->issuedAtNs);
+        self::assertSame(1, $record->protocolVersion, 'serde default protocol_version is 1');
+        self::assertNull($record->region);
+        self::assertSame(1, $record->policyVersion, 'serde default policy_version is 1');
+        self::assertNull($record->requestBinding);
+    }
+
+    public function testProtocolVersionWithinU8RangeIsAccepted(): void
+    {
+        // serde accepts any u8 — 99 is within range and deserializes (the
+        // verifier's validateRecord rejects it later, exactly like Rust).
+        $record = ChallengeRecord::fromArray(self::mutate('protocol_version', 99));
+
+        self::assertSame(99, $record->protocolVersion);
+    }
+
+    public function testBase64IsNotValidatedAtParseTime(): void
+    {
+        // serde treats nonce/salt as plain strings — the differential fuzz
+        // corpus pins both parsers to the same acceptance split, so a
+        // non-canonical base64 string must still parse here.
+        $record = ChallengeRecord::fromArray(self::mutate('salt', 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY'));
+
+        self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
+    }
+
+    public function testWireKeySetIsPinnedTo20(): void
+    {
+        self::assertSame([
+            'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
+            'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
+            'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
+            'attempts_used', 'region', 'policy_version', 'request_binding',
+        ], ChallengeRecord::WIRE_KEYS);
+    }
+
+    public function testVectorsSecretIsStillUsableAsRecordSeed(): void
+    {
+        // Keep the fixture reference alive so the strict parser tests never
+        // drift from the shared vector constants.
+        self::assertSame(32, \strlen(Vectors::SECRET));
+    }
+}
