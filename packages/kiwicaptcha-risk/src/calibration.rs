@@ -1252,7 +1252,8 @@ mod tests {
         // The rate-limit state must be cleared too: below the threshold the
         // stored bias now decays toward 0 at the allowed rate instead of
         // snapping, so a surviving state key would keep the old value.
-        conn.del::<_, ()>(format!("{{kiwi:{ns}}}:cal:state:7")).expect("del state");
+        conn.del::<_, ()>(format!("{{kiwi:{ns}}}:cal:state:7"))
+            .expect("del state");
         assert_eq!(
             s.bias_for_scope(7, now()),
             0,
