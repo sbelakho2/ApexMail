@@ -306,7 +306,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$sessionTtlSecs', $riskConfig['continuity_cookie']['ttl_secs'])
                 ->setArgument('$dedupeTtlSecs', $riskConfig['dedupe_ttl_secs'])
                 ->setArgument('$hysteresisMs', $riskConfig['hysteresis_ms'])
-                ->setArgument('$saturations', $riskConfig['saturations']));
+                ->setArgument('$saturations', $riskConfig['saturations'])
+                ->setArgument('$outcomeTtlSecs', $riskConfig['calibration']['outcome_receipt_ttl_secs']));
             $container->setDefinition('kiwi_captcha.risk.metrics', new Definition(RiskMetrics::class));
 
             // In-process emergency limiter (cheap admission BEFORE the risk
@@ -321,12 +322,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Redis-backed aggregate calibration (score-bucket statistics,
             // no identity): adjusts only the per-scope bias, bounded by the
             // configured min_samples / max_adjustment / max_change_per_minute
-            // knobs, with the receipt TTL passed through (also the TTL of the
-            // gateway's nonce->decision handles) and the LABEL-SELECTION
-            // contract (calibration.mode + sampling_probability_ppm) passed
-            // to the calibrator's sampling knobs. Receipts are keyed on
-            // decision ids, so the same Predis client + namespace as the risk
-            // state store keeps every calibration key in one hash-tag family.
+            // knobs, with the outcome/calibration receipt + outcome-ledger
+            // lifetime passed through (outcome_receipt_ttl_secs — also the
+            // lifetime of the store's outcome ledger; the short-lived
+            // nonce->decision handles use risk.nonce_to_decision_ttl_secs
+            // instead) and the LABEL-SELECTION contract
+            // (calibration.mode + sampling_probability_ppm) passed to the
+            // calibrator's sampling knobs. Receipts are keyed on decision
+            // ids, so the same Predis client + namespace as the risk state
+            // store keeps every calibration key in one hash-tag family.
             $calibrationRef = null;
             if ($riskConfig['calibration']['enabled']) {
                 $container->setDefinition('kiwi_captcha.risk.calibration', (new Definition(AggregateCalibrator::class, [
@@ -335,13 +339,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $riskConfig['calibration']['min_samples'],
                     $riskConfig['calibration']['max_adjustment'],
                     $riskConfig['calibration']['max_change_per_minute'],
-                    $riskConfig['calibration']['receipt_ttl_secs'],
+                    $riskConfig['calibration']['outcome_receipt_ttl_secs'],
                 ]))
                     ->setArgument('$samplingMode', $riskConfig['calibration']['mode'])
                     ->setArgument('$samplingProbabilityPpm', $riskConfig['calibration']['sampling_probability_ppm'])
                     ->setArgument('$minimumResolutionRatio', $riskConfig['calibration']['minimum_resolution_ratio'])
                     ->setArgument('$falsePositiveCost', $riskConfig['calibration']['false_positive_cost'])
-                    ->setArgument('$falseNegativeCost', $riskConfig['calibration']['false_negative_cost']));
+                    ->setArgument('$falseNegativeCost', $riskConfig['calibration']['false_negative_cost'])
+                    ->setArgument('$outcomeTtlSecs', $riskConfig['calibration']['outcome_receipt_ttl_secs']));
                 $calibrationRef = new Reference('kiwi_captcha.risk.calibration');
             }
 
@@ -433,7 +438,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$requestStack', new Reference('request_stack'))
                 ->setArgument('$decisionRedis', $riskRedis)
                 ->setArgument('$decisionKeyPrefix', sprintf('{kiwi:%s}:decision:', $namespace))
-                ->setArgument('$decisionTtlSecs', $riskConfig['calibration']['receipt_ttl_secs'])
+                ->setArgument('$decisionTtlSecs', $riskConfig['nonce_to_decision_ttl_secs'])
+                ->setArgument('$calibration', $calibrationRef)
                 ->setArgument('$policy', new Reference('kiwi_captcha.risk.policy'))
                 ->setPublic(true));
             if ($container->has(PrincipalResolverInterface::class)) {

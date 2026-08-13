@@ -20,6 +20,9 @@ final class FakeRiskStateStore implements RiskStateStoreInterface
     /** @var list<RiskObservation> */
     public array $observations = [];
 
+    /** @var array<string, array{scope: int, hour: int, status: int}> the outcome ledger */
+    public array $ledger = [];
+
     /** When true, observe() throws (simulates a state backend outage). */
     public bool $throwing = false;
 
@@ -40,5 +43,40 @@ final class FakeRiskStateStore implements RiskStateStoreInterface
         $this->observations[] = $observation;
 
         return $this->vector ?? SignalVector::zero();
+    }
+
+    public function registerOutcome(string $decisionId, int $scope, int $decisionHour, int $score): bool
+    {
+        if (isset($this->ledger[$decisionId])) {
+            return false;
+        }
+        $this->ledger[$decisionId] = ['scope' => $scope, 'hour' => $decisionHour, 'score' => $score, 'status' => 0];
+
+        return true;
+    }
+
+    public function confirmOutcome(string $decisionId, bool $legitimate): int
+    {
+        $entry = $this->ledger[$decisionId] ?? null;
+        if ($entry === null) {
+            return 0;
+        }
+        if ($entry['status'] !== 0) {
+            return 0;
+        }
+        $this->ledger[$decisionId]['status'] = 1;
+
+        return 1;
+    }
+
+    public function correctOutcome(string $decisionId, bool $legitimate): bool
+    {
+        $entry = $this->ledger[$decisionId] ?? null;
+        if ($entry === null || $entry['status'] === 2) {
+            return false;
+        }
+        $this->ledger[$decisionId]['status'] = 2;
+
+        return true;
     }
 }

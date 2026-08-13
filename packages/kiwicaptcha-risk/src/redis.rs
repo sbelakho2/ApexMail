@@ -35,12 +35,27 @@ use ::redis as redis_crate;
 /// asset `protocol/risk-v1/risk.lua`).
 pub const SCRIPT: &str = include_str!("../resources/risk-v1.lua");
 
+/// The canonical outcome-ledger scripts (shared verbatim with PHP
+/// `protocol/risk-v1/outcome_*.lua`): the ALWAYS-ON, calibration-
+/// independent ledger. With calibration disabled the store registers a
+/// PENDING ledger entry per decision and flips it exactly once on
+/// confirmation; with calibration enabled the register_decision/confirm/
+/// correction scripts do the same inside the calibration namespace.
+pub const OUTCOME_REGISTER_LUA: &str = include_str!("../resources/outcome_register.lua");
+pub const OUTCOME_CONFIRM_LUA: &str = include_str!("../resources/outcome_confirm.lua");
+pub const OUTCOME_CORRECT_LUA: &str = include_str!("../resources/outcome_correct.lua");
+
 /// Default raw saturations in Lua ARGV order:
 /// src_fast, src_slow, issue, bad, mal, rep, action, switch, global,
 /// trust, principal.
 pub const DEFAULT_SATURATIONS: [u32; 11] = [
     8000, 100000, 6000, 4000, 3000, 2000, 6000, 10000, 70000, 10000, 10000,
 ];
+
+/// Default outcome-ledger TTL (seconds): the PENDING/L/A ledger entries
+/// expire after 24 h (configurable via
+/// [`RedisRiskStateStore::with_options`]).
+pub const DEFAULT_OUTCOME_TTL_SECS: u64 = 86_400;
 
 /// Default number of pooled Redis connections.
 pub const DEFAULT_POOL_SIZE: usize = 4;
@@ -54,8 +69,12 @@ pub struct RedisRiskStateStore {
     hysteresis_ms: u64,
     session_ttl_secs: u64,
     principal_ttl_secs: u64,
+    outcome_ttl_secs: u64,
     saturations: [u32; 11],
     script: redis_crate::Script,
+    outcome_register_script: redis_crate::Script,
+    outcome_confirm_script: redis_crate::Script,
+    outcome_correct_script: redis_crate::Script,
     pool: ConnectionPool,
     last_global_level: AtomicU8,
     last_cooldown_until_ms: AtomicU64,
@@ -112,7 +131,8 @@ impl RedisRiskStateStore {
 
     /// Builds a store with the contract defaults (namespace `d`,
     /// 1800 s state TTL, 60 s dedupe TTL, 60 s hysteresis, 1800 s session
-    /// TTL, 86400 s principal TTL, default saturations, pool size 4).
+    /// TTL, 86400 s principal TTL, 86400 s outcome-ledger TTL, default
+    /// saturations, pool size 4).
     ///
     /// # Panics
     ///
@@ -128,15 +148,20 @@ impl RedisRiskStateStore {
             hysteresis_ms: 60_000,
             session_ttl_secs: 1800,
             principal_ttl_secs: 86_400,
+            outcome_ttl_secs: DEFAULT_OUTCOME_TTL_SECS,
             saturations: DEFAULT_SATURATIONS,
             script: redis_crate::Script::new(SCRIPT),
+            outcome_register_script: redis_crate::Script::new(OUTCOME_REGISTER_LUA),
+            outcome_confirm_script: redis_crate::Script::new(OUTCOME_CONFIRM_LUA),
+            outcome_correct_script: redis_crate::Script::new(OUTCOME_CORRECT_LUA),
             pool: ConnectionPool::new(DEFAULT_POOL_SIZE),
             last_global_level: AtomicU8::new(0),
             last_cooldown_until_ms: AtomicU64::new(0),
         }
     }
 
-    /// Builds a store with explicit knobs.
+    /// Builds a store with explicit knobs (`outcome_ttl_secs` is the
+    /// ALWAYS-ON outcome-ledger lifetime, default 86400 s).
     ///
     /// # Panics
     ///
@@ -150,6 +175,7 @@ impl RedisRiskStateStore {
         hysteresis_ms: u64,
         session_ttl_secs: u64,
         principal_ttl_secs: u64,
+        outcome_ttl_secs: u64,
         saturations: [u32; 11],
     ) -> RedisRiskStateStore {
         let mut store = RedisRiskStateStore::new(client, namespace);
@@ -158,6 +184,7 @@ impl RedisRiskStateStore {
         store.hysteresis_ms = hysteresis_ms;
         store.session_ttl_secs = session_ttl_secs;
         store.principal_ttl_secs = principal_ttl_secs;
+        store.outcome_ttl_secs = outcome_ttl_secs;
         store.saturations = saturations;
         store
     }
@@ -323,6 +350,15 @@ impl RedisRiskStateStore {
         })
     }
 
+    /// The outcome-ledger key for one decision — the SAME canonical key
+    /// the calibration scripts use (`{kiwi:<ns>}:outcome:<decision_id>`),
+    /// so the ALWAYS-ON ledger is one key layout whether calibration is
+    /// enabled or disabled. Public so tests (and tooling) can inspect the
+    /// ledger entries.
+    pub fn outcome_ledger_key(&self, decision_id: &str) -> String {
+        format!("{{kiwi:{}}}:outcome:{decision_id}", self.namespace)
+    }
+
     /// CRC-16/XMODEM (poly 0x1021, init 0): `"123456789"` -> `0x31C3`,
     /// and `slot("foo") = crc16("foo") & 0x3FFF = 12182` per the Redis
     /// Cluster docs.
@@ -396,6 +432,65 @@ impl RiskStateStore for RedisRiskStateStore {
         self.observe_full(o)
     }
 
+    fn register_outcome(
+        &self,
+        decision_id: &str,
+        scope: u32,
+        decision_hour: i64,
+        score: u32,
+    ) -> Result<bool, RiskStoreError> {
+        // outcome_register.lua: SET NX EX a PENDING ledger entry
+        // {"o":"P","scope","hour","score","w":1}. Returns 1 when created,
+        // 0 when the decision_id is already registered.
+        let key = self.outcome_ledger_key(decision_id);
+        let mut conn_guard = self.pool.acquire(&self.client)?;
+        let conn = conn_guard
+            .as_mut()
+            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
+        let script = self.outcome_register_script.clone();
+        let mut invoke = script.prepare_invoke();
+        invoke.key(key.as_str());
+        invoke.arg(scope.to_string());
+        invoke.arg(decision_hour.to_string());
+        invoke.arg(score.to_string());
+        invoke.arg(self.outcome_ttl_secs.to_string());
+        let created: i64 = invoke.invoke(conn).map_err(map_redis_error)?;
+        Ok(created != 0)
+    }
+
+    fn confirm_outcome(&self, decision_id: &str, legitimate: bool) -> Result<u8, RiskStoreError> {
+        // outcome_confirm.lua: PENDING -> L/A exactly once.
+        let key = self.outcome_ledger_key(decision_id);
+        let mut conn_guard = self.pool.acquire(&self.client)?;
+        let conn = conn_guard
+            .as_mut()
+            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
+        let script = self.outcome_confirm_script.clone();
+        let mut invoke = script.prepare_invoke();
+        invoke.key(key.as_str());
+        invoke.arg(if legitimate { "L" } else { "A" });
+        invoke.arg(self.outcome_ttl_secs.to_string());
+        let status: i64 = invoke.invoke(conn).map_err(map_redis_error)?;
+        Ok(status as u8)
+    }
+
+    fn correct_outcome(&self, decision_id: &str, legitimate: bool) -> Result<bool, RiskStoreError> {
+        // outcome_correct.lua: flip L <-> A (no-op when the ledger already
+        // carries the target outcome).
+        let key = self.outcome_ledger_key(decision_id);
+        let mut conn_guard = self.pool.acquire(&self.client)?;
+        let conn = conn_guard
+            .as_mut()
+            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
+        let script = self.outcome_correct_script.clone();
+        let mut invoke = script.prepare_invoke();
+        invoke.key(key.as_str());
+        invoke.arg(if legitimate { "L" } else { "A" });
+        invoke.arg(self.outcome_ttl_secs.to_string());
+        let applied: i64 = invoke.invoke(conn).map_err(map_redis_error)?;
+        Ok(applied != 0)
+    }
+
     fn last_global_level(&self) -> u8 {
         self.last_global_level.load(Ordering::Relaxed)
     }
@@ -411,6 +506,7 @@ mod tests {
     use crate::action::RiskAction;
     use crate::event::RiskEventKind;
     use rand::RngCore;
+    use redis::Commands;
 
     const T0: u64 = 1_700_000_000_000;
 
@@ -450,6 +546,7 @@ mod tests {
             hysteresis_ms,
             1800,
             86_400,
+            DEFAULT_OUTCOME_TTL_SECS,
             DEFAULT_SATURATIONS,
         )
     }
@@ -681,6 +778,7 @@ mod tests {
             2000,
             1800,
             86_400,
+            DEFAULT_OUTCOME_TTL_SECS,
             sats,
         );
         for i in 1..=5u64 {
@@ -729,6 +827,61 @@ mod tests {
     }
 
     #[test]
+    fn outcome_ledger_lifecycle_is_always_on() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping Redis test: RISK_REDIS_URL not set");
+            return;
+        };
+        let store = store(60_000, "ledger");
+        let hour = (T0 / 3_600_000) as i64;
+
+        // Unknown decision: confirm/correct are no-ops.
+        assert_eq!(store.confirm_outcome("led-unknown", true).unwrap(), 0);
+        assert!(!store.correct_outcome("led-unknown", false).unwrap());
+
+        // Register: PENDING ledger created once.
+        assert!(store.register_outcome("led-1", 7, hour, 900).unwrap());
+        assert!(
+            !store.register_outcome("led-1", 7, hour, 900).unwrap(),
+            "a duplicate registration must not overwrite the ledger"
+        );
+        let mut conn = client().get_connection().expect("connection");
+        let key = store.outcome_ledger_key("led-1");
+        let raw: String = conn.get(&key).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "P");
+        assert_eq!(value["scope"], 7);
+        assert_eq!(value["hour"], hour);
+        assert_eq!(value["score"], 900);
+        let ttl: i64 = redis::cmd("TTL").arg(&key).query(&mut conn).expect("ttl");
+        assert!(
+            (1..=86_400).contains(&ttl),
+            "the ledger TTL is the outcome TTL (got {ttl})"
+        );
+
+        // First confirmation flips to A; the retry is a no-op.
+        assert_eq!(store.confirm_outcome("led-1", false).unwrap(), 1);
+        assert_eq!(store.confirm_outcome("led-1", false).unwrap(), 0);
+        let raw: String = conn.get(&key).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "A");
+
+        // Correction flips A -> L once; the repeat (already L) is a no-op.
+        assert!(store.correct_outcome("led-1", true).unwrap());
+        assert!(!store.correct_outcome("led-1", true).unwrap());
+        let raw: String = conn.get(&key).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "L");
+
+        // A PENDING entry can be corrected too (never confirmed yet).
+        assert!(store.register_outcome("led-2", 7, hour, 100).unwrap());
+        assert!(store.correct_outcome("led-2", false).unwrap());
+        let raw: String = conn.get(store.outcome_ledger_key("led-2")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "A");
+    }
+
+    #[test]
     fn namespace_accessor() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping Redis test: RISK_REDIS_URL not set");
@@ -756,6 +909,7 @@ mod tests {
             60_000,
             1800,
             86_400,
+            DEFAULT_OUTCOME_TTL_SECS,
             sats,
         );
         let observed = store.observe(&observation(&event_id(1), 0, T0, 0)).unwrap();
@@ -804,6 +958,7 @@ mod tests {
             60_000,
             1800,
             86_400,
+            DEFAULT_OUTCOME_TTL_SECS,
             sats,
         );
         let (epoch, _prev, _cur, next) = epoch_ids("aa");
@@ -850,6 +1005,7 @@ mod tests {
             60_000,
             1800,
             86_400,
+            DEFAULT_OUTCOME_TTL_SECS,
             sats,
         );
 

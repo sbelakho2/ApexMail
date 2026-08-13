@@ -1,14 +1,13 @@
 -- Calibration: class-normalized score bias + proportional rate limit
 -- (canonical, shared PHP/Rust).
 --
--- KEYS[1..24]  hourly score buckets for one scope (hash; fields
---              legit_count / legit_score_sum / abuse_count /
---              abuse_score_sum — EXACT scores, not band-quantized)
+-- KEYS[1..24]  DECISION-TIME hourly score buckets for one scope (hash;
+--              fields legit_count / legit_score_sum / abuse_count /
+--              abuse_score_sum / sample_total / sample_resolved — exact
+--              scores, not band-quantized; the sample counters live in
+--              the SAME scope/hour buckets so scope, window, label
+--              population and resolution population are one cohort)
 -- KEYS[25]     rate-limit state (hash; fields bias_mp / ts)
--- KEYS[26]     sampled-decisions TOTAL counter (random_sample mode only;
---              string, INCR at assessment time for every sampled decision)
--- KEYS[27]     sampled-decisions RESOLVED counter (random_sample mode only;
---              string, INCR by confirm.lua on a sampled confirmation)
 -- ARGV[1]      now (epoch ms — informational; the script uses its own
 --              Redis TIME for the rate-limit clock)
 -- ARGV[2]      min_samples       (below this the TARGET bias is 0)
@@ -35,11 +34,13 @@
 -- at high risk pushes it down.
 --
 -- RANDOM-SAMPLE RESOLUTION GATE: in random_sample mode, bias adjustment
--- is SUSPENDED (target stays 0) while total >= min_samples AND
--- resolved/total < minimum_resolution_ratio — the label-reporting process
--- must demonstrably resolve a minimum fraction of the server-selected
--- sample before the model may move (the sampled flag alone cannot fix a
--- biased reporting process; the resolution ratio can detect it).
+-- is SUSPENDED (target stays 0) while the per-scope sample_total >=
+-- min_samples AND sample_resolved/sample_total < minimum_resolution_ratio
+-- — the label-reporting process must demonstrably resolve a minimum
+-- fraction of the server-selected sample before the model may move. The
+-- counters live in the same scope/hour buckets as the observations, so
+-- scope, window, label population and resolution population are exactly
+-- the same cohort (no lifetime/namespace-wide dilution).
 --
 -- The rate limiter is PROPORTIONAL to elapsed time and applies to the
 -- PATH, not just the target: internal bias is stored in MILLI-POINTS
@@ -59,6 +60,8 @@ local legit_count = 0
 local legit_score_sum = 0
 local abuse_count = 0
 local abuse_score_sum = 0
+local sample_total = 0
+local sample_resolved = 0
 for i = 1, 24 do
     local b = redis.call('HGETALL', KEYS[i])
     for j = 1, #b, 2 do
@@ -72,6 +75,10 @@ for i = 1, 24 do
             abuse_count = abuse_count + value
         elseif field == 'abuse_score_sum' then
             abuse_score_sum = abuse_score_sum + value
+        elseif field == 'sample_total' then
+            sample_total = sample_total + value
+        elseif field == 'sample_resolved' then
+            sample_resolved = sample_resolved + value
         end
     end
 end
@@ -99,8 +106,7 @@ if total >= tonumber(ARGV[2]) and total > 0 then
     local mode = tonumber(ARGV[6])
     local min_ratio = tonumber(ARGV[5]) or 0
     if mode == 1 and min_ratio > 0 then
-        local sample_total = tonumber(redis.call('GET', KEYS[26]) or '0')
-        local sample_resolved = tonumber(redis.call('GET', KEYS[27]) or '0')
+        -- Per-scope, per-window resolution cohort (same 24 buckets).
         if sample_total >= tonumber(ARGV[2]) and sample_resolved < sample_total * min_ratio then
             resolved_ratio_ok = false
         end

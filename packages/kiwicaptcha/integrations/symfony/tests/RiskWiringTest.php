@@ -20,12 +20,15 @@ use Symfony\Component\DependencyInjection\Reference;
 /**
  * The risk wiring contract at the definition level (extension load, no
  * container compile): the emergency limiter uses the NEW ProcessEmergencyCap
- * name, the calibrator receives the three bound knobs + the receipt TTL, the
+ * name, the calibrator receives the three bound knobs + the outcome
+ * receipt/ledger TTL (outcome_receipt_ttl_secs -> receiptTtlSecs and the
+ * appended outcomeTtlSecs), the store receives the outcome-ledger TTL, the
  * engine receives enableGlobalPressure from global_pressure.enabled, the
  * provider is built with the issuance-counter key + client + hard limit (no
  * breaker — backend health is the engine's degraded mode), the controller
  * receives the issuance counter, and the gateway receives the request stack,
- * the decision-handle Redis wiring and (optionally) the principal resolver.
+ * the decision-handle Redis wiring (TTL = risk.nonce_to_decision_ttl_secs),
+ * the calibrator when enabled and (optionally) the principal resolver.
  */
 final class RiskWiringTest extends TestCase
 {
@@ -65,10 +68,10 @@ final class RiskWiringTest extends TestCase
         self::assertSame([10000], $definition->getArguments(), 'args = [hard_limits.process_per_second] (the single per-process cap)');
     }
 
-    public function testCalibratorReceivesTheBoundKnobsReceiptTtlAndSamplingContract(): void
+    public function testCalibratorReceivesTheBoundKnobsOutcomeTtlAndSamplingContract(): void
     {
         $risk = $this->riskDefaults();
-        $risk['calibration'] = ['enabled' => true, 'min_samples' => 500, 'max_adjustment' => 77, 'max_change_per_minute' => 5, 'receipt_ttl_secs' => 600];
+        $risk['calibration'] = ['enabled' => true, 'min_samples' => 500, 'max_adjustment' => 77, 'max_change_per_minute' => 5, 'outcome_receipt_ttl_secs' => 43200];
         $container = $this->load($risk);
 
         $definition = $container->getDefinition('kiwi_captcha.risk.calibration');
@@ -79,12 +82,13 @@ final class RiskWiringTest extends TestCase
         self::assertSame(500, $args[2], 'arg 2 = min_samples');
         self::assertSame(77, $args[3], 'arg 3 = max_adjustment');
         self::assertSame(5, $args[4], 'arg 4 = max_change_per_minute');
-        self::assertSame(600, $args[5], 'arg 5 = receipt_ttl_secs (the AggregateCalibrator ctor position after maxChangePerMinute)');
+        self::assertSame(43200, $args[5], 'arg 5 = receiptTtlSecs (the AggregateCalibrator ctor position after maxChangePerMinute) follows outcome_receipt_ttl_secs');
         self::assertSame('random_sample', $args['$samplingMode'], 'samplingMode follows calibration.mode (default random_sample)');
         self::assertSame(100000, $args['$samplingProbabilityPpm'], 'samplingProbabilityPpm follows calibration.sampling_probability_ppm (default 100000)');
         self::assertSame(0.8, $args['$minimumResolutionRatio'], 'minimumResolutionRatio follows calibration.minimum_resolution_ratio (default 0.80 — the resolution gate)');
         self::assertSame(1.0, $args['$falsePositiveCost'], 'falsePositiveCost follows calibration.false_positive_cost (default 1.0)');
         self::assertSame(2.0, $args['$falseNegativeCost'], 'falseNegativeCost follows calibration.false_negative_cost (default 2.0)');
+        self::assertSame(43200, $args['$outcomeTtlSecs'], 'outcomeTtlSecs (appended AggregateCalibrator ctor param) follows outcome_receipt_ttl_secs');
 
         // Explicit sampling config flows through to the calibrator.
         $risk = $this->riskDefaults();
@@ -102,15 +106,27 @@ final class RiskWiringTest extends TestCase
         self::assertSame(2.5, $args['$falsePositiveCost']);
         self::assertSame(3.75, $args['$falseNegativeCost']);
 
-        // The default receipt TTL is the audit's 300 s.
+        // The default outcome TTL is the 24 h outcome/receipt lifetime.
         $risk = $this->riskDefaults();
         $risk['calibration'] = ['enabled' => true];
         $defaults = $this->load($risk)->getDefinition('kiwi_captcha.risk.calibration')->getArguments();
-        self::assertSame(300, $defaults[5], 'receipt_ttl_secs defaults to 300');
+        self::assertSame(86400, $defaults[5], 'receiptTtlSecs defaults to outcome_receipt_ttl_secs (86400)');
+        self::assertSame(86400, $defaults['$outcomeTtlSecs'], 'outcomeTtlSecs defaults to outcome_receipt_ttl_secs (86400)');
 
         // Without calibration.enabled the service must not exist.
         $container = $this->load($this->riskDefaults());
         self::assertFalse($container->hasDefinition('kiwi_captcha.risk.calibration'));
+    }
+
+    public function testStateStoreReceivesTheOutcomeTtl(): void
+    {
+        $container = $this->load($this->riskDefaults());
+        self::assertSame(86400, $container->getDefinition('kiwi_captcha.risk.store')->getArgument('$outcomeTtlSecs'), 'the store outcome-ledger TTL follows outcome_receipt_ttl_secs (default 86400)');
+
+        $risk = $this->riskDefaults();
+        $risk['calibration'] = ['outcome_receipt_ttl_secs' => 172800];
+        $container = $this->load($risk);
+        self::assertSame(172800, $container->getDefinition('kiwi_captcha.risk.store')->getArgument('$outcomeTtlSecs'), 'the store outcome-ledger TTL follows the configured outcome_receipt_ttl_secs');
     }
 
     public function testEngineReceivesEnableGlobalPressureFromConfig(): void
@@ -161,14 +177,24 @@ final class RiskWiringTest extends TestCase
         self::assertSame('request_stack', (string) $gateway->getArgument('$requestStack'), 'the gateway resolves the request principal via the request stack');
         self::assertSame('fake_redis', (string) $gateway->getArgument('$decisionRedis'), 'the nonce->decision handles live in the risk Redis');
         self::assertSame('{kiwi:wiring-test}:decision:', $gateway->getArgument('$decisionKeyPrefix'), 'the handle key prefix is hash-tagged with the risk namespace');
-        self::assertSame(300, $gateway->getArgument('$decisionTtlSecs'), 'the handle TTL follows calibration.receipt_ttl_secs (default 300)');
+        self::assertSame(300, $gateway->getArgument('$decisionTtlSecs'), 'the handle TTL follows risk.nonce_to_decision_ttl_secs (default 300)');
         self::assertArrayNotHasKey('$principalResolver', $gateway->getArguments(), 'no principal resolver wired by default');
         self::assertSame('kiwi_captcha.risk.policy', (string) $gateway->getArgument('$policy'), 'the gateway receives the policy for the degraded fallback');
+        self::assertNull($gateway->getArgument('$calibration'), 'no calibration store wired while calibration is disabled');
 
         $risk = $this->riskDefaults();
-        $risk['calibration'] = ['enabled' => true, 'receipt_ttl_secs' => 900];
+        $risk['nonce_to_decision_ttl_secs'] = 900;
         $container = $this->load($risk);
-        self::assertSame(900, $container->getDefinition(RiskGateway::class)->getArgument('$decisionTtlSecs'), 'the handle TTL follows the configured receipt_ttl_secs');
+        self::assertSame(900, $container->getDefinition(RiskGateway::class)->getArgument('$decisionTtlSecs'), 'the handle TTL follows the configured risk.nonce_to_decision_ttl_secs');
+
+        // Calibration.enabled wires the calibration store into the gateway
+        // (samplingMetrics delegates to it).
+        $risk = $this->riskDefaults();
+        $risk['calibration'] = ['enabled' => true];
+        $container = $this->load($risk);
+        $calibrationArg = $container->getDefinition(RiskGateway::class)->getArgument('$calibration');
+        self::assertInstanceOf(Reference::class, $calibrationArg);
+        self::assertSame('kiwi_captcha.risk.calibration', (string) $calibrationArg, 'the enabled calibrator is injected into the gateway');
     }
 
     public function testGatewayReceivesPrincipalResolverWhenServiceExists(): void

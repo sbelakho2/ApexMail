@@ -22,9 +22,14 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
  *      - semaphore ACQUIRE (1 key, 3 args, TIME + prune + cap + ZADD),
  *      - semaphore RELEASE (ZREM of one member),
  *      - rate-limiter (2 keys, 4 args, TIME + prune both + caps + ZADD both),
- *      - calibration CONFIRM (2 keys: receipt + bucket; GET + discard
- *        when unsampled + DEL + HINCRBYFLOAT + EXPIRE, mirroring the
- *        canonical confirm.lua),
+ *      - calibration CONFIRM (4 keys: outcome ledger + receipt + bucket +
+ *        resolved counter; ledger check -> validate -> flip the ledger ->
+ *        DEL receipt -> HINCRBYFLOAT + EXPIRE, mirroring the canonical
+ *        confirm.lua),
+ *      - calibration CORRECTION (2 keys: ledger + bucket; flip the ledger
+ *        1 -> 2 + reverse the bucket deltas, mirroring correction.lua),
+ *      - outcome-ledger CONFIRM / CORRECT (1 key: ledger; the engine-level
+ *        once-only gate used without a calibration store),
  *    mirroring the scripts' semantics exactly.
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
@@ -318,33 +323,52 @@ final class FakePredisClient extends \Predis\Client
             return $n;
         }
 
-        if (str_contains($script, 'cjson.decode(raw)')) {
-            // Calibration CONFIRM / CORRECTION (canonical confirm.lua): GET
-            // the receipt JSON -> validate mode/weight -> DEL -> when the
-            // FIRST confirmation is recorded (status 1): HINCRBYFLOAT the
-            // hourly score bucket, EXPIRE the bucket, and INCR the
-            // sampled-decisions RESOLVED counter in random_sample mode
-            // (KEYS[3]). Returns the shared accepted-outcome status:
-            //   0 = missing / already consumed / corrupt receipt,
-            //   1 = FIRST confirmation recorded,
-            //   2 = FIRST confirmation, deliberately unsampled
-            //       (random_sample mode: consumed, NOT recorded).
-            // Mirrors the canonical script's semantics exactly (weighted:
-            // weight = inverse sampling probability; score clamped 0..1000).
+        if (str_contains($script, 'Decision registration: receipt + sample denominator + outcome ledger')) {
+            // Canonical register_decision.lua: KEYS[1] receipt, KEYS[2]
+            // decision-hour bucket, KEYS[3] outcome ledger;
+            // ARGV[1] receipt JSON, ARGV[2] receipt TTL, ARGV[3] sampled,
+            // ARGV[4] bucket TTL, ARGV[5] outcome TTL, ARGV[6] scope,
+            // ARGV[7] decision_hour, ARGV[8] score, ARGV[9] weight.
             $receiptKey = (string) $keys[0];
             $bucketKey = (string) $keys[1];
-            $resolvedKey = (string) ($keys[2] ?? '');
+            $ledgerKey = (string) $keys[2];
+            if (isset($this->strings[$receiptKey])) {
+                return 0;
+            }
+            $this->strings[$receiptKey] = (string) $rest[0];
+            $this->strings[$ledgerKey] = (string) json_encode([
+                'o' => 'P',
+                'scope' => (int) $rest[5],
+                'hour' => (int) $rest[6],
+                'score' => (int) $rest[7],
+                'w' => (float) $rest[8],
+            ]);
+            $this->fakePexpire([$receiptKey, (int) $rest[1] * 1000]);
+            $this->fakePexpire([$ledgerKey, (int) $rest[4] * 1000]);
+            if ((int) $rest[2] === 1) {
+                $this->fakeHincrbyfloat([$bucketKey, 'sample_total', 1.0]);
+                $this->fakePexpire([$bucketKey, (int) $rest[3] * 1000]);
+            }
+
+            return 1;
+        }
+
+        if (str_contains($script, 'Calibration confirmation: outcome ledger CAS + receipt + bucket')) {
+            // Canonical confirm.lua (v2): KEYS[1] receipt, KEYS[2]
+            // DECISION-TIME bucket, KEYS[3] outcome ledger;
+            // ARGV[1] mode, ARGV[2] weight, ARGV[3] legitimate,
+            // ARGV[4] bucket TTL, ARGV[5] outcome TTL, ARGV[6] expected
+            // scope, ARGV[7] expected decision_hour.
+            $receiptKey = (string) $keys[0];
+            $bucketKey = (string) $keys[1];
+            $ledgerKey = (string) $keys[2];
             $mode = (int) $rest[0];
             $weight = (float) $rest[1];
             $legitimate = (int) $rest[2] === 1;
             $bucketTtlSecs = (int) $rest[3];
-
-            if ($mode !== 0 && $mode !== 1 && $mode !== 2) {
-                throw new \Predis\Response\ServerException('invalid calibration mode');
-            }
-            if ($mode === 2 && ($weight <= 0 || !\is_finite($weight))) {
-                throw new \Predis\Response\ServerException('invalid calibration weight');
-            }
+            $outcomeTtlSecs = (int) $rest[4];
+            $expectedScope = (int) $rest[5];
+            $expectedHour = (int) $rest[6];
 
             $raw = $this->strings[$receiptKey] ?? null;
             if ($raw === null) {
@@ -356,22 +380,47 @@ final class FakePredisClient extends \Predis\Client
 
                 return 0;
             }
+            if ((int) $receipt['scope'] !== $expectedScope
+                || (int) ($receipt['decision_hour'] ?? 0) !== $expectedHour
+            ) {
+                return 0;
+            }
+            if ($mode !== 0 && $mode !== 1 && $mode !== 2) {
+                throw new \Predis\Response\ServerException('invalid calibration mode');
+            }
+            if ($mode === 2 && ($weight <= 0 || !\is_finite($weight))) {
+                throw new \Predis\Response\ServerException('invalid calibration weight');
+            }
+
+            $ledgerRaw = $this->strings[$ledgerKey] ?? null;
+            if ($ledgerRaw === null) {
+                return 0;
+            }
+            $ledger = json_decode($ledgerRaw, true);
+            if (!\is_array($ledger) || ($ledger['o'] ?? null) !== 'P') {
+                return 0;
+            }
+
             $sampled = (int) ($receipt['sampled'] ?? 0) === 1;
             $status = 1;
             if ($mode === 1 && !$sampled) {
                 $status = 2;
             }
+            $score = (float) ($receipt['score'] ?? 0);
+            if ($score < 0) {
+                $score = 0;
+            }
+            if ($score > 1000) {
+                $score = 1000;
+            }
+
+            $ledger['o'] = $legitimate ? 'L' : 'A';
+            $ledger['w'] = $weight;
+            $this->strings[$ledgerKey] = (string) json_encode($ledger);
+            $this->fakePexpire([$ledgerKey, $outcomeTtlSecs * 1000]);
             unset($this->strings[$receiptKey]);
 
             if ($status === 1) {
-                $score = (float) ($receipt['score'] ?? 0);
-                if ($score < 0) {
-                    $score = 0;
-                }
-                if ($score > 1000) {
-                    $score = 1000;
-                }
-
                 if ($legitimate) {
                     $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
                     $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
@@ -380,12 +429,157 @@ final class FakePredisClient extends \Predis\Client
                     $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
                 }
                 $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
-                if ($mode === 1 && $resolvedKey !== '') {
-                    $this->fakeIncr([$resolvedKey]);
+                if ($mode === 1) {
+                    $this->fakeHincrbyfloat([$bucketKey, 'sample_resolved', 1.0]);
                 }
             }
 
             return $status;
+        }
+
+        if (str_contains($script, 'Calibration correction: flip the outcome ledger + reverse/redo')) {
+            // Canonical correction.lua: KEYS[1] ledger, KEYS[2]
+            // decision-time bucket; ARGV[1] new outcome, ARGV[2] weight,
+            // ARGV[3] bucket TTL, ARGV[4] outcome TTL, ARGV[5] expected
+            // scope, ARGV[6] expected hour.
+            $ledgerKey = (string) $keys[0];
+            $bucketKey = (string) $keys[1];
+            $newOutcome = (string) $rest[0];
+            $weight = (float) $rest[1];
+            $bucketTtlSecs = (int) $rest[2];
+            $outcomeTtlSecs = (int) $rest[3];
+            $expectedScope = (int) $rest[4];
+            $expectedHour = (int) $rest[5];
+
+            $ledgerRaw = $this->strings[$ledgerKey] ?? null;
+            if ($ledgerRaw === null) {
+                return 0;
+            }
+            $ledger = json_decode($ledgerRaw, true);
+            if (!\is_array($ledger) || !isset($ledger['o'])) {
+                return 0;
+            }
+            if ((int) ($ledger['scope'] ?? 0) !== $expectedScope
+                || (int) ($ledger['hour'] ?? 0) !== $expectedHour
+            ) {
+                return 0;
+            }
+            if ($newOutcome !== 'L' && $newOutcome !== 'A') {
+                throw new \Predis\Response\ServerException('invalid correction outcome');
+            }
+            if (($ledger['o'] ?? null) === $newOutcome) {
+                return 0;
+            }
+            if ($weight <= 0 || !\is_finite($weight)) {
+                throw new \Predis\Response\ServerException('invalid correction weight');
+            }
+            $score = (float) ($ledger['score'] ?? 0);
+            if ($score < 0) {
+                $score = 0;
+            }
+            if ($score > 1000) {
+                $score = 1000;
+            }
+            $oldW = (float) ($ledger['w'] ?? 1);
+
+            if (($ledger['o'] ?? null) === 'L') {
+                $this->fakeHincrbyfloat([$bucketKey, 'legit_count', -$oldW]);
+                $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', -($score * $oldW)]);
+            } else {
+                $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', -$oldW]);
+                $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', -($score * $oldW)]);
+            }
+            foreach (['legit_count', 'legit_score_sum', 'abuse_count', 'abuse_score_sum'] as $field) {
+                if (($this->hashes[$bucketKey][$field] ?? 0) < 0) {
+                    $this->hashes[$bucketKey][$field] = 0;
+                }
+            }
+
+            if ($newOutcome === 'L') {
+                $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
+                $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
+            } else {
+                $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $weight]);
+                $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
+            }
+            $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
+
+            $ledger['o'] = $newOutcome;
+            $ledger['w'] = $weight;
+            $this->strings[$ledgerKey] = (string) json_encode($ledger);
+            $this->fakePexpire([$ledgerKey, $outcomeTtlSecs * 1000]);
+
+            return 1;
+        }
+
+        if (str_contains($script, 'register: create a PENDING entry')) {
+            // Canonical outcome_register.lua: KEYS[1] ledger;
+            // ARGV[1] scope, ARGV[2] hour, ARGV[3] score, ARGV[4] TTL.
+            $ledgerKey = (string) $keys[0];
+            if (isset($this->strings[$ledgerKey])) {
+                return 0;
+            }
+            $this->strings[$ledgerKey] = (string) json_encode([
+                'o' => 'P',
+                'scope' => (int) $rest[0],
+                'hour' => (int) $rest[1],
+                'score' => (int) $rest[2],
+                'w' => 1.0,
+            ]);
+            $this->fakePexpire([$ledgerKey, (int) $rest[3] * 1000]);
+
+            return 1;
+        }
+
+        if (str_contains($script, 'Outcome ledger confirm: PENDING -> L/A exactly once')) {
+            // Canonical outcome_confirm.lua: KEYS[1] ledger;
+            // ARGV[1] outcome, ARGV[2] TTL.
+            $ledgerKey = (string) $keys[0];
+            $ledgerRaw = $this->strings[$ledgerKey] ?? null;
+            if ($ledgerRaw === null) {
+                return 0;
+            }
+            $ledger = json_decode($ledgerRaw, true);
+            if (!\is_array($ledger) || ($ledger['o'] ?? null) !== 'P') {
+                return 0;
+            }
+            $ledger['o'] = (string) $rest[0];
+            $this->strings[$ledgerKey] = (string) json_encode($ledger);
+            $this->fakePexpire([$ledgerKey, (int) $rest[1] * 1000]);
+
+            return 1;
+        }
+
+        if (str_contains($script, 'Outcome ledger correction: flip L <-> A')) {
+            // Canonical outcome_correct.lua: KEYS[1] ledger;
+            // ARGV[1] new outcome, ARGV[2] TTL.
+            $ledgerKey = (string) $keys[0];
+            $ledgerRaw = $this->strings[$ledgerKey] ?? null;
+            if ($ledgerRaw === null) {
+                return 0;
+            }
+            $ledger = json_decode($ledgerRaw, true);
+            if (!\is_array($ledger) || ($ledger['o'] ?? null) === (string) $rest[0]) {
+                return 0;
+            }
+            $ledger['o'] = (string) $rest[0];
+            $this->strings[$ledgerKey] = (string) json_encode($ledger);
+            $this->fakePexpire([$ledgerKey, (int) $rest[1] * 1000]);
+
+            return 1;
+        }
+
+        if (str_contains($script, 'Sampling metrics: per-scope sample totals')) {
+            // Canonical sampling_metrics.lua: 24 bucket keys; sums the two
+            // sample counters; returns {sample_total, sample_resolved}.
+            $total = 0.0;
+            $resolved = 0.0;
+            foreach ($keys as $bucketKey) {
+                $total += (float) ($this->hashes[(string) $bucketKey]['sample_total'] ?? 0);
+                $resolved += (float) ($this->hashes[(string) $bucketKey]['sample_resolved'] ?? 0);
+            }
+
+            return [$total, $resolved];
         }
 
         if (!str_contains($script, 'ZREMRANGEBYSCORE')) {

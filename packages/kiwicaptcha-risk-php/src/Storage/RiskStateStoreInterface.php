@@ -10,6 +10,12 @@ use KiwiCaptcha\Risk\SignalVector;
 /**
  * Risk state store: atomically applies an observation and returns the
  * resulting SignalVector.
+ *
+ * The OUTCOME LEDGER is part of the store contract: the always-on,
+ * calibration-independent exactly-once authority for confirmed outcomes
+ * (PENDING -> LEGITIMATE/ABUSE once, correction flips it). Confirmed
+ * outcomes work identically with or without calibration — calibration
+ * only OBSERVES the ledger via the canonical confirm/correction scripts.
  */
 interface RiskStateStoreInterface
 {
@@ -25,4 +31,40 @@ interface RiskStateStoreInterface
      * @throws RiskStoreException when the underlying state backend fails
      */
     public function observe(RiskObservation $observation): SignalVector;
+
+    /**
+     * Registers the decision's PENDING outcome-ledger entry (SET NX EX via
+     * the canonical outcome_register.lua): {"o":"P","scope","hour","score","w":1}
+     * keyed {kiwi:<ns>}:cal:ledger:<decisionId> with the store's
+     * outcomeTtlSecs. Used when calibration is DISABLED — the engine always
+     * registers one ledger entry per decision regardless of calibration.
+     *
+     * @return bool true when the PENDING entry was created, false when the
+     *              decision is already registered
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function registerOutcome(string $decisionId, int $scope, int $decisionHour, int $score): bool;
+
+    /**
+     * Confirms the decision's outcome EXACTLY ONCE (canonical
+     * outcome_confirm.lua): PENDING -> L/A. Returns 1 when THIS call
+     * performed the first confirmation, 0 when the decision is unknown,
+     * already confirmed or the ledger is not PENDING — a webhook retry
+     * can never confirm twice.
+     *
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function confirmOutcome(string $decisionId, bool $legitimate): int;
+
+    /**
+     * Corrects a previously confirmed outcome (canonical outcome_correct.lua):
+     * flips the ledger L <-> A. The corrected outcome is authoritative for
+     * future events; ephemeral reputation pressure is left to decay.
+     *
+     * @return bool true when the ledger was flipped, false when the
+     *              decision is unknown/expired or already carries the target
+     *              outcome
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function correctOutcome(string $decisionId, bool $legitimate): bool;
 }

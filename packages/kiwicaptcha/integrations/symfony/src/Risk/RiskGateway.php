@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 use KiwiCaptcha\ChallengeProfile;
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\Calibration\CalibrationStore;
 use KiwiCaptcha\Risk\EventReceipt;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
 use KiwiCaptcha\Risk\ResourcePressure;
@@ -37,10 +38,13 @@ use Symfony\Component\HttpFoundation\RequestStack;
  *    limiter cap must never deny a valid solve);
  *  - `record_feedback(event, ctx, idempotencyKey, decisionId)` for outcome
  *    signals (no limits, no decision), so decision ids flow end-to-end and
- *    the calibration receipts keyed on them are consumed.
- * ConfirmedLegitimate / ConfirmedAbuse are APPLICATION signals only — the
- * gateway never derives them from its own decisions (the engine requires a
- * decision id for them and throws InvalidArgumentException without one).
+ *    the calibration receipts keyed on them are consumed. The engine
+ *    REFUSES ConfirmedLegitimate / ConfirmedAbuse through record_feedback
+ *    (LogicException) — confirmed outcomes are APPLICATION signals only:
+ *    the gateway never derives them from its own decisions and routes them
+ *    exclusively through the engine's first-class confirmedLegitimate() /
+ *    confirmedAbuse() (the engine requires a decision id for them and
+ *    throws InvalidArgumentException without one).
  *
  * CONFIRMATION SPLIT: outcome confirmation is two deliberately separate
  * paths —
@@ -54,8 +58,16 @@ use Symfony\Component\HttpFoundation\RequestStack;
  *  - {@see recordConfirmedReputation()} (and the confirmedLegitimate /
  *    confirmedAbuse wrappers) is the CONTEXT-FUL path: when the
  *    source/session/principal context IS available, the engine confirms the
- *    decision atomically and then records the reputation event against the
- *    source/session/principal pseudonyms.
+ *    decision atomically (ledger-based once-only) and then records the
+ *    reputation event against the source/session/principal pseudonyms.
+ *    The optional $samplingProbabilityPpm (inverse sampling probability,
+ *    parts per million) flows through to the engine's confirmed* methods
+ *    (weight = 1_000_000/ppm for weighted calibration; null in weighted
+ *    mode makes the calibrator throw InvalidArgumentException — the
+ *    gateway lets that enforcement surface).
+ *
+ *  - {@see samplingMetrics()} exposes the calibrator's sampling-resolution
+ *    counters (zeros when calibration is disabled).
  *
  * Every FEEDBACK path is guarded against unknown scopes: when the scope is
  * not configured and unknown_scope.mode is "reject"/"baseline" (the engine
@@ -81,9 +93,9 @@ use Symfony\Component\HttpFoundation\RequestStack;
  * confirmation the controller pairs the minted challenge nonce to the
  * decision id via {@see attachDecisionForNonce()} — a short-lived
  * server-side mapping in the risk Redis ({kiwi:<ns>}:decision:<nonce>, TTL =
- * the calibration receipt TTL, default 300) consumed once with GETDEL via
- * {@see resolveDecisionForNonce()}. The mapping carries ONLY the decision id
- * — no IP, no identity.
+ * risk.nonce_to_decision_ttl_secs, default 300) consumed once with GETDEL
+ * via {@see resolveDecisionForNonce()}. The mapping carries ONLY the
+ * decision id — no IP, no identity.
  */
 final class RiskGateway
 {
@@ -97,12 +109,16 @@ final class RiskGateway
      * @param int|null                            $unknownScopeId   synthetic policy scope id used in 'minimum' mode
      * @param string                              $decisionKeyPrefix full nonce->decision key prefix including the
      *                                                               hash tag, e.g. "{kiwi:prod}:decision:"
-     * @param int                                 $decisionTtlSecs  TTL of the nonce->decision mapping (defaults to
-     *                                                               the calibration receipt TTL, 300 s)
-     * @param RiskPolicy|null                     $policy           the risk-v1 policy, required for
-     *                                                               {@see degradedDecisionForScope()} (the extension
-     *                                                               wires it automatically)
-     */
+ * @param int                                 $decisionTtlSecs  TTL of the nonce->decision mapping
+ *                                                               (risk.nonce_to_decision_ttl_secs,
+ *                                                               default 300 s)
+ * @param RiskPolicy|null                     $policy           the risk-v1 policy, required for
+ *                                                               {@see degradedDecisionForScope()} (the extension
+ *                                                               wires it automatically)
+ * @param CalibrationStore|null               $calibration      the calibration store, wired only when
+ *                                                               risk.calibration.enabled (drives
+ *                                                               {@see samplingMetrics()})
+ */
     public function __construct(
         private readonly AdaptiveRiskEngine $engine,
         private readonly NetworkClassifierInterface $classifier,
@@ -119,6 +135,7 @@ final class RiskGateway
         private readonly string $decisionKeyPrefix = '{kiwi:kiwi}:decision:',
         private readonly int $decisionTtlSecs = 300,
         private readonly ?RiskPolicy $policy = null,
+        private readonly ?CalibrationStore $calibration = null,
     ) {
         if (!\in_array($unknownScopeMode, ['reject', 'baseline', 'minimum'], true)) {
             throw new \InvalidArgumentException(sprintf('unknownScopeMode must be "reject", "baseline" or "minimum" (got "%s")', $unknownScopeMode));
@@ -300,9 +317,9 @@ final class RiskGateway
      * identity, no scope, no session: the target of DELAYED confirmations
      * (email confirmation, fraud review, chargeback, moderation) where the
      * original request's source/session/principal context is long gone.
-     * Confirms the decision against its calibration receipt atomically via
-     * the engine's confirmOutcome (the canonical confirm.lua: consume
-     * receipt + record the score-weighted outcome in one script).
+     * Confirms the decision against its outcome ledger atomically via the
+     * engine's confirmOutcome (the canonical confirm.lua: ledger check +
+     * consume receipt + record the score-weighted outcome in ONE script).
      *
      * Sampling contract: with the calibration mode 'random_sample', Kiwi
      * sampled the decision at assessment time (the receipt carries a
@@ -351,11 +368,15 @@ final class RiskGateway
      * CORRECTION of a previously confirmed outcome (e.g. a chargeback
      * verdict or moderation appeal flipped the label): the engine's
      * compensating-state API — records the corrected class at most once
-     * per decision (SET NX guard on the decision id, TTL = the calibration
-     * receipt TTL; the receipt itself is already consumed by the first
-     * confirmation, so the guard is the only gate). Calibration aggregates
-     * keep the FIRST confirmed outcome; a correction compensates
-     * reputation, never re-touches the buckets.
+     * per decision, guarded by the outcome ledger (status flipped to 2;
+     * the ledger TTL = calibration.outcome_receipt_ttl_secs, and the
+     * receipt itself is already consumed by the first confirmation, so the
+     * ledger is the only gate). WORKS WITHOUT CALIBRATION — the once-only
+     * guard lives in the state store; with a calibration store attached
+     * the correction additionally reverses the recorded bucket counts.
+     * Calibration aggregates keep the FIRST confirmed outcome; a
+     * correction compensates reputation and returns the buckets to the
+     * pre-confirmation state.
      *
      * Same weight mapping as {@see confirmDecisionOutcome()}
      * ($samplingProbabilityPpm is the inverse sampling probability in parts
@@ -364,7 +385,7 @@ final class RiskGateway
      * false (no-op — retries can never double-compensate).
      *
      * @return bool whether the compensation was applied (false = already
-     *               corrected / guard exhausted)
+     *               corrected / ledger missing)
      *
      * @throws \InvalidArgumentException when $samplingProbabilityPpm is
      *                                   outside 1..1_000_000
@@ -390,17 +411,31 @@ final class RiskGateway
      * account checks): the context-ful reputation path — used when the
      * source/session/principal context IS still available. Routes through
      * {@see recordConfirmedReputation()}: the engine confirms the decision
-     * atomically against its calibration receipt, then records the
-     * ConfirmedLegitimate reputation event. The decision id is REQUIRED by
-     * the engine contract — it throws InvalidArgumentException without one,
-     * and the gateway lets that enforcement surface.
+     * atomically against its outcome ledger (consuming the calibration
+     * receipt when one exists), then records the ConfirmedLegitimate
+     * reputation event. The decision id is REQUIRED by the engine contract
+     * — it throws InvalidArgumentException without one, and the gateway
+     * lets that enforcement surface.
+     *
+     * $samplingProbabilityPpm (parts per million, 1..1_000_000) is the
+     * INVERSE sampling probability for weighted calibration: it is passed
+     * to the engine's confirmedLegitimate (which converts it to
+     * weight = 1_000_000/ppm), so labels with known selection bias are
+     * re-weighted into the population. null in weighted mode reaches the
+     * calibrator as a null weight, which weighted mode refuses — the
+     * InvalidArgumentException PROPAGATES (documented behavior).
      *
      * @throws \InvalidArgumentException when the engine requires a decisionId
      *                                   for confirmed events and none is given
+     * @throws \InvalidArgumentException when $samplingProbabilityPpm is
+     *                                   outside 1..1_000_000
+     * @throws \InvalidArgumentException when the calibration mode is
+     *                                   'weighted' and $samplingProbabilityPpm
+     *                                   is null (propagated from the engine)
      */
-    public function confirmedLegitimate(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null): ?EventReceipt
+    public function confirmedLegitimate(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null, ?int $samplingProbabilityPpm = null): ?EventReceipt
     {
-        return $this->recordConfirmedReputation(true, $scope, $ip, $session, $idempotencyKey, $decisionId);
+        return $this->recordConfirmedReputation(true, $scope, $ip, $session, $idempotencyKey, $decisionId, $samplingProbabilityPpm);
     }
 
     /**
@@ -408,34 +443,67 @@ final class RiskGateway
      * checks): the context-ful reputation path — used when the
      * source/session/principal context IS still available. Routes through
      * {@see recordConfirmedReputation()}: the engine confirms the decision
-     * atomically against its calibration receipt, then records the
-     * ConfirmedAbuse reputation event. The decision id is REQUIRED by the
-     * engine contract — it throws InvalidArgumentException without one, and
-     * the gateway lets that enforcement surface.
+     * atomically against its outcome ledger (consuming the calibration
+     * receipt when one exists), then records the ConfirmedAbuse reputation
+     * event. The decision id is REQUIRED by the engine contract — it
+     * throws InvalidArgumentException without one, and the gateway lets
+     * that enforcement surface.
+     *
+     * $samplingProbabilityPpm (parts per million, 1..1_000_000) is the
+     * INVERSE sampling probability for weighted calibration: it is passed
+     * to the engine's confirmedAbuse (which converts it to
+     * weight = 1_000_000/ppm), so labels with known selection bias are
+     * re-weighted into the population. null in weighted mode reaches the
+     * calibrator as a null weight, which weighted mode refuses — the
+     * InvalidArgumentException PROPAGATES (documented behavior).
      *
      * @throws \InvalidArgumentException when the engine requires a decisionId
      *                                   for confirmed events and none is given
+     * @throws \InvalidArgumentException when $samplingProbabilityPpm is
+     *                                   outside 1..1_000_000
+     * @throws \InvalidArgumentException when the calibration mode is
+     *                                   'weighted' and $samplingProbabilityPpm
+     *                                   is null (propagated from the engine)
      */
-    public function confirmedAbuse(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null): ?EventReceipt
+    public function confirmedAbuse(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null, ?int $samplingProbabilityPpm = null): ?EventReceipt
     {
-        return $this->recordConfirmedReputation(false, $scope, $ip, $session, $idempotencyKey, $decisionId);
+        return $this->recordConfirmedReputation(false, $scope, $ip, $session, $idempotencyKey, $decisionId, $samplingProbabilityPpm);
     }
 
     /**
      * Context-ful confirmed-outcome path (legitimate/abuse): used when the
      * request's source/session/principal context IS available — the engine
-     * confirms the decision atomically against its calibration receipt and
-     * then records the reputation event (source/session/principal signals)
-     * via the engine's first-class confirmed* methods. Unlike the
+     * confirms the decision atomically against its outcome ledger (the
+     * once-only gate; with a calibration store the receipt is consumed and
+     * the score-weighted outcome recorded in the same script) and then
+     * records the reputation event (source/session/principal signals) via
+     * the engine's first-class confirmed* methods. Unlike the
      * calibration-only {@see confirmDecisionOutcome()}, an unparseable
      * client IP has nothing to attribute the reputation event to and the
      * signal is skipped (null).
      *
+     * $samplingProbabilityPpm (parts per million, 1..1_000_000) is the
+     * INVERSE sampling probability for weighted calibration (weight =
+     * 1_000_000/ppm), passed through to the engine's confirmed* methods.
+     * null in weighted mode makes the engine's confirmOutcome throw an
+     * InvalidArgumentException — the gateway lets it propagate.
+     *
      * @throws \InvalidArgumentException when the engine requires a decisionId
      *                                   for confirmed events and none is given
+     * @throws \InvalidArgumentException when $samplingProbabilityPpm is
+     *                                   outside 1..1_000_000
+     * @throws \InvalidArgumentException when the calibration mode is
+     *                                   'weighted' and $samplingProbabilityPpm
+     *                                   is null (propagated from the engine)
      */
-    public function recordConfirmedReputation(bool $legitimate, string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null): ?EventReceipt
+    public function recordConfirmedReputation(bool $legitimate, string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null, ?int $samplingProbabilityPpm = null): ?EventReceipt
     {
+        if ($samplingProbabilityPpm !== null && ($samplingProbabilityPpm < 1 || $samplingProbabilityPpm > 1_000_000)) {
+            throw new \InvalidArgumentException(sprintf(
+                'samplingProbabilityPpm must be 1..1000000 (got %d) — it is the inverse sampling probability in parts per million (weight = 1_000_000/ppm)',
+                $samplingProbabilityPpm,
+            ));
+        }
         $scopeId = $this->tryScopeId($scope);
         if ($scopeId === null) {
             return null;
@@ -456,10 +524,12 @@ final class RiskGateway
 
         // Route through the engine's first-class confirmation methods so the
         // package enforces the decisionId requirement (InvalidArgumentException
-        // without it) — the gateway never infers confirmations itself.
+        // without it) and the once-only outcome ledger — the gateway never
+        // infers confirmations itself. The ppm is passed through so the
+        // engine can convert it to the weighted-calibration weight.
         return $legitimate
-            ? $this->engine->confirmedLegitimate($context, $decisionId, $idempotencyKey)
-            : $this->engine->confirmedAbuse($context, $decisionId, $idempotencyKey);
+            ? $this->engine->confirmedLegitimate($context, $decisionId, $idempotencyKey, $samplingProbabilityPpm)
+            : $this->engine->confirmedAbuse($context, $decisionId, $idempotencyKey, $samplingProbabilityPpm);
     }
 
     /**
@@ -633,9 +703,10 @@ final class RiskGateway
     /**
      * Pair a challenge nonce to its decision id in the risk Redis:
      * {kiwi:<ns>}:decision:<nonce> holds the JSON string {"decision_id": ...}
-     * with the calibration receipt TTL (default 300 s). Server-side handle
-     * only — the mapping carries NO IP and NO identity, and a Redis failure
-     * is silent (the mapping must never break issuance).
+     * with the risk.nonce_to_decision_ttl_secs TTL (default 300 s) —
+     * independent of the outcome lifetime. Server-side handle only — the
+     * mapping carries NO IP and NO identity, and a Redis failure is silent
+     * (the mapping must never break issuance).
      */
     public function attachDecisionForNonce(string $nonce, string $decisionId): void
     {
@@ -683,6 +754,26 @@ final class RiskGateway
     }
 
     /**
+     * Sampling-resolution metrics of the random_sample calibration gate:
+     * the namespace-wide sampled-decision TOTAL and RESOLVED counters, the
+     * resolution ratio (resolved/total; 0.0 when total is 0) and the
+     * sampled-but-unresolved remainder (sampledExpired = total - resolved,
+     * floored at 0). Delegates to the calibrator; when calibration is
+     * disabled (or in complete/weighted mode — the counters are never
+     * touched there) every value is zero.
+     *
+     * @return array{sampledTotal: int, sampledResolved: int, resolutionRatio: float, sampledExpired: int}
+     */
+    public function samplingMetrics(int $scope): array
+    {
+        if ($this->calibration === null) {
+            return ['sampledTotal' => 0, 'sampledResolved' => 0, 'resolutionRatio' => 0.0, 'sampledExpired' => 0];
+        }
+
+        return $this->calibration->samplingMetrics($scope, (int) floor(microtime(true) * 1000));
+    }
+
+    /**
      * One feedback event through {@see AdaptiveRiskEngine::record_feedback()}.
      *
      * Never throws for unavailable signals:
@@ -693,7 +784,11 @@ final class RiskGateway
      *
      * Engine exceptions are deliberately NOT swallowed here: the engine's
      * InvalidArgumentException for confirmed events without a decisionId is
-     * contract enforcement and must reach the application caller.
+     * contract enforcement and must reach the application caller. (The
+     * engine also refuses ConfirmedLegitimate / ConfirmedAbuse through
+     * record_feedback with a LogicException — the gateway never routes
+     * confirmed events through this path; they go through
+     * {@see recordConfirmedReputation()} exclusively.)
      *
      * @return EventReceipt|null null when the signal was skipped (unknown
      *                           scope or invalid client IP)

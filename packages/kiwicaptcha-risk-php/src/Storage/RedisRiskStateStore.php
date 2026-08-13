@@ -48,8 +48,14 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         'principal' => 10000,
     ];
 
+    /** Default lifetime of the always-on outcome-ledger entries (86400 s). */
+    public const DEFAULT_OUTCOME_TTL_SECS = 86400;
+
     private string $script;
     private ?string $scriptSha = null;
+    private string $outcomeRegisterScript;
+    private string $outcomeConfirmScript;
+    private string $outcomeCorrectScript;
     private int $lastGlobalLevel = 0;
     private int $lastCooldownUntilMs = 0;
     private bool $lastIsDuplicate = false;
@@ -70,9 +76,13 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         private readonly int $dedupeTtlSecs = 60,
         private readonly int $hysteresisMs = 60000,
         private readonly array $saturations = self::DEFAULT_SATURATIONS,
+        private readonly int $outcomeTtlSecs = self::DEFAULT_OUTCOME_TTL_SECS,
     ) {
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Risk namespace must be non-empty and free of braces');
+        }
+        if ($outcomeTtlSecs < 1) {
+            throw new \InvalidArgumentException('outcomeTtlSecs must be >= 1');
         }
         $path = dirname(__DIR__, 2) . '/resources/risk-v1.lua';
         if (!is_file($path)) {
@@ -87,6 +97,9 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
             throw new \RuntimeException(sprintf('Cannot read the bundled risk-v1 script at %s', $path));
         }
         $this->script = $script;
+        $this->outcomeRegisterScript = self::loadOutcomeScript('outcome_register.lua');
+        $this->outcomeConfirmScript = self::loadOutcomeScript('outcome_confirm.lua');
+        $this->outcomeCorrectScript = self::loadOutcomeScript('outcome_correct.lua');
     }
 
     /**
@@ -121,6 +134,49 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
     public function namespace(): string
     {
         return $this->namespace;
+    }
+
+    /**
+     * The outcome ledger key shared with the calibrator's register_decision /
+     * confirm / correction scripts: {kiwi:<ns>}:cal:ledger:<decisionId>.
+     * The ledger is ALWAYS ON (calibration-independent): with calibration
+     * enabled the calibrator writes it inside register_decision.lua; with
+     * calibration disabled the store writes it here — one key, one
+     * exactly-once authority.
+     */
+    public function ledgerKey(string $decisionId): string
+    {
+        return "{kiwi:{$this->namespace}}:outcome:{$decisionId}";
+    }
+
+    public function registerOutcome(string $decisionId, int $scope, int $decisionHour, int $score): bool
+    {
+        $result = $this->runScript(
+            [$this->ledgerKey($decisionId)],
+            [$scope, $decisionHour, $score, $this->outcomeTtlSecs],
+            $this->outcomeRegisterScript,
+        );
+        return ((int) $result) === 1;
+    }
+
+    public function confirmOutcome(string $decisionId, bool $legitimate): int
+    {
+        $result = $this->runScript(
+            [$this->ledgerKey($decisionId)],
+            [$legitimate ? 'L' : 'A', $this->outcomeTtlSecs],
+            $this->outcomeConfirmScript,
+        );
+        return (int) $result;
+    }
+
+    public function correctOutcome(string $decisionId, bool $legitimate): bool
+    {
+        $result = $this->runScript(
+            [$this->ledgerKey($decisionId)],
+            [$legitimate ? 'L' : 'A', $this->outcomeTtlSecs],
+            $this->outcomeCorrectScript,
+        );
+        return ((int) $result) === 1;
     }
 
     public function observe(RiskObservation $observation): SignalVector
@@ -207,26 +263,20 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
      * @return array<int|string>|int|string
      * @throws RiskStoreException on any non-NOSCRIPT redis failure
      */
-    private function runScript(array $keys, array $args)
+    private function runScript(array $keys, array $args, ?string $script = null)
     {
+        $script ??= $this->script;
+        $sha = $this->shaOf($script);
         $numKeys = count($keys);
         $callArgs = [...$keys, ...$args];
 
         try {
-            if ($this->scriptSha !== null) {
-                return $this->client->evalsha($this->scriptSha, $numKeys, ...$callArgs);
-            }
-            $sha = $this->client->script('LOAD', $this->script);
-            if (!is_string($sha) || $sha === '') {
-                throw new RiskStoreException('SCRIPT LOAD returned no sha');
-            }
-            $this->scriptSha = $sha;
-            return $this->client->evalsha($this->scriptSha, $numKeys, ...$callArgs);
+            return $this->client->evalsha($sha, $numKeys, ...$callArgs);
         } catch (ServerException $e) {
             if (str_contains($e->getMessage(), 'NOSCRIPT')) {
                 try {
-                    $this->scriptSha = $this->client->script('LOAD', $this->script);
-                    return $this->client->evalsha($this->scriptSha, $numKeys, ...$callArgs);
+                    $sha = $this->loadScript($script);
+                    return $this->client->evalsha($sha, $numKeys, ...$callArgs);
                 } catch (\Predis\Exception\Exception $inner) {
                     throw new RiskStoreException('Risk script execution failed: ' . $inner->getMessage(), 0, $inner);
                 }
@@ -235,6 +285,43 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         } catch (\Predis\Exception\Exception $e) {
             throw new RiskStoreException('Risk store connection failed: ' . $e->getMessage(), 0, $e);
         }
+    }
+
+    /** Cached SHA1 of a script (SCRIPT LOAD once per script per process). */
+    private function shaOf(string $script): string
+    {
+        if ($script === $this->script && $this->scriptSha !== null) {
+            return $this->scriptSha;
+        }
+        $sha = $this->loadScript($script);
+        if ($script === $this->script) {
+            $this->scriptSha = $sha;
+        }
+        return $sha;
+    }
+
+    private function loadScript(string $script): string
+    {
+        $sha = $this->client->script('LOAD', $script);
+        if (!is_string($sha) || $sha === '') {
+            throw new RiskStoreException('SCRIPT LOAD returned no sha');
+        }
+        return $sha;
+    }
+
+    private static function loadOutcomeScript(string $file): string
+    {
+        $path = dirname(__DIR__, 2) . '/resources/' . $file;
+        if (!is_file($path)) {
+            throw new \RuntimeException(
+                sprintf('Cannot locate the bundled script at resources/%s (resolved from %s). The script ships with this package.', $file, __DIR__)
+            );
+        }
+        $script = @file_get_contents($path);
+        if ($script === false) {
+            throw new \RuntimeException(sprintf('Cannot read the bundled script at %s', $path));
+        }
+        return $script;
     }
 
     /**

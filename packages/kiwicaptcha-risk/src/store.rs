@@ -45,6 +45,50 @@ pub trait RiskStateStore {
     /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
     fn observe(&self, o: &crate::event::RiskObservation) -> Result<Observed, RiskStoreError>;
 
+    /// Registers a PENDING outcome-ledger entry for one decision
+    /// (`outcome_register.lua`). The OUTCOME LEDGER IS ALWAYS ON and
+    /// independent of calibration: with calibration DISABLED the engine
+    /// books the ledger here at decision time, so
+    /// ConfirmedLegitimate/ConfirmedAbuse work identically with or without
+    /// calibration. `decision_hour` is `now_ms / 3_600_000` (the decision's
+    /// hour; the ledger carries it for decision-time bucketing and
+    /// correction key derivation).
+    ///
+    /// Returns `Ok(false)` when the decision_id is already registered
+    /// (SET NX: a retried decision can never overwrite its ledger entry).
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn register_outcome(
+        &self,
+        decision_id: &str,
+        scope: u32,
+        decision_hour: i64,
+        score: u32,
+    ) -> Result<bool, RiskStoreError>;
+
+    /// Confirms a decision's ledger entry exactly once
+    /// (`outcome_confirm.lua`): PENDING -> L/A. Returns `1` for the FIRST
+    /// confirmation (reputation eligible), `0` when the decision is
+    /// unknown/already confirmed.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn confirm_outcome(&self, decision_id: &str, legitimate: bool) -> Result<u8, RiskStoreError>;
+
+    /// Corrects a decision's ledger entry (`outcome_correct.lua`): flips
+    /// L <-> A (authoritative for future events; ephemeral reputation
+    /// decays naturally — no synthetic identities). Returns `Ok(true)`
+    /// when the ledger was flipped, `Ok(false)` when the decision is
+    /// unknown or already carries the target outcome.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn correct_outcome(&self, decision_id: &str, legitimate: bool) -> Result<bool, RiskStoreError>;
+
     /// Last observed global pressure level (0..4) reported by the backend
     /// during the most recent successful assessment. Stores without the
     /// probe return 0.

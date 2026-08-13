@@ -426,4 +426,62 @@ final class RedisRiskStateStoreTest extends TestCase
         $store = new RedisRiskStateStore($this->client, namespace: 'deploy42');
         self::assertSame('deploy42', $store->namespace());
     }
+
+    /**
+     * The always-on outcome ledger (calibration-independent): register ->
+     * confirm exactly once -> correct flips the ledger. This is the
+     * round-7 authority behind ConfirmedLegitimate/ConfirmedAbuse when
+     * calibration is disabled.
+     */
+    public function testOutcomeLedgerRegisterConfirmCorrect(): void
+    {
+        $store = $this->store();
+        $ns = $store->namespace();
+        $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
+        $ledgerKey = "{kiwi:{$ns}}:outcome:dec-1";
+
+        // Register: the PENDING entry carries scope/hour/score.
+        self::assertTrue($store->registerOutcome('dec-1', 7, $hour, 500));
+        $ledger = json_decode((string) $this->client->get($ledgerKey), true);
+        self::assertSame('P', $ledger['o']);
+        self::assertSame(7, $ledger['scope']);
+        self::assertSame($hour, $ledger['hour']);
+        self::assertSame(500, $ledger['score']);
+        self::assertSame(1, $ledger['w']);
+
+        // Duplicate registration is refused (SET NX).
+        self::assertFalse($store->registerOutcome('dec-1', 7, $hour, 500), 'a duplicate registration must be refused');
+
+        // First confirmation flips P -> A exactly once.
+        self::assertSame(1, $store->confirmOutcome('dec-1', false), 'the first confirmation is the accepted-outcome status 1');
+        self::assertSame(0, $store->confirmOutcome('dec-1', false), 'a retried confirmation is status 0 (ledger already confirmed)');
+        self::assertSame('A', json_decode((string) $this->client->get($ledgerKey), true)['o'], 'the ledger records the abuse outcome exactly once');
+
+        // Correction flips A -> L (authoritative for future events).
+        self::assertTrue($store->correctOutcome('dec-1', true));
+        self::assertSame('L', json_decode((string) $this->client->get($ledgerKey), true)['o']);
+        self::assertFalse($store->correctOutcome('dec-1', true), 'correcting to the CURRENT outcome is a no-op');
+        self::assertTrue($store->correctOutcome('dec-1', false), 'flipping back applies');
+        self::assertSame('A', json_decode((string) $this->client->get($ledgerKey), true)['o']);
+
+        // Unknown decisions: confirm 0, correct false.
+        self::assertSame(0, $store->confirmOutcome('dec-missing', true));
+        self::assertFalse($store->correctOutcome('dec-missing', true));
+    }
+
+    public function testOutcomeLedgerHonorsOutcomeTtl(): void
+    {
+        $store = new RedisRiskStateStore($this->client, namespace: 'ledger-ttl' . bin2hex(random_bytes(4)), outcomeTtlSecs: 3600);
+        self::assertTrue($store->registerOutcome('ttl-dec', 1, intdiv((int) floor(microtime(true) * 1000), 3_600_000), 100));
+        $ttl = (int) $this->client->ttl($store->ledgerKey('ttl-dec'));
+        self::assertGreaterThan(0, $ttl);
+        self::assertLessThanOrEqual(3600, $ttl, 'the outcome ledger TTL comes from the constructor knob');
+
+        // The default is the DEFAULT_OUTCOME_TTL_SECS constant.
+        $default = $this->store();
+        self::assertTrue($default->registerOutcome('ttl-dec-2', 1, intdiv((int) floor(microtime(true) * 1000), 3_600_000), 100));
+        $ttl = (int) $this->client->ttl($default->ledgerKey('ttl-dec-2'));
+        self::assertGreaterThan(0, $ttl);
+        self::assertLessThanOrEqual(RedisRiskStateStore::DEFAULT_OUTCOME_TTL_SECS, $ttl);
+    }
 }

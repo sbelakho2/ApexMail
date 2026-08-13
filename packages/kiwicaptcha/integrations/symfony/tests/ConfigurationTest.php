@@ -140,23 +140,48 @@ final class ConfigurationTest extends TestCase
         self::assertSame(300, $config['challenge_ttl_secs']);
     }
 
-    public function testCalibrationReceiptTtlDefaultsAndBounds(): void
+    public function testCalibrationOutcomeReceiptTtlDefaultsAndBounds(): void
     {
-        self::assertSame(300, $this->process()['risk']['calibration']['receipt_ttl_secs'], 'receipt_ttl_secs defaults to the audit receipt window (300)');
-        self::assertSame(60, $this->process(['risk' => ['calibration' => ['receipt_ttl_secs' => 60]]])['risk']['calibration']['receipt_ttl_secs']);
-        self::assertSame(86400, $this->process(['risk' => ['calibration' => ['receipt_ttl_secs' => 86400]]])['risk']['calibration']['receipt_ttl_secs']);
+        self::assertSame(86400, $this->process()['risk']['calibration']['outcome_receipt_ttl_secs'], 'outcome_receipt_ttl_secs defaults to the 24 h outcome/calibration receipt + outcome-ledger lifetime (long enough for fraud review / moderation / chargeback labels)');
+        self::assertSame(3600, $this->process(['risk' => ['calibration' => ['outcome_receipt_ttl_secs' => 3600]]])['risk']['calibration']['outcome_receipt_ttl_secs']);
+        self::assertSame(604800, $this->process(['risk' => ['calibration' => ['outcome_receipt_ttl_secs' => 604800]]])['risk']['calibration']['outcome_receipt_ttl_secs']);
     }
 
-    public function testCalibrationReceiptTtlBelowMinimumIsRejected(): void
+    public function testCalibrationOutcomeReceiptTtlBelowMinimumIsRejected(): void
     {
         $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
-        $this->process(['risk' => ['calibration' => ['receipt_ttl_secs' => 59]]]);
+        $this->process(['risk' => ['calibration' => ['outcome_receipt_ttl_secs' => 3599]]]);
     }
 
-    public function testCalibrationReceiptTtlAboveMaximumIsRejected(): void
+    public function testCalibrationOutcomeReceiptTtlAboveMaximumIsRejected(): void
     {
         $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
-        $this->process(['risk' => ['calibration' => ['receipt_ttl_secs' => 86401]]]);
+        $this->process(['risk' => ['calibration' => ['outcome_receipt_ttl_secs' => 604801]]]);
+    }
+
+    public function testNonceToDecisionTtlDefaultsAndBounds(): void
+    {
+        self::assertSame(300, $this->process()['risk']['nonce_to_decision_ttl_secs'], 'nonce_to_decision_ttl_secs defaults to 300 (the short-lived challenge-nonce -> decision mapping, independent of the outcome lifetime)');
+        self::assertSame(60, $this->process(['risk' => ['nonce_to_decision_ttl_secs' => 60]])['risk']['nonce_to_decision_ttl_secs']);
+        self::assertSame(3600, $this->process(['risk' => ['nonce_to_decision_ttl_secs' => 3600]])['risk']['nonce_to_decision_ttl_secs']);
+    }
+
+    public function testNonceToDecisionTtlBelowMinimumIsRejected(): void
+    {
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['risk' => ['nonce_to_decision_ttl_secs' => 59]]);
+    }
+
+    public function testNonceToDecisionTtlAboveMaximumIsRejected(): void
+    {
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['risk' => ['nonce_to_decision_ttl_secs' => 3601]]);
+    }
+
+    public function testLegacyCalibrationReceiptTtlNodeIsGone(): void
+    {
+        $calibration = $this->process()['risk']['calibration'];
+        self::assertArrayNotHasKey('receipt_ttl_secs', $calibration, 'the old receipt_ttl_secs node is replaced by outcome_receipt_ttl_secs + risk.nonce_to_decision_ttl_secs');
     }
 
     public function testHardLimitsUseSinglePerProcessCap(): void

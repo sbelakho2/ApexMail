@@ -42,6 +42,7 @@ fn store_with(
         hysteresis_ms,
         1800,
         86_400,
+        kiwicaptcha_risk::redis::DEFAULT_OUTCOME_TTL_SECS,
         saturations,
     )
 }

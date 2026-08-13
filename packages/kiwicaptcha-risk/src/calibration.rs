@@ -7,11 +7,25 @@
 //! - Hourly aggregate buckets `{kiwi:<ns>}:cal:<scope>:<hour>` (hour =
 //!   `now_ms / 3600000`, integer) — a hash of flat fields
 //!   `legit_count` / `legit_score_sum` / `abuse_count` / `abuse_score_sum`
-//!   (EXACT scores, not band-quantized), written by
+//!   (EXACT scores, not band-quantized) PLUS the sample counters
+//!   `sample_total` / `sample_resolved` — written by
 //!   `HINCRBYFLOAT` + `EXPIRE 48h`. At most 24 keys per scope are ever read.
+//!   The sample counters live in the SAME scope/hour buckets as the
+//!   observations, so scope, window, label population and resolution
+//!   population are exactly one cohort (round 7: no namespace-wide
+//!   singleton counters).
 //! - Decision receipts `{kiwi:<ns>}:cal:receipt:<decision_id>` — a STRING
-//!   JSON `{"scope":..,"band":..,"action":"..","score":..,"sampled":0|1}`,
-//!   EXPIRE `receipt_ttl_secs`, consumed ONCE by the atomic confirm script.
+//!   JSON `{"scope":..,"band":..,"action":"..","decision_hour":..,"score":..,
+//!   "sampled":0|1}`, EXPIRE `receipt_ttl_secs`, consumed ONCE by the atomic
+//!   confirm script.
+//! - Outcome-ledger entries `{kiwi:<ns>}:outcome:<decision_id>` — a
+//!   STRING JSON `{"o":"P|L|A","scope","hour","score","w"}` with EXPIRE
+//!   `outcome_ttl_secs` (default 86400 s). THE OUTCOME LEDGER IS ALWAYS ON
+//!   and independent of calibration: with calibration enabled it is created
+//!   atomically by `register_decision.lua` at decision time; with
+//!   calibration disabled the state store registers the SAME key layout
+//!   (`outcome_register.lua`). ConfirmedLegitimate/ConfirmedAbuse therefore
+//!   work identically in both configurations.
 //!
 //! Bias (byte-identical integer math with PHP, ALL i64 truncating division,
 //! executed inside ONE canonical Lua invocation — the script at
@@ -42,10 +56,10 @@
 //! minimum_resolution_ratio` (default 0.80), the target is SUSPENDED at 0 —
 //! the label-reporting process must demonstrably resolve a minimum
 //! fraction of the server-selected sample before the model may move. The
-//! two counters are namespace-wide strings:
-//! `{kiwi:<ns>}:cal:sample:total` (INCR at assessment time for every
-//! sampled decision) and `{kiwi:<ns>}:cal:sample:resolved` (INCR by
-//! `confirm.lua` on a sampled confirmation).
+//! counters are summed from the SAME 24 hourly buckets per scope (round 7:
+//! `sample_total` is HINCRBYed by `register_decision.lua` at DECISION time
+//! for sampled decisions, `sample_resolved` by `confirm.lua` on a sampled
+//! confirmation — both ATOMICALLY with the receipt/ledger work).
 //!
 //! The rate limiter is PROPORTIONAL to elapsed time and applies to the
 //! PATH, not just the target: internal bias is stored in MILLI-POINTS at
@@ -59,38 +73,62 @@
 //! rate-limit clock is Redis TIME (the script derives `now` itself), so
 //! app-node clock skew cannot move the shared state.
 //!
+//! DECISION REGISTRATION is ATOMIC via `resources/register_decision.lua`
+//! (one script invocation: SET NX the receipt + create the PENDING outcome
+//! ledger + HINCRBY the decision-time bucket's sample_total when sampled) —
+//! a sample can never be counted without its receipt (no permanently
+//! orphaned denominators), and a decision always has an outcome-ledger
+//! entry regardless of whether calibration is enabled.
+//!
 //! Confirmation is ATOMIC via `resources/confirm.lua` (one script
-//! invocation: GET receipt → validate mode/weight → DEL → HINCRBYFLOAT
-//! into the bucket → EXPIRE): there is no crash window between consuming
-//! the receipt and recording the outcome, and ALL arguments are validated
-//! BEFORE the receipt is deleted (an invalid mode/weight is an error reply
-//! that leaves the receipt untouched). The script returns a SHARED status:
-//! 0 = missing / already confirmed / corrupt receipt; 1 = FIRST
-//! confirmation and calibration recorded; 2 = FIRST confirmation but
-//! deliberately unsampled (random-sample mode: the decision was not in the
-//! server-selected sample, so it does NOT enter calibration — but the
-//! confirmation is still consumed and the caller may apply first-party
-//! reputation exactly once). In random-sample mode an unsampled decision
-//! is discarded (deleted, never counted) so a label can never select
-//! itself into the calibration population; weighted mode applies the
-//! caller's inverse sampling probability as a float weight. KEYS[3] of the
-//! script is the sampled-RESOLVED counter
-//! (`{kiwi:<ns>}:cal:sample:resolved`), INCRed on a sampled confirmation
-//! in random-sample mode.
+//! invocation: GET receipt → validate mode/weight/scope/hour → DEL →
+//! ledger CAS PENDING->L/A → HINCRBYFLOAT into the DECISION-TIME bucket →
+//! EXPIRE): there is no crash window between consuming the receipt and
+//! recording the outcome, and ALL arguments are validated BEFORE the
+//! receipt is deleted (an invalid mode/weight is an error reply that
+//! leaves the receipt untouched). Confirmed outcomes are bucketed by when
+//! the DECISION was made (`receipt.decision_hour`), never by confirmation
+//! time. The script returns a SHARED status: 0 = missing / already
+//! confirmed / corrupt receipt; 1 = FIRST confirmation and calibration
+//! recorded; 2 = FIRST confirmation but deliberately unsampled
+//! (random-sample mode: the decision was not in the server-selected
+//! sample, so it does NOT enter calibration — but the confirmation is
+//! still consumed and the caller may apply first-party reputation exactly
+//! once). In random-sample mode an unsampled decision is discarded
+//! (deleted, never counted) so a label can never select itself into the
+//! calibration population; weighted mode applies the caller's inverse
+//! sampling probability as a float weight (and REQUIRES it: a weighted
+//! confirm without a weight is a typed error, never a silent 1.0).
+//!
+//! Correction is ATOMIC via `resources/correction.lua` (one script
+//! invocation: GET the outcome ledger → validate scope/hour → REVERSE the
+//! original contribution with the EXACT recorded weight (ledger.w, clamped
+//! at zero) → add the corrected contribution → flip the ledger). If the
+//! decision-time bucket already expired the ledger still flips — the
+//! corrected outcome is authoritative for future events while the old
+//! ephemeral reputation pressure is left to decay naturally (Kiwi does not
+//! pretend to reverse already-decayed leaky counters). No synthetic
+//! identities are involved: the ledger itself is the once-only authority.
 //!
 //! `bias_for_scope` caches the per-scope result in-process for 30 s (bounded
 //! to ~1024 scopes, oldest evicted): cache hits make ZERO Redis calls (0 is
 //! cached too). Recording a confirmed outcome (status 1 or 2) invalidates
 //! the scope's entry so the next assessment re-aggregates. The engine
 //! applies `clamp(base + bias, 0, 1000)` BEFORE band mapping.
+//!
+//! `sampling_metrics` runs `resources/sampling_metrics.lua` (one
+//! invocation: 24 HGETALLs summing `sample_total` / `sample_resolved` for
+//! one scope) and derives `resolution_ratio = resolved / total` (0 when
+//! total is 0) and `sampled_expired = max(0, total − resolved)` — the
+//! latter includes receipts still in flight (registered, not yet
+//! resolved).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use redis::Commands;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::action::RiskAction;
@@ -101,6 +139,27 @@ use crate::action::RiskAction;
 pub enum CalibrationError {
     #[error("calibration backend unavailable: {0}")]
     Backend(String),
+    /// Weighted sampling requires the caller to supply the inverse sampling
+    /// probability at confirmation time; a missing weight would silently
+    /// bias the population, so it is a typed error instead of a silent 1.0.
+    #[error("weighted sampling requires a confirmation weight for decision {0}")]
+    WeightRequired(String),
+}
+
+/// Per-scope sampling metrics from [`CalibrationStore::sampling_metrics`]:
+/// the sample counters summed across the scope's 24-bucket window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SamplingMetrics {
+    /// Sample-registered decisions in the window (includes receipts still
+    /// in flight).
+    pub sampled_total: i64,
+    /// Sample-resolved decisions in the window.
+    pub sampled_resolved: i64,
+    /// `sampled_resolved / sampled_total` (0.0 when total is 0).
+    pub resolution_ratio: f64,
+    /// `max(0, total − resolved)`: unresolved decisions in the window,
+    /// including receipts still in flight.
+    pub sampled_expired: i64,
 }
 
 /// Outcome-confirmation sampling strategy (wire ints shared with PHP:
@@ -131,10 +190,22 @@ impl SamplingMode {
 
 /// Outcome-feedback calibration store.
 pub trait CalibrationStore: Send + Sync {
-    /// Registers the calibration receipt of one issued decision: a STRING
-    /// JSON `{"scope":..,"band":..,"action":"..","score":..,"sampled":0|1}`
-    /// with EXPIRE `receipt_ttl_secs`. `score` is the decision's EXACT risk
-    /// score (0..1000); `sampled` is the [`CalibrationStore::sample`] flag.
+    /// Registers one issued decision ATOMICALLY
+    /// (`resources/register_decision.lua`): a STRING receipt JSON
+    /// `{"scope":..,"band":..,"action":"..","decision_hour":..,"score":..,
+    /// "sampled":0|1}` with EXPIRE `receipt_ttl_secs`, a PENDING outcome
+    /// ledger entry (EXPIRE `outcome_ttl_secs`) and — when `sampled` — the
+    /// decision-time bucket's `sample_total` denominator, all in ONE script
+    /// invocation (a sample can never be counted without its receipt).
+    /// `score` is the decision's EXACT risk score (0..1000); `sampled` is
+    /// the [`CalibrationStore::sample`] flag; `decision_hour` is
+    /// `now_ms / 3_600_000` (the DECISION's hour — confirmed outcomes are
+    /// bucketed by decision time); `weight` is 1.0 at registration (the
+    /// confirmation records the actual inverse-sampling weight).
+    ///
+    /// Returns `Ok(false)` when the decision_id is already registered (SET
+    /// NX: a retried decision can never overwrite its receipt/ledger).
+    #[allow(clippy::too_many_arguments)]
     fn record_receipt(
         &self,
         decision_id: &str,
@@ -143,31 +214,35 @@ pub trait CalibrationStore: Send + Sync {
         action: RiskAction,
         score: u32,
         sampled: bool,
-    ) -> Result<(), CalibrationError>;
+        decision_hour: i64,
+        weight: f64,
+    ) -> Result<bool, CalibrationError>;
 
     /// Confirms the outcome of one decision ATOMICALLY (one canonical Lua
-    /// invocation — `resources/confirm.lua`): consumes the receipt and
-    /// records the exact score into the scope's current hourly bucket, or
-    /// discards an unsampled receipt in random-sample mode.
+    /// invocation — `resources/confirm.lua`): consumes the receipt, flips
+    /// the outcome ledger PENDING->L/A exactly once and records the exact
+    /// score into the DECISION-TIME hourly bucket, or discards an unsampled
+    /// receipt in random-sample mode.
     ///
     /// Returns the SHARED accepted-outcome status (wire contract with PHP):
     ///
     /// - `0` — nothing consumed: receipt missing, already confirmed,
     ///   corrupt, or (mode 1) discarded as deliberately unsampled.
     /// - `1` — FIRST confirmation; the exact score was recorded into the
-    ///   scope bucket (+ the sampled-resolved counter in random-sample
-    ///   mode).
+    ///   decision-time scope bucket (+ the sampled-resolved counter in
+    ///   random-sample mode).
     /// - `2` — FIRST confirmation; deliberately unsampled in random-sample
     ///   mode (consumed, never calibrated, resolved counter untouched).
     ///
     /// Statuses 1 and 2 both mean "first confirmation" — the caller may
     /// apply the first-party reputation event exactly once (engine
     /// contract); status 0 must NOT book any reputation event (a retry
-    /// must never amplify). `weight` is the HINCRBYFLOAT weight (default
-    /// 1.0; the inverse sampling probability in weighted mode). Any
-    /// backend failure — including a Lua error reply for an invalid mode
-    /// or weight, which happens BEFORE the receipt is deleted — is an
-    /// error (the engine treats calibration as best-effort).
+    /// must never amplify). `weight` is the HINCRBYFLOAT weight (the
+    /// inverse sampling probability in weighted mode). In weighted mode a
+    /// missing weight is [`CalibrationError::WeightRequired`] — never a
+    /// silent 1.0. Any backend failure — including a Lua error reply for an
+    /// invalid mode or weight, which happens BEFORE the receipt is deleted
+    /// — is an error (the engine treats calibration as best-effort).
     fn confirm_outcome(
         &self,
         decision_id: &str,
@@ -175,32 +250,47 @@ pub trait CalibrationStore: Send + Sync {
         weight: Option<f64>,
     ) -> Result<u8, CalibrationError>;
 
-    /// Assessment-time accounting hook: the engine calls this for every
-    /// decision whose receipt was registered with `sampled: true`; in
-    /// random-sample mode the store INCRs the namespace-wide sampled-TOTAL
-    /// counter `{kiwi:<ns>}:cal:sample:total` (the denominator of the
-    /// resolution gate). PHP parity: the PHP store performs the same INCR
-    /// inside its `sample()` when mode is random_sample and the decision
-    /// is sampled. Other modes are no-ops. Default: no-op.
-    fn mark_sampled(&self) -> Result<(), CalibrationError> {
-        Ok(())
-    }
-
-    /// Reserves the once-only correction slot for a decision: SET NX
-    /// `{kiwi:<ns>}:cal:corrected:<hex(sha256(decision_id))>` EX
-    /// `receipt_ttl_secs`. `Ok(true)` = this call WON the slot (the engine
-    /// may record its compensating event); `Ok(false)` = already
-    /// corrected. Default: never granted (stores without a namespace
-    /// cannot enforce the guard and therefore refuse corrections).
-    fn reserve_correction(&self, decision_id: &str) -> Result<bool, CalibrationError> {
-        let _ = decision_id;
-        Ok(false)
-    }
+    /// Corrects a decision's outcome ATOMICALLY (one canonical Lua
+    /// invocation — `resources/correction.lua`): flips the outcome ledger
+    /// L <-> A and REVERSES the original bucket contribution (exact
+    /// recorded weight `ledger.w`, clamped at zero) before adding the
+    /// corrected contribution — or flips the ledger alone when the
+    /// decision-time bucket already expired. `legitimate` is the CORRECTED
+    /// outcome. Returns `Ok(true)` when the correction was applied,
+    /// `Ok(false)` when the decision is unknown or already carries the
+    /// target outcome.
+    fn correct_outcome(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+    ) -> Result<bool, CalibrationError>;
 
     /// The sampling flag stamped on every new receipt: Complete/Weighted
     /// always sample; RandomSample samples with probability
-    /// `sampling_probability_ppm / 1_000_000`.
+    /// `sampling_probability_ppm / 1_000_000`. PURE (no side effects): the
+    /// sample denominator is booked atomically by
+    /// [`CalibrationStore::record_receipt`].
     fn sample(&self) -> bool;
+
+    /// Per-scope sampling metrics (one canonical Lua invocation —
+    /// `resources/sampling_metrics.lua`): `sample_total` / `sample_resolved`
+    /// summed across the scope's 24-bucket window, plus the derived
+    /// `resolution_ratio` and `sampled_expired` (see [`SamplingMetrics`]).
+    /// Default: an all-zero snapshot (stores without a namespace).
+    fn sampling_metrics(
+        &self,
+        scope: u32,
+        now_ms: i64,
+    ) -> Result<SamplingMetrics, CalibrationError> {
+        let _ = (scope, now_ms);
+        Ok(SamplingMetrics {
+            sampled_total: 0,
+            sampled_resolved: 0,
+            resolution_ratio: 0.0,
+            sampled_expired: 0,
+        })
+    }
 
     /// Bias adjustment for a scope at `now_ms` (epoch milliseconds).
     ///
@@ -221,6 +311,7 @@ pub struct RedisCalibrationStore {
     max_adjustment: i32,
     max_change_per_minute: i32,
     receipt_ttl_secs: u64,
+    outcome_ttl_secs: u64,
     mode: SamplingMode,
     sampling_probability_ppm: u32,
     minimum_resolution_ratio: f64,
@@ -229,6 +320,9 @@ pub struct RedisCalibrationStore {
     cache: Mutex<BiasCache>,
     script: redis::Script,
     confirm_script: redis::Script,
+    register_script: redis::Script,
+    correction_script: redis::Script,
+    metrics_script: redis::Script,
     script_calls: AtomicUsize,
 }
 
@@ -281,16 +375,34 @@ impl BiasCache {
 
 /// The CANONICAL calibration script, shared verbatim with PHP
 /// (`protocol/risk-v1/calibration.lua`). One invocation replaces the old
-/// two-script round trip: it aggregates the 24 hourly buckets, seeds and
-/// refreshes the rate-limit state (milli-points), applies the proportional
-/// per-minute allowance and returns the final integer bias in points.
+/// two-script round trip: it aggregates the 24 hourly buckets (including
+/// their per-bucket sample counters), seeds and refreshes the rate-limit
+/// state (milli-points), applies the proportional per-minute allowance and
+/// returns the final integer bias in points.
 const CALIBRATION_LUA: &str = include_str!("../resources/calibration.lua");
 
 /// The CANONICAL atomic confirm script, shared verbatim with PHP
 /// (`protocol/risk-v1/confirm.lua`). One invocation consumes the receipt
-/// (DEL) and records the exact score into the bucket (HINCRBYFLOAT +
-/// EXPIRE) — or discards an unsampled receipt in random-sample mode.
+/// (DEL), flips the outcome ledger and records the exact score into the
+/// DECISION-TIME bucket (HINCRBYFLOAT + EXPIRE) — or discards an unsampled
+/// receipt in random-sample mode.
 const CONFIRM_LUA: &str = include_str!("../resources/confirm.lua");
+
+/// The CANONICAL atomic decision-registration script, shared verbatim with
+/// PHP (`protocol/risk-v1/register_decision.lua`): receipt (SET NX EX) +
+/// PENDING outcome ledger + the sampled decision-time denominator in ONE
+/// invocation.
+const REGISTER_DECISION_LUA: &str = include_str!("../resources/register_decision.lua");
+
+/// The CANONICAL atomic correction script, shared verbatim with PHP
+/// (`protocol/risk-v1/correction.lua`): flips the outcome ledger and
+/// reverses/redoes the bucket contribution with the exact recorded weight.
+const CORRECTION_LUA: &str = include_str!("../resources/correction.lua");
+
+/// The CANONICAL sampling-metrics script, shared verbatim with PHP
+/// (`protocol/risk-v1/sampling_metrics.lua`): 24 HGETALLs summing the
+/// scope's sample counters.
+const SAMPLING_METRICS_LUA: &str = include_str!("../resources/sampling_metrics.lua");
 
 impl RedisCalibrationStore {
     /// Bucket retention (48 h; 24 buckets per scope are ever read).
@@ -298,6 +410,9 @@ impl RedisCalibrationStore {
     /// Default receipt lifetime (configurable via
     /// [`RedisCalibrationStore::with_receipt_ttl`]).
     pub const RECEIPT_EXPIRE_S: u64 = 300;
+    /// Default outcome-ledger lifetime (configurable via
+    /// [`RedisCalibrationStore::with_options`]).
+    pub const OUTCOME_EXPIRE_S: u64 = 86_400;
     /// Hourly buckets considered by `bias_for_scope` (current + 23 back).
     pub const BUCKET_WINDOW_HOURS: i64 = 24;
     /// Minimum confirmed outcomes before a scope earns any nonzero bias.
@@ -388,6 +503,7 @@ impl RedisCalibrationStore {
             max_adjustment,
             max_change_per_minute,
             receipt_ttl_secs,
+            Self::OUTCOME_EXPIRE_S,
             Self::DEFAULT_MODE,
             Self::DEFAULT_SAMPLING_PROBABILITY_PPM,
             Self::DEFAULT_MIN_RESOLUTION_RATIO,
@@ -404,14 +520,16 @@ impl RedisCalibrationStore {
     /// round-6 cost/resolution knobs: `minimum_resolution_ratio` (0..1,
     /// default 0.80 — 0 disables the random-sample resolution gate),
     /// `false_positive_cost` (default 1.0) and `false_negative_cost`
-    /// (default 2.0).
+    /// (default 2.0). `outcome_ttl_secs` is the ALWAYS-ON outcome-ledger
+    /// lifetime (default 86400 s).
     ///
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`, if
     /// `min_samples < 1` / `max_adjustment < 0` / `max_change_per_minute < 0`,
-    /// if `receipt_ttl_secs < 1`, if `minimum_resolution_ratio` is outside
-    /// 0..=1, or if either cost is not > 0.
+    /// if `receipt_ttl_secs < 1` or `outcome_ttl_secs < 1`, if
+    /// `minimum_resolution_ratio` is outside 0..=1, or if either cost is
+    /// not > 0.
     #[allow(clippy::too_many_arguments)]
     pub fn with_options(
         client: redis::Client,
@@ -420,6 +538,7 @@ impl RedisCalibrationStore {
         max_adjustment: i32,
         max_change_per_minute: i32,
         receipt_ttl_secs: u64,
+        outcome_ttl_secs: u64,
         mode: SamplingMode,
         sampling_probability_ppm: u32,
         minimum_resolution_ratio: f64,
@@ -437,6 +556,7 @@ impl RedisCalibrationStore {
             "max_change_per_minute must be >= 0"
         );
         assert!(receipt_ttl_secs >= 1, "receipt_ttl_secs must be >= 1");
+        assert!(outcome_ttl_secs >= 1, "outcome_ttl_secs must be >= 1");
         assert!(
             (0.0..=1.0).contains(&minimum_resolution_ratio),
             "minimum_resolution_ratio must be within 0..=1"
@@ -451,6 +571,7 @@ impl RedisCalibrationStore {
             max_adjustment,
             max_change_per_minute,
             receipt_ttl_secs,
+            outcome_ttl_secs,
             mode,
             sampling_probability_ppm,
             minimum_resolution_ratio,
@@ -462,6 +583,9 @@ impl RedisCalibrationStore {
             )),
             script: redis::Script::new(CALIBRATION_LUA),
             confirm_script: redis::Script::new(CONFIRM_LUA),
+            register_script: redis::Script::new(REGISTER_DECISION_LUA),
+            correction_script: redis::Script::new(CORRECTION_LUA),
+            metrics_script: redis::Script::new(SAMPLING_METRICS_LUA),
             script_calls: AtomicUsize::new(0),
         }
     }
@@ -545,17 +669,13 @@ impl RedisCalibrationStore {
         format!("{{kiwi:{}}}:cal:receipt:{decision_id}", self.namespace)
     }
 
-    /// Namespace-wide sampled-decisions TOTAL counter (denominator of the
-    /// random-sample resolution gate; KEYS[26] of calibration.lua).
-    fn sample_total_key(&self) -> String {
-        format!("{{kiwi:{}}}:cal:sample:total", self.namespace)
-    }
-
-    /// Namespace-wide sampled-decisions RESOLVED counter (numerator of the
-    /// random-sample resolution gate; KEYS[27] of calibration.lua and
-    /// KEYS[3] of confirm.lua).
-    fn sample_resolved_key(&self) -> String {
-        format!("{{kiwi:{}}}:cal:sample:resolved", self.namespace)
+    /// The outcome-ledger key for one decision — the SAME canonical key the
+    /// calibration-independent store path uses (`outcome_register.lua` /
+    /// `outcome_confirm.lua` / `outcome_correct.lua`), so the ALWAYS-ON
+    /// ledger is one key layout whether calibration is enabled or disabled.
+    /// Public so tests (and tooling) can inspect the ledger entries.
+    pub fn outcome_ledger_key(&self, decision_id: &str) -> String {
+        format!("{{kiwi:{}}}:outcome:{decision_id}", self.namespace)
     }
 
     /// Lazy single connection.
@@ -576,13 +696,6 @@ fn backend(e: redis::RedisError) -> CalibrationError {
     CalibrationError::Backend(e.to_string())
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
 impl CalibrationStore for RedisCalibrationStore {
     fn bias_for_scope(&self, scope: u32, now_ms: i64) -> i32 {
         let now = Instant::now();
@@ -601,23 +714,22 @@ impl CalibrationStore for RedisCalibrationStore {
         };
         let conn = guard.as_mut().expect("connection set by connection()");
 
-        // HOT PATH: ONE canonical script invocation (was two scripts). Keys
-        // are the 24 hourly buckets + the rate-limit state + the two
-        // random-sample resolution counters; ARGV is
-        // now_ms (informational — the script's rate-limit clock is Redis
-        // TIME), min_samples, max_adjustment, max_change_per_minute,
+        // HOT PATH: ONE canonical script invocation. Keys are the 24 hourly
+        // buckets + the rate-limit state (round 7: the sample counters live
+        // INSIDE the buckets, so there are no singleton counter keys);
+        // ARGV is now_ms (informational — the script's rate-limit clock is
+        // Redis TIME), min_samples, max_adjustment, max_change_per_minute,
         // minimum_resolution_ratio (float), sampling mode (0/1/2),
         // false_positive_cost, false_negative_cost. The script aggregates,
         // seeds/refreshes the milli-point state, applies the proportional
-        // allowance and the resolution gate, and returns the integer bias.
+        // allowance and the per-scope resolution gate, and returns the
+        // integer bias.
         let hour = now_ms / 3_600_000;
-        let mut keys: Vec<String> = Vec::with_capacity(Self::BUCKET_WINDOW_HOURS as usize + 3);
+        let mut keys: Vec<String> = Vec::with_capacity(Self::BUCKET_WINDOW_HOURS as usize + 1);
         for h in (hour - (Self::BUCKET_WINDOW_HOURS - 1))..=hour {
             keys.push(self.bucket_key(scope, h));
         }
         keys.push(self.state_key(scope));
-        keys.push(self.sample_total_key());
-        keys.push(self.sample_resolved_key());
         let mut invoke = self.script.prepare_invoke();
         for key in &keys {
             invoke.key(key.as_str());
@@ -648,33 +760,49 @@ impl CalibrationStore for RedisCalibrationStore {
         action: RiskAction,
         score: u32,
         sampled: bool,
-    ) -> Result<(), CalibrationError> {
-        let key = self.receipt_key(decision_id);
+        decision_hour: i64,
+        weight: f64,
+    ) -> Result<bool, CalibrationError> {
+        let receipt_key = self.receipt_key(decision_id);
+        let bucket_key = self.bucket_key(scope, decision_hour);
+        let ledger_key = self.outcome_ledger_key(decision_id);
         let mut guard = self.connection()?;
         let conn = guard.as_mut().ok_or_else(|| {
             CalibrationError::Backend("calibration connection vanished".to_string())
         })?;
-        // Wire format shared with PHP: a JSON string
-        // {"scope":..,"band":..,"action":"..","score":..,"sampled":0|1}
-        // with EXPIRE `receipt_ttl_secs` (default 300 s), consumed once,
-        // atomically, by the confirm script (GETDEL would lose the exact
-        // score; the script DELs and increments in the same invocation).
+
+        // ONE canonical script invocation (register_decision.lua): SET NX EX
+        // the receipt + create the PENDING outcome ledger + HINCRBY the
+        // decision-time bucket's sample_total when sampled — a sample can
+        // never be counted without its receipt (no permanently orphaned
+        // denominators), and a decision always has an outcome-ledger entry.
+        // Wire format shared with PHP: receipt JSON
+        // {"scope":..,"band":..,"action":"..","decision_hour":..,"score":..,
+        // "sampled":0|1} with EXPIRE `receipt_ttl_secs`.
         let json = serde_json::json!({
             "scope": scope,
             "band": band,
             "action": action.as_str(),
+            "decision_hour": decision_hour,
             "score": score.clamp(0, 1000),
             "sampled": sampled as u8,
         })
         .to_string();
-        redis::cmd("SET")
-            .arg(&key)
-            .arg(&json)
-            .arg("EX")
-            .arg(self.receipt_ttl_secs)
-            .query::<()>(conn)
-            .map_err(backend)?;
-        Ok(())
+        let mut invoke = self.register_script.prepare_invoke();
+        invoke.key(receipt_key.as_str());
+        invoke.key(bucket_key.as_str());
+        invoke.key(ledger_key.as_str());
+        invoke.arg(json.as_str());
+        invoke.arg(self.receipt_ttl_secs.to_string());
+        invoke.arg(if sampled { "1" } else { "0" });
+        invoke.arg(Self::BUCKET_EXPIRE_S.to_string());
+        invoke.arg(self.outcome_ttl_secs.to_string());
+        invoke.arg(scope.to_string());
+        invoke.arg(decision_hour.to_string());
+        invoke.arg(score.clamp(0, 1000).to_string());
+        invoke.arg(weight.to_string());
+        let registered: i64 = invoke.invoke(conn).map_err(backend)?;
+        Ok(registered != 0)
     }
 
     fn confirm_outcome(
@@ -683,18 +811,25 @@ impl CalibrationStore for RedisCalibrationStore {
         legitimate: bool,
         weight: Option<f64>,
     ) -> Result<u8, CalibrationError> {
+        // Weighted sampling REQUIRES the caller's inverse sampling
+        // probability: a missing weight would silently bias the population,
+        // so it is a TYPED error, never a silent 1.0.
+        if self.mode == SamplingMode::Weighted && weight.is_none() {
+            return Err(CalibrationError::WeightRequired(decision_id.to_string()));
+        }
         let receipt_key = self.receipt_key(decision_id);
         let mut guard = self.connection()?;
         let conn = guard.as_mut().ok_or_else(|| {
             CalibrationError::Backend("calibration connection vanished".to_string())
         })?;
 
-        // Key discovery: the bucket key needs the receipt's scope, which
-        // only the receipt itself carries. The pre-read GET is
-        // NON-destructive — the confirm script re-checks the receipt under
-        // the same key, so a concurrent consumption simply yields status 0
-        // (the outcome is recorded exactly once) and a receipt deleted in
-        // between is a no-op, never a double record.
+        // Key discovery: the DECISION-TIME bucket and the outcome ledger
+        // keys need the receipt's scope + decision_hour, which only the
+        // receipt itself carries. The pre-read GET is NON-destructive — the
+        // confirm script re-checks the receipt under the same key, so a
+        // concurrent consumption simply yields status 0 (the outcome is
+        // recorded exactly once) and a receipt deleted in between is a
+        // no-op, never a double record.
         let raw: Option<String> = redis::cmd("GET")
             .arg(&receipt_key)
             .query(conn)
@@ -712,32 +847,41 @@ impl CalibrationStore for RedisCalibrationStore {
         let Ok(scope) = u32::try_from(scope) else {
             return Ok(0);
         };
-        let bucket_key = self.bucket_key(scope, now_ms() / 3_600_000);
+        let Some(decision_hour) = value.get("decision_hour").and_then(|v| v.as_i64()) else {
+            return Ok(0);
+        };
+        let bucket_key = self.bucket_key(scope, decision_hour);
+        let ledger_key = self.outcome_ledger_key(decision_id);
 
         // ONE canonical script invocation: GET receipt -> validate mode +
-        // weight -> DEL -> (discard or) HINCRBYFLOAT the exact score into
-        // the bucket + EXPIRE -> (random-sample) INCR the resolved counter.
-        // KEYS = receipt, bucket, resolved counter; ARGV = mode int, weight
-        // (float; default 1.0), legitimate 1/0, bucket TTL. Returns the
-        // SHARED status: 0 none consumed, 1 recorded, 2 consumed-but-
-        // unsampled. Invalid mode/weight -> error_reply BEFORE the DEL, so
-        // the receipt survives a validation failure.
-        let resolved_key = self.sample_resolved_key();
+        // weight + scope/hour -> DEL -> ledger CAS PENDING->L/A -> (discard
+        // or) HINCRBYFLOAT the exact score into the DECISION-TIME bucket +
+        // EXPIRE -> (random-sample) HINCRBY the resolved counter. KEYS =
+        // receipt, decision-time bucket, outcome ledger; ARGV = mode int,
+        // weight (decimal string; "1" outside weighted mode), legitimate
+        // 1/0, bucket TTL, outcome TTL, expected scope, expected
+        // decision_hour. Returns the SHARED status: 0 none consumed,
+        // 1 recorded, 2 consumed-but-unsampled. Invalid mode/weight ->
+        // error_reply BEFORE any state change, so the receipt survives a
+        // validation failure.
         let mut invoke = self.confirm_script.prepare_invoke();
         invoke.key(receipt_key.as_str());
         invoke.key(bucket_key.as_str());
-        invoke.key(resolved_key.as_str());
+        invoke.key(ledger_key.as_str());
         invoke.arg(self.mode.as_int().to_string());
         invoke.arg(weight.unwrap_or(1.0).to_string());
         invoke.arg(if legitimate { "1" } else { "0" });
         invoke.arg(Self::BUCKET_EXPIRE_S.to_string());
+        invoke.arg(self.outcome_ttl_secs.to_string());
+        invoke.arg(scope.to_string());
+        invoke.arg(decision_hour.to_string());
         let status: i64 = invoke.invoke(conn).map_err(backend)?;
-        if status != 0 {
+        if status == 1 || status == 2 {
             // A FIRST confirmation (status 1 or 2) invalidates the scope's
             // cached bias so the next assessment re-aggregates — status 2
             // is a consumed outcome too (unsampled: no calibration, but the
-            // cache entry would otherwise go stale relative to the
-            // namespace counters the gate reads).
+            // cache entry would otherwise go stale relative to the sample
+            // counters the gate reads).
             self.cache
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -747,42 +891,109 @@ impl CalibrationStore for RedisCalibrationStore {
         Ok(status as u8)
     }
 
-    fn mark_sampled(&self) -> Result<(), CalibrationError> {
-        if self.mode != SamplingMode::RandomSample {
-            return Ok(());
-        }
+    fn correct_outcome(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+    ) -> Result<bool, CalibrationError> {
+        let ledger_key = self.outcome_ledger_key(decision_id);
         let mut guard = self.connection()?;
         let conn = guard.as_mut().ok_or_else(|| {
             CalibrationError::Backend("calibration connection vanished".to_string())
         })?;
-        redis::cmd("INCR")
-            .arg(self.sample_total_key())
-            .query::<i64>(conn)
-            .map_err(backend)?;
-        Ok(())
-    }
 
-    fn reserve_correction(&self, decision_id: &str) -> Result<bool, CalibrationError> {
-        let mut digest = Sha256::new();
-        digest.update(decision_id.as_bytes());
-        let key = format!(
-            "{{kiwi:{}}}:cal:corrected:{}",
-            self.namespace,
-            hex::encode(digest.finalize())
-        );
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
-        })?;
-        let set: Option<String> = redis::cmd("SET")
-            .arg(&key)
-            .arg("1")
-            .arg("NX")
-            .arg("EX")
-            .arg(self.receipt_ttl_secs)
+        // Key discovery: the DECISION-TIME bucket needs the ledger's scope
+        // + hour. The pre-read GET is NON-destructive — correction.lua
+        // re-checks the ledger under the same key.
+        let raw: Option<String> = redis::cmd("GET")
+            .arg(&ledger_key)
             .query(conn)
             .map_err(backend)?;
-        Ok(set.is_some())
+        let Some(raw) = raw else {
+            return Ok(false);
+        };
+        let value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => return Ok(false),
+        };
+        let Some(scope) = value.get("scope").and_then(|v| v.as_u64()) else {
+            return Ok(false);
+        };
+        let Ok(scope) = u32::try_from(scope) else {
+            return Ok(false);
+        };
+        let Some(hour) = value.get("hour").and_then(|v| v.as_i64()) else {
+            return Ok(false);
+        };
+        let bucket_key = self.bucket_key(scope, hour);
+
+        // ONE canonical script invocation (correction.lua): validate
+        // scope/hour/outcome/weight -> REVERSE the original contribution
+        // with the exact recorded weight (ledger.w, clamped at zero) -> add
+        // the corrected contribution -> flip the ledger. KEYS = ledger,
+        // decision-time bucket; ARGV = new outcome ('L'/'A'), weight
+        // (decimal string), bucket TTL, outcome TTL, expected scope,
+        // expected decision_hour. Returns 1 when applied, 0 when unknown or
+        // already carrying the target outcome.
+        let mut invoke = self.correction_script.prepare_invoke();
+        invoke.key(ledger_key.as_str());
+        invoke.key(bucket_key.as_str());
+        invoke.arg(if legitimate { "L" } else { "A" });
+        invoke.arg(weight.unwrap_or(1.0).to_string());
+        invoke.arg(Self::BUCKET_EXPIRE_S.to_string());
+        invoke.arg(self.outcome_ttl_secs.to_string());
+        invoke.arg(scope.to_string());
+        invoke.arg(hour.to_string());
+        let applied: i64 = invoke.invoke(conn).map_err(backend)?;
+        if applied != 0 {
+            // A corrected outcome changes the scope's aggregate: drop the
+            // cached bias so the next assessment re-aggregates.
+            self.cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entries
+                .remove(&scope);
+        }
+        Ok(applied != 0)
+    }
+
+    fn sampling_metrics(
+        &self,
+        scope: u32,
+        now_ms: i64,
+    ) -> Result<SamplingMetrics, CalibrationError> {
+        let mut guard = self.connection()?;
+        let conn = guard.as_mut().ok_or_else(|| {
+            CalibrationError::Backend("calibration connection vanished".to_string())
+        })?;
+
+        // ONE canonical script invocation (sampling_metrics.lua): 24
+        // HGETALLs summing the scope's sample counters. ARGV[1] is
+        // now_ms (informational).
+        let hour = now_ms / 3_600_000;
+        let mut keys: Vec<String> = Vec::with_capacity(Self::BUCKET_WINDOW_HOURS as usize);
+        for h in (hour - (Self::BUCKET_WINDOW_HOURS - 1))..=hour {
+            keys.push(self.bucket_key(scope, h));
+        }
+        let mut invoke = self.metrics_script.prepare_invoke();
+        for key in &keys {
+            invoke.key(key.as_str());
+        }
+        invoke.arg(now_ms.to_string());
+        let counts: Vec<i64> = invoke.invoke(conn).map_err(backend)?;
+        let sampled_total = counts.first().copied().unwrap_or(0);
+        let sampled_resolved = counts.get(1).copied().unwrap_or(0);
+        Ok(SamplingMetrics {
+            sampled_total,
+            sampled_resolved,
+            resolution_ratio: if sampled_total > 0 {
+                sampled_resolved as f64 / sampled_total as f64
+            } else {
+                0.0
+            },
+            sampled_expired: (sampled_total - sampled_resolved).max(0),
+        })
     }
 
     fn sample(&self) -> bool {
@@ -798,6 +1009,7 @@ impl CalibrationStore for RedisCalibrationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn redis_url() -> Option<String> {
         match std::env::var("RISK_REDIS_URL") {
@@ -877,6 +1089,7 @@ mod tests {
             max_adjustment,
             max_change_per_minute,
             receipt_ttl_secs,
+            RedisCalibrationStore::OUTCOME_EXPIRE_S,
             mode,
             ppm,
             minimum_resolution_ratio,
@@ -909,6 +1122,7 @@ mod tests {
             max_adjustment,
             max_change_per_minute,
             receipt_ttl_secs,
+            RedisCalibrationStore::OUTCOME_EXPIRE_S,
             mode,
             ppm,
             minimum_resolution_ratio,
@@ -960,19 +1174,49 @@ mod tests {
     }
 
     fn bucket_key(ns: &str, scope: u32) -> String {
-        format!("{{kiwi:{ns}}}:cal:{scope}:{}", now_ms() / 3_600_000)
+        format!("{{kiwi:{ns}}}:cal:{scope}:{}", now() / 3_600_000)
+    }
+
+    fn bucket_key_at(ns: &str, scope: u32, hour: i64) -> String {
+        format!("{{kiwi:{ns}}}:cal:{scope}:{hour}")
     }
 
     fn receipt_key(ns: &str, id: &str) -> String {
         format!("{{kiwi:{ns}}}:cal:receipt:{id}")
     }
 
-    fn sample_total_key(ns: &str) -> String {
-        format!("{{kiwi:{ns}}}:cal:sample:total")
+    fn ledger_key(ns: &str, id: &str) -> String {
+        format!("{{kiwi:{ns}}}:outcome:{id}")
     }
 
-    fn sample_resolved_key(ns: &str) -> String {
-        format!("{{kiwi:{ns}}}:cal:sample:resolved")
+    /// The current decision hour (`now_ms / 3_600_000`).
+    fn hour() -> i64 {
+        now() / 3_600_000
+    }
+
+    /// Registers a receipt through the ATOMIC production path
+    /// (register_decision.lua) with the current decision hour and weight
+    /// 1.0.
+    fn register(
+        s: &RedisCalibrationStore,
+        id: &str,
+        scope: u32,
+        band: u8,
+        score: u32,
+        sampled: bool,
+    ) {
+        assert!(s
+            .record_receipt(
+                id,
+                scope,
+                band,
+                RiskAction::Argon16,
+                score,
+                sampled,
+                hour(),
+                1.0
+            )
+            .unwrap());
     }
 
     /// The Redis TIME clock in epoch milliseconds — the distributed clock
@@ -985,7 +1229,10 @@ mod tests {
     /// Local epoch ms for bucket-hour selection (the Rust side computes the
     /// hourly window; the script's rate-limit clock is Redis TIME).
     fn now() -> i64 {
-        now_ms()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64
     }
 
     /// Seeds the state for every scope of a store (each first call returns
@@ -1329,8 +1576,7 @@ mod tests {
         // MUST re-invoke the script, which serves the aggregate in full
         // (10 abuse@100 -> 150; the state was seeded at the first call, so
         // after the sleep the allowance is huge).
-        s.record_receipt("c-1", 7, 4, RiskAction::Sha16, 100, true)
-            .unwrap();
+        register(&s, "c-1", 7, 4, 100, true);
         assert_eq!(s.confirm_outcome("c-1", false, None).unwrap(), 1);
         std::thread::sleep(Duration::from_millis(700));
         assert_eq!(s.bias_for_scope(7, now()), 150);
@@ -1340,12 +1586,11 @@ mod tests {
             "confirm_outcome must invalidate the cached bias"
         );
 
-        // The confirmed exact score feeds the bias in the CURRENT hour: a
+        // The confirmed exact score feeds the bias in the DECISION hour: a
         // fresh scope (fresh state) seeded at the real now, queried after a
         // real sleep by the same store (the confirm already dropped the
         // cache) -> full raw 180 -> clamped 150.
-        s.record_receipt("c-2", 8, 4, RiskAction::Sha16, 100, true)
-            .unwrap();
+        register(&s, "c-2", 8, 4, 100, true);
         assert_eq!(s.confirm_outcome("c-2", false, None).unwrap(), 1);
         assert_eq!(s.bias_for_scope(8, now()), 0, "first call seeds the state");
         std::thread::sleep(Duration::from_millis(700));
@@ -1428,8 +1673,7 @@ mod tests {
             10,
             1,
         );
-        s.record_receipt("decision-ttl", 7, 4, RiskAction::Argon16, 900, true)
-            .unwrap();
+        register(&s, "decision-ttl", 7, 4, 900, true);
         let mut conn = client().get_connection().expect("connection");
         let ttl: i64 = redis::cmd("TTL")
             .arg(format!(
@@ -1442,8 +1686,7 @@ mod tests {
 
         // The default knob stays 300 s.
         let d = store("ttldef");
-        d.record_receipt("decision-def", 7, 4, RiskAction::Argon16, 900, true)
-            .unwrap();
+        register(&d, "decision-def", 7, 4, 900, true);
         let ttl: i64 = redis::cmd("TTL")
             .arg(format!(
                 "{{kiwi:{}}}:cal:receipt:decision-def",
@@ -1461,10 +1704,19 @@ mod tests {
             return;
         };
         let s = store("rcarries");
-        s.record_receipt("decision-1", 7, 4, RiskAction::Argon16, 900, true)
-            .unwrap();
-        s.record_receipt("decision-2", 8, 9, RiskAction::Deny, 1000, false)
-            .unwrap();
+        register(&s, "decision-1", 7, 4, 900, true);
+        assert!(s
+            .record_receipt(
+                "decision-2",
+                8,
+                9,
+                RiskAction::Deny,
+                1000,
+                false,
+                hour(),
+                1.0
+            )
+            .unwrap());
         let mut conn = client().get_connection().expect("connection");
         let json1: String = conn
             .get(receipt_key(s.namespace(), "decision-1"))
@@ -1473,6 +1725,7 @@ mod tests {
         assert_eq!(value["scope"], 7);
         assert_eq!(value["band"], 4);
         assert_eq!(value["action"], "argon16");
+        assert_eq!(value["decision_hour"], hour());
         assert_eq!(value["score"], 900);
         assert_eq!(value["sampled"], 1);
         let json2: String = conn
@@ -1491,8 +1744,7 @@ mod tests {
         };
         let s = store_mode("complete", SamplingMode::Complete, 0);
         assert!(s.sample(), "Complete mode always samples");
-        s.record_receipt("d-1", 7, 4, RiskAction::Argon16, 900, s.sample())
-            .unwrap();
+        register(&s, "d-1", 7, 4, 900, s.sample());
         assert_eq!(s.confirm_outcome("d-1", true, None).unwrap(), 1);
         let mut conn = client().get_connection().expect("connection");
         let key = bucket_key(s.namespace(), 7);
@@ -1513,8 +1765,7 @@ mod tests {
         // Unsampled: consumed with status 2 (receipt deleted, NO bucket
         // fields, no resolved-counter increment) — a FIRST confirmation
         // that never enters calibration.
-        s.record_receipt("d-unsampled", 7, 4, RiskAction::Argon16, 900, false)
-            .unwrap();
+        register(&s, "d-unsampled", 7, 4, 900, false);
         assert_eq!(
             s.confirm_outcome("d-unsampled", true, None).unwrap(),
             2,
@@ -1532,19 +1783,12 @@ mod tests {
             fields.is_empty(),
             "a status-2 confirm must not touch the bucket"
         );
-        let resolved: Option<i64> = redis::cmd("GET")
-            .arg(sample_resolved_key(s.namespace()))
-            .query(&mut conn)
-            .expect("get");
-        assert_eq!(
-            resolved.unwrap_or(0),
-            0,
-            "a status-2 confirm must not resolve a sample"
-        );
+        let resolved: i64 =
+            hget_f64(&mut conn, &bucket_key(s.namespace(), 7), "sample_resolved") as i64;
+        assert_eq!(resolved, 0, "a status-2 confirm must not resolve a sample");
 
         // Sampled: recorded with status 1.
-        s.record_receipt("d-sampled", 7, 4, RiskAction::Argon16, 900, true)
-            .unwrap();
+        register(&s, "d-sampled", 7, 4, 900, true);
         assert_eq!(s.confirm_outcome("d-sampled", true, None).unwrap(), 1);
         assert_eq!(
             hget_f64(&mut conn, &bucket_key(s.namespace(), 7), "legit_count"),
@@ -1560,8 +1804,7 @@ mod tests {
         };
         let s = store_mode("weighted", SamplingMode::Weighted, 0);
         assert!(s.sample(), "Weighted mode always samples");
-        s.record_receipt("d-w", 7, 4, RiskAction::Argon16, 500, s.sample())
-            .unwrap();
+        register(&s, "d-w", 7, 4, 500, s.sample());
         // Inverse sampling probability 10: the outcome counts 10-fold.
         assert_eq!(s.confirm_outcome("d-w", true, Some(10.0)).unwrap(), 1);
         let mut conn = client().get_connection().expect("connection");
@@ -1577,8 +1820,7 @@ mod tests {
             return;
         };
         let s = store_mode("confirm", SamplingMode::Complete, 0);
-        s.record_receipt("decision-1", 7, 4, RiskAction::Argon16, 900, true)
-            .unwrap();
+        register(&s, "decision-1", 7, 4, 900, true);
         assert_eq!(
             s.confirm_outcome("decision-1", true, None).unwrap(),
             1,
@@ -1627,8 +1869,7 @@ mod tests {
             )
         };
         let s = make();
-        s.record_receipt("race-1", 7, 4, RiskAction::Sha16, 500, true)
-            .unwrap();
+        register(&s, "race-1", 7, 4, 500, true);
         // Two INDEPENDENT stores on the same namespace: no shared
         // connection, so the race exercises the script's atomicity (the
         // GET+DEL+increment has no crash window; the loser sees no receipt
@@ -1661,6 +1902,7 @@ mod tests {
                 150,
                 10,
                 300,
+                RedisCalibrationStore::OUTCOME_EXPIRE_S,
                 mode,
                 ppm,
                 0.80,
@@ -1689,21 +1931,23 @@ mod tests {
         let ns = s.namespace().to_string();
         let mut conn = client().get_connection().expect("connection");
         let bucket = bucket_key(&ns, 7);
-        let resolved = sample_resolved_key(&ns);
+        let ledger = ledger_key(&ns, "cv-1");
         let script = redis::Script::new(CONFIRM_LUA);
 
         // Invalid mode: the script must error BEFORE the receipt is
         // deleted.
-        s.record_receipt("cv-1", 7, 4, RiskAction::Argon16, 900, true)
-            .unwrap();
+        register(&s, "cv-1", 7, 4, 900, true);
         let mut inv = script.prepare_invoke();
         inv.key(receipt_key(&ns, "cv-1"));
         inv.key(&bucket);
-        inv.key(&resolved);
+        inv.key(&ledger);
         inv.arg("9");
         inv.arg("1.0");
         inv.arg("1");
         inv.arg("172800");
+        inv.arg("86400");
+        inv.arg("7");
+        inv.arg(hour().to_string());
         assert!(
             inv.invoke::<i64>(&mut conn).is_err(),
             "an invalid mode must be an error reply"
@@ -1718,16 +1962,18 @@ mod tests {
         );
 
         // Invalid weight in weighted mode: 0 is rejected.
-        s.record_receipt("cv-2", 7, 4, RiskAction::Argon16, 900, true)
-            .unwrap();
+        register(&s, "cv-2", 7, 4, 900, true);
         let mut inv = script.prepare_invoke();
         inv.key(receipt_key(&ns, "cv-2"));
         inv.key(&bucket);
-        inv.key(&resolved);
+        inv.key(ledger_key(&ns, "cv-2"));
         inv.arg("2");
         inv.arg("0");
         inv.arg("1");
         inv.arg("172800");
+        inv.arg("86400");
+        inv.arg("7");
+        inv.arg(hour().to_string());
         assert!(inv.invoke::<i64>(&mut conn).is_err());
         let exists: i64 = redis::cmd("EXISTS")
             .arg(receipt_key(&ns, "cv-2"))
@@ -1736,16 +1982,18 @@ mod tests {
         assert_eq!(exists, 1);
 
         // Non-numeric weight is rejected too.
-        s.record_receipt("cv-3", 7, 4, RiskAction::Argon16, 900, true)
-            .unwrap();
+        register(&s, "cv-3", 7, 4, 900, true);
         let mut inv = script.prepare_invoke();
         inv.key(receipt_key(&ns, "cv-3"));
         inv.key(&bucket);
-        inv.key(&resolved);
+        inv.key(ledger_key(&ns, "cv-3"));
         inv.arg("2");
         inv.arg("abc");
         inv.arg("1");
         inv.arg("172800");
+        inv.arg("86400");
+        inv.arg("7");
+        inv.arg(hour().to_string());
         assert!(inv.invoke::<i64>(&mut conn).is_err());
         let exists: i64 = redis::cmd("EXISTS")
             .arg(receipt_key(&ns, "cv-3"))
@@ -1759,11 +2007,15 @@ mod tests {
     }
 
     #[test]
-    fn resolution_gate_holds_until_ratio_met() {
+    fn per_scope_resolution_gate_independence() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
+        // ONE namespace, TWO scopes: the sample counters live in the
+        // per-scope decision-hour buckets, so each scope's resolution
+        // cohort is its own — a gated scope must not leak into (or be
+        // rescued by) a resolved one.
         let s = store_full(
             "gate",
             10,
@@ -1771,7 +2023,7 @@ mod tests {
             100_000,
             300,
             SamplingMode::RandomSample,
-            0,
+            1_000_000,
             0.80,
             1.0,
             2.0,
@@ -1780,33 +2032,52 @@ mod tests {
         let mut conn = client().get_connection().expect("connection");
         // 10 abuse@100 -> raw 360 -> clamped 150 once the gate opens.
         fill(&s, 9, 100, 0, 10, now());
-        for _ in 0..10 {
-            s.mark_sampled().unwrap();
-        }
-        assert_eq!(s.bias_for_scope(9, now()), 0, "first call seeds the state");
-        let total: i64 = redis::cmd("GET")
-            .arg(sample_total_key(&ns))
-            .query(&mut conn)
-            .expect("get");
-        assert_eq!(total, 10, "mark_sampled must INCR the total counter");
+        fill(&s, 10, 100, 0, 10, now());
 
-        // 7 sampled confirms: resolved 7 < total 10 * 0.80 = 8 -> the gate
-        // holds the target at 0 even after a real sleep.
+        // Scope 9: 10 sampled decisions registered, 7 resolved — 0.70 < 0.80
+        // -> the gate HOLDS the bias at 0.
+        for i in 0..10 {
+            register(&s, &format!("g9-{i}"), 9, 4, 100, true);
+        }
         for i in 0..7 {
-            let id = format!("g-{i}");
-            s.record_receipt(&id, 9, 4, RiskAction::Argon16, 100, true)
-                .unwrap();
+            let id = format!("g9-{i}");
             assert_eq!(
                 s.confirm_outcome(&id, false, None).unwrap(),
                 1,
                 "sampled confirms record calibration AND the resolved counter"
             );
         }
-        let resolved: i64 = redis::cmd("GET")
-            .arg(sample_resolved_key(&ns))
-            .query(&mut conn)
-            .expect("get");
-        assert_eq!(resolved, 7);
+        assert_eq!(
+            hget_f64(&mut conn, &bucket_key(&ns, 9), "sample_total") as i64,
+            10,
+            "register_decision.lua must book the sample_total denominator per scope"
+        );
+        assert_eq!(
+            hget_f64(&mut conn, &bucket_key(&ns, 9), "sample_resolved") as i64,
+            7,
+            "confirm.lua must resolve the sample in the decision-time bucket"
+        );
+
+        // Scope 10: 10 sampled decisions registered, 8 resolved — 0.80 >=
+        // 0.80 -> the gate OPENS for this scope in the SAME namespace.
+        for i in 0..10 {
+            register(&s, &format!("g10-{i}"), 10, 4, 100, true);
+        }
+        for i in 0..8 {
+            let id = format!("g10-{i}");
+            assert_eq!(s.confirm_outcome(&id, false, None).unwrap(), 1);
+        }
+        assert_eq!(
+            hget_f64(&mut conn, &bucket_key(&ns, 9), "sample_total") as i64,
+            10,
+            "scope 10's sample counters must not leak into scope 9"
+        );
+        assert_eq!(
+            hget_f64(&mut conn, &bucket_key(&ns, 10), "sample_total") as i64,
+            10,
+            "scope 10 books its own denominators"
+        );
+
         // The gate HOLD is elapsed-independent (the target is 0), so this
         // query also refreshes the rate-limit ts...
         let hold = store_full_on(
@@ -1816,7 +2087,7 @@ mod tests {
             100_000,
             300,
             SamplingMode::RandomSample,
-            0,
+            1_000_000,
             0.80,
             1.0,
             2.0,
@@ -1826,18 +2097,17 @@ mod tests {
             0,
             "resolved/total below the ratio must suspend the bias"
         );
-
-        // The 8th confirm reaches resolved/total = 0.80: the gate opens.
-        s.record_receipt("g-7", 9, 4, RiskAction::Argon16, 100, true)
-            .unwrap();
-        assert_eq!(s.confirm_outcome("g-7", false, None).unwrap(), 1);
-        let resolved: i64 = redis::cmd("GET")
-            .arg(sample_resolved_key(&ns))
-            .query(&mut conn)
-            .expect("get");
-        assert_eq!(resolved, 8);
-        // ...and only then a real sleep gives the proportional allowance
-        // real elapsed time: the raw 150 is served in full.
+        // Scope 10's gate is ALREADY open (8/10 resolved): this first call
+        // seeds its rate-limit state (raw 150 target, zero allowance -> 0),
+        // so the post-sleep allowance has real elapsed time to serve.
+        assert_eq!(
+            s.bias_for_scope(10, now()),
+            0,
+            "the first scope-10 call seeds the state with a zero allowance"
+        );
+        // ...while the 8th scope-10 confirm reached resolved/total = 0.80:
+        // a real sleep gives the proportional allowance real elapsed time
+        // and the raw 150 is served in full — independently of scope 9.
         std::thread::sleep(Duration::from_millis(700));
         assert_eq!(
             store_full_on(
@@ -1847,14 +2117,31 @@ mod tests {
                 100_000,
                 300,
                 SamplingMode::RandomSample,
-                0,
+                1_000_000,
+                0.80,
+                1.0,
+                2.0,
+            )
+            .bias_for_scope(10, now()),
+            150,
+            "the bias is released once resolved/total >= minimum_resolution_ratio"
+        );
+        assert_eq!(
+            store_full_on(
+                &ns,
+                10,
+                150,
+                100_000,
+                300,
+                SamplingMode::RandomSample,
+                1_000_000,
                 0.80,
                 1.0,
                 2.0,
             )
             .bias_for_scope(9, now()),
-            150,
-            "the bias is released once resolved/total >= minimum_resolution_ratio"
+            0,
+            "scope 9 stays gated while scope 10 moves"
         );
     }
 
@@ -1871,7 +2158,7 @@ mod tests {
             100_000,
             300,
             SamplingMode::RandomSample,
-            0,
+            1_000_000,
             0.80,
             1.0,
             2.0,
@@ -1879,10 +2166,10 @@ mod tests {
         let ns = s.namespace().to_string();
         // 10 abuse@100 -> raw 150 target.
         fill(&s, 10, 100, 0, 10, now());
-        // Only 5 sampled decisions: the total counter stays BELOW
+        // Only 5 sampled decisions: the per-scope total stays BELOW
         // min_samples, so the resolution gate is skipped entirely.
-        for _ in 0..5 {
-            s.mark_sampled().unwrap();
+        for i in 0..5 {
+            register(&s, &format!("g2-{i}"), 10, 4, 100, true);
         }
         assert_eq!(s.bias_for_scope(10, now()), 0, "first call seeds the state");
         std::thread::sleep(Duration::from_millis(700));
@@ -1894,7 +2181,7 @@ mod tests {
                 100_000,
                 300,
                 SamplingMode::RandomSample,
-                0,
+                1_000_000,
                 0.80,
                 1.0,
                 2.0,
@@ -2018,81 +2305,228 @@ mod tests {
     }
 
     #[test]
-    fn sampled_counters_follow_the_mode() {
+    fn register_decision_is_atomic() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
+        let s = store_mode("regat", SamplingMode::Complete, 0);
+        let ns = s.namespace().to_string();
         let mut conn = client().get_connection().expect("connection");
 
-        // Complete mode: mark_sampled never touches the counters.
-        let c = store_mode("totc", SamplingMode::Complete, 0);
-        c.mark_sampled().unwrap();
-        c.mark_sampled().unwrap();
-        let total: Option<i64> = redis::cmd("GET")
-            .arg(sample_total_key(c.namespace()))
+        // ONE script invocation books the receipt, the PENDING outcome
+        // ledger AND the sample denominator together.
+        assert!(s
+            .record_receipt("ra-1", 7, 4, RiskAction::Argon16, 900, true, hour(), 1.0)
+            .unwrap());
+        let receipt: i64 = redis::cmd("EXISTS")
+            .arg(receipt_key(&ns, "ra-1"))
             .query(&mut conn)
-            .expect("get");
+            .expect("exists");
+        assert_eq!(receipt, 1, "the receipt must exist");
+        let ledger: i64 = redis::cmd("EXISTS")
+            .arg(ledger_key(&ns, "ra-1"))
+            .query(&mut conn)
+            .expect("exists");
+        assert_eq!(ledger, 1, "the PENDING outcome ledger must exist");
+        let raw: String = conn.get(ledger_key(&ns, "ra-1")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "P");
+        assert_eq!(value["scope"], 7);
+        assert_eq!(value["hour"], hour());
+        assert_eq!(value["score"], 900);
+        assert_eq!(value["w"], 1);
+        let key = bucket_key(&ns, 7);
         assert_eq!(
-            total.unwrap_or(0),
-            0,
-            "complete mode must not INCR the total"
+            hget_f64(&mut conn, &key, "sample_total") as i64,
+            1,
+            "a sampled registration books the sample_total denominator"
         );
 
-        // Random-sample mode: mark_sampled INCRs the total only; a sampled
-        // confirm INCRs the resolved counter; an unsampled confirm (status
-        // 2) consumes WITHOUT resolving.
-        let r = store_mode("totr", SamplingMode::RandomSample, 0);
-        for _ in 0..5 {
-            r.mark_sampled().unwrap();
+        // Duplicate registration: refused without touching anything.
+        assert!(
+            !s.record_receipt("ra-1", 7, 4, RiskAction::Argon16, 900, true, hour(), 1.0)
+                .unwrap(),
+            "a duplicate decision_id must not overwrite the receipt/ledger"
+        );
+        assert_eq!(
+            hget_f64(&mut conn, &key, "sample_total") as i64,
+            1,
+            "a duplicate registration must not double-count the denominator"
+        );
+
+        // Unsampled: receipt + ledger yes, denominator no.
+        assert!(s
+            .record_receipt("ra-2", 7, 4, RiskAction::Argon16, 900, false, hour(), 1.0)
+            .unwrap());
+        assert_eq!(
+            hget_f64(&mut conn, &key, "sample_total") as i64,
+            1,
+            "an unsampled registration must not book the denominator"
+        );
+    }
+
+    #[test]
+    fn confirmation_buckets_by_decision_hour() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("decidh", SamplingMode::Complete, 0);
+        let ns = s.namespace().to_string();
+        let mut conn = client().get_connection().expect("connection");
+        let old_hour = hour() - 2;
+
+        // The decision was made TWO hours ago: the confirmation must land in
+        // the DECISION-TIME bucket, never the confirmation-time one.
+        assert!(s
+            .record_receipt("dh-1", 7, 4, RiskAction::Argon16, 900, true, old_hour, 1.0,)
+            .unwrap());
+        assert_eq!(s.confirm_outcome("dh-1", true, None).unwrap(), 1);
+        assert_eq!(
+            hget_f64(&mut conn, &bucket_key_at(&ns, 7, old_hour), "legit_count"),
+            1.0,
+            "the outcome is bucketed by DECISION time"
+        );
+        assert_eq!(
+            hget_f64(
+                &mut conn,
+                &bucket_key_at(&ns, 7, old_hour),
+                "legit_score_sum"
+            ),
+            900.0
+        );
+        let current = bucket_key_at(&ns, 7, hour());
+        let fields: Vec<(String, String)> = conn.hgetall(&current).expect("hgetall");
+        assert!(
+            fields.is_empty(),
+            "the confirmation-time bucket must stay untouched"
+        );
+        // The ledger carries the decision hour for correction key
+        // derivation.
+        let raw: String = conn.get(ledger_key(&ns, "dh-1")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["hour"], old_hour);
+        assert_eq!(value["o"], "L");
+    }
+
+    #[test]
+    fn correction_reverses_bucket_counts_and_flips_the_ledger() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("corr", SamplingMode::Weighted, 0);
+        let ns = s.namespace().to_string();
+        let mut conn = client().get_connection().expect("connection");
+        let key = bucket_key(&ns, 7);
+
+        // Confirm legitimate with inverse-sampling weight 2.0.
+        register(&s, "cor-1", 7, 4, 900, true);
+        assert_eq!(s.confirm_outcome("cor-1", true, Some(2.0)).unwrap(), 1);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 2.0);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_score_sum"), 1800.0);
+
+        // Correct to abuse with weight 3.0: the ORIGINAL contribution is
+        // reversed with the exact recorded weight (2.0, clamped at zero)
+        // and the corrected one is added (3.0) — the ledger flips to A.
+        assert!(s.correct_outcome("cor-1", false, Some(3.0)).unwrap());
+        assert_eq!(
+            hget_f64(&mut conn, &key, "legit_count"),
+            0.0,
+            "the reversed legit contribution is clamped at zero"
+        );
+        assert_eq!(hget_f64(&mut conn, &key, "legit_score_sum"), 0.0);
+        assert_eq!(hget_f64(&mut conn, &key, "abuse_count"), 3.0);
+        assert_eq!(hget_f64(&mut conn, &key, "abuse_score_sum"), 2700.0);
+        let raw: String = conn.get(ledger_key(&ns, "cor-1")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "A");
+        assert_eq!(value["w"], 3.0);
+
+        // Correcting again to the SAME outcome is a no-op.
+        assert!(
+            !s.correct_outcome("cor-1", false, Some(3.0)).unwrap(),
+            "a ledger already carrying the target outcome must not flip"
+        );
+        assert_eq!(hget_f64(&mut conn, &key, "abuse_count"), 3.0);
+
+        // Unknown decisions are no-ops (never errors).
+        assert!(!s.correct_outcome("cor-missing", false, None).unwrap());
+    }
+
+    #[test]
+    fn weighted_confirm_without_weight_is_a_typed_error() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("wnull", SamplingMode::Weighted, 0);
+        register(&s, "w-1", 7, 4, 900, true);
+        let err = s
+            .confirm_outcome("w-1", true, None)
+            .expect_err("a weighted confirm without a weight must be a typed error");
+        assert!(
+            matches!(&err, CalibrationError::WeightRequired(id) if id == "w-1"),
+            "got {err:?}"
+        );
+        // The receipt survives the validation failure (nothing consumed).
+        let mut conn = client().get_connection().expect("connection");
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg(receipt_key(s.namespace(), "w-1"))
+            .query(&mut conn)
+            .expect("exists");
+        assert_eq!(exists, 1);
+        // With the weight the same receipt confirms normally.
+        assert_eq!(s.confirm_outcome("w-1", true, Some(10.0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn sampling_metrics_reports_per_scope_totals() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("metr", SamplingMode::RandomSample, 1_000_000);
+        // Scope 7: 10 sampled registered, 6 resolved -> ratio 0.6, expired 4
+        // (expired includes receipts still in flight).
+        for i in 0..10 {
+            register(&s, &format!("m7-{i}"), 7, 4, 900, true);
         }
-        let total: i64 = redis::cmd("GET")
-            .arg(sample_total_key(r.namespace()))
-            .query(&mut conn)
-            .expect("get");
-        assert_eq!(total, 5);
-        let resolved: Option<i64> = redis::cmd("GET")
-            .arg(sample_resolved_key(r.namespace()))
-            .query(&mut conn)
-            .expect("get");
-        assert_eq!(
-            resolved.unwrap_or(0),
-            0,
-            "mark_sampled must not INCR the resolved counter"
-        );
+        for i in 0..6 {
+            assert_eq!(
+                s.confirm_outcome(&format!("m7-{i}"), true, None).unwrap(),
+                1
+            );
+        }
+        // Scope 8: 5 sampled registered, 3 resolved (the other 2 stay in
+        // flight).
+        for i in 0..5 {
+            register(&s, &format!("m8-{i}"), 8, 4, 900, true);
+        }
+        for i in 0..3 {
+            assert_eq!(
+                s.confirm_outcome(&format!("m8-{i}"), true, None).unwrap(),
+                1
+            );
+        }
+        // A scope with NO samples reports zeros (never a ratio panic).
+        let empty = s.sampling_metrics(99, now()).unwrap();
+        assert_eq!(empty.sampled_total, 0);
+        assert_eq!(empty.sampled_resolved, 0);
+        assert_eq!(empty.resolution_ratio, 0.0);
+        assert_eq!(empty.sampled_expired, 0);
 
-        r.record_receipt("r-1", 7, 4, RiskAction::Argon16, 900, true)
-            .unwrap();
-        assert_eq!(r.confirm_outcome("r-1", true, None).unwrap(), 1);
-        let resolved: i64 = redis::cmd("GET")
-            .arg(sample_resolved_key(r.namespace()))
-            .query(&mut conn)
-            .expect("get");
-        assert_eq!(resolved, 1, "a sampled confirmation resolves the sample");
+        let m7 = s.sampling_metrics(7, now()).unwrap();
+        assert_eq!(m7.sampled_total, 10);
+        assert_eq!(m7.sampled_resolved, 6);
+        assert_eq!(m7.sampled_expired, 4);
+        assert!((m7.resolution_ratio - 0.6).abs() < 1e-9);
 
-        r.record_receipt("r-2", 7, 4, RiskAction::Argon16, 900, false)
-            .unwrap();
-        assert_eq!(r.confirm_outcome("r-2", true, None).unwrap(), 2);
-        let resolved: i64 = redis::cmd("GET")
-            .arg(sample_resolved_key(r.namespace()))
-            .query(&mut conn)
-            .expect("get");
-        assert_eq!(
-            resolved, 1,
-            "an unsampled confirmation (status 2) must not resolve"
-        );
-
-        // Weighted mode: no-op like complete.
-        let w = store_mode("totw", SamplingMode::Weighted, 0);
-        w.mark_sampled().unwrap();
-        let total: Option<i64> = redis::cmd("GET")
-            .arg(sample_total_key(w.namespace()))
-            .query(&mut conn)
-            .expect("get");
-        assert_eq!(
-            total.unwrap_or(0),
-            0,
-            "weighted mode must not INCR the total"
-        );
+        let m8 = s.sampling_metrics(8, now()).unwrap();
+        assert_eq!(m8.sampled_total, 5);
+        assert_eq!(m8.sampled_resolved, 3);
+        assert_eq!(m8.sampled_expired, 2);
+        assert!((m8.resolution_ratio - 0.6).abs() < 1e-9);
     }
 }

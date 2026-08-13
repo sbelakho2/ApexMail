@@ -365,6 +365,19 @@ impl RedisChallengeStore {
         })?;
         Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
     }
+
+    /// Best-effort cleanup of a terminal cheap-failure record. Deletion is
+    /// NOT security-critical once the challenge has been rejected, and a
+    /// storage error must never turn a cheap invalid submission into an
+    /// infrastructure failure — the typed outcome already decided stands.
+    /// Failures are swallowed (the record expires via its TTL anyway).
+    pub fn best_effort_delete(&self, nonce: &str) {
+        let key = format!("{}{}", self.prefix, nonce);
+        let Ok(mut conn) = self.checkout() else {
+            return;
+        };
+        let _ = redis::cmd("DEL").arg(key).query::<()>(&mut conn);
+    }
 }
 
 impl fmt::Debug for RedisChallengeStore {
@@ -486,10 +499,12 @@ impl ProductionVerifier {
     /// Flow: decode → PEEK (GET) → cheap validation → Argon admission gate
     /// (acquire → RAII lease) → atomic CONSUME (GETDEL) → TOCTOU
     /// re-validation of the consumed record → single derive → leading-zero
-    /// check → lease released by Drop. The cheap checks and the gate never
-    /// consume, so a malformed/expired/mismatched token or a capacity /
-    /// availability rejection leaves the record in place for a retry; the
-    /// record is burned exactly once, at the GETDEL, so at most one hash
+    /// check → lease released by Drop. Terminal cheap failures (malformed
+    /// record, unsupported protocol, bad signature, expired, wrong scope,
+    /// IP mismatch, TooFast) CONSUME the record via a best-effort DEL,
+    /// matching the PHP core's one-shot cheap-failure semantics; capacity /
+    /// admission-backend / storage failures never consume. The expensive
+    /// proof is burned exactly once, at the GETDEL, so at most one hash
     /// derivation ever runs per nonce (concurrent losers see
     /// `RecordNotFound`).
     ///
@@ -521,12 +536,19 @@ impl ProductionVerifier {
             Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
         };
 
-        // 3. Cheap validation on the PEEKED record — a failure returns the
-        //    outcome WITHOUT consuming, so a malformed/expired/mismatched
-        //    record is rejected cheaply and stays in the store (the client
-        //    can retry with a fresh proof; a corrupt record can never drive
-        //    an expensive derivation).
+        // 3. Cheap validation on the PEEKED record. Per the shared
+        //    cross-language consumption table (PHP mirrors this), terminal
+        //    cheap failures CONSUME the record: malformed stored record,
+        //    unsupported protocol, bad signature, expired, wrong scope, IP
+        //    mismatch and TooFast all burn the challenge (best-effort DEL —
+        //    a cleanup error never overrides the typed outcome), matching
+        //    PHP's one-shot cheap-failure semantics. NOT consumed:
+        //    missing IP/context (Rust requires the IP), Argon capacity
+        //    exhausted, admission backend unavailable, storage unavailable
+        //    (presumed intact) and ConsumeIndeterminate (GETDEL never
+        //    retried). The expensive proof itself is burned by the GETDEL.
         if let Err(e) = self.check_cheap(&peek, scope, client_ip, now_ns) {
+            self.store.best_effort_delete(&token.nonce);
             return VerifyOutcome::Invalid(e);
         }
 

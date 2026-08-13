@@ -170,7 +170,7 @@ final class Verifier
         }
 
         if (!$this->validateRecord($peek)) {
-            $this->storage->delete($token->nonce);
+            $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::MalformedRecord);
         }
@@ -181,7 +181,7 @@ final class Verifier
         //     challenge lifetime, so any surviving v1 record is stale or
         //     foreign.
         if ($peek->protocolVersion === 1 && !$this->acceptLegacyV1) {
-            $this->storage->delete($token->nonce);
+            $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::MalformedRecord);
         }
@@ -191,7 +191,7 @@ final class Verifier
         //    Protocol v1 uses the legacy canonical form; protocol v2 uses the
         //    full-parameter canonical payload.
         if (!$this->verifyRecordSignature($peek, $secretKey)) {
-            $this->storage->delete($token->nonce);
+            $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::BadSignature);
         }
@@ -199,14 +199,14 @@ final class Verifier
         // 3. TTL.
         $now = $this->now !== null ? (int) ($this->now)() : time();
         if ($now >= $peek->expiresAt) {
-            $this->storage->delete($token->nonce);
+            $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::Expired);
         }
 
         // 4. Scope validation.
         if ($expectedScope !== null && $peek->scope !== $expectedScope) {
-            $this->storage->delete($token->nonce);
+            $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::WrongScope);
         }
@@ -227,7 +227,7 @@ final class Verifier
                 ? Issuer::hashIp($clientIp, $secretKey)
                 : Issuer::bindingTag($peek->nonce, $clientIp, $secretKey);
             if (!hash_equals($expectedTag, $peek->bindingTag)) {
-                $this->storage->delete($token->nonce);
+                $this->bestEffortDelete($token->nonce);
 
                 return VerifyOutcome::invalid(VerifyError::IpMismatch);
             }
@@ -240,7 +240,7 @@ final class Verifier
         //    the TooFast check and there is no legacy fallback — a record
         //    without issued_at_ns cannot be timed and is malformed.
         if ($peek->issuedAtNs <= 0) {
-            $this->storage->delete($token->nonce);
+            $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::MalformedRecord);
         }
@@ -249,7 +249,7 @@ final class Verifier
             $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
             if ($receiptNs >= $peek->issuedAtNs) {
                 if ($receiptNs - $peek->issuedAtNs < $floor * 1_000) {
-                    $this->storage->delete($token->nonce);
+                    $this->bestEffortDelete($token->nonce);
 
                     return VerifyOutcome::invalid(VerifyError::TooFast);
                 }
@@ -260,7 +260,7 @@ final class Verifier
                 // time cannot be measured reliably and the floor check is
                 // skipped for this verification — the proof-of-work check
                 // still applies, so no attacker advantage is gained.
-                $this->storage->delete($token->nonce);
+                $this->bestEffortDelete($token->nonce);
 
                 return VerifyOutcome::invalid(VerifyError::TooFast);
             }
@@ -272,7 +272,7 @@ final class Verifier
         //    payload ({} or []) is itself a bot signal (a real widget always
         //    reports fields): it must not bypass strict mode.
         if ($enforceTelemetry && (empty($token->telemetry) || Telemetry::score($token->telemetry, $token->durationMs))) {
-            $this->storage->delete($token->nonce);
+            $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::TelemetryRejected);
         }
@@ -408,6 +408,20 @@ final class Verifier
      * computed (e.g. Argon2id parameters outside KiwiCaptcha's protocol
      * profile — t < 3 or p != 1).
      */
+    /**
+     * Terminal cheap-failure cleanup. Deletion is NOT security-critical
+     * once the challenge has been rejected, and a storage outage must not
+     * turn a cheap invalid submission into an application exception — the
+     * typed VerifyOutcome already returned stands.
+     */
+    private function bestEffortDelete(string $nonce): void
+    {
+        try {
+            $this->storage->delete($nonce);
+        } catch (\Throwable) {
+        }
+    }
+
     private function deriveHash(ChallengeRecord $record, int $counter): ?string
     {
         $saltBytes = base64_decode($record->salt, true);

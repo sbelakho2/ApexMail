@@ -87,8 +87,9 @@ final class AdaptiveRiskEngineTest extends TestCase
             {
             }
 
-            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled, int $decisionHour, float $weight = 1.0): bool
             {
+                return true;
             }
 
             public function sample(): bool
@@ -96,18 +97,19 @@ final class AdaptiveRiskEngineTest extends TestCase
                 return true;
             }
 
-            public function markSampled(): void
-            {
-            }
-
-            public function reserveCorrection(string $decisionId): bool
-            {
-                return false;
-            }
-
             public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
             {
                 return $this->confirmStatus;
+            }
+
+            public function correctOutcome(string $decisionId, bool $legitimate, ?float $weight = null): bool
+            {
+                return true;
+            }
+
+            public function samplingMetrics(int $scope, int $now): array
+            {
+                return ['sampledTotal' => 0, 'sampledResolved' => 0, 'resolutionRatio' => 1.0, 'sampledExpired' => 0];
             }
 
             public function biasForScope(int $scope, int $now): int
@@ -132,7 +134,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testAssessNormalPath(): void
     {
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public int $globalLevel = 2;
 
             public function observe(RiskObservation $observation): SignalVector
@@ -167,7 +169,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     public function testObservationCarriesPseudonymsAndNetworkRisk(): void
     {
         $captured = [];
-        $store = new class($captured) implements RiskStateStoreInterface {
+        $store = new class($captured) extends RiskStateStoreStub {
             public function __construct(private array &$captured)
             {
             }
@@ -202,7 +204,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     public function testAssessNormalizesIdempotencyKey(): void
     {
         $captured = [];
-        $store = new class($captured) implements RiskStateStoreInterface {
+        $store = new class($captured) extends RiskStateStoreStub {
             public function __construct(private array &$captured)
             {
             }
@@ -228,7 +230,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     public function testNormalizationIsDomainSeparatedByEventAndScope(): void
     {
         $captured = [];
-        $store = new class($captured) implements RiskStateStoreInterface {
+        $store = new class($captured) extends RiskStateStoreStub {
             public function __construct(private array &$captured)
             {
             }
@@ -262,7 +264,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     public function testEmptyIdempotencyKeyBecomesRandom(): void
     {
         $captured = [];
-        $store = new class($captured) implements RiskStateStoreInterface {
+        $store = new class($captured) extends RiskStateStoreStub {
             public function __construct(private array &$captured)
             {
             }
@@ -283,7 +285,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testIdempotencyKeyTooLongThrows(): void
     {
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public function observe(RiskObservation $observation): SignalVector
             {
                 return SignalVector::zero();
@@ -297,7 +299,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     public function testNormalizedEventIdsAcrossAllEntryPoints(): void
     {
         $captured = [];
-        $store = new class($captured) implements RiskStateStoreInterface {
+        $store = new class($captured) extends RiskStateStoreStub {
             public function __construct(private array &$captured)
             {
             }
@@ -347,7 +349,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
         }
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public int $calls = 0;
 
             public function observe(RiskObservation $observation): SignalVector
@@ -368,7 +370,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     {
         $limiter = new ProcessEmergencyCap(processPerSecond: 1);
         self::assertTrue($limiter->allow(), 'the single allowance is consumed by the cap');
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public int $calls = 0;
 
             public function observe(RiskObservation $observation): SignalVector
@@ -392,7 +394,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         // is denied, but a post-solve reassessment must still score.
         $limiter = new ProcessEmergencyCap(processPerSecond: 1);
         $limiter->allow();
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public int $calls = 0;
 
             public function observe(RiskObservation $observation): SignalVector
@@ -419,7 +421,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     {
         $limiter = new ProcessEmergencyCap(processPerSecond: 1);
         $limiter->allow();
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public int $calls = 0;
 
             public function observe(RiskObservation $observation): SignalVector
@@ -445,7 +447,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         $limiter->allow();
 
         $captured = [];
-        $store = new class($captured) implements RiskStateStoreInterface {
+        $store = new class($captured) extends RiskStateStoreStub {
             public function __construct(private array &$captured)
             {
             }
@@ -474,7 +476,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testRecordFeedbackStoreFailureIsSilent(): void
     {
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public function observe(RiskObservation $observation): SignalVector
             {
                 throw new RiskStoreException('redis down');
@@ -498,23 +500,15 @@ final class AdaptiveRiskEngineTest extends TestCase
             ) {
             }
 
-            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled, int $decisionHour, float $weight = 1.0): bool
             {
-                $this->capturedReceipts[] = [$decisionId, $scope, $band, $action, $score, $sampled];
+                $this->capturedReceipts[] = [$decisionId, $scope, $band, $action, $score, $sampled, $decisionHour];
+                return true;
             }
 
             public function sample(): bool
             {
                 return true;
-            }
-
-            public function markSampled(): void
-            {
-            }
-
-            public function reserveCorrection(string $decisionId): bool
-            {
-                return false;
             }
 
             public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
@@ -523,13 +517,23 @@ final class AdaptiveRiskEngineTest extends TestCase
                 return 1;
             }
 
+            public function correctOutcome(string $decisionId, bool $legitimate, ?float $weight = null): bool
+            {
+                return true;
+            }
+
+            public function samplingMetrics(int $scope, int $now): array
+            {
+                return ['sampledTotal' => 0, 'sampledResolved' => 0, 'resolutionRatio' => 1.0, 'sampledExpired' => 0];
+            }
+
             public function biasForScope(int $scope, int $now): int
             {
                 return 0;
             }
         };
 
-        $store = new class($observedEvents) implements RiskStateStoreInterface {
+        $store = new class($observedEvents) extends RiskStateStoreStub {
             public function __construct(private array &$observedEvents)
             {
             }
@@ -552,10 +556,11 @@ final class AdaptiveRiskEngineTest extends TestCase
 
         $decision = $engine->assess($this->context());
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $decision->decisionId);
+        $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
         self::assertSame(
-            [[$decision->decisionId, 1, $decision->band, $decision->action, $decision->score, 1]],
+            [[$decision->decisionId, 1, $decision->band, $decision->action, $decision->score, 1, $hour]],
             $capturedReceipts,
-            'the receipt must carry the EXACT score and the assessment-time sampling flag'
+            'the receipt must carry the EXACT score, the assessment-time sampling flag and the decision hour'
         );
 
         // confirmedAbuse: FIRST the calibrator's atomic confirm (receipt
@@ -581,7 +586,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         );
         $denied = $engine->assess($this->context());
         self::assertTrue($denied->hasReason(RiskReason::HardRateLimit));
-        self::assertSame([[$denied->decisionId, 1, 10, RiskAction::Deny, 1000, 1]], array_slice($capturedReceipts, 1));
+        self::assertSame([[$denied->decisionId, 1, 10, RiskAction::Deny, 1000, 1, $hour]], array_slice($capturedReceipts, 1));
     }
 
     public function testConfirmedFeedbackGatesReputationOnStatus(): void
@@ -601,22 +606,14 @@ final class AdaptiveRiskEngineTest extends TestCase
                 ) {
                 }
 
-                public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+                public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled, int $decisionHour, float $weight = 1.0): bool
                 {
+                    return true;
                 }
 
                 public function sample(): bool
                 {
                     return true;
-                }
-
-                public function markSampled(): void
-                {
-                }
-
-                public function reserveCorrection(string $decisionId): bool
-                {
-                    return false;
                 }
 
                 public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
@@ -625,13 +622,23 @@ final class AdaptiveRiskEngineTest extends TestCase
                     return $this->status;
                 }
 
+                public function correctOutcome(string $decisionId, bool $legitimate, ?float $weight = null): bool
+                {
+                    return true;
+                }
+
+                public function samplingMetrics(int $scope, int $now): array
+                {
+                    return ['sampledTotal' => 0, 'sampledResolved' => 0, 'resolutionRatio' => 1.0, 'sampledExpired' => 0];
+                }
+
                 public function biasForScope(int $scope, int $now): int
                 {
                     return 0;
                 }
             };
 
-            $store = new class($observedEvents) implements RiskStateStoreInterface {
+            $store = new class($observedEvents) extends RiskStateStoreStub {
                 public function __construct(private array &$observedEvents)
                 {
                 }
@@ -685,22 +692,14 @@ final class AdaptiveRiskEngineTest extends TestCase
             {
             }
 
-            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled, int $decisionHour, float $weight = 1.0): bool
             {
+                return true;
             }
 
             public function sample(): bool
             {
                 return true;
-            }
-
-            public function markSampled(): void
-            {
-            }
-
-            public function reserveCorrection(string $decisionId): bool
-            {
-                return false;
             }
 
             public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
@@ -709,12 +708,22 @@ final class AdaptiveRiskEngineTest extends TestCase
                 return 2;
             }
 
+            public function correctOutcome(string $decisionId, bool $legitimate, ?float $weight = null): bool
+            {
+                return true;
+            }
+
+            public function samplingMetrics(int $scope, int $now): array
+            {
+                return ['sampledTotal' => 0, 'sampledResolved' => 0, 'resolutionRatio' => 1.0, 'sampledExpired' => 0];
+            }
+
             public function biasForScope(int $scope, int $now): int
             {
                 return 0;
             }
         };
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public function observe(RiskObservation $observation): SignalVector
             {
                 return SignalVector::zero();
@@ -731,39 +740,130 @@ final class AdaptiveRiskEngineTest extends TestCase
         );
         self::assertSame(2, $engine->confirmOutcome('dec-1', true, 4.0), 'confirmOutcome passes the calibrator status through');
         self::assertSame([['dec-1', true, 4.0]], $confirmed);
-        self::assertSame(0, $this->engine($store)->confirmOutcome('dec-2', false), 'no calibration store -> status 0');
+        self::assertSame(1, $this->engine($store)->confirmOutcome('dec-2', false), 'without a calibration store the OUTCOME LEDGER still confirms (store->confirmOutcome)');
+        self::assertSame(['confirm', 'dec-2', false], $store->ledgerCalls[0], 'the store ledger CAS must run for the calibration-less confirmation');
     }
 
-    public function testConfirmCorrectionAppliesTheOppositeEventOnce(): void
+    /**
+     * ROUND-7 HEADLINE: the OUTCOME LEDGER is ALWAYS ON and independent of
+     * calibration — ConfirmedLegitimate/ConfirmedAbuse work IDENTICALLY with
+     * calibration disabled. Every decision registers a PENDING ledger entry
+     * at assessment time (store->registerOutcome without calibration); the
+     * first confirmation flips the ledger exactly once (status 1) and
+     * records the reputation event; a retry finds the ledger already
+     * confirmed (status 0) and is a duplicate-marked no-op.
+     */
+    public function testConfirmedWorksWithoutCalibration(): void
     {
-        $corrected = [];
         $observedEvents = [];
-        $calibration = new class($corrected, $observedEvents) implements CalibrationStore {
+        $confirmedLedger = [];
+        $store = new class($observedEvents, $confirmedLedger) extends RiskStateStoreStub {
             public function __construct(
-                private array &$corrected,
                 private array &$observedEvents,
+                private array &$confirmedLedger,
             ) {
             }
 
-            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                $this->observedEvents[] = $observation->event;
+                return SignalVector::zero();
+            }
+
+            public function confirmOutcome(string $decisionId, bool $legitimate): int
+            {
+                $this->ledgerCalls[] = ['confirm', $decisionId, $legitimate];
+                if (isset($this->confirmedLedger[$decisionId])) {
+                    return 0;
+                }
+                $this->confirmedLedger[$decisionId] = true;
+                return 1;
+            }
+        };
+        $engine = $this->engine($store);
+
+        // Assessment registers the PENDING ledger entry in the store.
+        $decision = $engine->assess($this->context());
+        $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
+        self::assertSame(
+            ['register', $decision->decisionId, 1, $hour, $decision->score],
+            $store->ledgerCalls[0],
+            'without calibration the decision still registers its PENDING ledger entry (scope + decision hour + score)'
+        );
+
+        // FIRST confirmation: ledger CAS flips once, the reputation event
+        // is recorded — identical to the calibration-enabled path.
+        $receipt = $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), $decision->decisionId);
+        self::assertFalse($receipt->isDuplicate, 'the FIRST confirmation records the reputation event without calibration');
+        self::assertSame(['confirm', $decision->decisionId, false], $store->ledgerCalls[1], 'the store ledger CAS runs first');
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ConfirmedAbuse], $observedEvents);
+
+        // RETRY: the ledger is already confirmed -> status 0 -> a
+        // duplicate-marked no-op — webhook retries can never amplify.
+        $retry = $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), $decision->decisionId);
+        self::assertTrue($retry->isDuplicate, 'a retried confirmation is marked duplicate (ledger already confirmed)');
+        self::assertSame(SignalVector::zero()->toArray(), $retry->signals->toArray());
+        self::assertCount(2, $observedEvents, 'a retry must never record a second reputation event');
+
+        // confirmedLegitimate works identically in the other direction.
+        $second = $engine->assess($this->context());
+        $legit = $engine->confirmedLegitimate($this->context(event: RiskEventKind::ConfirmedLegitimate), $second->decisionId);
+        self::assertFalse($legit->isDuplicate);
+        self::assertSame(RiskEventKind::ConfirmedLegitimate, $observedEvents[3], 'the second decision confirms legitimately too');
+        self::assertSame([
+            RiskEventKind::PreIssue,
+            RiskEventKind::ConfirmedAbuse,
+            RiskEventKind::PreIssue,
+            RiskEventKind::ConfirmedLegitimate,
+        ], $observedEvents);
+        self::assertCount(5, $store->ledgerCalls, '2 registers + 3 confirms (first, retry, second decision)');
+    }
+
+    public function testRecordFeedbackRejectsConfirmationEvents(): void
+    {
+        $observedEvents = [];
+        $store = new class($observedEvents) extends RiskStateStoreStub {
+            public function __construct(private array &$observedEvents)
             {
             }
 
-            public function sample(): bool
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                $this->observedEvents[] = $observation->event;
+                return SignalVector::zero();
+            }
+        };
+        $engine = $this->engine($store);
+
+        try {
+            $engine->record_feedback(RiskEventKind::ConfirmedLegitimate, $this->context(event: RiskEventKind::ConfirmedLegitimate));
+            self::fail('record_feedback must reject ConfirmedLegitimate');
+        } catch (\LogicException $e) {
+            self::assertStringContainsString('confirmOutcome/confirmed*', $e->getMessage());
+        }
+        try {
+            $engine->record(RiskEventKind::ConfirmedAbuse, 1, '203.0.113.27');
+            self::fail('record() must reject ConfirmedAbuse');
+        } catch (\LogicException) {
+        }
+        self::assertSame([], $observedEvents, 'a rejected confirmation must never reach the store');
+    }
+
+    public function testConfirmCorrectionFlipsTheLedgerWithoutReputationEvents(): void
+    {
+        $corrected = [];
+        $calibration = new class($corrected) implements CalibrationStore {
+            public function __construct(private array &$corrected)
+            {
+            }
+
+            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled, int $decisionHour, float $weight = 1.0): bool
             {
                 return true;
             }
 
-            public function markSampled(): void
+            public function sample(): bool
             {
-            }
-
-            public function reserveCorrection(string $decisionId): bool
-            {
-                if (in_array($decisionId, $this->corrected, true)) {
-                    return false;
-                }
-                $this->corrected[] = $decisionId;
                 return true;
             }
 
@@ -772,20 +872,32 @@ final class AdaptiveRiskEngineTest extends TestCase
                 return 1;
             }
 
+            public function correctOutcome(string $decisionId, bool $legitimate, ?float $weight = null): bool
+            {
+                if (in_array([$decisionId, $legitimate], $this->corrected, true)) {
+                    return false;
+                }
+                $this->corrected[] = [$decisionId, $legitimate];
+                return true;
+            }
+
+            public function samplingMetrics(int $scope, int $now): array
+            {
+                return ['sampledTotal' => 0, 'sampledResolved' => 0, 'resolutionRatio' => 1.0, 'sampledExpired' => 0];
+            }
+
             public function biasForScope(int $scope, int $now): int
             {
                 return 0;
             }
         };
 
-        $store = new class($observedEvents) implements RiskStateStoreInterface {
-            public function __construct(private array &$observedEvents)
-            {
-            }
+        $store = new class extends RiskStateStoreStub {
+            public array $observedEvents = [];
 
             public function observe(RiskObservation $observation): SignalVector
             {
-                $this->observedEvents[] = [$observation->event, $observation->scope, $observation->eventId];
+                $this->observedEvents[] = $observation->event;
                 return SignalVector::zero();
             }
         };
@@ -799,40 +911,32 @@ final class AdaptiveRiskEngineTest extends TestCase
             calibration: $calibration,
         );
 
-        // A first confirmation of legitimate=true (trust) is compensated by
-        // the OPPOSITE event: ConfirmedAbuse.
-        self::assertTrue($engine->confirmCorrection('decision-c', true), 'the winning reservation applies the compensation');
-        self::assertCount(1, $observedEvents);
-        self::assertSame(RiskEventKind::ConfirmedAbuse, $observedEvents[0][0]);
-        self::assertSame(0, $observedEvents[0][1], 'the compensation lands in the identity-free scope 0');
-        self::assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $observedEvents[0][2], 'the correction event_id is deterministic 64-hex');
+        // With calibration: the correction goes to the calibrator's
+        // correction.lua (ledger flip + bucket reversal) — NO synthetic
+        // identity event is recorded anywhere.
+        self::assertTrue($engine->confirmCorrection('decision-c', true), 'the calibrator correction applies');
+        self::assertSame([['decision-c', true]], $corrected, 'the calibrator receives the new outcome');
+        self::assertSame([], $store->observedEvents, 'the correction must NOT record a synthetic reputation event');
 
-        // Once-only: the second attempt finds the guard consumed.
+        // Already carrying the target outcome -> the calibrator refuses.
         self::assertFalse($engine->confirmCorrection('decision-c', true));
-        self::assertFalse($engine->confirmCorrection('decision-c', false), 'the guard is label-agnostic');
-        self::assertCount(1, $observedEvents, 'the compensation must be recorded at most once');
+        self::assertCount(1, $corrected);
 
-        // The opposite direction: a first confirmation of abuse
-        // (legitimate=false) is compensated by ConfirmedLegitimate.
+        // The opposite direction (abuse -> legitimate) applies.
         self::assertTrue($engine->confirmCorrection('decision-d', false));
-        self::assertCount(2, $observedEvents);
-        self::assertSame(RiskEventKind::ConfirmedLegitimate, $observedEvents[1][0]);
+        self::assertSame([['decision-c', true], ['decision-d', false]], $corrected);
 
-        // Without a calibration store there is no namespace to guard in:
-        // the correction is refused (never applied).
-        $plain = $this->engine(new class($observedEvents) implements RiskStateStoreInterface {
-            public function __construct(private array &$observedEvents)
-            {
-            }
-
+        // WITHOUT a calibration store the correction runs the STORE's
+        // outcome_correct.lua (ledger flip — the always-on authority).
+        $plainStore = new class extends RiskStateStoreStub {
             public function observe(RiskObservation $observation): SignalVector
             {
-                $this->observedEvents[] = [$observation->event, 0, ''];
                 return SignalVector::zero();
             }
-        });
-        self::assertFalse($plain->confirmCorrection('decision-e', true));
-        self::assertCount(2, $observedEvents, 'without a calibration store the correction never reaches the state');
+        };
+        $plain = $this->engine($plainStore);
+        self::assertTrue($plain->confirmCorrection('decision-e', true), 'without calibration the STORE ledger flips');
+        self::assertSame(['correct', 'decision-e', true], $plainStore->ledgerCalls[0], 'the store correction must run for the calibration-less path');
 
         // Empty decision id is rejected up front.
         $this->expectException(\InvalidArgumentException::class);
@@ -841,7 +945,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testStoreFailureDegradesAndOpensBreaker(): void
     {
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public int $calls = 0;
 
             public function observe(RiskObservation $observation): SignalVector
@@ -870,7 +974,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testBreakerRecoversAfterWindow(): void
     {
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public int $calls = 0;
 
             public function observe(RiskObservation $observation): SignalVector
@@ -900,7 +1004,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     public function testRecordMapsEvents(): void
     {
         $captured = [];
-        $store = new class($captured) implements RiskStateStoreInterface {
+        $store = new class($captured) extends RiskStateStoreStub {
             public function __construct(private array &$captured)
             {
             }
@@ -938,7 +1042,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testConfirmedFeedbackRequiresDecisionId(): void
     {
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public function observe(RiskObservation $observation): SignalVector
             {
                 return SignalVector::zero();
@@ -960,7 +1064,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testEnableGlobalPressureFalseZeroesSignalLevelAndCooldown(): void
     {
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public function observe(RiskObservation $observation): SignalVector
             {
                 return SignalVector::fromArray(['global_pressure' => 1000]);
@@ -998,7 +1102,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testDecisionType(): void
     {
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class extends RiskStateStoreStub {
             public function observe(RiskObservation $observation): SignalVector
             {
                 return SignalVector::zero();
@@ -1080,7 +1184,7 @@ final class AdaptiveRiskEngineTest extends TestCase
             keys: $keys,
             calibration: $calibrator2,
         );
-        $calibrator2->recordReceipt('unsampled-dec', 1, 0, RiskAction::Allow, 100, 0);
+        $calibrator2->recordReceipt('unsampled-dec', 1, 0, RiskAction::Allow, 100, 0, intdiv((int) floor(microtime(true) * 1000), 3_600_000));
         $sourceKey2 = "{kiwi:{$ns2}}:risk:src:{$epoch}:" . $identityFactory->sourceIdForEpoch($ctx, $epoch);
         $bad2 = (int) ($client->hget($sourceKey2, 'bad') ?? 0);
         $first2 = $engine2->confirmedAbuse($ctx, 'unsampled-dec');

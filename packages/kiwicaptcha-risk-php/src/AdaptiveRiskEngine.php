@@ -125,7 +125,7 @@ final class AdaptiveRiskEngine
                 band: 10,
             );
             $this->recordDecisionMetrics($c->scope, $decision);
-            $this->registerCalibrationReceipt($c->scope, $decision);
+            $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
             return $decision;
         }
 
@@ -161,7 +161,7 @@ final class AdaptiveRiskEngine
             $this->metrics->increment('degraded:breaker');
             $decision = $this->policy->degradedDecision($c->scope, $this->storeGlobalLevel());
             $this->recordDecisionMetrics($c->scope, $decision);
-            $this->registerCalibrationReceipt($c->scope, $decision);
+            $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
             return $decision;
         }
 
@@ -173,7 +173,7 @@ final class AdaptiveRiskEngine
             $this->metrics->increment('degraded:store');
             $decision = $this->policy->degradedDecision($c->scope, $this->storeGlobalLevel());
             $this->recordDecisionMetrics($c->scope, $decision);
-            $this->registerCalibrationReceipt($c->scope, $decision);
+            $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
             return $decision;
         }
         $this->metrics->recordLatency('store:observe', (microtime(true) - $start) * 1000);
@@ -214,7 +214,7 @@ final class AdaptiveRiskEngine
         $this->metrics->gauge('global:level', $decision->globalLevel);
         $this->metrics->gauge('resources:argon_capacity', $c->resources->argonCapacity);
         $this->recordDecisionMetrics($c->scope, $decision);
-        $this->registerCalibrationReceipt($c->scope, $decision);
+        $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
         return $decision;
     }
 
@@ -225,11 +225,15 @@ final class AdaptiveRiskEngine
      * EventReceipt. Store failures are silent (zero signals, not a
      * duplicate).
      *
-     * Calibration is NOT part of this path: confirmed outcomes must be
-     * routed through confirmedLegitimate()/confirmedAbuse(), which first
-     * run the calibrator's atomic confirmOutcome() (receipt consumed
-     * exactly once) and then record the reputation event here.
+     * CONFIRMATION EVENTS ARE REJECTED: ConfirmedLegitimate and
+     * ConfirmedAbuse must be routed through confirmedLegitimate()/
+     * confirmedAbuse() (or confirmOutcome()), which first run the
+     * always-on outcome ledger exactly once and then record the reputation
+     * event through the internal feedback path. A plain feedback call for
+     * a confirmation event would bypass the ledger's exactly-once CAS.
      *
+     * @throws \LogicException when $event is ConfirmedLegitimate or
+     *                         ConfirmedAbuse (use confirmed* instead)
      * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
      *                                    (HMAC-SHA256, event+scope domain
      *                                    separated) before use as the dedupe
@@ -240,6 +244,20 @@ final class AdaptiveRiskEngine
      *                                    confirmedAbuse() via confirmOutcome()
      */
     public function record_feedback(RiskEventKind $event, RiskContext $c, ?string $idempotencyKey = null, ?string $decisionId = null): EventReceipt
+    {
+        if ($event === RiskEventKind::ConfirmedLegitimate || $event === RiskEventKind::ConfirmedAbuse) {
+            throw new \LogicException('Confirmed outcomes must use confirmOutcome/confirmed*');
+        }
+        return $this->emitFeedback($event, $c, $idempotencyKey);
+    }
+
+    /**
+     * The internal feedback path behind record_feedback(): the plain
+     * observation -> store -> EventReceipt flow WITHOUT the confirmation-
+     * event guard — only the confirmed* methods may reach it (the outcome
+     * ledger has already authorized the event exactly once).
+     */
+    private function emitFeedback(RiskEventKind $event, RiskContext $c, ?string $idempotencyKey = null): EventReceipt
     {
         $nowMs = (int) floor(microtime(true) * 1000);
         $observation = $this->buildObservation($c, $nowMs, $idempotencyKey, $event);
@@ -277,26 +295,44 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * Best-effort atomic calibration confirmation: consumes the decision's
-     * receipt EXACTLY ONCE (single canonical confirm.lua script) and
+     * Best-effort atomic outcome confirmation: consumes the decision's
+     * receipt EXACTLY ONCE (single canonical confirm.lua script with
+     * calibration; the store's outcome_confirm.lua ledger CAS without) and
      * records the outcome against the ORIGINAL decision's scope bucket.
+     * The OUTCOME LEDGER IS ALWAYS ON and independent of calibration:
+     * ConfirmedLegitimate/ConfirmedAbuse work identically with or without
+     * calibration — with calibration the ledger + calibration are recorded
+     * by the calibrator's script; without calibration the store flips the
+     * ledger only (status is never 2 without a receipt).
+     *
      * Returns the SHARED accepted-outcome status (wire contract with the
      * Rust mirror): 0 = nothing consumed (missing / already confirmed /
-     * corrupt / no calibration configured), 1 = FIRST confirmation with
-     * calibration recorded, 2 = FIRST confirmation deliberately unsampled.
-     * Statuses 1 and 2 authorize the first-party reputation event exactly
-     * once; status 0 must never book one (a webhook retry must never
-     * amplify). Never throws — a calibration backend failure surfaces as
-     * status 0 and the receipt survives, so a retry applies the outcome
-     * exactly once.
+     * corrupt / backend failure), 1 = FIRST confirmation with calibration
+     * recorded, 2 = FIRST confirmation deliberately unsampled (only when
+     * calibration is enabled). Statuses 1 and 2 authorize the first-party
+     * reputation event exactly once; status 0 must never book one (a
+     * webhook retry must never amplify). Never throws for backend failures
+     * — they surface as status 0 and the receipt survives, so a retry
+     * applies the outcome exactly once.
+     *
+     * @throws \InvalidArgumentException when the calibration sampling mode
+     *                                   is 'weighted' and $weight is null
+     *                                   (weighted mode requires a sampling
+     *                                   probability weight)
      */
     public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
     {
-        if ($this->calibration === null) {
-            return 0;
+        if ($this->calibration !== null) {
+            try {
+                return $this->calibration->confirmOutcome($decisionId, $legitimate, $weight);
+            } catch (\InvalidArgumentException $e) {
+                throw $e;
+            } catch (\Throwable) {
+                return 0;
+            }
         }
         try {
-            return $this->calibration->confirmOutcome($decisionId, $legitimate, $weight);
+            return $this->store->confirmOutcome($decisionId, $legitimate);
         } catch (\Throwable) {
             return 0;
         }
@@ -305,77 +341,84 @@ final class AdaptiveRiskEngine
     /**
      * Confirmed-legitimate outcome: REQUIRES the id of the decision being
      * confirmed so the outcome is recorded against the ORIGINAL decision's
-     * scope bucket. FIRST runs the calibrator's atomic confirm (receipt
-     * consumed exactly once), THEN — and only when the confirmation is the
-     * FIRST one (status 1 or 2) — records the ConfirmedLegitimate
-     * reputation event via record_feedback(). REPUTATION GATING: a status-0
-     * outcome (receipt already consumed / missing / backend failure) is a
-     * no-op returning an EventReceipt marked isDuplicate with zero signals
-     * and NO observation — one real-world outcome produces at most ONE
-     * reputation mutation, so webhook retries can never amplify.
+     * scope bucket. FIRST runs the always-on outcome-ledger confirmation
+     * (ledger CAS PENDING -> LEGITIMATE exactly once, with or without
+     * calibration), THEN — and only when the confirmation is the FIRST one
+     * (status 1 or 2) — records the ConfirmedLegitimate reputation event.
+     * REPUTATION GATING: a status-0 outcome (ledger already consumed /
+     * missing / backend failure) is a no-op returning an EventReceipt
+     * marked isDuplicate with zero signals and NO observation — one real-
+     * world outcome produces at most ONE reputation mutation, so webhook
+     * retries can never amplify.
+     *
+     * $samplingProbabilityPpm (1..1_000_000) is the application-supplied
+     * inverse sampling probability for 'weighted' calibration mode,
+     * converted to weight = 1_000_000 / ppm; null passes no weight (the
+     * calibrator's own sampling knobs apply).
      *
      * @throws \InvalidArgumentException when $decisionId is null or empty
      */
-    public function confirmedLegitimate(RiskContext $ctx, ?string $decisionId, ?string $idempotencyKey = null): EventReceipt
+    public function confirmedLegitimate(RiskContext $ctx, ?string $decisionId, ?string $idempotencyKey = null, ?int $samplingProbabilityPpm = null): EventReceipt
     {
         if ($decisionId === null || $decisionId === '') {
             throw new \InvalidArgumentException('confirmedLegitimate requires the decision id being confirmed');
         }
-        if ($this->confirmOutcome($decisionId, true) === 0) {
+        $weight = $samplingProbabilityPpm === null ? null : 1_000_000 / $samplingProbabilityPpm;
+        if ($this->confirmOutcome($decisionId, true, $weight) === 0) {
             return $this->skippedConfirmationReceipt(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey);
         }
-        return $this->record_feedback(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey);
+        return $this->emitFeedback(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey);
     }
 
     /**
      * Confirmed-abuse outcome: REQUIRES the id of the decision being
      * confirmed so the outcome is recorded against the ORIGINAL decision's
-     * scope bucket. FIRST runs the calibrator's atomic confirm (receipt
-     * consumed exactly once), THEN — and only when the confirmation is the
-     * FIRST one (status 1 or 2) — records the ConfirmedAbuse reputation
-     * event via record_feedback(). REPUTATION GATING: a status-0 outcome
-     * (receipt already consumed / missing / backend failure) is a no-op
-     * returning an EventReceipt marked isDuplicate with zero signals and
-     * NO observation — one real-world outcome produces at most ONE
-     * reputation mutation, so webhook retries can never re-penalize the
-     * source with repeated +6000 ConfirmedAbuse.
+     * scope bucket. FIRST runs the always-on outcome-ledger confirmation
+     * (ledger CAS PENDING -> ABUSE exactly once, with or without
+     * calibration), THEN — and only when the confirmation is the FIRST one
+     * (status 1 or 2) — records the ConfirmedAbuse reputation event.
+     * REPUTATION GATING: a status-0 outcome (ledger already consumed /
+     * missing / backend failure) is a no-op returning an EventReceipt
+     * marked isDuplicate with zero signals and NO observation — one real-
+     * world outcome produces at most ONE reputation mutation, so webhook
+     * retries can never re-penalize the source with repeated +6000
+     * ConfirmedAbuse.
+     *
+     * $samplingProbabilityPpm (1..1_000_000) is the application-supplied
+     * inverse sampling probability for 'weighted' calibration mode,
+     * converted to weight = 1_000_000 / ppm; null passes no weight (the
+     * calibrator's own sampling knobs apply).
      *
      * @throws \InvalidArgumentException when $decisionId is null or empty
      */
-    public function confirmedAbuse(RiskContext $ctx, ?string $decisionId, ?string $idempotencyKey = null): EventReceipt
+    public function confirmedAbuse(RiskContext $ctx, ?string $decisionId, ?string $idempotencyKey = null, ?int $samplingProbabilityPpm = null): EventReceipt
     {
         if ($decisionId === null || $decisionId === '') {
             throw new \InvalidArgumentException('confirmedAbuse requires the decision id being confirmed');
         }
-        if ($this->confirmOutcome($decisionId, false) === 0) {
+        $weight = $samplingProbabilityPpm === null ? null : 1_000_000 / $samplingProbabilityPpm;
+        if ($this->confirmOutcome($decisionId, false, $weight) === 0) {
             return $this->skippedConfirmationReceipt(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey);
         }
-        return $this->record_feedback(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey);
+        return $this->emitFeedback(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey);
     }
 
     /**
-     * Compensating-state correction: fixes a prior label by recording the
-     * OPPOSITE reputation event for a decision AT MOST ONCE, guarded by a
-     * SET NX reservation in the calibration store
-     * ({kiwi:<ns>}:cal:corrected:<hex(sha256(decisionId))> EX
-     * receiptTtlSecs — see CalibrationStore::reserveCorrection()).
+     * Corrects a prior label via the canonical correction.lua (with
+     * calibration) or the store's outcome_correct.lua (without): flips the
+     * always-on outcome ledger L <-> A — the corrected outcome is
+     * authoritative for future events; ephemeral reputation pressure is
+     * left to decay naturally (no synthetic identities are involved).
+     * With calibration the correction ALSO reverses the original bucket
+     * contribution (exact recorded weight, clamped at zero) and adds the
+     * corrected contribution.
      *
      * $legitimate mirrors the (mistaken) FIRST confirmed outcome — a first
-     * confirmation of legitimate=true (trust) is compensated by a
-     * ConfirmedAbuse event and vice versa. The compensation lands in
-     * per-decision, decision-anchored pseudonyms (the original identity
-     * context is unrecoverable once the receipt is consumed) and is
-     * additionally dedupe-guarded by a deterministic event_id, so it can
-     * never re-apply or amplify a real visitor. Calibration consumes only
-     * the first confirmed outcome: the correction NEVER touches receipts
-     * or hourly buckets ($weight is accepted for signature parity with
-     * confirmOutcome() and unused).
-     *
-     * Returns true when the compensation was applied (best-effort — a
-     * state-store failure is silent and the reservation stays consumed so
-     * a retry cannot double-apply); false when the decision was already
-     * corrected or no calibration store is attached (the guard cannot be
-     * enforced without its namespace).
+     * confirmation of legitimate=true (trust) is corrected to abuse and
+     * vice versa. Returns true when the correction was applied
+     * (best-effort — a state-backend failure is silent and the retry may
+     * apply it later); false when the decision is unknown/expired or
+     * already carries the target outcome.
      *
      * @throws \InvalidArgumentException when $decisionId is empty
      */
@@ -384,57 +427,20 @@ final class AdaptiveRiskEngine
         if ($decisionId === '') {
             throw new \InvalidArgumentException('confirmCorrection requires a non-empty decision id');
         }
-        if ($this->calibration === null) {
-            return false;
-        }
-        try {
-            if (!$this->calibration->reserveCorrection($decisionId)) {
+        if ($this->calibration !== null) {
+            try {
+                return $this->calibration->correctOutcome($decisionId, $legitimate, $weight);
+            } catch (\InvalidArgumentException $e) {
+                throw $e;
+            } catch (\Throwable) {
                 return false;
             }
+        }
+        try {
+            return $this->store->correctOutcome($decisionId, $legitimate);
         } catch (\Throwable) {
             return false;
         }
-        $event = $legitimate ? RiskEventKind::ConfirmedAbuse : RiskEventKind::ConfirmedLegitimate;
-        $observation = $this->correctionObservation($decisionId, $event);
-        try {
-            $this->store->observe($observation);
-        } catch (\Throwable) {
-            // Best-effort: the reservation stays consumed so a retry cannot
-            // double-apply the compensation.
-        }
-        return true;
-    }
-
-    /**
-     * A deterministic, identity-free observation for a compensation event:
-     * source/subnet pseudonyms and the dedupe event_id are sha256-derived
-     * from the decision_id (distinct salts for the ±1 epoch boundary keys
-     * so the rotated pseudonyms never collide), which isolates every
-     * correction's state mutation in its own keys and makes the event
-     * once-only even if the guard key expires.
-     */
-    private function correctionObservation(string $decisionId, RiskEventKind $event): RiskObservation
-    {
-        $digest = static fn (string $salt): string => substr(hash('sha256', $salt . $decisionId), 0, 32);
-        $nowMs = (int) floor(microtime(true) * 1000);
-        $nowSecs = intdiv($nowMs, 1000);
-        return new RiskObservation(
-            event: $event,
-            scope: 0,
-            sourceEpoch: intdiv($nowSecs, $this->sourceEpochSecs),
-            sourceIdPrev: $digest('kiwicaptcha:correction:srcp:'),
-            sourceId: $digest('kiwicaptcha:correction:srcc:'),
-            sourceIdNext: $digest('kiwicaptcha:correction:srcn:'),
-            subnetEpoch: intdiv($nowSecs, $this->subnetEpochSecs),
-            subnetIdPrev: $digest('kiwicaptcha:correction:netp:'),
-            subnetId: $digest('kiwicaptcha:correction:netc:'),
-            subnetIdNext: $digest('kiwicaptcha:correction:netn:'),
-            sessionId: null,
-            principalId: null,
-            eventId: hash('sha256', 'kiwicaptcha:correction:evt:' . $decisionId),
-            networkRisk: 0,
-            nowMs: $nowMs,
-        );
     }
 
     /**
@@ -553,29 +559,39 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * Registers the calibration receipt for one decision so a later
-     * confirmed outcome can be paired back to its scope/band/action. The
-     * receipt carries the EXACT risk score and the assessment-time
-     * sampling flag (sample() decides; the label can never select itself
-     * into the calibration population in random_sample mode). Failures are
-     * silent — calibration never breaks issuance.
+     * Registers one decision in the ALWAYS-ON outcome ledger (the 
+     * exactly-once authority for later confirmed outcomes):
+     *   - with calibration: the canonical register_decision.lua creates the
+     *     receipt (with the assessment-time sampling flag), the sampled
+     *     TOTAL denominator (when sampled) and the PENDING ledger entry
+     *     ATOMICALLY;
+     *   - without calibration: the store's outcome_register.lua creates the
+     *     PENDING ledger entry only.
+     * The sampled flag = sample() (PURE — the denominator is booked
+     * atomically by the script); true when calibration is null. decisionHour
+     * anchors the outcome to the hour the DECISION was made. Failures are
+     * silent — registration never breaks issuance.
      */
-    private function registerCalibrationReceipt(int $scope, RiskDecision $decision): void
+    private function registerDecisionOutcome(int $scope, RiskDecision $decision, int $nowMs): void
     {
-        if ($this->calibration === null) {
-            return;
-        }
+        $decisionHour = intdiv($nowMs, 3_600_000);
         try {
-            $this->calibration->recordReceipt(
-                $decision->decisionId,
-                $scope,
-                $decision->band,
-                $decision->action,
-                $decision->score,
-                $this->calibration->sample() ? 1 : 0,
-            );
+            $sampled = $this->calibration?->sample() ?? true;
+            if ($this->calibration !== null) {
+                $this->calibration->recordReceipt(
+                    $decision->decisionId,
+                    $scope,
+                    $decision->band,
+                    $decision->action,
+                    $decision->score,
+                    $sampled ? 1 : 0,
+                    $decisionHour,
+                );
+            } else {
+                $this->store->registerOutcome($decision->decisionId, $scope, $decisionHour, $decision->score);
+            }
         } catch (\Throwable) {
-            // calibration must never break issuance
+            // registration must never break issuance
         }
     }
 

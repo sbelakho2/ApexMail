@@ -13,15 +13,17 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Redis-backed calibration tests (EXACT-score CLASS-NORMALIZED semantics of
- * the canonical calibration.lua + confirm.lua pair: fp_mean =
- * legit_score_sum/legit_count, fn_mean = (abuse_count*1000 -
- * abuse_score_sum)/abuse_count, error = fn_mean*fn_cost - fp_mean*fp_cost,
- * raw = trunc(error*2/10) clamped ±maxAdjustment; proportional rate
- * limiter over milli-points clocked by Redis TIME; random-sample RESOLUTION
- * GATE over the sampled-total/resolved counters; receipts carry score +
- * sampled and are consumed EXACTLY ONCE by the atomic confirm script with
- * the SHARED status 0/1/2). AggregateCalibrator cases are skipped unless
- * RISK_REDIS_URL is set.
+ * the canonical calibration.lua + register_decision.lua/confirm.lua/
+ * correction.lua/sampling_metrics.lua: fp_mean = legit_score_sum/legit_count,
+ * fn_mean = (abuse_count*1000 - abuse_score_sum)/abuse_count, error =
+ * fn_mean*fn_cost - fp_mean*fp_cost, raw = trunc(error*2/10) clamped
+ * ±maxAdjustment; proportional rate limiter over milli-points clocked by
+ * Redis TIME; PER-SCOPE random-sample RESOLUTION GATE over the 24-bucket
+ * sample_total/sample_resolved window; receipts carry score + sampled +
+ * decision_hour and are created ATOMICALLY with the sample denominator and
+ * the PENDING outcome-ledger entry by register_decision.lua, consumed
+ * EXACTLY ONCE by the atomic confirm script with the SHARED status 0/1/2).
+ * AggregateCalibrator cases are skipped unless RISK_REDIS_URL is set.
  */
 final class CalibrationTest extends TestCase
 {
@@ -55,14 +57,15 @@ final class CalibrationTest extends TestCase
 
     /**
      * Records n confirmed outcomes at an EXACT score through the full
-     * receipt -> confirm.lua path (each confirmation must return status 1 —
-     * the FIRST confirmation).
+     * register_decision.lua -> confirm.lua path (each confirmation must
+     * return status 1 — the FIRST confirmation). The receipts are booked
+     * as SAMPLED so the sample counters follow the outcomes.
      */
     private function recordOutcomes(AggregateCalibrator $c, int $n, int $score, bool $legit, int $scope = 1, string $prefix = 'd'): void
     {
         for ($i = 0; $i < $n; $i++) {
             $id = "{$prefix}-{$scope}-{$i}";
-            $c->recordReceipt($id, $scope, intdiv(max(0, min(1000, $score)), 100), RiskAction::Sha20, $score, 1);
+            self::assertTrue($c->recordReceipt($id, $scope, intdiv(max(0, min(1000, $score)), 100), RiskAction::Sha20, $score, 1, $this->decisionHour()), "receipt {$id} must register");
             self::assertSame(1, $c->confirmOutcome($id, $legit), "outcome {$id} must be recorded (status 1) against scope {$scope}");
         }
     }
@@ -70,6 +73,11 @@ final class CalibrationTest extends TestCase
     private function nowMs(): int
     {
         return (int) floor(microtime(true) * 1000);
+    }
+
+    private function decisionHour(): int
+    {
+        return intdiv($this->nowMs(), 3_600_000);
     }
 
     /**
@@ -98,9 +106,9 @@ final class CalibrationTest extends TestCase
         $prop->setValue($c, []);
     }
 
-    private function bucket(AggregateCalibrator $c, int $scope): string
+    private function bucket(AggregateCalibrator $c, int $scope, ?int $hour = null): string
     {
-        return "{kiwi:{$c->namespace()}}:cal:{$scope}:" . intdiv($this->nowMs(), 3_600_000);
+        return "{kiwi:{$c->namespace()}}:cal:{$scope}:" . ($hour ?? intdiv($this->nowMs(), 3_600_000));
     }
 
     /** The Redis server clock in epoch milliseconds (the script's clock authority). */
@@ -367,6 +375,11 @@ final class CalibrationTest extends TestCase
             self::fail('ppm > 1000000 must throw');
         } catch (\InvalidArgumentException) {
         }
+        try {
+            new AggregateCalibrator($this->requireClient(), namespace: 'm4' . bin2hex(random_bytes(4)), outcomeTtlSecs: 0);
+            self::fail('outcomeTtlSecs 0 must throw');
+        } catch (\InvalidArgumentException) {
+        }
         self::assertTrue(true);
     }
 
@@ -415,68 +428,88 @@ final class CalibrationTest extends TestCase
         }
         self::assertGreaterThan(0, $yes, '50% ppm must eventually sample');
         self::assertGreaterThan(0, $no, '50% ppm must eventually skip');
+
+        // sample() is PURE (round 7): no singleton counters are touched —
+        // the denominator is booked atomically with the receipt.
+        $client = $this->requireClient();
+        $r = new AggregateCalibrator($client, namespace: 'spure' . bin2hex(random_bytes(4)), samplingMode: 'random_sample', samplingProbabilityPpm: 1_000_000);
+        $r->sample();
+        $r->sample();
+        self::assertNull($client->get("{kiwi:{$r->namespace()}}:cal:sample:total"), 'the lifetime singleton counter key is GONE (round 7)');
+        self::assertNull($client->get("{kiwi:{$r->namespace()}}:cal:sample:resolved"), 'the lifetime singleton resolved key is GONE (round 7)');
     }
 
-    public function testSamplingCountersFollowTheMode(): void
+    public function testSamplingMetricsPerScope(): void
     {
         $client = $this->requireClient();
+        $c = new AggregateCalibrator($client, namespace: 'smet' . bin2hex(random_bytes(4)), samplingMode: 'random_sample', samplingProbabilityPpm: 1_000_000);
+        $ns = $c->namespace();
+        $now = $this->nowMs();
+        $hour = intdiv($now, 3_600_000);
 
-        // Complete mode: sample()/markSampled() never touch the counters
-        // (the resolution gate applies only to random_sample).
-        $c = new AggregateCalibrator($client, namespace: 'totc' . bin2hex(random_bytes(4)), samplingMode: 'complete');
-        self::assertTrue($c->sample());
-        $c->markSampled();
-        $c->markSampled();
-        self::assertNull($client->get("{kiwi:{$c->namespace()}}:cal:sample:total"), 'complete mode must not INCR the total');
-        self::assertNull($client->get("{kiwi:{$c->namespace()}}:cal:sample:resolved"), 'complete mode must not INCR the resolved');
+        // A fresh scope has zero totals and a fully-resolved ratio (1.0).
+        self::assertSame(
+            ['sampledTotal' => 0, 'sampledResolved' => 0, 'resolutionRatio' => 0.0, 'sampledExpired' => 0],
+            $c->samplingMetrics(1, $now),
+        );
 
-        // Random-sample mode: a sampled decision INCRs the TOTAL counter
-        // (one INCR per sampled decision — the resolution-gate denominator).
-        $r = new AggregateCalibrator($client, namespace: 'totr' . bin2hex(random_bytes(4)), samplingMode: 'random_sample', samplingProbabilityPpm: 1_000_000);
+        // Three SAMPLED receipts: the denominator is booked atomically with
+        // each receipt (no markSampled — no singleton counters).
         for ($i = 0; $i < 3; $i++) {
-            self::assertTrue($r->sample(), 'ppm 1000000 samples every decision');
+            $c->recordReceipt("smet-{$i}", 1, 1, RiskAction::Sha20, 100, 1, $hour);
         }
-        self::assertSame('3', (string) $client->get("{kiwi:{$r->namespace()}}:cal:sample:total"), 'each sampled decision INCRs the total exactly once');
-        self::assertNull($client->get("{kiwi:{$r->namespace()}}:cal:sample:resolved"), 'sample() must not touch the resolved counter');
+        self::assertSame('3', (string) $client->hget($this->bucket($c, 1), 'sample_total'), 'each sampled decision books sample_total exactly once');
 
-        // markSampled() books one sampled decision into the total too.
-        $r->markSampled();
-        $r->markSampled();
-        self::assertSame('5', (string) $client->get("{kiwi:{$r->namespace()}}:cal:sample:total"));
+        // One resolution: 1/3 resolved, 2 in flight (expired approximation).
+        self::assertSame(1, $c->confirmOutcome('smet-0', true), 'the sampled confirmation resolves');
+        $metrics = $c->samplingMetrics(1, $now);
+        self::assertSame(3, $metrics['sampledTotal']);
+        self::assertSame(1, $metrics['sampledResolved']);
+        self::assertSame(1 / 3, $metrics['resolutionRatio']);
+        self::assertSame(2, $metrics['sampledExpired'], 'sampledExpired = max(0, total - resolved) — includes in-flight receipts');
 
-        // A sampled confirmation (status 1) INCRs the RESOLVED counter; an
-        // unsampled confirmation (status 2) consumes WITHOUT resolving.
-        $r->recordReceipt('r-1', 7, 4, RiskAction::Argon16, 900, 1);
-        self::assertSame(1, $r->confirmOutcome('r-1', true));
-        $r->recordReceipt('r-2', 7, 4, RiskAction::Argon16, 900, 0);
-        self::assertSame(2, $r->confirmOutcome('r-2', true), 'an unsampled confirmation is consumed with status 2');
-        self::assertSame('1', (string) $client->get("{kiwi:{$r->namespace()}}:cal:sample:resolved"), 'exactly one resolved confirmation');
+        // An UNSAMPLED receipt (sampled=0) books NO denominator and is
+        // consumed with status 2 WITHOUT resolving.
+        $c->recordReceipt('smet-unsampled', 1, 1, RiskAction::Sha20, 100, 0, $hour);
+        self::assertSame(2, $c->confirmOutcome('smet-unsampled', true));
+        self::assertSame(3, $c->samplingMetrics(1, $now)['sampledTotal'], 'an unsampled decision never books the denominator');
+        self::assertSame(1, $c->samplingMetrics(1, $now)['sampledResolved']);
+
+        // Metrics are PER-SCOPE: scope 2 (with one sampled receipt) does
+        // not see scope 1's window.
+        $c->recordReceipt('smet-other', 2, 1, RiskAction::Sha20, 100, 1, $hour);
+        $other = $c->samplingMetrics(2, $now);
+        self::assertSame(1, $other['sampledTotal']);
+        self::assertSame(0, $other['sampledResolved']);
+        self::assertSame(0.0, $other['resolutionRatio']);
+        self::assertSame(1, $other['sampledExpired']);
     }
 
     public function testRandomSampleDiscardsUnsampledConfirmations(): void
     {
         $c = new AggregateCalibrator($this->requireClient(), namespace: 'rs' . bin2hex(random_bytes(4)), samplingMode: 'random_sample', samplingProbabilityPpm: 1_000_000);
         $ns = $c->namespace();
+        $hour = $this->decisionHour();
         // Unsampled: status 2 — the receipt is CONSUMED (never calibrated,
         // the label can never select itself into the population).
-        $c->recordReceipt('rs-unsampled', 1, 1, RiskAction::Sha20, 100, 0);
+        $c->recordReceipt('rs-unsampled', 1, 1, RiskAction::Sha20, 100, 0, $hour);
         self::assertSame(2, $c->confirmOutcome('rs-unsampled', false), 'an unsampled decision must be consumed with status 2, never recorded');
         self::assertSame([], $this->client->hgetall($this->bucket($c, 1)), 'no bucket fields may be written for a consumed unsampled confirmation');
         self::assertNull($this->client->get("{kiwi:{$ns}}:cal:receipt:rs-unsampled"), 'the unsampled receipt must still be consumed');
-        self::assertNull($this->client->get("{kiwi:{$ns}}:cal:sample:resolved"), 'a status-2 confirmation must not INCR the resolved counter');
 
         // A sampled receipt confirms normally (status 1) and resolves.
-        $c->recordReceipt('rs-sampled', 1, 1, RiskAction::Sha20, 100, 1);
+        $c->recordReceipt('rs-sampled', 1, 1, RiskAction::Sha20, 100, 1, $hour);
         self::assertSame(1, $c->confirmOutcome('rs-sampled', false));
         self::assertSame('1', (string) $this->client->hget($this->bucket($c, 1), 'abuse_count'));
         self::assertSame('100', (string) $this->client->hget($this->bucket($c, 1), 'abuse_score_sum'));
-        self::assertSame('1', (string) $this->client->get("{kiwi:{$ns}}:cal:sample:resolved"));
+        self::assertSame('1', (string) $this->client->hget($this->bucket($c, 1), 'sample_resolved'));
+        self::assertSame('1', (string) $this->client->hget($this->bucket($c, 1), 'sample_total'));
     }
 
     public function testCompleteModeRecordsRegardlessOfSampledFlag(): void
     {
         $c = $this->calibrator();
-        $c->recordReceipt('cm-unsampled', 1, 1, RiskAction::Sha20, 100, 0);
+        $c->recordReceipt('cm-unsampled', 1, 1, RiskAction::Sha20, 100, 0, $this->decisionHour());
         self::assertSame(1, $c->confirmOutcome('cm-unsampled', false), 'complete mode must record even an unsampled receipt');
         self::assertSame('1', (string) $this->client->hget($this->bucket($c, 1), 'abuse_count'));
     }
@@ -486,28 +519,52 @@ final class CalibrationTest extends TestCase
         $c = new AggregateCalibrator($this->requireClient(), namespace: 'wg' . bin2hex(random_bytes(4)), samplingMode: 'weighted');
         // Weight 10: every confirmed outcome counts 10 (host-supplied
         // inverse sampling probability).
-        $c->recordReceipt('wg-1', 1, 1, RiskAction::Sha20, 100, 0);
+        $c->recordReceipt('wg-1', 1, 1, RiskAction::Sha20, 100, 0, $this->decisionHour());
         self::assertSame(1, $c->confirmOutcome('wg-1', true, 10.0));
         self::assertSame('10', (string) $this->client->hget($this->bucket($c, 1), 'legit_count'));
         self::assertSame('1000', (string) $this->client->hget($this->bucket($c, 1), 'legit_score_sum'), 'score 100 x weight 10');
 
-        // The default weight is 1.0.
-        $c->recordReceipt('wg-2', 1, 1, RiskAction::Sha20, 200, 0);
-        self::assertSame(1, $c->confirmOutcome('wg-2', true));
+        // The default weight is 1.0 when supplied explicitly.
+        $c->recordReceipt('wg-2', 1, 1, RiskAction::Sha20, 200, 0, $this->decisionHour());
+        self::assertSame(1, $c->confirmOutcome('wg-2', true, 1.0));
         self::assertSame('11', (string) $this->client->hget($this->bucket($c, 1), 'legit_count'));
         self::assertSame('1200', (string) $this->client->hget($this->bucket($c, 1), 'legit_score_sum'));
     }
 
-    public function testReceiptCarriesScoreAndSampled(): void
+    public function testWeightedModeRejectsNullWeight(): void
+    {
+        $c = new AggregateCalibrator($this->requireClient(), namespace: 'wgn' . bin2hex(random_bytes(4)), samplingMode: 'weighted');
+        $ns = $c->namespace();
+        $c->recordReceipt('wgn-1', 1, 1, RiskAction::Sha20, 100, 0, $this->decisionHour());
+
+        // A PHP-side validation error: weighted mode REQUIRES the
+        // inverse-sampling weight — the script never runs and the receipt
+        // survives (a retry with the weight applies exactly once).
+        try {
+            $c->confirmOutcome('wgn-1', true);
+            self::fail('weighted mode with a null weight must throw');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('weighted mode requires a sampling probability weight', $e->getMessage());
+        }
+        self::assertNotNull($this->client->get("{kiwi:{$ns}}:cal:receipt:wgn-1"), 'the receipt must survive the rejected confirmation');
+        self::assertSame([], $this->client->hgetall($this->bucket($c, 1)), 'no bucket fields may be written without a weight');
+
+        // With the weight the same confirmation applies (status 1).
+        self::assertSame(1, $c->confirmOutcome('wgn-1', true, 2.0));
+        self::assertSame('2', (string) $this->client->hget($this->bucket($c, 1), 'legit_count'));
+    }
+
+    public function testReceiptCarriesScoreSampledAndDecisionHour(): void
     {
         $c = $this->calibrator();
         $ns = $c->namespace();
-        $c->recordReceipt('carry-1', 7, 4, RiskAction::Argon16, 900, 1);
+        $hour = $this->decisionHour();
+        $c->recordReceipt('carry-1', 7, 4, RiskAction::Argon16, 900, 1, $hour);
         $raw = $this->client->get("{kiwi:{$ns}}:cal:receipt:carry-1");
         self::assertSame(
-            ['scope' => 7, 'band' => 4, 'action' => 'argon16', 'score' => 900, 'sampled' => 1],
+            ['scope' => 7, 'band' => 4, 'action' => 'argon16', 'decision_hour' => $hour, 'score' => 900, 'sampled' => 1],
             json_decode((string) $raw, true),
-            'the receipt must carry the exact score and the sampling flag'
+            'the receipt must carry the exact score, the sampling flag and the decision hour'
         );
         self::assertSame(1, $c->confirmOutcome('carry-1', true));
         self::assertSame('1', (string) $this->client->hget($this->bucket($c, 7), 'legit_count'));
@@ -533,11 +590,14 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->confirmOutcome('corrupt-2', false));
         self::assertSame('not-json', (string) $this->client->get("{kiwi:{$ns}}:cal:receipt:corrupt-2"), 'the pre-read must not delete the receipt');
 
-        // FIRST confirmation -> status 1; the retry -> status 0.
-        $c->recordReceipt('once-1', 7, 4, RiskAction::Argon16, 500, 1);
+        // FIRST confirmation -> status 1; the retry -> status 0 (the
+        // outcome-ledger CAS is the exactly-once authority).
+        $c->recordReceipt('once-1', 7, 4, RiskAction::Argon16, 500, 1, $this->decisionHour());
         self::assertSame(1, $c->confirmOutcome('once-1', true), 'the first confirmation is status 1');
         self::assertSame(0, $c->confirmOutcome('once-1', true), 'a retried confirmation is status 0 (already confirmed)');
         self::assertSame('1', (string) $this->client->hget($this->bucket($c, 7), 'legit_count'), 'exactly one outcome recorded');
+        $ledger = json_decode((string) $this->client->get("{kiwi:{$ns}}:outcome:once-1"), true);
+        self::assertSame('L', $ledger['o'], 'the outcome ledger records the confirmation exactly once');
     }
 
     public function testRateOfChangeClampIsProportional(): void
@@ -606,7 +666,7 @@ final class CalibrationTest extends TestCase
 
         $before = $client->commands;
         self::assertSame(0, $c->biasForScope(1, $this->nowMs()), 'first call seeds the state');
-        self::assertSame($before + 1, $client->commands, '24 buckets + rate clamp + state + gate counters must be ONE round trip');
+        self::assertSame($before + 1, $client->commands, '24 buckets + rate clamp + state must be ONE round trip (no singleton counters)');
 
         self::assertSame(0, $c->biasForScope(1, $this->nowMs()));
         self::assertSame($before + 1, $client->commands, 'cache hit must not touch Redis');
@@ -625,25 +685,24 @@ final class CalibrationTest extends TestCase
         // A fresh outcome for the SAME scope invalidates its cached bias:
         // the next read must hit Redis again. The confirm itself is the
         // bucket pre-read GET + the atomic script.
-        $c->recordReceipt('inv-fresh', 1, 1, RiskAction::Sha20, 100, 1);
+        $c->recordReceipt('inv-fresh', 1, 1, RiskAction::Sha20, 100, 1, $this->decisionHour());
         $c->confirmOutcome('inv-fresh', false);
         $c->biasForScope(1, $this->nowMs());
         self::assertSame($before + 5, $client->commands, 'confirmOutcome() must invalidate the confirmed scope cache');
 
         // A fresh outcome for ANOTHER scope must not invalidate this one.
-        $c->recordReceipt('inv-other', 2, 1, RiskAction::Sha20, 100, 1);
+        $c->recordReceipt('inv-other', 2, 1, RiskAction::Sha20, 100, 1, $this->decisionHour());
         $c->confirmOutcome('inv-other', false);
         $c->biasForScope(1, $this->nowMs());
         self::assertSame($before + 8, $client->commands, 'a confirm for another scope must not invalidate this scope');
     }
 
-    public function testResolutionGateSuspendsBias(): void
+    public function testResolutionGateIsPerScopeWindow(): void
     {
         // random_sample mode with the default minimumResolutionRatio 0.80:
-        // 100 abuse @ 100 fill the buckets (raw 360 -> 150). The
-        // confirmations resolve the sampled counter to 100; the test then
-        // REWINDS the resolved counter to drive the gate scenario, and 100
-        // sampled decisions are booked into the TOTAL counter.
+        // the gate compares the PER-SCOPE 24-bucket sample totals — two
+        // scopes with different resolution ratios gate independently (the
+        // lifetime singleton counters are GONE in round 7).
         $c = new AggregateCalibrator(
             $this->requireClient(),
             namespace: 'gate' . bin2hex(random_bytes(4)),
@@ -651,31 +710,44 @@ final class CalibrationTest extends TestCase
             samplingMode: 'random_sample',
             samplingProbabilityPpm: 1_000_000,
         );
-        $ns = $c->namespace();
-        $this->recordOutcomes($c, 100, 100, false, 1, 'gate');
-        $this->client->set("{kiwi:{$ns}}:cal:sample:resolved", 0);
-        for ($i = 0; $i < 100; $i++) {
-            $c->markSampled();
-        }
-        self::assertSame('100', (string) $this->client->get("{kiwi:{$ns}}:cal:sample:total"));
+        $client = $this->requireClient();
         $t = $this->t0();
+        $hour = intdiv($t, 3_600_000);
 
-        // Gate closed: total 100 >= minSamples 100 and resolved 0 < 100*0.8
-        // -> the target stays 0 even with full movement allowance.
-        $this->seedRateWindow($c, 1, 0, 900_000);
-        self::assertSame(0, $c->biasForScope(1, $t), 'the resolution gate must hold the bias at 0 while resolved < 80% of total');
-
-        // Still closed at exactly 79 < 80.
-        $this->client->set("{kiwi:{$ns}}:cal:sample:resolved", 79);
-        $this->seedRateWindow($c, 1, 0, 900_000);
-        $this->clearCache($c);
-        self::assertSame(0, $c->biasForScope(1, $t));
-
-        // Gate opens at 80 (80 < 80 is false): the bias moves to the raw.
-        $this->client->set("{kiwi:{$ns}}:cal:sample:resolved", 80);
+        // Scope 1: 100 sampled abuse @ 100, ALL resolved -> ratio 1.0,
+        // gate OPEN -> the bias moves to the raw (150 with full allowance).
+        $this->recordOutcomes($c, 100, 100, false, 1, 'gate');
+        self::assertSame('100', (string) $client->hget($this->bucket($c, 1), 'sample_total'));
+        self::assertSame('100', (string) $client->hget($this->bucket($c, 1), 'sample_resolved'));
         $this->seedRateWindow($c, 1, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(150, $c->biasForScope(1, $t), 'the bias moves once the resolution ratio is met');
+        self::assertSame(150, $c->biasForScope(1, $t), 'a fully-resolved scope must move');
+
+        // Scope 2: 100 sampled abuse @ 100, only 79 resolved -> ratio 0.79
+        // < 0.80, gate CLOSED -> the target stays 0 even with full
+        // movement allowance (a DIFFERENT scope's resolution cannot open
+        // this window).
+        $this->recordOutcomes($c, 100, 100, false, 2, 'gate2');
+        $client->hset($this->bucket($c, 2, $hour), 'sample_resolved', 79);
+        $this->seedRateWindow($c, 2, 0, 900_000);
+        $this->clearCache($c);
+        self::assertSame(0, $c->biasForScope(2, $t), 'the gate must hold the bias at 0 while resolved < 80% of the per-scope total');
+
+        // Rewind scope 2's resolved below the exact boundary (79 < 80).
+        self::assertSame(0, $c->biasForScope(2, $t));
+
+        // Exactly 80 resolves: 80 < 80 is false -> the gate opens. (The
+        // previous call refreshed the rate-limit clock, so re-seed the
+        // proportional window.)
+        $client->hset($this->bucket($c, 2, $hour), 'sample_resolved', 80);
+        $this->seedRateWindow($c, 2, 0, 900_000);
+        $this->clearCache($c);
+        self::assertSame(150, $c->biasForScope(2, $t), 'the bias moves once the per-scope resolution ratio is met');
+
+        // Scope 1 is untouched by scope 2's rewinds (still open).
+        $this->seedRateWindow($c, 1, 0, 900_000);
+        $this->clearCache($c);
+        self::assertSame(150, $c->biasForScope(1, $t));
 
         // The gate never applies to complete mode (mode != 1).
         $c2 = new AggregateCalibrator($this->requireClient(), namespace: 'gatec' . bin2hex(random_bytes(4)), minSamples: 100, samplingMode: 'complete');
@@ -741,14 +813,14 @@ final class CalibrationTest extends TestCase
             receiptTtlSecs: 60,
             samplingMode: 'complete',
         );
-        $c->recordReceipt('receipt-ttl-1', 1, 5, RiskAction::Sha20, 500, 1);
+        $c->recordReceipt('receipt-ttl-1', 1, 5, RiskAction::Sha20, 500, 1, $this->decisionHour());
         $ttl = (int) $this->client->ttl("{kiwi:{$c->namespace()}}:cal:receipt:receipt-ttl-1");
         self::assertGreaterThan(0, $ttl);
         self::assertLessThanOrEqual(60, $ttl);
 
         // The default is the RECEIPT_TTL_SECS constant (300).
         $d = $this->calibrator();
-        $d->recordReceipt('receipt-ttl-2', 1, 5, RiskAction::Sha20, 500, 1);
+        $d->recordReceipt('receipt-ttl-2', 1, 5, RiskAction::Sha20, 500, 1, $this->decisionHour());
         $ttl = (int) $this->client->ttl("{kiwi:{$d->namespace()}}:cal:receipt:receipt-ttl-2");
         self::assertGreaterThan(0, $ttl);
         self::assertLessThanOrEqual(AggregateCalibrator::RECEIPT_TTL_SECS, $ttl);
@@ -782,14 +854,79 @@ final class CalibrationTest extends TestCase
         self::assertSame($before + 2, $client->commands, 'recently cached scope must still hit');
     }
 
+    public function testRegisterIsAtomicWithReceiptAndDenominator(): void
+    {
+        // register_decision.lua creates the receipt, the sampled-TOTAL
+        // denominator and the PENDING ledger entry in ONE invocation: a
+        // duplicate registration returns false and can NEVER double-book
+        // the denominator (no orphaned counters).
+        $c = $this->calibrator();
+        $client = $this->requireClient();
+        $ns = $c->namespace();
+        $hour = $this->decisionHour();
+
+        $bucketKey = $this->bucket($c, 7, $hour);
+        self::assertTrue($c->recordReceipt('atomic-reg', 7, 4, RiskAction::Argon16, 100, 1, $hour));
+        self::assertSame('1', (string) $client->hget($bucketKey, 'sample_total'));
+        self::assertNotNull($client->get("{kiwi:{$ns}}:cal:receipt:atomic-reg"), 'the receipt exists');
+
+        // The SAME decision again: nothing is registered, the denominator
+        // is NOT incremented — a sample can never be counted without its
+        // receipt.
+        self::assertFalse($c->recordReceipt('atomic-reg', 7, 4, RiskAction::Argon16, 100, 1, $hour), 'a duplicate registration is refused');
+        self::assertSame('1', (string) $client->hget($bucketKey, 'sample_total'), 'the denominator must be booked exactly once');
+
+        // An UNSAMPLED registration never touches the bucket at all.
+        self::assertTrue($c->recordReceipt('atomic-reg-unsampled', 7, 4, RiskAction::Argon16, 100, 0, $hour));
+        self::assertSame('1', (string) $client->hget($bucketKey, 'sample_total'), 'an unsampled decision books no denominator');
+        self::assertNull($client->hget($bucketKey, 'sample_resolved'), 'nothing resolves at registration');
+
+        // Every registered decision has a PENDING outcome-ledger entry.
+        $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:atomic-reg"), true);
+        self::assertSame('P', $ledger['o'], 'the ledger entry is PENDING at registration');
+        self::assertSame(7, $ledger['scope']);
+        self::assertSame($hour, $ledger['hour']);
+        self::assertSame(100, $ledger['score']);
+    }
+
+    public function testDecisionHourBucketing(): void
+    {
+        // A decision made at hour H is bucketed at H — a confirmation
+        // HOURS later must land in the DECISION-time bucket, never in the
+        // confirmation-time bucket. (random_sample mode so the resolution
+        // counter is exercised too.)
+        $client = $this->requireClient();
+        $c = new AggregateCalibrator($client, namespace: 'dhb' . bin2hex(random_bytes(4)), samplingMode: 'random_sample', samplingProbabilityPpm: 1_000_000);
+        $ns = $c->namespace();
+        $decisionHour = intdiv($this->nowMs(), 3_600_000) - 3; // 3 hours ago
+        $nowHour = intdiv($this->nowMs(), 3_600_000);
+
+        self::assertTrue($c->recordReceipt('hour-dec', 9, 3, RiskAction::Sha20, 700, 1, $decisionHour));
+        self::assertSame('1', (string) $client->hget("{kiwi:{$ns}}:cal:9:{$decisionHour}", 'sample_total'), 'the denominator is booked in the DECISION-hour bucket');
+
+        // "Hours later": the confirmation runs now, but the receipt's
+        // decision_hour anchors the outcome to the decision hour.
+        self::assertSame(1, $c->confirmOutcome('hour-dec', true));
+        self::assertSame('1', (string) $client->hget("{kiwi:{$ns}}:cal:9:{$decisionHour}", 'legit_count'), 'the outcome lands in the DECISION-hour bucket');
+        self::assertSame('700', (string) $client->hget("{kiwi:{$ns}}:cal:9:{$decisionHour}", 'legit_score_sum'));
+        self::assertSame('1', (string) $client->hget("{kiwi:{$ns}}:cal:9:{$decisionHour}", 'sample_resolved'), 'the resolution counter lands in the DECISION-hour bucket');
+        self::assertSame([], $client->hgetall("{kiwi:{$ns}}:cal:9:{$nowHour}"), 'the confirmation-time bucket must stay empty');
+
+        // The bias window reads the decision-hour bucket (the t0 window
+        // spans it when it falls inside the last 24 hours).
+        $windowStart = intdiv($this->t0(), 3_600_000) - AggregateCalibrator::WINDOW_HOURS + 1;
+        self::assertLessThanOrEqual($decisionHour, $windowStart, 'the decision hour must be inside the 24-bucket window');
+    }
+
     public function testAtomicConfirmConsumesReceiptExactlyOnce(): void
     {
         $client = $this->countingClient();
         $c = new AggregateCalibrator($client, namespace: 'atm' . bin2hex(random_bytes(4)), samplingMode: 'complete');
-        $c->recordReceipt('atomic-1', 7, 4, RiskAction::Argon16, 100, 1);
+        $c->recordReceipt('atomic-1', 7, 4, RiskAction::Argon16, 100, 1, $this->decisionHour());
 
         // The confirm is the bucket-key pre-read + ONE atomic script (the
-        // receipt delete and the bucket increment cannot be split).
+        // receipt delete, the ledger CAS and the bucket increment cannot be
+        // split).
         $before = $client->commands;
         self::assertSame(1, $c->confirmOutcome('atomic-1', false));
         self::assertSame($before + 2, $client->commands, 'the confirm must be a pre-read GET + a single EVAL');
@@ -808,17 +945,19 @@ final class CalibrationTest extends TestCase
         // The Lua script executes atomically, so sequential confirms from
         // two INDEPENDENT calibrator instances are equivalent to
         // concurrent ones: whoever runs the script first records; the
-        // other finds the receipt gone.
+        // other finds the receipt gone and the ledger already flipped.
         $ns = 'cc' . bin2hex(random_bytes(4));
         $a = new AggregateCalibrator($this->requireClient(), namespace: $ns, samplingMode: 'complete');
         $b = new AggregateCalibrator($this->requireClient(), namespace: $ns, samplingMode: 'complete');
-        $a->recordReceipt('cc-1', 7, 4, RiskAction::Argon16, 100, 1);
+        $a->recordReceipt('cc-1', 7, 4, RiskAction::Argon16, 100, 1, $this->decisionHour());
 
         self::assertSame(1, $a->confirmOutcome('cc-1', false));
         self::assertSame(0, $b->confirmOutcome('cc-1', false), 'the second independent confirm must find the receipt already consumed');
 
         self::assertSame('1', (string) $this->client->hget($this->bucket($a, 7), 'abuse_count'));
         self::assertSame('100', (string) $this->client->hget($this->bucket($a, 7), 'abuse_score_sum'));
+        $ledger = json_decode((string) $this->client->get("{kiwi:{$ns}}:outcome:cc-1"), true);
+        self::assertSame('A', $ledger['o'], 'the shared ledger records the outcome exactly once');
     }
 
     public function testConfirmLuaValidatesArgumentsBeforeDeletion(): void
@@ -827,16 +966,18 @@ final class CalibrationTest extends TestCase
         $ns = 'val' . bin2hex(random_bytes(4));
         $c = new AggregateCalibrator($client, namespace: $ns, samplingMode: 'complete');
         $script = (string) file_get_contents(dirname(__DIR__) . '/resources/confirm.lua');
+        $hour = $this->decisionHour();
+        $bucketKey = "{kiwi:{$ns}}:cal:1:{$hour}";
 
         // Invalid mode -> error reply BEFORE the DEL: the receipt survives.
-        $c->recordReceipt('val-mode', 1, 1, RiskAction::Sha20, 100, 1);
+        $c->recordReceipt('val-mode', 1, 1, RiskAction::Sha20, 100, 1, $hour);
         $keys = [
             "{kiwi:{$ns}}:cal:receipt:val-mode",
-            "{kiwi:{$ns}}:cal:1:" . intdiv($this->nowMs(), 3_600_000),
-            "{kiwi:{$ns}}:cal:sample:resolved",
+            $bucketKey,
+            "{kiwi:{$ns}}:outcome:val-mode",
         ];
         try {
-            $client->eval($script, 3, ...array_merge($keys, ['9', '1', '1', (string) AggregateCalibrator::BUCKET_TTL_SECS]));
+            $client->eval($script, 3, ...array_merge($keys, ['9', '1', '1', (string) AggregateCalibrator::BUCKET_TTL_SECS, (string) AggregateCalibrator::DEFAULT_OUTCOME_TTL_SECS, '1', (string) $hour]));
             self::fail('an invalid calibration mode must be refused with an error reply');
         } catch (ServerException $e) {
             self::assertStringContainsString('invalid calibration mode', $e->getMessage());
@@ -846,10 +987,11 @@ final class CalibrationTest extends TestCase
         // Invalid weight in weighted mode (zero / non-finite) -> error
         // reply, receipt intact.
         foreach (['0', '-1', 'NaN', 'abc'] as $badWeight) {
-            $c->recordReceipt('val-weight-' . $badWeight, 1, 1, RiskAction::Sha20, 100, 1);
+            $c->recordReceipt('val-weight-' . $badWeight, 1, 1, RiskAction::Sha20, 100, 1, $hour);
             $keys[0] = "{kiwi:{$ns}}:cal:receipt:val-weight-" . $badWeight;
+            $keys[2] = "{kiwi:{$ns}}:outcome:val-weight-" . $badWeight;
             try {
-                $client->eval($script, 3, ...array_merge($keys, ['2', $badWeight, '1', (string) AggregateCalibrator::BUCKET_TTL_SECS]));
+                $client->eval($script, 3, ...array_merge($keys, ['2', $badWeight, '1', (string) AggregateCalibrator::BUCKET_TTL_SECS, (string) AggregateCalibrator::DEFAULT_OUTCOME_TTL_SECS, '1', (string) $hour]));
                 self::fail('an invalid calibration weight must be refused with an error reply');
             } catch (ServerException $e) {
                 self::assertStringContainsString('invalid calibration weight', $e->getMessage());
@@ -857,33 +999,81 @@ final class CalibrationTest extends TestCase
             self::assertNotNull($client->get($keys[0]), "the receipt must NOT be deleted on a validation failure (weight {$badWeight})");
         }
 
-        // A valid confirmation records with status 1.
-        $c->recordReceipt('val-ok', 1, 1, RiskAction::Sha20, 100, 1);
+        // A valid confirmation records with status 1 (ledger CAS included).
+        $c->recordReceipt('val-ok', 1, 1, RiskAction::Sha20, 100, 1, $hour);
         $keys[0] = "{kiwi:{$ns}}:cal:receipt:val-ok";
-        self::assertSame(1, (int) $client->eval($script, 3, ...array_merge($keys, ['2', '2.0', '1', (string) AggregateCalibrator::BUCKET_TTL_SECS])), 'a valid weighted confirmation records with status 1');
+        $keys[2] = "{kiwi:{$ns}}:outcome:val-ok";
+        self::assertSame(1, (int) $client->eval($script, 3, ...array_merge($keys, ['2', '2.0', '1', (string) AggregateCalibrator::BUCKET_TTL_SECS, (string) AggregateCalibrator::DEFAULT_OUTCOME_TTL_SECS, '1', (string) $hour])), 'a valid weighted confirmation records with status 1');
         self::assertNull($client->get($keys[0]), 'a valid confirmation consumes the receipt');
+        $ledger = json_decode((string) $client->get($keys[2]), true);
+        self::assertSame('L', $ledger['o']);
+        self::assertSame(2.0, (float) $ledger['w'], 'the ledger records the actual confirmation weight');
     }
 
-    public function testCorrectionGuardIsOnceOnly(): void
+    public function testCorrectionReversesBucketCounts(): void
     {
+        // An abuse confirmation at score 500 is corrected to legitimate:
+        // the original contribution is REVERSED with the exact recorded
+        // weight (abuse_count -1, abuse_score_sum -500, clamped at zero)
+        // and the corrected contribution added (legit_count +1,
+        // legit_score_sum +500). The ledger flips A -> L.
+        $c = $this->calibrator();
         $client = $this->requireClient();
-        $c = new AggregateCalibrator($client, namespace: 'corr' . bin2hex(random_bytes(4)), samplingMode: 'complete');
         $ns = $c->namespace();
-        $guard = "{kiwi:{$ns}}:cal:corrected:" . hash('sha256', 'dec-1');
+        $hour = $this->decisionHour();
+        $bucketKey = $this->bucket($c, 7, $hour);
 
-        self::assertTrue($c->reserveCorrection('dec-1'), 'the first reservation wins the slot');
-        self::assertSame('1', (string) $client->get($guard), 'the once-only guard is armed on the decision id');
-        $ttl = (int) $client->ttl($guard);
-        self::assertGreaterThan(0, $ttl);
-        self::assertLessThanOrEqual(AggregateCalibrator::RECEIPT_TTL_SECS, $ttl, 'the guard TTL is the receipt TTL');
+        self::assertTrue($c->recordReceipt('corr-1', 7, 4, RiskAction::Argon16, 500, 1, $hour));
+        self::assertSame(1, $c->confirmOutcome('corr-1', false), 'first confirmed as abuse');
+        self::assertSame('1', (string) $client->hget($bucketKey, 'abuse_count'));
+        self::assertSame('500', (string) $client->hget($bucketKey, 'abuse_score_sum'));
 
-        self::assertFalse($c->reserveCorrection('dec-1'), 'a second reservation of the same decision is a no-op');
-        self::assertTrue($c->reserveCorrection('dec-2'), 'a different decision gets its own slot');
-        self::assertSame('1', (string) $client->get("{kiwi:{$ns}}:cal:corrected:" . hash('sha256', 'dec-2')));
+        self::assertTrue($c->correctOutcome('corr-1', true), 'the correction flips abuse -> legitimate');
+        self::assertSame('0', (string) $client->hget($bucketKey, 'abuse_count'), 'the original abuse contribution is reversed');
+        self::assertSame('0', (string) $client->hget($bucketKey, 'abuse_score_sum'));
+        self::assertSame('1', (string) $client->hget($bucketKey, 'legit_count'), 'the corrected contribution is added');
+        self::assertSame('500', (string) $client->hget($bucketKey, 'legit_score_sum'), 'the score sum moves with the correction');
+        $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:corr-1"), true);
+        self::assertSame('L', $ledger['o'], 'the ledger flips to the corrected outcome');
 
-        // The guard is namespace-scoped.
-        $other = new AggregateCalibrator($client, namespace: 'corr2' . bin2hex(random_bytes(4)), samplingMode: 'complete');
-        self::assertTrue($other->reserveCorrection('dec-1'), 'the guard is per-namespace');
+        // Flipping BACK (legitimate -> abuse) reverses the legit
+        // contribution and restores the abuse one.
+        self::assertTrue($c->correctOutcome('corr-1', false));
+        self::assertSame('0', (string) $client->hget($bucketKey, 'legit_count'));
+        self::assertSame('0', (string) $client->hget($bucketKey, 'legit_score_sum'));
+        self::assertSame('1', (string) $client->hget($bucketKey, 'abuse_count'));
+        self::assertSame('500', (string) $client->hget($bucketKey, 'abuse_score_sum'));
+
+        // Already carrying the target outcome -> refused.
+        self::assertFalse($c->correctOutcome('corr-1', false), 'correcting to the CURRENT outcome is a no-op');
+
+        // Unknown / never-confirmed decisions are refused too.
+        self::assertFalse($c->correctOutcome('corr-missing', true));
+    }
+
+    public function testCorrectionWithWeightAppliesRecordedWeight(): void
+    {
+        // The reversal uses the EXACT weight recorded by the first
+        // confirmation (ledger.w), and the correction is re-weighted with
+        // the supplied weight.
+        $c = new AggregateCalibrator($this->requireClient(), namespace: 'corw' . bin2hex(random_bytes(4)), samplingMode: 'weighted');
+        $client = $this->requireClient();
+        $ns = $c->namespace();
+        $hour = $this->decisionHour();
+        $bucketKey = "{kiwi:{$ns}}:cal:3:{$hour}";
+
+        self::assertTrue($c->recordReceipt('corw-1', 3, 2, RiskAction::Sha20, 200, 1, $hour));
+        self::assertSame(1, $c->confirmOutcome('corw-1', false, 10.0));
+        self::assertSame('10', (string) $client->hget($bucketKey, 'abuse_count'));
+        self::assertSame('2000', (string) $client->hget($bucketKey, 'abuse_score_sum'));
+
+        // Correction with a different weight: -10 abuse (recorded weight),
+        // +5 legit (the correction weight).
+        self::assertTrue($c->correctOutcome('corw-1', true, 5.0));
+        self::assertSame('0', (string) $client->hget($bucketKey, 'abuse_count'));
+        self::assertSame('0', (string) $client->hget($bucketKey, 'abuse_score_sum'));
+        self::assertSame('5', (string) $client->hget($bucketKey, 'legit_count'));
+        self::assertSame('1000', (string) $client->hget($bucketKey, 'legit_score_sum'), 'score 200 x correction weight 5');
     }
 
     private function countingClient(): CountingClient

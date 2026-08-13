@@ -450,7 +450,7 @@ fn gate_rejection_does_not_consume_the_record() {
 }
 
 #[test]
-fn cheap_validation_failure_does_not_consume_the_record() {
+fn cheap_validation_failure_consumes_the_record() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("cheap-noconsume");
     let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
@@ -473,18 +473,23 @@ fn cheap_validation_failure_does_not_consume_the_record() {
         VerifyOutcome::Invalid(VerifyError::BadSignature)
     );
 
-    // The record must survive the cheap rejection: the key is still present
-    // and still fails the same way (never RecordNotFound).
-    assert!(
-        verifier.store().find(&tampered.nonce).unwrap().is_some(),
-        "a cheap-validation failure must not consume the record"
-    );
+    // Round-7 cross-language table: terminal cheap failures CONSUME the
+    // record (best-effort DEL), matching the PHP core — a retry with the
+    // correct token now sees RecordNotFound.
+    let good_token = encode_token(&issued.record.nonce, counter);
     assert_eq!(
-        verify_at(&verifier, &token, issued_at_ns),
-        VerifyOutcome::Invalid(VerifyError::BadSignature)
+        verify_at(&verifier, &good_token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "the tampered record must have been consumed by the cheap failure"
     );
 
-    // And the pristine record under the same nonce still verifies.
+    assert_eq!(
+        verify_at(&verifier, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "the consumed record stays consumed"
+    );
+
+    // And a pristine record under the same nonce still verifies.
     verifier.store().store(&issued.record).unwrap();
     assert_eq!(
         verify_at(

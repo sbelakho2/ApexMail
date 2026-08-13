@@ -270,33 +270,42 @@ kiwi_captcha:
         #                                   # challenge); minimum: synthetic
         #                                   # policy (base_risk 100, min/
         #                                   # degraded sha20)
-        # calibration:
-        #     enabled: false                # Redis score-bucket bias
-        #     min_samples: 1000             # passed to the AggregateCalibrator
-        #     max_adjustment: 150           #   (bias clamp bound)
-        #     max_change_per_minute: 10     #   (adjustment rate bound)
-        #     mode: random_sample           # label selection: complete |
-        #                                   # random_sample (Kiwi samples at
-        #                                   # assessment time; unsampled
-        #                                   # confirmations are consumed but
-        #                                   # not recorded — status 2 — so
-        #                                   # the label can never select
-        #                                   # itself into the population) |
-        #                                   # weighted (the app supplies the
-        #                                   # inverse sampling probability
-        #                                   # per confirmation)
-        #     sampling_probability_ppm: 100000  # PPM chance a decision is
-        #                                   # sampled (random_sample mode)
-        #     minimum_resolution_ratio: 0.8 # random_sample resolution gate:
-        #                                   # bias adjustment is suspended
-        #                                   # while sampled total >=
-        #                                   # min_samples but resolved/total
-        #                                   # < this ratio (0 disables)
-        #     false_positive_cost: 1.0      # class-normalized calibration:
-        #     false_negative_cost: 2.0      #   price of a false positive vs
-        #                                   #   a false negative (default:
-        #                                   #   abuse slipping through costs
-        #                                   #   twice a false rejection)
+         # calibration:
+         #     enabled: false                # Redis score-bucket bias
+         #     min_samples: 1000             # passed to the AggregateCalibrator
+         #     max_adjustment: 150           #   (bias clamp bound)
+         #     max_change_per_minute: 10     #   (adjustment rate bound)
+         #     outcome_receipt_ttl_secs: 86400 # outcome/calibration receipt
+         #                                   # + outcome-ledger lifetime (24 h
+         #                                   # default; 3600..604800) — long
+         #                                   # enough for fraud review /
+         #                                   # moderation / chargeback labels
+         #     mode: random_sample           # label selection: complete |
+         #                                   # random_sample (Kiwi samples at
+         #                                   # assessment time; unsampled
+         #                                   # confirmations are consumed but
+         #                                   # not recorded — status 2 — so
+         #                                   # the label can never select
+         #                                   # itself into the population) |
+         #                                   # weighted (the app supplies the
+         #                                   # inverse sampling probability
+         #                                   # per confirmation)
+         #     sampling_probability_ppm: 100000  # PPM chance a decision is
+         #                                   # sampled (random_sample mode)
+         #     minimum_resolution_ratio: 0.8 # random_sample resolution gate:
+         #                                   # bias adjustment is suspended
+         #                                   # while sampled total >=
+         #                                   # min_samples but resolved/total
+         #                                   # < this ratio (0 disables)
+         #     false_positive_cost: 1.0      # class-normalized calibration:
+         #     false_negative_cost: 2.0      #   price of a false positive vs
+         #                                   #   a false negative (default:
+         #                                   #   abuse slipping through costs
+         #                                   #   twice a false rejection)
+         # nonce_to_decision_ttl_secs: 300   # short-lived challenge-nonce ->
+         #                                   # decision-id handle TTL
+         #                                   # (60..3600; independent of the
+         #                                   # outcome lifetime)
         continuity_cookie:
             name: kiwi_risk_session
             ttl_secs: 15552000              # 180 days; 0 = session cookie
@@ -340,9 +349,14 @@ confirmations split into two paths:
 `recordConfirmedReputation()` / `confirmedLegitimate()` /
 `confirmedAbuse()` (all requiring the `decisionId` of the decision being
 confirmed — the engine throws `InvalidArgumentException` without it; the
-gateway passes it through) are the CONTEXT-FUL path — the engine confirms
-the decision atomically against its calibration receipt and records the
-reputation event against the source/session/principal signals.
+gateway passes it through) are the CONTEXT-FUL path — the engine settles
+the decision's outcome ledger atomically (consuming the calibration
+receipt when one exists) and records the reputation event against the
+source/session/principal signals. All three accept the optional inverse
+sampling probability (`$samplingProbabilityPpm`, weight = 1_000_000/ppm)
+for weighted calibration; a null ppm in weighted mode propagates the
+engine's `InvalidArgumentException` (the label cannot be re-weighted
+without its inverse probability).
 `confirmDecisionOutcome()` is the CALIBRATION-ONLY path for DELAYED
 confirmations (email confirmation, fraud review, chargeback, moderation):
 just a decision id + outcome — no IP, no scope, no session — and an
@@ -353,10 +367,15 @@ no-op — at most one reputation mutation per decision), `1` = first
 confirmation recorded, `2` = first confirmation but deliberately unsampled
 (random_sample mode). `confirmCorrection()` (a label correction of a
 decision, same signature/weight mapping) is the engine's compensating
-once-only API: it returns `true` when the compensation was applied and
-`false` on retries (per-decision SET NX guard — a correction never
-re-touches the calibration aggregates, which keep the first confirmed
-outcome). `metricsSnapshot()`
+once-only API guarded by the outcome ledger — it WORKS WITHOUT
+CALIBRATION (the guard lives in the state store) and, with a calibration
+store attached, flips the ledger and REVERSES the recorded bucket counts;
+it returns `true` when the compensation was applied and `false` on
+retries (the aggregates return to the pre-confirmation state).
+`samplingMetrics($scope)` exposes the random_sample resolution-gate
+counters (`sampledTotal` / `sampledResolved` / `resolutionRatio` /
+`sampledExpired`; zeros when calibration is disabled).
+`metricsSnapshot()`
 returns aggregate decision counters, global level, store latency — no
 identity labels. Decisions are logged through the app's `logger` (info for
 decisions, warning for denials) with scope/action/score/reasons only —

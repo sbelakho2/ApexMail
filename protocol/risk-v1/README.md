@@ -174,7 +174,39 @@ Files:
     confirm.lua — the label can never select itself into the calibration
     population.
 
-13. Degraded mode applies `strongest(scope.degraded, scope.minimum,
+13. OUTCOME LEDGER (always on, independent of calibration):
+    `{kiwi:<ns>}:outcome:<decision_id>` holds the decision's outcome state
+    as JSON `{"o":"P|L|A","scope","hour","score","w"}` (PENDING /
+    LEGITIMATE / ABUSE, exact decision score, recorded weight), EX =
+    outcome receipt TTL. Registration is ATOMIC with the calibration
+    receipt + sample denominator (register_decision.lua: SET receipt NX
+    EX + PENDING ledger + sample_total INCR in the decision-hour bucket);
+    when calibration is disabled the store still registers the ledger
+    (outcome_register.lua). Confirmation performs a PENDING -> L/A CAS
+    exactly once (confirm.lua / outcome_confirm.lua) and returns the
+    shared status 0/1/2 — reputation mutation is gated on 1|2, so
+    ConfirmedLegitimate/ConfirmedAbuse work identically with or without
+    calibration and webhook retries can never amplify reputation.
+    Corrections flip the ledger (correction.lua / outcome_correct.lua):
+    the original bucket contribution is REVERSED using the recorded
+    weight and the corrected contribution added (clamped at zero); the
+    corrected outcome is authoritative for future events while the old
+    ephemeral reputation pressure decays naturally — no synthetic
+    identities. `record_feedback` REJECTS confirmation events
+    (LogicException / ConfirmationApiRequired): the exactly-once property
+    is structural.
+    Confirmed outcomes are bucketed by DECISION time (receipt carries
+    `decision_hour`), never confirmation time; receipt TTLs split into a
+    5-minute nonce->decision mapping and a 24-168h outcome receipt
+    (score/scope/sample metadata only, no identity). Weighted mode is
+    propagated through the context-full APIs (samplingProbabilityPpm ->
+    weight) and null weight in weighted mode is rejected. Sampling
+    counters (sample_total/sample_resolved) live in the same scope/hour
+    buckets as the observations; samplingMetrics(scope) exposes
+    sampledTotal/sampledResolved/resolutionRatio/sampledExpired per
+    scope.
+
+14. Degraded mode applies `strongest(scope.degraded, scope.minimum,
     global_floors[min(last_known_level, 4)])` — the last known global
     attack floor survives backend failure.
 

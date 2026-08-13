@@ -206,7 +206,7 @@ final class ChallengeController
         // signal (resource-pressure headroom), the risk issue-debt signal,
         // and pair the challenge nonce to the decision id so a later solve
         // can be confirmed back to the ORIGINAL decision (short-lived
-        // server-side mapping, TTL = calibration receipt TTL).
+        // server-side mapping, TTL = risk.nonce_to_decision_ttl_secs).
         $this->issuanceCounter?->record();
         if ($this->risk !== null && $riskAssessed && $decision !== null) {
             $this->risk->challengeIssued($scope, $clientIp, $riskSession, $decision->decisionId);
