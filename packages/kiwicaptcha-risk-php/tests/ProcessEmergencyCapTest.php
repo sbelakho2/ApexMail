@@ -10,9 +10,14 @@ use PHPUnit\Framework\TestCase;
 
 final class ProcessEmergencyCapTest extends TestCase
 {
+    /**
+     * The pre-audit burst tests construct with warmupRampSecs: 0 (ramp
+     * disabled) so they pin the FULL-cap window semantics; the ramp's own
+     * behavior is covered by the testWarmup* cases below.
+     */
     public function testAllowsExactlyCapPerWindow(): void
     {
-        $limiter = new ProcessEmergencyCap(processPerSecond: 100);
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: 0);
         for ($i = 0; $i < 100; $i++) {
             self::assertTrue($limiter->allow(), "allow #" . ($i + 1));
         }
@@ -22,7 +27,7 @@ final class ProcessEmergencyCapTest extends TestCase
 
     public function testWindowSlides(): void
     {
-        $limiter = new ProcessEmergencyCap(processPerSecond: 100);
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: 0);
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
         }
@@ -35,7 +40,7 @@ final class ProcessEmergencyCapTest extends TestCase
 
     public function testIsOpenFalseWhenIdle(): void
     {
-        $limiter = new ProcessEmergencyCap(processPerSecond: 100);
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: 0);
         self::assertFalse($limiter->isOpen());
         $limiter->allow();
         self::assertFalse($limiter->isOpen());
@@ -44,7 +49,7 @@ final class ProcessEmergencyCapTest extends TestCase
     public function testDefaultCapIsOneProcessPerSecondKnob(): void
     {
         self::assertSame(10000, ProcessEmergencyCap::DEFAULT_PROCESS_PER_SECOND);
-        $limiter = new ProcessEmergencyCap();
+        $limiter = new ProcessEmergencyCap(warmupRampSecs: 0);
         for ($i = 0; $i < 10000; $i++) {
             self::assertTrue($limiter->allow(), "default allow #" . ($i + 1));
         }
@@ -56,7 +61,7 @@ final class ProcessEmergencyCapTest extends TestCase
         // The window runs on hrtime(true) NANOSECONDS (monotonic clock): a
         // wall-clock jump backwards can never extend the window, and a
         // jump forwards can never hold it open early.
-        $limiter = new ProcessEmergencyCap(processPerSecond: 100);
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: 0);
         self::assertTrue($limiter->allow());
         $prop = new \ReflectionProperty(ProcessEmergencyCap::class, 'stamps');
         $queue = $prop->getValue($limiter);
@@ -85,5 +90,73 @@ final class ProcessEmergencyCapTest extends TestCase
         $limiter = new LocalEmergencyLimiter();
         self::assertInstanceOf(ProcessEmergencyCap::class, $limiter);
         self::assertTrue($limiter->allow());
+    }
+
+    /**
+     * AUDIT #105 — warm-up ramp: a fresh process must NOT start with a
+     * full burst. At t≈0 the effective cap is the floor
+     * max(1, cap/10); here cap 1000 -> floor 100: exactly 100 admissions
+     * fit, the 101st is denied.
+     */
+    public function testWarmupFreshCapAllowsOnlyTheFloorRate(): void
+    {
+        $limiter = new ProcessEmergencyCap(processPerSecond: 1000, warmupRampSecs: 0.3);
+        self::assertSame(0.3, $limiter->warmupRampSecs());
+        for ($i = 0; $i < 100; $i++) {
+            self::assertTrue($limiter->allow(), "floor allow #" . ($i + 1));
+        }
+        self::assertTrue($limiter->isOpen(), 'the floor window must be saturated');
+        self::assertFalse($limiter->allow(), 'the floor+1th must be denied during the ramp');
+    }
+
+    /**
+     * AUDIT #105 — after the ramp the cap reaches the full value: a short
+     * ramp + sleep (the implementation uses the fixed hrtime clock).
+     */
+    public function testWarmupReachesFullCapAfterTheRamp(): void
+    {
+        $limiter = new ProcessEmergencyCap(processPerSecond: 1000, warmupRampSecs: 0.3);
+        for ($i = 0; $i < 100; $i++) {
+            self::assertTrue($limiter->allow());
+        }
+        usleep(350_000); // past the 0.3 s ramp
+        self::assertFalse($limiter->isOpen(), 'the floor window must have expired with the ramp');
+        // The 100 ramp-phase stamps are still inside the sliding 1 s window,
+        // so 900 more admissions fit at the full cap (100 + 900 = 1000).
+        for ($i = 0; $i < 900; $i++) {
+            self::assertTrue($limiter->allow(), "full-cap allow #" . ($i + 1));
+        }
+        self::assertTrue($limiter->isOpen());
+        self::assertFalse($limiter->allow(), 'the full cap+1th must be denied');
+    }
+
+    /** AUDIT #105 — the floor is never below 1 admission. */
+    public function testWarmupFloorNeverBelowOne(): void
+    {
+        $limiter = new ProcessEmergencyCap(processPerSecond: 5, warmupRampSecs: 0.3);
+        self::assertTrue($limiter->allow(), 'cap 5 floors at max(1, 0) = 1');
+        self::assertTrue($limiter->isOpen());
+        self::assertFalse($limiter->allow(), 'the 2nd must be denied during the ramp');
+    }
+
+    /** AUDIT #105 — the ramp must never raise the cap above the configured value. */
+    public function testWarmupNeverExceedsConfiguredCap(): void
+    {
+        $limiter = new ProcessEmergencyCap(processPerSecond: 10, warmupRampSecs: 0.3);
+        for ($i = 0; $i < 1; $i++) {
+            self::assertTrue($limiter->allow());
+        }
+        usleep(350_000);
+        // The 1 ramp-phase stamp is still in the 1 s window: 9 more fit.
+        for ($i = 0; $i < 9; $i++) {
+            self::assertTrue($limiter->allow(), "full-cap allow #" . ($i + 1));
+        }
+        self::assertFalse($limiter->allow(), 'the ramp must not lift the cap above processPerSecond');
+    }
+
+    public function testWarmupRampRejectsNegativeRamp(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: -1.0);
     }
 }

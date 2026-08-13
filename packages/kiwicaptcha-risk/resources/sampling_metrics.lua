@@ -1,6 +1,13 @@
 -- Sampling metrics: per-scope sample totals for the resolution gate
 -- (canonical, shared PHP/Rust).
 --
+-- SCRIPT BOUNDS (audit #101) — all bounded constants:
+--   max keys touched:     24
+--   max Redis calls:      24 (HGETALL)
+--   max collection cardinality: 12 flat fields per bucket hash (6 fields
+--                           as flat HGETALL pairs) — no attacker-sized
+--                           collections.
+--
 -- KEYS[1..24]  DECISION-TIME hourly score buckets for one scope (hash;
 --              sample_total / sample_resolved live in the SAME buckets as
 --              the observations, so scope, window and resolution population

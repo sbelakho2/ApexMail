@@ -42,6 +42,14 @@ use Symfony\Component\HttpFoundation\Request;
  * invalid_or_expired); with the default false the anomaly is logged and the
  * request proceeds with Symfony's derivation.
  *
+ * DUPLICATE SECURITY-SINGULAR HEADERS (audit #100): a request carrying
+ * Origin, Forwarded, X-Forwarded-For or X-Real-IP MORE THAN ONCE is parser
+ * ambiguity — different intermediaries will pick different values, so the
+ * header-derived identity is untrustworthy. The challenge CONTROLLER rejects
+ * such a request with 400 DUPLICATE_HEADER BEFORE this resolver is ever
+ * consulted; the resolver therefore treats a duplicate as ambiguous (it is
+ * rejected earlier, never silently resolved).
+ *
  * An unparseable/missing socket peer yields the empty string (the callers'
  * existing "no usable risk signal" handling applies).
  */

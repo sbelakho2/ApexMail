@@ -1,5 +1,18 @@
 -- Risk Protocol v1 — canonical production state script (v4 semantics).
 --
+-- SCRIPT BOUNDS (audit #101) — all bounded constants, no attacker-sized
+-- collections anywhere in this script:
+--   max keys touched:     10 (KEYS[1..10])
+--   max Redis calls:      22 (1 TIME + 9 HMGET + 6 HSET + 4 EXPIRE +
+--                           1 GET + 1 SET — every call is fixed-cost;
+--                           no KEYS/SCAN/EVAL nesting, no iteration over
+--                           attacker-sized collections)
+--   max collection cardinality: 12 flat fields per state hash (the
+--                           HMGET reply of STATE_FIELDS); the sum3/max3/
+--                           max4 aggregation touches at most 4 elements.
+-- The script's runtime is therefore O(1) in the state size and bounded
+-- by the constants above regardless of traffic volume.
+--
 -- One atomic assessment: read → decay → apply event → aggregate → normalize,
 -- across (all keys share the hash tag {kiwi:<deployment>} — Redis Cluster safe):
 --   KEYS[1]  source current-epoch state (hash)   — updated

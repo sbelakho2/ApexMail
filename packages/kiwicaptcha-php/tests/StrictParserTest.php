@@ -129,6 +129,16 @@ final class StrictParserTest extends TestCase
             'exceeds the 4096-byte ceiling',
         ];
 
+        yield 'oversized salt (> 4096)' => [
+            self::mutate('salt', str_repeat('s', 4097)),
+            'exceeds the 4096-byte ceiling',
+        ];
+
+        yield 'oversized nonce (> 4096)' => [
+            self::mutate('nonce', str_repeat('n', 10_000)),
+            'exceeds the 4096-byte ceiling',
+        ];
+
         yield 'negative issued_at' => [self::mutate('issued_at', -1), 'must be within'];
 
         yield 'float issued_at' => [self::mutate('issued_at', 1_800_000_000.0), 'must be an integer'];

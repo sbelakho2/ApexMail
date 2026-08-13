@@ -369,6 +369,7 @@ final class RiskPolicyTest extends TestCase
         self::assertSame(500, $json['score']);
         self::assertSame('sha20', $json['action']);
         self::assertSame(3, $json['policy_version']);
+        self::assertSame(17, $json['model_revision'], 'AUDIT #110: the decision carries the model revision in the public JSON');
         self::assertSame(2, $json['global_level']);
         self::assertNull($json['retry_after_ms']);
         self::assertSame(5, $json['band']);

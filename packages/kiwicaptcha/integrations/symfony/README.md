@@ -363,16 +363,25 @@ kiwi_captcha:
         # security_epoch_cache_secs: 1      # audit #81: cache of the central
         #                                   # security-policy read (1..30) —
         #                                   # revocation latency is one window
-        # result_receipt_signing_key: null  # audit #80: OPTIONAL base64
+        # security_epoch_max_stale_secs: 60 # audit #108: max-stale FAIL-
+        #                                   # CLOSED window (min 10) — past
+        #                                   # last_success + window the
+        #                                   # validator returns
+        #                                   # temporary_unavailable and the
+        #                                   # controller refuses issuance 503
+        # result_receipt_signing_key: null  # audit #80/#106: OPTIONAL base64
         #                                   # 32-byte Ed25519 seed; when set,
         #                                   # valid verifications export
         #                                   # signed receipts (the HMAC
         #                                   # result verification stays
         #                                   # CENTRAL-ONLY)
-        # max_challenges_per_scope_per_minute: 0 # audit #89: per-scope
+        # max_challenges_per_scope_per_minute: 0 # audit #89/#112: per-scope
         #                                   # fixed-window issuance cap
         #                                   # (0 = unlimited); > 0 requires
-        #                                   # Redis
+        #                                   # Redis; the window key carries
+        #                                   # hex(hmac_sha256(scope, K_scope))
+        #                                   # — the raw scope is never a
+        #                                   # Redis key component
         policy_version: 1                  # CHALLENGE security-policy epoch
                                            # (audit #42): signed into every
                                            # issued record and enforced at
@@ -667,6 +676,20 @@ node. Three hardening properties:
   seen stays enforced, never a weaker one.
 - **Bounded latency** — the central value is re-read at most once per cache
   window; revocation latency is one TTL, never unbounded.
+- **MAX-STALE FAIL-CLOSED (audit #108)** — `risk.security_epoch_max_stale_secs`
+  (default **60** s, min 10 s) bounds how long a node may serve from a
+  cached read: once `now > last_successful_read + max_stale`, the monitor
+  reports stale — the cached epoch may be outdated (an emergency revocation
+  could have landed while the node could not read). A stale monitor fails
+  CLOSED on both sides: the validator returns the distinct
+  `temporary_unavailable` violation (the token is NOT burned — retryable,
+  never `invalid_or_expired`) and the challenge controller refuses issuance
+  with HTTP 503 `{"error":{"code":"SERVICE_UNAVAILABLE"}}`. The availability
+  trade-off is deliberate and documented: within the window a bounded Redis
+  outage keeps serving the cached max; past it the node stops issuing and
+  stops verifying rather than trusting a potentially-revoked cache forever.
+  A deployment WITHOUT a security Redis client (no central state by design)
+  is never stale — the configured epoch is authoritative.
 
 The effective epoch is `max(risk.policy_version, observedCentral)` — the
 local configuration is the floor (a node's own challenges must verify), and
@@ -686,7 +709,7 @@ redis-cli HSET "{kiwi:<namespace>}:security-policy" \
 challenges are minted — the monitor revokes OLD challenges; the issuer
 stamps the NEW epoch.)
 
-### Asymmetric result receipts (audit #80)
+### Asymmetric result receipts (audit #80/#106)
 
 **The result verification itself is CENTRAL-ONLY by design: the HMAC secret
 never leaves the server**, so no third party can ever re-derive a
@@ -694,17 +717,20 @@ verification result on its own. For EXPORTED results the bundle adds an
 OPTIONAL **Ed25519 receipt signer**: configure
 `risk.result_receipt_signing_key` (base64 32-byte Ed25519 seed — generate
 with `sodium_crypto_sign_seed_keypair()` and export the seed); on every
-VALID verification the validator then signs the canonical receipt
+VALID verification the validator then signs the canonical receipt from the
+CONSUMED RECORD's own fields — the FULL REPLAY-CRITICAL SET (audit #106):
 
 ```json
-{"jti":"<challenge nonce>","scope":"login","binding":"<signed binding|null>","outcome":"valid","issued_at_ms":<epoch ms>}
+{"jti":"<challenge nonce>","tenant":"<scope>","action":"sha256|argon2id","request_binding":"<signed binding|null>","issued_at":<epoch seconds>,"expires_at":<epoch seconds>,"issuer":"<deployment issuer|null>"}
 ```
 
 with `sodium_crypto_sign_detached` and exposes it via
 `KiwiCaptchaValidator::verifiedReceiptPayload()` (the exact signed JSON) and
 `KiwiCaptchaValidator::verifiedReceiptSignature()` (base64 64-byte detached
-signature). The payload is public by construction — jti, scope, binding,
-outcome, timestamp; no secret material. Customers verify with the PUBLIC
+signature). The payload is public by construction — jti, tenant (the flow
+scope), action (the PoW algorithm the challenge required),
+request_binding, issued_at/expires_at (epoch seconds — the record wire
+unit) and issuer; no secret material. Customers verify with the PUBLIC
 key — never the private seed:
 
 ```php
@@ -718,10 +744,32 @@ sodium_crypto_sign_verify_detached(
 );
 ```
 
-A receipt is only as fresh as its `issued_at_ms` — the application must
-bound how long a receipt stays acceptable (the challenge lifetime bounds
-the result itself). Without the key, both accessors stay `null`; a failed
-verification never produces a receipt.
+**SINGLE-USE SEMANTICS (audit #106): signature verification alone is NOT
+sufficient for single-use actions.** A valid signature proves the payload
+was signed by the server — it does NOT prove the jti has not already been
+consumed elsewhere (the receipt is an EXPORT, the consumption happened at
+the verifying server). An integrator accepting a receipt for a one-time
+action MUST additionally record the jti atomically and treat a pre-existing
+jti as a replay — the recommended primitive:
+
+```sql
+-- verify_and_consume: FIRST verify the signature + freshness (now <=
+-- expires_at), THEN atomically insert the jti. Only a FIRST insert may
+-- proceed with the action; a duplicate jti is a replay.
+INSERT INTO captcha_receipts (jti, tenant, action, binding, received_at)
+VALUES (:jti, :tenant, :action, :binding, NOW())
+ON CONFLICT (jti) DO NOTHING
+RETURNING jti;          -- NULL row = the jti was already consumed
+```
+
+(Redis equivalent: `SET captcha:receipt:<jti> 1 NX EX <ttl>` — nil reply =
+already consumed.) Verify the signature FIRST, then attempt the atomic
+insert, and only execute the protected action when the insert succeeded:
+**verify_and_consume**. Key the idempotency table on the jti alone (it is
+high-entropy, 256-bit random, never reused); `tenant`/`action`/
+`request_binding`/`expires_at` are the additional binding and freshness
+checks the payload now carries. Without the key, both accessors stay
+`null`; a failed verification never produces a receipt.
 
 ### Fixed Argon verification envelope (audit #79)
 
@@ -743,19 +791,27 @@ invariant (`risk.container_memory_mib`) uses the configured envelope, and
 ceiling. (The SHA ladder already escalates bits on a fixed SHA cost — no
 change.)
 
-### Per-scope issuance cap (audit #89)
+### Per-scope issuance cap (audit #89/#112)
 
 `risk.max_challenges_per_scope_per_minute` (default **0** = unlimited):
 when > 0, a Redis fixed-window counter
-`{kiwi:<ns>}:issuance:<scope>:<minute>` — INCR + EXPIRE 60 in ONE atomic
-Lua script — bounds how many challenges a scope may issue per minute; the
-controller denies HTTP 429 `{"error":{"code":"SCOPE_LIMITED"}}` beyond the
-cap, BEFORE any challenge is minted. The public site key + claimed origin
-can therefore no longer create unlimited billed verification work per
-scope. Each scope gets an independent window; a Redis failure propagates
-(fail closed — no challenge without a checked scope bound), and the config
-is refused at compile time when no Redis client is available. The minute is
-derived from the Redis server clock so all workers share one window.
+`{kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>` — INCR +
+EXPIRE 60 in ONE atomic Lua script — bounds how many challenges a scope may
+issue per minute; the controller denies HTTP 429
+`{"error":{"code":"SCOPE_LIMITED"}}` beyond the cap, BEFORE any challenge is
+minted. The public site key + claimed origin can therefore no longer create
+unlimited billed verification work per scope. **The RAW SCOPE STRING IS
+NEVER A REDIS KEY COMPONENT (audit #112):** the scope is attacker-controlled
+(bounded alphabet `[A-Za-z0-9._:-]{1,128}`, unbounded cardinality), so the
+window key carries the keyed pseudonym `hex(hmac_sha256(scope, K_scope))`
+where `K_scope = hash_hkdf('sha256', master, 32, 'kiwi/v2/scope-rate')`
+derived from the risk master (`risk.master_secret`, falling back to
+`secret_key`) — purpose-separated from the risk identity keys, identical
+across the bundle and the risk package's calibration scope keys. Each scope
+gets an independent window; a Redis failure propagates (fail closed — no
+challenge without a checked scope bound), and the config is refused at
+compile time when no Redis client is available. The minute is derived from
+the Redis server clock so all workers share one window.
 
 ### Sitekey publicity (audit #82)
 
@@ -839,20 +895,93 @@ the wire level the PROXY STACK must reject the ambiguity first:
   log the peer. NEVER let a downstream layer (PHP-FPM, proxy) pick one
   interpretation and continue.
 
+### Canonical request targets (audit #99)
+
+The challenge endpoint serves ONE canonical path
+(`{route_prefix}/challenge`, a fixed ASCII target). The controller rejects
+any NONCANONICAL request target — measured on the RAW REQUEST_URI, never a
+normalized route — with HTTP 404
+`{"error":{"code":"CANONICAL_PATH_REQUIRED"}}` BEFORE any handling:
+
+- empty segments: `/kiwi-captcha//challenge`, `/challenge/` (trailing slash);
+- dot segments: `/./challenge`, `/foo/../challenge`;
+- percent-encoded bytes: `/%76hallenge` (encoding of the first path byte),
+  `%2F`/`%5C` (encoded separators), double encodings — the canonical path
+  is pure ASCII, so ANY `%` in the path is a probe;
+- backslashes (Windows path separators on some stacks).
+
+The bundle never redirects, rewrites or normalizes a noncanonical target —
+the typed target does not exist on this server. **The proxy stack must
+reach the same decision at the edge — prefer rejecting there too**, so the
+noncanonical bytes are dropped before they consume application resources:
+
+```nginx
+# nginx: reject noncanonical request targets before routing
+if ($request_uri ~ "(//|/\./|/\.\./|%[0-9a-fA-F]{2}|\\\\)") { return 404; }
+# (an even stricter posture: 404 any path containing '%' at all)
+```
+
+AWS ALB / CloudFront: add a WAF rule matching the same patterns on the
+request URI (and consider rejecting any `%` in the path — the challenge
+path is fixed ASCII). The controller-level check is the SECOND layer for
+direct invocations and for proxies that normalize; the edge rejection is
+the first.
+
+### Duplicate security-singular headers (audit #100)
+
+Origin, Forwarded, X-Forwarded-For and X-Real-IP are SECURITY-SINGULAR
+headers: each carries identity or forwarding trust and MUST appear at most
+once. A duplicate occurrence is parser ambiguity — one intermediary trusts
+the first value, another the last, so the same-origin check and the
+client-IP resolution would disagree — and the challenge endpoint refuses it
+with HTTP 400 `{"error":{"code":"DUPLICATE_HEADER"}}` before any
+header-derived identity is trusted (the client-IP resolver treats a
+duplicate as ambiguous; the controller rejects it earlier, so the resolver
+is never consulted with one). The count is value-agnostic: two IDENTICAL
+values are still a duplicate. Symfony's `HeaderBag` keeps every raw value,
+so HTTP/1.1-style multi-line duplicates survive into the controller; at the
+wire level the proxy should also refuse them (most servers collapse
+duplicates — verify with a raw-socket test; a WAF rule on the raw headers
+is the portable fallback).
+
 ### Transaction binding (audit #41)
 
 A challenge can be bound to ONE application transaction: the issuing side
 signs a `request_binding` (1..128 chars of `[A-Za-z0-9._:-]`, audit #96)
 into the record, and verification only accepts the solve when the final
 POST presents the SAME binding — a challenge minted for one transaction is
-never redeemable for another. The widget carries the binding end-to-end:
+never redeemable for another. The widget carries the binding end-to-end.
+**The binding is ALWAYS server-originated in the bundle (audit #107): the
+widget driver never generates a binding of its own** — the rendered widget
+container carries exactly the value the backend rendered, nothing else.
+
+TWO BINDING MODES (audit #107):
+
+1. **Client-chosen binding (public, basic anti-abuse).** The application
+   lets the CLIENT choose the binding — e.g. a per-page random nonce the
+   page JavaScript generates and passes to the widget. This is fine for
+   basic anti-abuse (it proves the browser chose a nonce and carries it
+   back), but the binding is client-controlled: it proves nothing about a
+   trusted backend decision. Suitable when the binding is a transaction
+   correlation tag, not an authorization signal.
+2. **BACKEND-ORIGINATED binding (the recommended sensitive-flow mode).**
+   The application backend renders the binding server-side from a
+   `flow_id` stored server-side: the Symfony form type's `request_binding`
+   option (or the static `risk.request_binding` config, or a per-render
+   `request_binding` passed to the standalone widget) carries a value the
+   backend itself issued — a flow/session identifier the backend created
+   and persists. The widget renders that value and only ever forwards it;
+   the verification side enforces it against the signed record. A binding
+   minted by the backend (and stored server-side) can be checked against
+   the backend's own flow state after verification — a client can never
+   invent a binding the backend did not issue.
 
 - **Config** — `risk.request_binding` sets a STATIC binding used whenever
   the request sends no `request_binding` field (e.g. server-side
   integrations). For DYNAMIC per-transaction bindings (recommended: a
-  random nonce per page load) the application supplies the value per
-  request/form:
-  - `KiwiCaptchaType` option `'request_binding' => $txnId` (defaults to the
+  backend-issued `flow_id` nonce per page load) the application supplies
+  the value per request/form:
+  - `KiwiCaptchaType` option `'request_binding' => $flowId` (defaults to the
     static config) → rendered as `data-kiwi-request-binding` on the widget
     container;
   - the standalone widget accepts `'request_binding'` in the
@@ -863,7 +992,9 @@ never redeemable for another. The widget carries the binding end-to-end:
   `INVALID_REQUEST_BINDING` otherwise, then
   passes it to the core Issuer, which signs it into the record), and — on a
   successful solve — creates the hidden `kiwi_request_binding` input in the
-  form, next to the token input.
+  form, next to the token input. The driver contains NO binding-generation
+  code (no `crypto.randomUUID`-style synthesis — pinned by test): the
+  rendered container carries ONLY the server-provided binding.
 - **Verification** — after a VALID verification, the validator compares the
   consumed record's signed binding against the request binding. The
   application controller copies the POSTed field into the request attribute
@@ -1292,13 +1423,18 @@ The same value is available via the validator service's `verifiedJti()`
 (non-web contexts). The jti is set ONLY on a successful verification, on the
 request's attribute bag — request-scoped and race-free.
 
-With `risk.result_receipt_signing_key` configured (audit #80 — see "Asymmetric
-result receipts" above), a successful verification additionally exposes
-`verifiedReceiptPayload()` (the canonical `{jti, scope, binding, outcome,
-issued_at_ms}` JSON) and `verifiedReceiptSignature()` (base64 Ed25519
-detached signature) — the exportable, PUBLIC-key-verifiable receipt of the
-server-side result. The HMAC-based verification itself remains
-central-only: the secret never leaves the server.
+With `risk.result_receipt_signing_key` configured (audit #80/#106 — see
+"Asymmetric result receipts" above), a successful verification additionally
+exposes `verifiedReceiptPayload()` (the canonical `{jti, tenant, action,
+request_binding, issued_at, expires_at, issuer}` JSON — the full
+replay-critical set, signed from the consumed record) and
+`verifiedReceiptSignature()` (base64 Ed25519 detached signature) — the
+exportable, PUBLIC-key-verifiable receipt of the server-side result. The
+HMAC-based verification itself remains central-only: the secret never
+leaves the server. Signature verification alone is NOT sufficient for
+single-use actions: the integrator must atomically record the jti
+(INSERT IF NOT EXISTS / SET NX) and treat a pre-existing jti as a replay
+(verify_and_consume — see the receipts section).
 
 **Idempotency contract (audit #37):** the application MUST key its protected
 business operation on **(jti, action)** and make it idempotent — a retry
@@ -1451,8 +1587,19 @@ anything from `Host` — a forged Host cannot alter the issued challenge
 challenge endpoint accepts ONLY `POST` with an uncompressed
 `application/json` body:
 
+- the RAW request target must be the canonical path (audit #99) — no `//`,
+  no `/./` or `/../`, no percent-encoded bytes, no trailing slash; a
+  noncanonical target is 404 `CANONICAL_PATH_REQUIRED` before any handling
+  (see "Canonical request targets" above);
 - non-`POST` methods (including `OPTIONS` preflights) stay HTTP 405 with
   `Allow: POST` — a preflight alone NEVER authorizes anything;
+- HTTP framing ambiguity (audit #83) — `Content-Length` + `Transfer-Encoding`
+  together, or a duplicate `Content-Length` — is rejected with 400
+  `FRAMING_REJECTED` BEFORE the body is read (see "HTTP framing" above);
+- duplicate SECURITY-SINGULAR headers (audit #100) — `Origin`, `Forwarded`,
+  `X-Forwarded-For`, `X-Real-IP` appearing more than once — are rejected
+  with 400 `DUPLICATE_HEADER` before any header-derived identity is trusted
+  (see "Duplicate security-singular headers" above);
 - `Content-Encoding` other than `identity` (gzip/br/deflate) is rejected
   with 415 `UNSUPPORTED_CONTENT_ENCODING` BEFORE the body is read — no
   transparent decompression into unbounded memory;
@@ -1460,6 +1607,13 @@ challenge endpoint accepts ONLY `POST` with an uncompressed
   multipart, text/plain...) is rejected with 415 `UNSUPPORTED_MEDIA_TYPE`;
 - query parameters (`?debug=1`, `?skip_pow=1`, `?algorithm=...`) are
   rejected with 422 `QUERY_PARAMETERS_NOT_ALLOWED`;
+- a STALE security-policy state (audit #108: the epoch monitor's central
+  read is past `risk.security_epoch_max_stale_secs`) refuses issuance with
+  503 `SERVICE_UNAVAILABLE` (see "Bounded-revocation-latency security
+  epoch" above);
+- duplicate JSON object keys in the raw body (audit #111) —
+  `{"scope":"login","scope":"signup"}` — are rejected with 422
+  `DUPLICATE_FIELD` (nested objects included) before decoding;
 - the JSON body must be an OBJECT with ONLY the documented fields
   `scope`, `algorithm` (accepted for forward-compatibility; the issued
   algorithm always comes from the server), `request_binding` — unknown
@@ -1467,6 +1621,19 @@ challenge endpoint accepts ONLY `POST` with an uncompressed
   non-object document gets 422 `INVALID_JSON`.
 
 The widget's own POSTs are plain uncompressed JSON and pass unchanged.
+
+**Challenge-issuance sequence (audits #103/#104).** The scoped syntactic
+rejection runs FIRST and locally: an invalid scope/request-binding
+identifier (charset or > 128 bytes) is refused at 422 with ZERO Redis
+operations — a malformed identifier never touches shared infrastructure.
+Then, in order, every quota check runs BEFORE the challenge state is
+created: the process-local emergency cap (no Redis), the issuance rate
+limiter (per-client + global), the pre-issue risk assessment, the
+per-scope issuance cap, and the anti-stockpiling outstanding admission
+(with the configured TTL wired, the outstanding counters are admitted
+BEFORE the mint — a refused admission never creates challenge state), and
+only then the challenge is minted and stored. A Redis failure in any quota
+check propagates (fail closed — no challenge without a checked bound).
 
 **CORS is not authorization (audit #63).** The bundle emits NO CORS headers
 — no `Access-Control-Allow-Origin`, no `Access-Control-Allow-Methods` — on

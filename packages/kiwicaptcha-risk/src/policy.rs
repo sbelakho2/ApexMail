@@ -17,6 +17,14 @@
 //! The `hash` is sha256 of the canonical JSON of the whole config
 //! (recursively key-sorted with PHP-compatible ordering and escaping), so
 //! both implementations derive the identical hash for the identical config.
+//!
+//! `policy_version` (the config's `version`, stamped on every decision):
+//! bump it whenever the operator policy materially changes. A model
+//! revision ([`crate::RISK_MODEL_REVISION`]) that MATERIALLY affects
+//! security — e.g. changes how scores are computed or how calibration
+//! moves the bias — REQUIRES a `policy_version` bump too, so the
+//! decision's `policy_version` always pins down both the operator policy
+//! AND the security-relevant model generation it was computed under.
 
 use std::collections::HashMap;
 
@@ -407,6 +415,7 @@ impl RiskPolicy {
             action,
             reasons: out,
             policy_version: self.version,
+            model_revision: crate::RISK_MODEL_REVISION,
             global_level,
             retry_after_ms,
             band: (score.clamp(0, 1000) / 100) as u8,
@@ -431,6 +440,7 @@ impl RiskPolicy {
             action,
             reasons: [Some(RiskReason::CapacityPressure), None, None, None],
             policy_version: self.version,
+            model_revision: crate::RISK_MODEL_REVISION,
             global_level,
             retry_after_ms: None,
             band: 0,
@@ -1059,6 +1069,11 @@ mod tests {
         assert_eq!(p.degraded_decision(1, 3).global_level, 3);
         assert_eq!(p.degraded_decision(1, 0).global_level, 0);
         assert_eq!(p.degraded_decision(1, 3).policy_version, 3);
+        // AUDIT #110: the degraded decision carries the model revision too.
+        assert_eq!(
+            p.degraded_decision(1, 3).model_revision,
+            crate::RISK_MODEL_REVISION
+        );
     }
 
     #[test]
@@ -1069,10 +1084,18 @@ mod tests {
         assert_eq!(json["score"], 500);
         assert_eq!(json["action"], "sha20");
         assert_eq!(json["policy_version"], 3);
+        // AUDIT #110: the revision is exposed in the public JSON (bounded).
+        assert_eq!(json["model_revision"], 17);
         assert_eq!(json["global_level"], 2);
         assert_eq!(json["retry_after_ms"], Value::Null);
         assert_eq!(json["band"], 5);
         assert!(json["reasons"].is_array());
+    }
+
+    /// AUDIT #110: the revision constant is a shared cross-language value.
+    #[test]
+    fn model_revision_constant_is_seventeen() {
+        assert_eq!(crate::RISK_MODEL_REVISION, 17);
     }
 
     /// AUDIT #95 — the policy-level wiring: an oscillating boundary score

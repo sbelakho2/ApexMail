@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
+use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use KiwiCaptcha\Config;
@@ -1044,5 +1045,345 @@ final class ChallengeFlowTest extends TestCase
         $prop = new \ReflectionProperty(ArrayStorage::class, 'records');
 
         return array_values($prop->getValue($storage));
+    }
+
+    // ── Round 12: canonical request targets (audit #99) ───────────────────
+
+    /**
+     * Audit #99: the RAW REQUEST_URI must equal the canonical path — no
+     * empty segments (`//`, trailing `/`), no dot segments (`/./`,
+     * `/../`), no percent-encoded bytes (`/%76hallenge`, `%2F`, `%5C`).
+     * The full audit list gets 404 CANONICAL_PATH_REQUIRED before ANY
+     * handling (no challenge is ever minted for a noncanonical target).
+     */
+    public function testNonCanonicalRequestTargetsAre404BeforeAnyHandling(): void
+    {
+        $storage = new ArrayStorage();
+        $controller = new ChallengeController(new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage));
+
+        $nonCanonical = [
+            '/kiwi-captcha//challenge' => 'empty segment (double slash)',
+            '/challenge/' => 'trailing slash (empty final segment)',
+            '/./challenge' => 'leading dot segment',
+            '/kiwi-captcha/./challenge' => 'middle dot segment',
+            '/foo/../challenge' => 'parent traversal segment',
+            '/kiwi-captcha/challenge/../challenge' => 'embedded parent segment',
+            '/%76hallenge' => 'percent-encoded leading byte',
+            '/kiwi-captcha/%2Fchallenge' => 'percent-encoded separator',
+            '/challenge%2F' => 'percent-encoded trailing separator',
+            '/kiwi-captcha/challenge%5C' => 'percent-encoded backslash',
+            '/kiwi-captcha%2F%2Fchallenge' => 'double-encoded separators',
+            // (a RAW backslash is also refused by the check, but Symfony's
+            // Request::create refuses to even build such a URI — the
+            // percent-encoded %5C case above pins the smuggling path)
+        ];
+        foreach ($nonCanonical as $uri => $why) {
+            $response = $controller->challenge(JsonRequest::create($uri, 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+            self::assertSame(404, $response->getStatusCode(), sprintf('%s (%s) must be 404', $uri, $why));
+            self::assertSame('CANONICAL_PATH_REQUIRED', json_decode((string) $response->getContent(), true)['error']['code'], $why);
+        }
+        self::assertSame([], $this->storedRecords($storage), 'a noncanonical target must never reach issuance');
+
+        // The canonical path itself keeps working.
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode());
+    }
+
+    /**
+     * Audit #99: the canonicality check runs BEFORE the method check — a
+     * noncanonical GET is still 404 CANONICAL_PATH_REQUIRED, never 405 —
+     * and BEFORE the query check (a canonical path with a query string
+     * still gets the query rejection 422, not the canonical 404).
+     */
+    public function testCanonicalityPrecedesMethodAndQueryChecks(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        $response = $controller->challenge(Request::create('/kiwi-captcha//challenge', 'GET'));
+        self::assertSame(404, $response->getStatusCode(), 'a noncanonical target is 404 regardless of method');
+        self::assertSame('CANONICAL_PATH_REQUIRED', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        // The query string is excluded from the path scan; a CANONICAL path
+        // with a query keeps the documented 422 QUERY_PARAMETERS_NOT_ALLOWED.
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge?debug=1', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(422, $response->getStatusCode());
+        self::assertSame('QUERY_PARAMETERS_NOT_ALLOWED', json_decode((string) $response->getContent(), true)['error']['code']);
+    }
+
+    // ── Round 12: duplicate security-singular headers (audit #100) ────────
+
+    /**
+     * Audit #100: Origin, Forwarded, X-Forwarded-For and X-Real-IP are
+     * security-singular — a duplicate occurrence is parser ambiguity
+     * (intermediaries disagree on which value is authoritative) and gets
+     * 400 DUPLICATE_HEADER before any header-derived identity is trusted.
+     * The count is value-agnostic: two IDENTICAL values are still a
+     * duplicate.
+     */
+    public function testDuplicateSecurityHeadersAre400(): void
+    {
+        $storage = new ArrayStorage();
+        $controller = new ChallengeController(new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage));
+
+        $cases = [
+            ['origin', ['https://good.example', 'https://evil.example'], 'Origin twice, good + evil'],
+            ['origin', ['https://app.example', 'https://app.example'], 'Origin twice, IDENTICAL values'],
+            ['forwarded', ['for=1.2.3.4', 'for=5.6.7.8'], 'Forwarded twice'],
+            ['x-forwarded-for', ['1.2.3.4', '5.6.7.8'], 'X-Forwarded-For twice'],
+            ['x-real-ip', ['1.2.3.4', '5.6.7.8'], 'X-Real-IP twice'],
+        ];
+        foreach ($cases as [$name, $values, $why]) {
+            $request = JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+            foreach ($values as $value) {
+                $request->headers->set($name, $value, false);
+            }
+            $response = $controller->challenge($request);
+            self::assertSame(400, $response->getStatusCode(), $why.' must be 400 DUPLICATE_HEADER');
+            self::assertSame('DUPLICATE_HEADER', json_decode((string) $response->getContent(), true)['error']['code'], $why);
+        }
+        self::assertSame([], $this->storedRecords($storage), 'a duplicate-header request must never reach issuance');
+
+        // Each SINGLE occurrence is the normal case — the endpoint keeps
+        // issuing (a browser always sends exactly one Origin, a trusted
+        // proxy exactly one forwarding chain). The single-Origin control
+        // uses the request's own origin so the same-origin check passes.
+        foreach ([['origin', 'http://localhost'], ['forwarded', 'for=1.2.3.4'], ['x-forwarded-for', '1.2.3.4'], ['x-real-ip', '1.2.3.4']] as [$name, $value]) {
+            $request = JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+            $request->headers->set($name, $value, false);
+            self::assertSame(200, $controller->challenge($request)->getStatusCode(), 'a single '.$name.' header must pass');
+        }
+    }
+
+    /**
+     * Audit #100: the duplicate-header check is a WIRE-LEVEL check — it
+     * runs with the framing checks, before any body is read; a request with
+     * a duplicate Origin AND a wrong content type still gets
+     * DUPLICATE_HEADER (never 415). Framing ambiguity stays first (a
+     * duplicate Origin + CL+TE is FRAMING_REJECTED).
+     */
+    public function testDuplicateHeaderCheckPrecedesBodyChecks(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        $request = JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $request->headers->set('origin', 'https://a.example', false);
+        $request->headers->set('origin', 'https://b.example', false);
+        $request->headers->set('Content-Type', 'text/plain');
+        $response = $controller->challenge($request);
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame('DUPLICATE_HEADER', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        // Framing ambiguity is checked FIRST (it is the deepest wire-level
+        // ambiguity): a duplicate Origin plus CL+TE stays FRAMING_REJECTED.
+        $request = $this->framingRequest(['content-length' => '13', 'transfer-encoding' => 'chunked']);
+        $request->headers->set('origin', 'https://a.example', false);
+        $request->headers->set('origin', 'https://b.example', false);
+        $response = $controller->challenge($request);
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame('FRAMING_REJECTED', json_decode((string) $response->getContent(), true)['error']['code']);
+    }
+
+    // ── Round 12: scoped syntactic rejection before shared infrastructure ─
+
+    /**
+     * Audit #103: a syntactically INVALID scope (bad charset, > 128 bytes)
+     * is rejected locally at 422 with ZERO Redis operations — the
+     * identifier-charset check runs BEFORE the rate limiter, the risk
+     * engine, the scope cap and the outstanding counters, so a malformed
+     * identifier never touches shared infrastructure.
+     */
+    public function testInvalidScopeIsRejectedWithZeroRedisOperations(): void
+    {
+        $client = new FakePredisClient();
+        $limiter = new IssuanceRateLimiter(10, 60, null, null, 'pepper', $client, 500, 'test-ns');
+        $outstanding = new OutstandingChallenges($client, '{kiwi:zero-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $scopeCap = new ScopeIssuanceCap($client, '{kiwi:zero-test}:issuance:', 10, ScopeIssuanceCap::deriveScopeHmacKey(self::SECRET), fn (): int => 1_800_000_000);
+        $controller = new ChallengeController(
+            $this->issuer(),
+            rateLimiter: $limiter,
+            outstanding: $outstanding,
+            scopeIssuanceCap: $scopeCap,
+        );
+
+        foreach (['bad|scope', 'log@in', "login\nadmin", str_repeat('x', 129)] as $badScope) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['scope' => $badScope])));
+            self::assertSame(422, $response->getStatusCode(), sprintf('scope %s must be refused locally', var_export($badScope, true)));
+            self::assertSame('INVALID_SCOPE', json_decode((string) $response->getContent(), true)['error']['code']);
+            self::assertSame([], $client->calls, 'a syntactically invalid scope must be rejected with ZERO Redis operations (audit #103)');
+        }
+
+        // Control: a VALID scope flows into the Redis limiter (the check is
+        // not skipping Redis for everything).
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode());
+        self::assertNotSame([], $client->calls, 'a valid scope proceeds to the Redis-backed checks');
+    }
+
+    /**
+     * Audit #104: the challenge-issuance sequence runs every quota check
+     * BEFORE the challenge state is created — local cap, issuer limiter,
+     * scope cap and outstanding counters all precede the storage write.
+     * The FakePredis call ORDER pins the limit/incr keys BEFORE the
+     * challenge SET key.
+     */
+    public function testAdmissionQuotaChecksPrecedeChallengeStateCreation(): void
+    {
+        $client = new FakePredisClient();
+        $limiter = new IssuanceRateLimiter(10, 60, null, null, 'pepper', $client, 500, 'order-test-ns');
+        $outstanding = new OutstandingChallenges($client, '{kiwi:order-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $scopeCap = new ScopeIssuanceCap($client, '{kiwi:order-test}:issuance:', 100, ScopeIssuanceCap::deriveScopeHmacKey(self::SECRET), fn (): int => 1_800_000_000);
+
+        $storage = new ArrayStorage();
+        // The tracking decorator IS the issuer's storage — the challenge
+        // record write flows through it into the shared call log.
+        $tracking = new class($storage, $client) implements \KiwiCaptcha\StorageInterface {
+            public function __construct(
+                private readonly \KiwiCaptcha\StorageInterface $inner,
+                private readonly FakePredisClient $client,
+            ) {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->client->calls[] = ['SET', ['{kiwi:order-test}:challenge:'.$record->nonce]];
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+        };
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $tracking);
+
+        $controller = new ChallengeController(
+            $issuer,
+            rateLimiter: $limiter,
+            outstanding: $outstanding,
+            storage: $tracking,
+            scopeIssuanceCap: $scopeCap,
+            challengeTtlSecs: 120,
+        );
+
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode());
+
+        $setIndex = null;
+        $evalIndices = [];
+        foreach ($client->calls as $i => [$command, $args]) {
+            if ($command === 'SET') {
+                $setIndex = $i;
+            }
+            if ($command === 'EVAL' && isset($args[2]) && \is_string($args[2])) {
+                $evalIndices[$args[2]] = $i;
+            }
+        }
+        self::assertNotNull($setIndex, 'the challenge-state write must have happened');
+        self::assertNotSame([], $evalIndices, 'the quota checks must have run');
+
+        $sawScopeCap = false;
+        $sawOutstanding = false;
+        foreach ($evalIndices as $firstKey => $i) {
+            self::assertLessThan(
+                $setIndex,
+                $i,
+                sprintf('the quota-check EVAL on %s must run BEFORE the challenge SET key (audit #104)', $firstKey)
+            );
+            // The scope-cap and outstanding keys are the {kiwi:...} family
+            // (Cluster safe) and carry ONLY keyed pseudonyms — never the
+            // raw scope or IP (audit #112).
+            if (str_contains($firstKey, ':issuance:')) {
+                $sawScopeCap = true;
+                self::assertStringContainsString('{kiwi:order-test}:issuance:', $firstKey);
+                self::assertStringNotContainsString('login', $firstKey, 'the scope cap key carries hex(hmac_sha256(scope, K_scope)), never the raw scope');
+            }
+            if (str_contains($firstKey, ':outstanding:')) {
+                $sawOutstanding = true;
+                self::assertStringContainsString('{kiwi:order-test}:outstanding:', $firstKey);
+            }
+        }
+        self::assertTrue($sawScopeCap, 'the per-scope issuance cap must have run');
+        self::assertTrue($sawOutstanding, 'the outstanding admission must have run');
+    }
+
+    /**
+     * Audit #104: with the configured TTL wired, a refused outstanding
+     * admission happens BEFORE the challenge is minted — the 4th issuance
+     * beyond the per-source cap never creates challenge state at all.
+     */
+    public function testPreMintOutstandingRefusalNeverMints(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $client = $this->requirePredis();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:flow-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 3, 100, 0);
+        $controller = new ChallengeController($issuer, null, false, null, null, null, $outstanding, [], false, $storage, null, false, null, null, null, null, 120);
+
+        for ($i = 0; $i < 3; $i++) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+            self::assertSame(200, $response->getStatusCode(), 'issuance '.(1 + $i).' must pass below the cap');
+        }
+
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(429, $response->getStatusCode(), 'the 4th outstanding challenge must hit the per-source cap');
+        self::assertSame('RISK_DENIED', json_decode((string) $response->getContent(), true)['error']['code']);
+        self::assertCount(3, $this->storedRecords($storage), 'a pre-mint refusal must never create challenge state');
+    }
+
+    // ── Round 12: duplicate JSON keys (audit #111) ────────────────────────
+
+    /**
+     * Audit #111: the raw challenge JSON is scanned for duplicate object
+     * keys BEFORE decoding — {"scope":"login","scope":"signup"} is a
+     * parser-ambiguity probe (json_decode would silently keep the LAST
+     * value; intermediaries may disagree) and gets 422 DUPLICATE_FIELD.
+     * Nested objects are scanned recursively.
+     */
+    public function testDuplicateJsonKeysAre422(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        $duplicates = [
+            '{"scope":"login","scope":"signup"}' => 'top-level duplicate scope',
+            '{"scope":"login","request_binding":"a","request_binding":"b"}' => 'top-level duplicate binding',
+            '{"scope":"login","nested":{"a":1,"a":2}}' => 'nested duplicate key',
+            '{"scope":"login","arr":[{"x":1,"x":2}]}' => 'duplicate inside an array element',
+            '{"scope":"login","deep":{"mid":{"scope":"a","scope":"b"}}}' => 'deeply nested duplicate',
+            '{"debug":1,"debug":2}' => 'duplicate unknown field (DUPLICATE_FIELD, never UNKNOWN_FIELDS)',
+        ];
+        foreach ($duplicates as $body => $why) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], $body));
+            self::assertSame(422, $response->getStatusCode(), $why.' must be 422');
+            self::assertSame('DUPLICATE_FIELD', json_decode((string) $response->getContent(), true)['error']['code'], $why);
+        }
+
+        // Clean documents — top-level documented fields only (the endpoint
+        // accepts exactly scope/algorithm/request_binding; nested payload
+        // objects are unknown-field probes regardless of their internals,
+        // and the duplicate scan runs BEFORE that check) — keep working.
+        foreach ([
+            '{"scope":"login"}',
+            ' { "scope" : "login" , "algorithm" : "sha256" } ',
+            '{"scope":"login","request_binding":"txn-1"}',
+            '{}',
+        ] as $body) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], $body));
+            self::assertSame(200, $response->getStatusCode(), 'a clean document must keep issuing: '.$body);
+        }
     }
 }

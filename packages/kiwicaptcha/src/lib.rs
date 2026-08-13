@@ -54,7 +54,7 @@ pub use challenge::{
 pub use keys::{DerivedKeys, HKDF_DEPLOY_SALT};
 pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg, kiwi_shield_svg};
 pub use profile::{ChallengeProfile, ProfileError};
-pub use token::{DecodeError, IssuedChallenge, SolutionToken};
+pub use token::{DecodeError, IssuedChallenge, SolutionToken, MAX_TOKEN_RAW_BYTES};
 pub use verify::{
     score_telemetry, solve_for_test, validate_record, verify_solution, VerifyContext, VerifyError,
     VerifyOutcome,

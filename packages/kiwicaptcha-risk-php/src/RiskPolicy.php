@@ -25,6 +25,14 @@ namespace KiwiCaptcha\Risk;
  *
  * The `hash` is sha256 of the canonical JSON of the config (recursively
  * key-sorted, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE).
+ *
+ * policy_version (the config's `version`, stamped on every decision):
+ * bump it whenever the operator policy materially changes. A model
+ * revision (RiskModel::REVISION) that MATERIALLY affects security —
+ * e.g. changes how scores are computed or how calibration moves the
+ * bias — REQUIRES a policy_version bump too, so the decision's
+ * policy_version always pins down both the operator policy AND the
+ * security-relevant model generation it was computed under.
  */
 final class RiskPolicy
 {

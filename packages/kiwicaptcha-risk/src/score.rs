@@ -5,6 +5,11 @@
 //!
 //! `score(base, s, w) = base + Σ weighted(positive signals) - weighted(trust)
 //! - weighted(principal)`, clamped to [0, 1000] with saturating arithmetic.
+//!
+//! The SCORE is pure integer math (u16/u32/i32 — no float boundary, audit
+//! #109): NaN/Inf cannot enter, and the output is always a bounded u16 in
+//! 0..=1000. The only floats in the risk path live in the calibration
+//! boundary, which is guarded separately (calibration.lua + `bounded_bias`).
 
 use serde::{Deserialize, Serialize};
 

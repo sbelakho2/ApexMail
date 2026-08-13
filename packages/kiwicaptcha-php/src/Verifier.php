@@ -37,12 +37,16 @@ namespace KiwiCaptcha;
  *      per-algorithm difficulty range (the protocol bounds 1..MAX_DIFFICULTY,
  *      audit #87 — the leading-zero comparison only ever runs against a
  *      validated difficulty).
- *   2. Kid resolution (audit #91): when a secretsByKid set is configured,
- *      the signature secret for the record's kid is selected here — an
- *      unknown kid, or a kid beyond the newest configured kid (the
- *      rollback/forward guard — a future-keyed challenge must never verify
- *      on an older node), fails with UnknownKid. An empty set keeps the
- *      legacy single-secret path (the verify() secret parameter).
+ *   2. Kid gate (audit #91 + audit #117): a record whose kid is in the
+ *      verifier's revokedKids set fails with UnknownKid IMMEDIATELY — even
+ *      when the kid's secret is present in secretsByKid (compromise
+ *      revocation overrides the normal rotation grace). Otherwise, when a
+ *      secretsByKid set is configured, the signature secret for the
+ *      record's kid is selected here — an unknown kid, or a kid beyond the
+ *      newest configured kid (the rollback/forward guard — a future-keyed
+ *      challenge must never verify on an older node), fails with
+ *      UnknownKid. An empty set keeps the legacy single-secret path (the
+ *      verify() secret parameter).
  *   2. Re-check the challenge HMAC signature (constant-time compare) —
  *      protocol v1 payloads use the legacy canonical form signed with the
  *      master key, protocol v2 uses the full-parameter canonical payload
@@ -206,6 +210,16 @@ final class Verifier
          * is used for every record.
          */
         private readonly array $secretsByKid = [],
+        /**
+         * Compromised signing key ids (audit #117). A record whose `kid`
+         * appears here is rejected with UnknownKid BEFORE any signature
+         * work — IMMEDIATELY, even when the kid's secret is present in
+         * secretsByKid: compromise revocation overrides the normal rotation
+         * grace (a kid past the newest configured kid would otherwise
+         * verify until its secret leaves the set). Values are kid ids
+         * (positive integers). Empty (default) disables the revocation set.
+         */
+        private readonly array $revokedKids = [],
     ) {
         // BC shim: pre-gate callers passed the clock override positionally
         // as the second argument. A Closure in that slot is $now, not an
@@ -225,6 +239,13 @@ final class Verifier
             if (!\is_int($kid) || $kid < 1 || !\is_string($secret) || \strlen($secret) < 16) {
                 throw new \InvalidArgumentException(
                     'secretsByKid keys must be positive integer kid values 1..N with secrets of at least 16 bytes'
+                );
+            }
+        }
+        foreach ($revokedKids as $kid) {
+            if (!\is_int($kid) || $kid < 1) {
+                throw new \InvalidArgumentException(
+                    'revokedKids values must be positive integer kid values 1..N'
                 );
             }
         }
@@ -293,6 +314,17 @@ final class Verifier
             $this->bestEffortDelete($token->nonce);
 
             return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
+
+        // 2. Kid gate (audit #117): a REVOKED kid is rejected with
+        //    UnknownKid IMMEDIATELY — before the signature check and before
+        //    the secret selection — so compromise revocation overrides the
+        //    normal rotation grace (a perfectly-signed challenge under a
+        //    revoked kid still fails). Cheap: a set membership test only.
+        if ($this->isRevokedKid($peek->kid)) {
+            $this->bestEffortDelete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::UnknownKid);
         }
 
         // 2. Kid resolution (audit #91): with a secretsByKid set, the
@@ -520,6 +552,7 @@ final class Verifier
             $consumedSecret = $this->secretForKey($record, $secretKey);
             if (
                 !hash_equals($peek->challenge, $record->challenge)
+                || $this->isRevokedKid($record->kid)
                 || $consumedSecret === null
                 || !$this->validateRecord($record)
                 || !$this->verifyRecordSignature($record, $consumedSecret)
@@ -873,6 +906,19 @@ final class Verifier
         }
 
         return $this->secretsByKid[$record->kid];
+    }
+
+    /**
+     * Compromise-revocation gate (audit #117): true when the record's kid is
+     * in the verifier's revokedKids set. The check is a cheap set-membership
+     * test that runs BEFORE any signature work — revocation overrides the
+     * normal rotation grace, so a revoked kid fails with UnknownKid even
+     * when its secret is still present in secretsByKid and the challenge is
+     * perfectly signed.
+     */
+    private function isRevokedKid(?int $kid): bool
+    {
+        return $kid !== null && \in_array($kid, $this->revokedKids, true);
     }
 
     /**

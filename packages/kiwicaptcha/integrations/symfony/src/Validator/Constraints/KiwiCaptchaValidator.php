@@ -142,12 +142,17 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The canonical JSON payload of the last successfully verified
-     * challenge's Ed25519 RECEIPT (audit #80): {jti, scope, binding,
-     * outcome, issued_at_ms}, or null when no verification succeeded yet or
-     * no signing key is configured (risk.result_receipt_signing_key). The
-     * payload is public by construction (no secret material); pair it with
+     * challenge's Ed25519 RECEIPT (audit #80/#106): {jti, tenant, action,
+     * request_binding, issued_at, expires_at, issuer} — the full
+     * replay-critical set signed from the CONSUMED record, or null when no
+     * verification succeeded yet or no signing key is configured
+     * (risk.result_receipt_signing_key). The payload is public by
+     * construction (no secret material); pair it with
      * {@see verifiedReceiptSignature()} and verify against the PUBLIC key
-     * derived from the configured seed — never the private key.
+     * derived from the configured seed — never the private key. Signature
+     * verification alone is NOT sufficient for single-use actions: the
+     * integrator must atomically record the jti (INSERT IF NOT EXISTS) and
+     * treat a pre-existing jti as a replay (README).
      */
     public function verifiedReceiptPayload(): ?string
     {
@@ -194,6 +199,24 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // outstanding challenges within one cache window, a regressed or
         // unavailable central value can never weaken the epoch.
         $this->epochMonitor?->refresh();
+
+        // MAX-STALE FAIL-CLOSED (audit #108): once now exceeds the last
+        // successful central read by risk.security_epoch_max_stale_secs,
+        // the cached epoch may be outdated (an emergency revocation could
+        // have landed while this node could not read) — verification fails
+        // closed with the DISTINCT temporary_unavailable violation
+        // (retryable, never invalid_or_expired: the token is not burned,
+        // the server is temporarily refusing to trust its own cache).
+        if ($this->epochMonitor !== null && $this->epochMonitor->isStale()) {
+            $this->logger?->info('KiwiCaptcha: verification refused — security-policy state stale (audit #108)', [
+                'scope' => $constraint->scope,
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR)
+                ->addViolation();
+
+            return;
+        }
 
         $request = $this->requestStack->getMainRequest();
         // The issued record is authoritative: a non-empty binding tag means
@@ -422,17 +445,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 $this->lastVerifiedRequestBinding = $outcome->requestBinding();
             }
 
-            // RESULT RECEIPT (audit #80): a VALID verification can be
+            // RESULT RECEIPT (audit #80/#106): a VALID verification can be
             // exported as an Ed25519-signed receipt for third parties holding
-            // the PUBLIC key. The receipt is public by construction (jti,
-            // scope, binding, outcome, issued_at_ms — no secret material);
-            // the HMAC verification secret itself never leaves the server.
+            // the PUBLIC key. The receipt is signed from the CONSUMED
+            // RECORD's own fields and carries the FULL replay-critical set —
+            // jti, tenant (scope), action (PoW algorithm), request_binding,
+            // issued_at / expires_at, issuer (the payload is public by
+            // construction — no secret material; the HMAC verification
+            // secret itself never leaves the server). Signature verification
+            // alone is NOT sufficient for single-use actions: the integrator
+            // must atomically record the jti (INSERT IF NOT EXISTS) and treat
+            // a pre-existing jti as a replay (README).
             if ($this->receiptSigner !== null && $jti !== null) {
-                $receipt = $this->receiptSigner->sign($jti, $constraint->scope, $this->lastVerifiedRequestBinding, (int) round(microtime(true) * 1000));
-                if ($receipt !== null) {
-                    $this->lastReceiptPayload = $receipt['payload'];
-                    $this->lastReceiptSignature = $receipt['signature'];
-                }
+                $this->signReceipt($this->findRecordByNonce($jti));
             }
 
             // Anti-stockpiling (audit #26): the source's outstanding
@@ -552,23 +577,57 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // The SAME success: expose the canonical jti + signed binding (the
         // application's (jti, action) idempotency key stays stable across
         // the retry) — no re-derive, no repeated side effects. The receipt
-        // is re-signed for the retry (a fresh issued_at_ms — the receipt is
-        // per-verification export, the jti inside stays stable).
+        // is re-signed for the retry from the SAME consumed record — the
+        // payload is byte-identical (record fields only, no per-request
+        // timestamp), so a retry's receipt matches the original exactly
+        // (audit #106).
         $this->lastVerifiedJti = $record->nonce;
         $request?->attributes->set(self::VERIFIED_JTI_ATTRIBUTE, $record->nonce);
         $binding = $this->consumedBindingOf($record);
         if ($binding !== null) {
             $this->lastVerifiedRequestBinding = $binding;
         }
-        if ($this->receiptSigner !== null) {
-            $receipt = $this->receiptSigner->sign($record->nonce, $scope, $binding, (int) round(microtime(true) * 1000));
-            if ($receipt !== null) {
-                $this->lastReceiptPayload = $receipt['payload'];
-                $this->lastReceiptSignature = $receipt['signature'];
-            }
-        }
+        $this->signReceipt($record);
 
         return 'success';
+    }
+
+    /**
+     * Sign the Ed25519 result receipt from a consumed record (audit #106):
+     * the payload is built from the RECORD's own fields (jti, tenant,
+     * action, request_binding, issued_at, expires_at, issuer) — never from
+     * per-request state — so a stored-result retry re-signs the SAME
+     * payload. No-op when signing is disabled or the record is unavailable.
+     */
+    private function signReceipt(?ChallengeRecord $record): void
+    {
+        if ($this->receiptSigner === null || $record === null) {
+            return;
+        }
+        $receipt = $this->receiptSigner->sign($record);
+        if ($receipt !== null) {
+            $this->lastReceiptPayload = $receipt['payload'];
+            $this->lastReceiptSignature = $receipt['signature'];
+        }
+    }
+
+    /**
+     * The consumed record behind a canonical nonce (jti), read from the
+     * challenge storage after a valid verification so the receipt can be
+     * signed from the RECORD's own fields. null when storage is not wired
+     * or the read fails (a receipt is then simply not produced — the
+     * verification result itself is unaffected).
+     */
+    private function findRecordByNonce(string $nonce): ?ChallengeRecord
+    {
+        if ($this->storage === null) {
+            return null;
+        }
+        try {
+            return $this->storage->find($nonce);
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**

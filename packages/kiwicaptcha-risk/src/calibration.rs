@@ -128,7 +128,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use redis::Commands;
+use sha2::Sha256;
 use thiserror::Error;
 
 use crate::action::RiskAction;
@@ -303,9 +306,13 @@ pub trait CalibrationStore: Send + Sync {
 }
 
 /// Redis-backed bounded aggregator implementing the calibration contract.
+/// Scope HMAC key (audit #112): the raw scope must NEVER appear in Redis
+/// keys — an attacker can manufacture unbounded distinct scopes. Derived
+/// with HKDF info `kiwi/v2/scope-rate`, identical to the PHP side.
 pub struct RedisCalibrationStore {
     client: redis::Client,
     namespace: String,
+    scope_hmac_key: [u8; 32],
     conn: Mutex<Option<redis::Connection>>,
     min_samples: i64,
     max_adjustment: i32,
@@ -446,6 +453,24 @@ impl RedisCalibrationStore {
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`.
+    /// Derive the scope HMAC key (audit #112): HKDF-SHA256, info
+    /// `kiwi/v2/scope-rate`, 32 bytes — identical to the PHP side.
+    pub fn derive_scope_hmac_key(master: &[u8]) -> [u8; 32] {
+        // HKDF-SHA256(master, salt, info) matching the PHP hash_hkdf call
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(b"kiwicaptcha/deploy-salt/v1"), master);
+        let mut out = [0u8; 32];
+        hk.expand(b"kiwi/v2/scope-rate", &mut out)
+            .expect("expand ok");
+        out
+    }
+
+    /// Set the scope HMAC key (audit #112) — required for production use;
+    /// without it scope-based keys fall back to the raw scope (deprecated).
+    pub fn with_scope_key(mut self, key: [u8; 32]) -> Self {
+        self.scope_hmac_key = key;
+        self
+    }
+
     pub fn new(client: redis::Client, namespace: &str) -> RedisCalibrationStore {
         RedisCalibrationStore::with_limits(
             client,
@@ -566,6 +591,7 @@ impl RedisCalibrationStore {
         RedisCalibrationStore {
             client,
             namespace: namespace.to_string(),
+            scope_hmac_key: [0u8; 32],
             conn: Mutex::new(None),
             min_samples,
             max_adjustment,
@@ -657,12 +683,30 @@ impl RedisCalibrationStore {
         Ok(())
     }
 
+    fn scope_component(&self, scope: u32) -> String {
+        if self.scope_hmac_key == [0u8; 32] {
+            return scope.to_string();
+        }
+        let mut mac = hmac::Hmac::<Sha256>::new_from_slice(&self.scope_hmac_key).expect("key fits");
+        mac.update(scope.to_string().as_bytes());
+        let out = mac.finalize().into_bytes();
+        out.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
     fn bucket_key(&self, scope: u32, hour: i64) -> String {
-        format!("{{kiwi:{}}}:cal:{scope}:{hour}", self.namespace)
+        format!(
+            "{{kiwi:{}}}:cal:{}:{hour}",
+            self.namespace,
+            self.scope_component(scope)
+        )
     }
 
     fn state_key(&self, scope: u32) -> String {
-        format!("{{kiwi:{}}}:cal:state:{scope}", self.namespace)
+        format!(
+            "{{kiwi:{}}}:cal:state:{}",
+            self.namespace,
+            self.scope_component(scope)
+        )
     }
 
     fn receipt_key(&self, decision_id: &str) -> String {
@@ -694,6 +738,17 @@ impl RedisCalibrationStore {
 
 fn backend(e: redis::RedisError) -> CalibrationError {
     CalibrationError::Backend(e.to_string())
+}
+
+/// Maps a raw calibration.lua reply to a BOUNDED integer bias (audit
+/// #109). The canonical script guards its own output (a non-finite
+/// final_mp maps to +max_adjustment*1000 inside the Lua), so the reply is
+/// always a finite integer within ±max_adjustment; this defense-in-depth
+/// clamp keeps the i32 conversion bounded even if a future script variant
+/// regresses — the bias can never be NaN (i64 cannot be NaN) and never
+/// lower-risk-than-max beyond the configured clamp.
+fn bounded_bias(bias: i64, max_adjustment: i32) -> i32 {
+    bias.clamp(-(max_adjustment as i64), max_adjustment as i64) as i32
 }
 
 impl CalibrationStore for RedisCalibrationStore {
@@ -748,8 +803,11 @@ impl CalibrationStore for RedisCalibrationStore {
         };
         self.script_calls.fetch_add(1, Ordering::Relaxed);
 
-        self.cache_insert(scope, bias as i32, now);
-        bias as i32
+        // AUDIT #109: bounded conversion — the script guarantees a finite
+        // integer reply; the clamp is the defense-in-depth boundary.
+        let bias = bounded_bias(bias, self.max_adjustment);
+        self.cache_insert(scope, bias, now);
+        bias
     }
 
     fn record_receipt(
@@ -984,14 +1042,22 @@ impl CalibrationStore for RedisCalibrationStore {
         let counts: Vec<i64> = invoke.invoke(conn).map_err(backend)?;
         let sampled_total = counts.first().copied().unwrap_or(0);
         let sampled_resolved = counts.get(1).copied().unwrap_or(0);
+        // AUDIT #109: the ratio is integer-derived (always finite); the
+        // is_finite() guard is defensive and maps a never-occurring
+        // non-finite ratio to 0.0 — fail-closed for the resolution gate
+        // (bias movement stays suspended).
+        let mut ratio = if sampled_total > 0 {
+            sampled_resolved as f64 / sampled_total as f64
+        } else {
+            0.0
+        };
+        if !ratio.is_finite() {
+            ratio = 0.0;
+        }
         Ok(SamplingMetrics {
             sampled_total,
             sampled_resolved,
-            resolution_ratio: if sampled_total > 0 {
-                sampled_resolved as f64 / sampled_total as f64
-            } else {
-                0.0
-            },
+            resolution_ratio: ratio,
             sampled_expired: (sampled_total - sampled_resolved).max(0),
         })
     }
@@ -2528,5 +2594,234 @@ mod tests {
         assert_eq!(m8.sampled_resolved, 3);
         assert_eq!(m8.sampled_expired, 2);
         assert!((m8.resolution_ratio - 0.6).abs() < 1e-9);
+    }
+
+    // ── AUDIT #109 — NON-FINITE RISK GUARDS ─────────────────────────────
+    // Every float boundary in the scoring/calibration path must produce a
+    // BOUNDED integer output — never NaN, never lower-risk-than-max. The
+    // canonical calibration.lua guards its own output (non-finite final_mp
+    // -> +max_adjustment*1000) and `bounded_bias` clamps the reply on the
+    // Rust side; these cases exercise the FULL guard chain (corrupted
+    // state -> Lua guard -> bounded integer reply -> Rust clamp). The SCORE
+    // itself is pure integer math (`score::score`, saturating u16) — no
+    // float boundary exists there.
+
+    /// Property test of the i64 -> i32 conversion boundary: extreme and
+    /// overflowing replies always yield a bounded int within
+    /// ±max_adjustment (never NaN — i64 cannot be NaN — and never
+    /// lower-risk-than-max beyond the clamp).
+    #[test]
+    fn bounded_bias_conversion_is_bounded_for_extreme_inputs() {
+        for max_adj in [1i32, 10, 150, 1000] {
+            for raw in [
+                i64::MAX,
+                i64::MIN,
+                0,
+                1,
+                -1,
+                max_adj as i64,
+                -(max_adj as i64),
+                (max_adj as i64) + 1,
+                -(max_adj as i64) - 1,
+                1_000_000,
+                -1_000_000,
+            ] {
+                let bias = bounded_bias(raw, max_adj);
+                assert!(
+                    (-(max_adj as i64)..=max_adj as i64).contains(&(bias as i64)),
+                    "bounded_bias({raw}, {max_adj}) = {bias} must stay within ±{max_adj}"
+                );
+            }
+            assert_eq!(
+                bounded_bias(i64::MAX, max_adj),
+                max_adj,
+                "overflow fails HIGH"
+            );
+            assert_eq!(bounded_bias(i64::MIN, max_adj), -max_adj);
+        }
+    }
+
+    /// Seeds a corrupted flat field via raw HSET ("1e999" — Redis 7.4+ Lua
+    /// tonumber parses it as +Inf, the value Lua 5.1's errno check would
+    /// have rejected).
+    fn hset_corrupt(conn: &mut redis::Connection, key: &str, field: &str, value: &str) {
+        redis::cmd("HSET")
+            .arg(key)
+            .arg(field)
+            .arg(value)
+            .query::<()>(conn)
+            .expect("hset corrupt field");
+    }
+
+    /// A store with huge allowance (mpm 100_000, min_samples 1) so the
+    /// proportional rate limiter never binds the corruption verdicts.
+    fn corrupt_store(prefix: &str) -> RedisCalibrationStore {
+        store_limits(prefix, 1, 150, 100_000)
+    }
+
+    /// Integration: a corrupted bucket value makes fp_mean = Inf/Inf = NaN;
+    /// the Lua guard maps the NaN final_mp to +max_adjustment*1000 and the
+    /// Rust conversion yields exactly +150 — never 0, never an eval error.
+    #[test]
+    fn corrupted_bucket_nan_fails_high_to_plus_max_adjustment() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = corrupt_store("nfnan");
+        let mut conn = client().get_connection().expect("connection");
+        let key = s.bucket_key(1, now() / 3_600_000);
+        hset_corrupt(&mut conn, &key, "legit_count", "1e999");
+        hset_corrupt(&mut conn, &key, "legit_score_sum", "1e999");
+
+        assert_eq!(
+            s.bias_for_scope(1, now()),
+            150,
+            "NaN must fail HIGH to +max_adjustment (never 0)"
+        );
+        // A COLD store re-aggregates the same corrupted state: stable.
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, now()),
+            150,
+            "the guarded bias must be stable across re-reads"
+        );
+    }
+
+    /// Integration: a corrupted bucket value (fp_mean = +Inf -> error
+    /// -Inf) clamps at the raw -max_adjustment clamp inside the script —
+    /// bounded int output, never NaN. The rate state is pre-seeded so the
+    /// first call's allowance does not clamp the verdict to 0.
+    #[test]
+    fn corrupted_bucket_inf_fp_mean_clamps_bounded() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = corrupt_store("nfinf");
+        let mut conn = client().get_connection().expect("connection");
+        let key = s.bucket_key(2, now() / 3_600_000);
+        hset_corrupt(&mut conn, &key, "legit_count", "100");
+        hset_corrupt(&mut conn, &key, "legit_score_sum", "1e999");
+        // Seed bias_mp = 0 / ts = Redis now - 60 s: the allowance is
+        // 100_000 * 1000 * 60000 / 60000 = 1e8 milli-points >> 150 points.
+        redis::cmd("HSET")
+            .arg(s.state_key(2))
+            .arg("bias_mp")
+            .arg("0")
+            .query::<()>(&mut conn)
+            .expect("seed bias_mp");
+        let t = redis_time_ms(&mut conn);
+        redis::cmd("HSET")
+            .arg(s.state_key(2))
+            .arg("ts")
+            .arg(t - 60_000)
+            .query::<()>(&mut conn)
+            .expect("seed ts");
+
+        let bias = s.bias_for_scope(2, now());
+        assert_eq!(
+            bias, -150,
+            "a +Inf fp_mean (error -Inf) must clamp to -max_adjustment"
+        );
+    }
+
+    /// Integration: corrupted rate-limit STATE (bias_mp = "1e999" -> +Inf)
+    /// drags final_mp to +Inf through the lower clamp even when the target
+    /// is 0 — the Lua guard must fail HIGH to +max_adjustment, never
+    /// return the target 0.
+    #[test]
+    fn corrupted_state_inf_never_maps_to_zero() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        // min_samples 1_000_000_000: the target stays 0.
+        let s = store_limits("nfst", 1_000_000_000, 150, 100_000);
+        let mut conn = client().get_connection().expect("connection");
+        hset_corrupt(&mut conn, &s.state_key(3), "bias_mp", "1e999");
+        let t = redis_time_ms(&mut conn);
+        redis::cmd("HSET")
+            .arg(s.state_key(3))
+            .arg("ts")
+            .arg(t)
+            .query::<()>(&mut conn)
+            .expect("seed ts");
+
+        assert_eq!(
+            s.bias_for_scope(3, now()),
+            150,
+            "a corrupted +Inf bias_mp must fail HIGH to +max_adjustment, never the 0 target"
+        );
+    }
+
+    /// (b) The resolution-ratio division is integer-derived: total 0 ->
+    /// 0.0, extreme ints stay finite; the defensive guard never yields
+    /// NaN.
+    #[test]
+    fn resolution_ratio_division_is_always_finite() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("nfra", SamplingMode::RandomSample, 1_000_000);
+        let mut conn = client().get_connection().expect("connection");
+
+        // Empty buckets -> total 0 -> ratio exactly 0.0.
+        let empty = s.sampling_metrics(4, now()).unwrap();
+        assert_eq!(empty.sampled_total, 0);
+        assert_eq!(empty.resolution_ratio, 0.0);
+        assert!(empty.resolution_ratio.is_finite());
+
+        // Extreme integer counters: the ratio stays finite and in [0, 1].
+        let key = s.bucket_key(4, now() / 3_600_000);
+        redis::cmd("HSET")
+            .arg(&key)
+            .arg("sample_total")
+            .arg(i64::MAX.to_string())
+            .arg("sample_resolved")
+            .arg(i64::MAX.to_string())
+            .query::<()>(&mut conn)
+            .expect("hset extremes");
+        let maxed = s.sampling_metrics(4, now()).unwrap();
+        assert_eq!(maxed.sampled_total, i64::MAX);
+        assert_eq!(maxed.resolution_ratio, 1.0);
+        assert!(
+            maxed.resolution_ratio.is_finite(),
+            "the ratio must never be NaN/Inf"
+        );
+
+        redis::cmd("HSET")
+            .arg(&key)
+            .arg("sample_resolved")
+            .arg("0")
+            .query::<()>(&mut conn)
+            .expect("hset zero resolved");
+        assert_eq!(s.sampling_metrics(4, now()).unwrap().resolution_ratio, 0.0);
+    }
+
+    /// (c) The SCORE is pure integer math (saturating u16 weighted
+    /// products, i32 accumulation) — no float boundary; extreme inputs
+    /// always produce a bounded 0..=1000 score.
+    #[test]
+    fn score_is_pure_integer_math_with_no_float_boundary() {
+        let w = crate::score::RiskWeights::default();
+        let saturated = crate::signals::SignalVector {
+            source_fast: 1000,
+            source_slow: 1000,
+            subnet_fast: 1000,
+            issue_debt: 1000,
+            bad_proof: 1000,
+            malformed: 1000,
+            replay: 1000,
+            action_failure: 1000,
+            scope_switch: 1000,
+            global_pressure: 1000,
+            network_risk: 1000,
+            trust_credit: 1000,
+            principal_credit: 1000,
+        };
+        assert_eq!(crate::score::score(0, &saturated, &w), 1000);
+        assert_eq!(crate::score::score(1000, &saturated, &w), 1000);
+        assert!(crate::score::score(1000, &saturated, &w) <= 1000);
     }
 }

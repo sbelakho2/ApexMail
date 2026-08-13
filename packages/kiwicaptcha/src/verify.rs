@@ -12,7 +12,7 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::challenge::{
     binding_tag, hash_ip, payload_from_record, verify_signature, verify_signature_v2,
@@ -105,6 +105,14 @@ pub struct VerifyContext<'a> {
     /// [`VerifyError::UnknownKid`]. When `None`, `secret_key` is used
     /// unconditionally (the historical single-key path).
     pub secrets_by_kid: Option<&'a HashMap<u32, String>>,
+    /// Compromise-revoked key ids (audit #117): `kid → revoked` — e.g. a key
+    /// that leaked. A record whose `kid` is in this set is rejected with
+    /// [`VerifyError::UnknownKid`] IMMEDIATELY — before the signature check —
+    /// even when the secret is present: compromise revocation OVERRIDES the
+    /// rotation grace (a revoked key may legitimately remain in
+    /// `secrets_by_kid` while the deployment retires it, but its challenges
+    /// must never verify). When `None`, no kid is revoked.
+    pub revoked_kids: Option<&'a HashSet<u32>>,
     /// The client's claimed counter.
     pub counter: u64,
     /// The client's reported solve duration in milliseconds. This value is
@@ -306,8 +314,10 @@ pub enum VerifyError {
 /// - `issuer` / `region` / `request_binding`, when set, match the same
 ///   narrow alphabet with the length caps (issuer 128, request_binding 128,
 ///   region 64 — audit #96);
-/// - `nonce` decodes as base64 to exactly 32 bytes;
-/// - `salt` decodes as base64 to exactly 16 bytes;
+/// - `nonce` decodes as base64 to exactly 32 bytes (44-char pre-bound before
+///   decode — audit #113);
+/// - `salt` decodes as base64 to exactly 16 bytes (24-char pre-bound before
+///   decode — audit #113);
 /// - `expires_at > issued_at` and `expires_at - issued_at <= MAX_TTL_SECS`;
 /// - `prefix` is exactly `challenge|salt|`;
 /// - `target_bits` 1..=MAX_DIFFICULTY for BOTH algorithms (audit #87 — the
@@ -345,6 +355,13 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
         if !crate::challenge::valid_identifier(binding, 128) {
             return Err(VerifyError::MalformedRecord);
         }
+    }
+    // Audit #113: exact-length pre-bounds BEFORE any base64 decode — the
+    // nonce is the 44-char base64 of 32 bytes and the salt the 24-char
+    // base64 of 16 bytes. An oversized (attacker-written) value is rejected
+    // as malformed without allocating a decode buffer for it.
+    if record.nonce.len() != 44 || record.salt.len() != 24 {
+        return Err(VerifyError::MalformedRecord);
     }
     match B64.decode(&record.nonce) {
         Ok(bytes) if bytes.len() == 32 => {}
@@ -425,7 +442,10 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 ///    signatures use the HKDF-derived challenge key, audit #21). When
 ///    `secrets_by_kid` is configured, the record's `kid` selects the secret
 ///    (audit #91): an unknown — or future — kid rejects with
-///    [`VerifyError::UnknownKid`] before any signature work.
+///    [`VerifyError::UnknownKid`] before any signature work. A REVOKED kid
+///    (audit #117 — `revoked_kids`) rejects with [`VerifyError::UnknownKid`]
+///    even earlier, before the signature check, even when its secret is
+///    present: compromise revocation overrides the rotation grace.
 /// 4. Hard Argon2id parameter ceilings (audit #32) — after signature
 ///    authentication, before any `Params::new`/allocation.
 /// 5. Check the TTL (defends against stale challenges).
@@ -485,6 +505,15 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     forward/rollback guard: future-keyed challenges must never verify
     //     on older nodes, even if the key were somehow known) — is rejected
     //     with UnknownKid BEFORE any signature work.
+    //     Compromise revocation FIRST (audit #117): a REVOKED kid is
+    //     rejected immediately — before the signature check — even when its
+    //     secret is still present in `secrets_by_kid` (or the single-key
+    //     path): revocation overrides the rotation grace.
+    if let Some(revoked) = ctx.revoked_kids {
+        if revoked.contains(&ctx.record.kid) {
+            return VerifyOutcome::Invalid(VerifyError::UnknownKid);
+        }
+    }
     let secret: &str = match ctx.secrets_by_kid {
         Some(secrets) => {
             let max_kid = secrets.keys().max().copied().unwrap_or(0);
@@ -990,6 +1019,7 @@ mod tests {
             record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms,
             now_unix: NOW_UNIX + 1,
@@ -1361,6 +1391,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 121, // past TTL
@@ -1395,6 +1426,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 60_000, // client forges a 60 s solve — must NOT help
             now_unix: NOW_UNIX + 1,
@@ -1429,6 +1461,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000, // forged
             now_unix: NOW_UNIX,
@@ -1471,6 +1504,7 @@ mod tests {
             record: &mut record,
             secret_key: "WRONG-KEY-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1503,6 +1537,7 @@ mod tests {
             record: &mut record,
             secret_key: "x", // 1 byte — below the hard minimum
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1535,6 +1570,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1567,6 +1603,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1618,6 +1655,7 @@ mod tests {
             record: &mut unbound,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter: counter2,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1650,6 +1688,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter: wrong,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1674,6 +1713,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1706,6 +1746,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter: wrong,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1728,6 +1769,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1761,6 +1803,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1792,6 +1835,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1826,6 +1870,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1851,6 +1896,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1882,6 +1928,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1914,6 +1961,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1946,6 +1994,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -1980,6 +2029,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 60_000, // a forged long client duration must NOT resurrect the legacy path
             now_unix: NOW_UNIX + 1,
@@ -2013,6 +2063,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2044,6 +2095,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2281,6 +2333,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: 1_000_001,
@@ -2311,6 +2364,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: expires_at, // exactly at expiry
@@ -2341,6 +2395,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: expires_at - 1,
@@ -2438,6 +2493,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2461,6 +2517,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 60_000, // forged long client duration must NOT help
             now_unix: NOW_UNIX + 1,
@@ -2712,6 +2769,7 @@ mod tests {
             record: &mut issued.record.clone(),
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2741,6 +2799,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2778,6 +2837,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2810,6 +2870,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2842,6 +2903,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2867,6 +2929,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2903,6 +2966,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2936,6 +3000,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2968,6 +3033,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -2993,6 +3059,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3076,6 +3143,7 @@ mod tests {
             record: &mut record,
             secret_key: "WRONG-KEY-16-bytes!",
             secrets_by_kid: Some(&secrets),
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3104,6 +3172,7 @@ mod tests {
             record: &mut record,
             secret_key: "WRONG-KEY-16-bytes!",
             secrets_by_kid: Some(&wrong),
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3129,6 +3198,7 @@ mod tests {
             record: &mut record,
             secret_key: key_b,
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3166,6 +3236,7 @@ mod tests {
             record: &mut record,
             secret_key: key_a, // the correct key — must NOT rescue the record
             secrets_by_kid: Some(&secrets),
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3191,6 +3262,7 @@ mod tests {
             record: &mut record,
             secret_key: key_a,
             secrets_by_kid: Some(&empty),
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3231,6 +3303,7 @@ mod tests {
             record: &mut record,
             secret_key: key,
             secrets_by_kid: Some(&secrets),
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3260,6 +3333,7 @@ mod tests {
             record: &mut record2,
             secret_key: key,
             secrets_by_kid: Some(&secrets),
+            revoked_kids: None,
             counter: counter2,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3289,6 +3363,7 @@ mod tests {
             record: &mut record,
             secret_key: key,
             secrets_by_kid: Some(&rolled_forward),
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3308,6 +3383,119 @@ mod tests {
             verify_solution(&mut ctx_rolled),
             VerifyOutcome::Valid { .. }
         ));
+    }
+
+    // ── Round-12 audit: compromise revocation overrides rotation grace (#117)
+
+    #[test]
+    fn revoked_kid_is_rejected_even_when_the_secret_is_present() {
+        // Audit #117: a REVOKED kid is rejected with UnknownKid IMMEDIATELY —
+        // before the signature check — even though the record is perfectly
+        // signed and the verifier still holds its secret: compromise
+        // revocation overrides the rotation grace (a leaked key stays in
+        // secrets_by_kid while the deployment retires it, but its challenges
+        // must never verify).
+        let key = "0123456789abcdef0123456789abcdef";
+        let mut record = make_record_with_kid(8, 2, key);
+        let counter = solve_for_test(&record).unwrap();
+
+        // The secret IS present — the revocation must still fire.
+        let mut secrets: HashMap<u32, String> = HashMap::new();
+        secrets.insert(2, key.to_string());
+        let mut revoked: HashSet<u32> = HashSet::new();
+        revoked.insert(2);
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: key,
+            secrets_by_kid: Some(&secrets),
+            revoked_kids: Some(&revoked),
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::UnknownKid),
+            "a revoked kid must be rejected before the signature check, secret present or not"
+        );
+
+        // Revocation also applies on the single-key path (no secrets_by_kid).
+        let mut ctx_plain = VerifyContext {
+            record: &mut record,
+            secret_key: key,
+            secrets_by_kid: None,
+            revoked_kids: Some(&revoked),
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx_plain),
+            VerifyOutcome::Invalid(VerifyError::UnknownKid),
+            "revocation applies on the plain single-key path too"
+        );
+    }
+
+    #[test]
+    fn unrevoked_kid_verifies_normally() {
+        // Audit #117: revocation is an exact-kid set — a record whose kid is
+        // NOT in the revoked set verifies normally even when other kids are
+        // revoked.
+        let key = "0123456789abcdef0123456789abcdef";
+        let mut record = make_record_with_kid(8, 2, key);
+        let counter = solve_for_test(&record).unwrap();
+
+        let mut secrets: HashMap<u32, String> = HashMap::new();
+        secrets.insert(2, key.to_string());
+        let mut revoked: HashSet<u32> = HashSet::new();
+        revoked.insert(1);
+        revoked.insert(9); // a different kid is revoked — not this one
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: key,
+            secrets_by_kid: Some(&secrets),
+            revoked_kids: Some(&revoked),
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(
+            matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
+            "an unrevoked kid with its secret present must verify normally"
+        );
     }
 
     #[test]
@@ -3332,7 +3520,6 @@ mod tests {
     }
 
     // ── Round-11 audit: explicit difficulty bounds (audit #87) ────────
-
     #[test]
     fn validate_record_enforces_the_explicit_difficulty_bounds() {
         // Audit #87: MIN_DIFFICULTY = 1 and MAX_DIFFICULTY = 20 apply to BOTH
@@ -3401,8 +3588,43 @@ mod tests {
         }
     }
 
-    // ── Round-11 audit: narrow identifier alphabet (audit #96) ────────
+    // ── Round-12 audit: allocation-after-length pre-bounds (#113) ─────
 
+    #[test]
+    fn validate_record_rejects_oversized_nonce_and_salt_before_decode() {
+        // Audit #113: the exact-length pre-bounds (nonce 44 chars, salt
+        // 24 chars) fire BEFORE any base64 decode — a megabyte salt/nonce
+        // string is rejected as MalformedRecord without allocating a decode
+        // buffer. Also verified end-to-end: validate_record is the first
+        // check of verify_solution, so an oversized field never reaches
+        // derive_hash's decode.
+        for mutate in ["salt", "nonce"] {
+            let mut record = make_record(8);
+            let huge = "A".repeat(1_000_000);
+            match mutate {
+                "salt" => record.salt = huge,
+                _ => record.nonce = huge,
+            }
+            assert_eq!(
+                validate_record(&record),
+                Err(VerifyError::MalformedRecord),
+                "a 1 MB {mutate} must be rejected before any decode"
+            );
+            let counter = solve_for_test(&make_record(8)).unwrap();
+            let mut record = make_record(8);
+            match mutate {
+                "salt" => record.salt = "A".repeat(1_000_000),
+                _ => record.nonce = "A".repeat(1_000_000),
+            }
+            assert_eq!(
+                verify(&mut record, counter, 5000),
+                VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+                "a 1 MB {mutate} must never reach hash derivation"
+            );
+        }
+    }
+
+    // ── Round-11 audit: narrow identifier alphabet (audit #96) ────────
     #[test]
     fn validate_record_rejects_non_conforming_identifiers() {
         // Audit #96: scope, issuer, region and request_binding must match
@@ -3492,6 +3714,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1, // issued_at > now + 60 → invalid
@@ -3523,6 +3746,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: NOW_UNIX + 1,
@@ -3561,6 +3785,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: cheap_now,
@@ -3610,6 +3835,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix,
@@ -3828,6 +4054,7 @@ mod tests {
             record,
             secret_key: FIXTURE_SECRET,
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: 1_700_000_100, // before expires_at 1_700_000_120
@@ -3914,6 +4141,7 @@ mod tests {
             record: &mut record,
             secret_key: FIXTURE_SECRET,
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: 1_700_000_100,

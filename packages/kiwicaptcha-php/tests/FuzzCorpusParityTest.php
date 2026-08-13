@@ -42,6 +42,17 @@ final class FuzzCorpusParityTest extends TestCase
                 $accepted++;
             } catch (MalformedRecordException) {
                 $rejected++;
+            } catch (\Throwable $e) {
+                // Audit #115: fromArray is a documented-exception-only parse
+                // path — every corpus entry must end in either a record or
+                // MalformedRecordException. A TypeError/Error/ValueError
+                // leaking out is a parser bug (e.g. an unchecked type cast
+                // or an int overflow in a range comparison), not a rejection.
+                self::fail(sprintf(
+                    'unexpected %s from fromArray for corpus entry: %s',
+                    $e::class,
+                    $e->getMessage(),
+                ));
             }
         }
 

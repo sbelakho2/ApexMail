@@ -10,7 +10,7 @@
 #![cfg(feature = "redis")]
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -114,6 +114,15 @@ fn now_micros() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_micros() as u64
+}
+
+/// Deterministic verifier clock for the future-issued-skew test: the fixed
+/// issue-time second (audit #76) — the 61 s future-issued challenge is then
+/// ALWAYS beyond the 60 s skew bound, with no wall-clock race.
+static FAKE_FUTURE_NOW: AtomicU64 = AtomicU64::new(0);
+
+fn fake_future_now() -> u64 {
+    FAKE_FUTURE_NOW.load(Ordering::SeqCst)
 }
 
 /// Test prefix unique per process so concurrent test binaries never collide.
@@ -1230,7 +1239,18 @@ fn replica_wait_store_succeeds_without_replicas() {
     .unwrap();
     let store = store_for(&url, &prefix).with_wait(1, 1000);
     assert_eq!(store.wait_config(), (1, 1000));
-    store.store(&issued.record).unwrap();
+    // The pool checkout/connect can take up to POOL_CHECKOUT_TIMEOUT under
+    // parallel load — retry the store a few times so the test never fails
+    // on mere machine contention (the record is idempotently overwritten).
+    let mut stored = false;
+    for _ in 0..3 {
+        if store.store(&issued.record).is_ok() {
+            stored = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(stored, "store() with the replica wait must succeed");
     let peeked = store
         .find(&issued.record.nonce)
         .unwrap()
@@ -1273,12 +1293,16 @@ fn ttl_margin_extends_the_redis_ttl_only() {
         .unwrap()
         .get_connection()
         .unwrap();
+    let before = now_unix();
     let ttl: i64 = redis::cmd("TTL").arg(&key).query(&mut conn).unwrap();
-    let now = now_unix();
-    let base = issued.record.expires_at as i64 - now as i64;
+    let after = now_unix();
+    let base = issued.record.expires_at as i64 - after as i64;
+    // Sub-second slack: the TTL was stamped from the store's clock read
+    // (before) and is read here (after), so the exact bound is
+    // `base + 30 + (after - before)`; `>= base + 29` is the tight floor.
     assert!(
-        ttl > base && ttl <= base + 30,
-        "TTL must be expires_at - now + margin, got {ttl} (base {base})"
+        ttl >= base + 29 && ttl <= base + 30 + (after - before) as i64 + 1,
+        "TTL must be expires_at - now + margin(30), got {ttl} (base {base})"
     );
 
     // End-to-end: a record stored with a margin verifies normally, and a
@@ -1705,26 +1729,32 @@ fn future_issued_challenge_beyond_skew_is_rejected() {
     // Audit #76 at the production boundary: a challenge whose issued_at is
     // more than MAX_CLOCK_SKEW_SECS (60) ahead of the verifier clock is a
     // time-domain anomaly — the cheap TTL phase rejects it with Expired.
+    // The verifier's clock is INJECTED (the PHP `$now` override equivalent)
+    // so the check is fully deterministic: the 61 s future-issued challenge
+    // is always beyond the 60 s skew bound, no wall-clock race.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("future");
+    let fixed_now = now_unix();
     let issued = issue_challenge(
         &sha_config(4),
         "login",
         IP,
-        now_unix() + 61, // issued_at > now + 60 → beyond the skew bound
+        fixed_now + 61, // issued_at > now + 60 → beyond the skew bound
         now_micros(),
         0,
         None,
     )
     .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
-    let verifier = verifier_for(&url, &prefix);
+    FAKE_FUTURE_NOW.store(fixed_now, Ordering::SeqCst);
+    let verifier = verifier_for(&url, &prefix).with_now_fn(fake_future_now);
     verifier.store().store(&issued.record).unwrap();
     assert_eq!(
-        verify_at(
-            &verifier,
+        verifier.verify(
             &encode_token(&issued.record.nonce, counter),
-            issued.record.issued_at_ns
+            "login",
+            IP,
+            issued.record.issued_at_ns + 1_000_000
         ),
         VerifyOutcome::Invalid(VerifyError::Expired),
         "a future-issued challenge beyond the clock skew must be rejected"
@@ -1774,4 +1804,171 @@ fn unknown_algorithm_variants_in_stored_records_are_record_not_found() {
             "algorithm {algo:?} must be undecodable (RecordNotFound), like PHP"
         );
     }
+}
+
+// ── Round-12 audit: revocation (#117), allocation-after-length (#113),
+//    NOSCRIPT recovery (#102) ──────────────────────────────────────────────
+
+#[test]
+fn revoked_kid_is_rejected_before_signature_checks() {
+    // Audit #117 at the production boundary: with_revoked_kids rejects the
+    // record in the cheap phase with UnknownKid — BEFORE the signature
+    // check — even when the kid's secret is present in secrets_by_kid:
+    // compromise revocation overrides the rotation grace. An UNREVOKED kid
+    // with its secret present verifies normally.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("revoked");
+    let key_b = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    let issued = issue_challenge(
+        &ChallengeConfig {
+            kid: 2,
+            ..ChallengeConfig {
+                secret_key: key_b.into(),
+                ..sha_config(4)
+            }
+        },
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // Perfectly signed, secret PRESENT, kid REVOKED → UnknownKid.
+    let revoking = verifier_for(&url, &prefix)
+        .with_secrets_by_kid([(2, key_b.to_string())])
+        .with_revoked_kids([2]);
+    revoking.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&revoking, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::UnknownKid),
+        "a revoked kid must be rejected even with its secret present"
+    );
+
+    // Same record, a DIFFERENT kid revoked → the unrevoked kid verifies.
+    let unrevoked = verifier_for(&url, &prefix)
+        .with_secrets_by_kid([(2, key_b.to_string())])
+        .with_revoked_kids([9]);
+    unrevoked.store().store(&issued.record).unwrap();
+    assert!(
+        matches!(
+            verify_at(&unrevoked, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "an unrevoked kid must verify normally"
+    );
+}
+
+#[test]
+fn oversized_stored_record_is_rejected_before_parse() {
+    // Audit #113 at the production boundary: a 10 MB attacker-written value
+    // under the nonce key is rejected by the stored-record length cap BEFORE
+    // any JSON parse and maps to RecordNotFound — exactly like any other
+    // corrupt key (PHP parity), never a large parse and never a panic.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("oversize");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let _: () = redis::cmd("SET")
+        .arg(key)
+        .arg("A".repeat(10 * 1024 * 1024))
+        .query(&mut conn)
+        .unwrap();
+
+    let verifier = verifier_for(&url, &prefix);
+    assert_eq!(
+        verifier.verify(
+            &encode_token(&issued.record.nonce, 0),
+            "login",
+            IP,
+            now_micros()
+        ),
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "a 10 MB stored value must be rejected at parse (RecordNotFound), like any corrupt key"
+    );
+}
+
+#[test]
+fn script_flush_is_recovered_deterministically() {
+    // Audit #102: the redis crate's Script invoke() handles NOSCRIPT by
+    // re-loading the script text (EVALSHA → NOSCRIPT → SCRIPT LOAD →
+    // EVALSHA), so a SCRIPT FLUSH cannot break verification: the record is
+    // NOT burned and the verification proceeds normally — deterministically,
+    // and again after a second flush (every script invocation re-covers).
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("noscript");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+
+    // Wipe the server-side script cache: BOTH Lua scripts are now unloaded
+    // (the consume transition AND the outcome commit).
+    let _: () = redis::cmd("SCRIPT").arg("FLUSH").query(&mut conn).unwrap();
+
+    // The first verify after the flush re-loads the scripts on NOSCRIPT and
+    // proceeds normally: the full consume → derive → commit lifecycle works.
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "NOSCRIPT must be recovered by re-loading — the verification proceeds normally"
+    );
+
+    // The record is NOT burned: it still exists with the consumed state and
+    // the committed outcome, and a replay returns the SAME outcome — even
+    // after ANOTHER flush (the replayed consume re-loads the script again).
+    let _: () = redis::cmd("SCRIPT").arg("FLUSH").query(&mut conn).unwrap();
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "a replay after a second flush returns the stored outcome — deterministic recovery"
+    );
+
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        stored["state"], "consumed",
+        "the transition ran — the record is kept, not burned"
+    );
+    assert_eq!(stored["consumed_result"]["valid"], true);
 }

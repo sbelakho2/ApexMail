@@ -496,4 +496,19 @@ final class ConfigurationTest extends TestCase
         self::assertNull($this->process()['public_base_url'], 'public_base_url defaults to null (same-origin derived from the request)');
         self::assertSame('https://captcha.example.com', $this->process(['public_base_url' => 'https://captcha.example.com'])['public_base_url']);
     }
+
+    // ── Round 12: max-stale fail-closed (audit #108) ──────────────────────
+
+    public function testSecurityEpochMaxStaleDefaultsAndBounds(): void
+    {
+        self::assertSame(60, $this->process()['risk']['security_epoch_max_stale_secs'], 'security_epoch_max_stale_secs defaults to 60 (the max-stale fail-closed window, audit #108)');
+        self::assertSame(10, $this->process(['risk' => ['security_epoch_max_stale_secs' => 10]])['risk']['security_epoch_max_stale_secs']);
+        self::assertSame(3600, $this->process(['risk' => ['security_epoch_max_stale_secs' => 3600]])['risk']['security_epoch_max_stale_secs']);
+    }
+
+    public function testSecurityEpochMaxStaleBelowMinimumIsRejected(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['risk' => ['security_epoch_max_stale_secs' => 9]]);
+    }
 }

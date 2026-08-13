@@ -313,6 +313,15 @@ struct StoredChallenge {
     consumed_result: Option<StoredConsumedResult>,
 }
 
+/// Maximum byte length of a stored record value (audit #113). The canonical
+/// [`ChallengeRecord`] JSON is a few hundred bytes — every field is
+/// length-bounded (nonce 44 chars, salt 24 chars, identifiers ≤ 128 bytes,
+/// challenge/signature bounded by the signed canonical input) — so 128 KiB is
+/// far beyond any legitimate value. An oversized stored value is rejected
+/// BEFORE any JSON parse: a 10 MB attacker-written value never reaches
+/// serde_json and never drives a large allocation.
+pub const MAX_STORED_RECORD_JSON_BYTES: usize = 128 * 1024;
+
 /// Decode a stored value that MAY carry the storage-level runtime fields
 /// `state` / `consumed_result`. The runtime fields are stripped BEFORE the
 /// strict [`ChallengeRecord`] parse, so `deny_unknown_fields` stays
@@ -320,6 +329,13 @@ struct StoredChallenge {
 /// Returns `None` on any parse failure — a corrupt key must never blow up
 /// the verify path (mirrors the PHP `RedisStorage::decode()`).
 fn decode_stored(raw: &str) -> Option<StoredChallenge> {
+    // Bound BEFORE the parse (audit #113): the canonical record JSON is a
+    // few hundred bytes — a value at 128 KiB+ is a corrupt/attacker-written
+    // key and is rejected without allocating for a parse it could never
+    // survive.
+    if raw.len() > MAX_STORED_RECORD_JSON_BYTES {
+        return None;
+    }
     let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
     let consumed_result = value
         .get("consumed_result")
@@ -508,6 +524,40 @@ impl RedisChallengeStore {
         }
     }
 
+    /// Invoke one of the store's Lua scripts with bounded NOSCRIPT recovery
+    /// (audit #102). The redis crate's [`redis::Script`] already re-loads the
+    /// script on NOSCRIPT, but it retries exactly ONCE — a concurrent
+    /// `SCRIPT FLUSH` landing between the re-load and the retry would fail
+    /// the invocation. The bounded loop (3 attempts, re-loading on every
+    /// NOSCRIPT) makes the recovery deterministic even while a deployment
+    /// (or a test) flushes the script cache: a NOSCRIPT hit can only fail
+    /// if the cache is flushed during EVERY attempt. Only NOSCRIPT errors
+    /// are retried — any other error propagates immediately (and the caller
+    /// poisons the connection, as usual).
+    fn invoke_script<T: redis::FromRedisValue>(
+        conn: &mut ManagedConnection,
+        script: &redis::Script,
+        key: &str,
+        args: &[&str],
+    ) -> redis::RedisResult<T> {
+        for _ in 0..3 {
+            let mut invocation = script.prepare_invoke();
+            invocation.key(key);
+            for arg in args {
+                invocation.arg(arg);
+            }
+            match invocation.invoke::<T>(conn) {
+                Ok(value) => return Ok(value),
+                Err(e) if e.kind() == redis::ErrorKind::NoScriptError => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(redis::RedisError::from((
+            redis::ErrorKind::NoScriptError,
+            "script still not loaded after 3 NOSCRIPT recovery attempts",
+        )))
+    }
+
     /// Persist a record with `EX ttl = max(1, expires_at - now +
     /// ttl_margin_secs)` — the PHP `RedisStorage::store()` rule plus the
     /// audit #23 TTL margin. An already-expired record is stored with a
@@ -527,10 +577,17 @@ impl RedisChallengeStore {
     /// store overwrites the record, which is safe).
     pub fn store(&self, record: &ChallengeRecord) -> redis::RedisResult<()> {
         let key = format!("{}{}", self.prefix, record.nonce);
-        // Infallible for this struct: every field is a String or an integer
-        // (no non-finite floats), so serde_json::to_string cannot fail.
-        let value = serde_json::to_string(record)
-            .expect("ChallengeRecord JSON serialization is infallible");
+        // Infallible for this struct in practice — every field is a String
+        // or an integer (no non-finite floats) — but the no-panic invariant
+        // (audit #115) maps even the impossible serialization failure to a
+        // typed storage error instead of panicking.
+        let value = serde_json::to_string(record).map_err(|e| {
+            redis::RedisError::from((
+                redis::ErrorKind::TypeError,
+                "ChallengeRecord JSON serialization failed",
+                e.to_string(),
+            ))
+        })?;
         let now_unix = now_epoch_micros() / 1_000_000;
         let ttl = (record.expires_at as i64)
             .saturating_sub(now_unix as i64)
@@ -611,9 +668,12 @@ impl RedisChallengeStore {
         let key = format!("{}{}", self.prefix, nonce);
         let mut conn = self.checkout()?;
         let value = Self::run_command(&mut conn, |c| {
-            redis::Script::new(CONSUME_TRANSITION_LUA)
-                .key(key)
-                .invoke::<redis::Value>(c)
+            Self::invoke_script::<redis::Value>(
+                c,
+                &redis::Script::new(CONSUME_TRANSITION_LUA),
+                &key,
+                &[],
+            )
         })?;
         Ok(parse_consume(value))
     }
@@ -637,11 +697,8 @@ impl RedisChallengeStore {
         let key = format!("{}{}", self.prefix, nonce);
         let mut conn = self.checkout()?;
         let stored = Self::run_command(&mut conn, |c| {
-            redis::Script::new(COMMIT_RESULT_LUA)
-                .key(key)
-                .arg(if valid { "1" } else { "0" })
-                .arg(binding.unwrap_or(""))
-                .invoke::<i64>(c)
+            let args = [if valid { "1" } else { "0" }, binding.unwrap_or("")];
+            Self::invoke_script::<i64>(c, &redis::Script::new(COMMIT_RESULT_LUA), &key, &args)
         })?;
         Ok(stored == 1)
     }
@@ -730,6 +787,11 @@ pub struct ProductionVerifier {
     /// for the UnknownKid / forward-guard semantics. `None` = the historical
     /// single-key path (`secret_key` used unconditionally).
     secrets_by_kid: Option<std::collections::HashMap<u32, String>>,
+    /// Compromise-revoked key ids (audit #117): a record whose `kid` is in
+    /// this set is rejected with [`VerifyError::UnknownKid`] in the cheap
+    /// phase — BEFORE the signature check — even when the secret is present:
+    /// compromise revocation overrides the rotation grace.
+    revoked_kids: Option<std::collections::HashSet<u32>>,
     argon_gate: Option<Box<dyn ArgonAdmissionGate>>,
     accept_legacy_v1: bool,
     expected_region: Option<String>,
@@ -754,6 +816,7 @@ impl ProductionVerifier {
             store,
             secret_key: secret_key.into(),
             secrets_by_kid: None,
+            revoked_kids: None,
             argon_gate: None,
             accept_legacy_v1: false,
             expected_region: None,
@@ -771,6 +834,17 @@ impl ProductionVerifier {
     /// Default: the single `secret_key` path.
     pub fn with_secrets_by_kid(mut self, secrets: impl IntoIterator<Item = (u32, String)>) -> Self {
         self.secrets_by_kid = Some(secrets.into_iter().collect());
+        self
+    }
+
+    /// Configure compromise-revoked key ids (audit #117): a record whose
+    /// `kid` is in this set is rejected with [`VerifyError::UnknownKid`] in
+    /// the cheap phase — BEFORE the signature check — even when the kid's
+    /// secret is still present in `secrets_by_kid` (or the single-key path):
+    /// compromise revocation overrides the rotation grace. A revoked kid is
+    /// rejected without consuming the record. Default: no revoked ids.
+    pub fn with_revoked_kids(mut self, revoked: impl IntoIterator<Item = u32>) -> Self {
+        self.revoked_kids = Some(revoked.into_iter().collect());
         self
     }
 
@@ -1072,7 +1146,18 @@ impl ProductionVerifier {
             return Err(VerifyError::MalformedRecord);
         }
 
-        // 3b2. Key-rotation resolution (audit #91): when a `secrets_by_kid`
+        // 3b2. Compromise revocation (audit #117): a REVOKED kid is rejected
+        //      IMMEDIATELY — before the signature check — even when its
+        //      secret is still present: revocation overrides the rotation
+        //      grace. Never consumes the record (the deployment's revocation
+        //      list may change).
+        if let Some(revoked) = &self.revoked_kids {
+            if revoked.contains(&record.kid) {
+                return Err(VerifyError::UnknownKid);
+            }
+        }
+
+        // 3b3. Key-rotation resolution (audit #91): when a `secrets_by_kid`
         //      map is configured, the record's kid selects the signing
         //      secret. An unknown kid — or a kid NEWER than the map's newest
         //      id (the forward/rollback guard: future-keyed challenges must
@@ -1323,6 +1408,55 @@ mod tests {
         assert_eq!(
             verifier.verify(&token, "login", IP, issued_at_ns + 1_000_000),
             VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate)
+        );
+    }
+
+    // ── Round-12 audit: allocation-after-length (#113), recursion (#114) ──
+
+    #[test]
+    fn oversized_stored_value_is_rejected_before_any_parse() {
+        // Audit #113 at the STORAGE layer: a stored value beyond
+        // MAX_STORED_RECORD_JSON_BYTES never reaches serde_json — a 10 MB
+        // attacker-written value maps to None (corrupt key → RecordNotFound
+        // upstream) without a large decode/parse.
+        let huge = "A".repeat(10 * 1024 * 1024);
+        assert!(
+            decode_stored(&huge).is_none(),
+            "a 10 MB stored value must be rejected by the length cap"
+        );
+        // Exactly at the cap: parsed (and fails as corrupt JSON — but never
+        // panics and never allocates beyond the value itself).
+        let at_cap = "A".repeat(MAX_STORED_RECORD_JSON_BYTES);
+        assert!(decode_stored(&at_cap).is_none());
+    }
+
+    #[test]
+    fn deeply_nested_stored_value_hits_the_recursion_limit() {
+        // Audit #114: serde_json's default recursion limit (128) is intact —
+        // a 100k-level nested value yields a CLEAN RecursionLimitExceeded
+        // parse error, never a stack overflow. (The crate never calls
+        // disable_recursion_limit / unbounded_depth.)
+        let mut deep = String::with_capacity(100_000 * 4 + 2);
+        for _ in 0..100_000 {
+            deep.push_str("{\"a\":");
+        }
+        deep.push_str("{}");
+        for _ in 0..100_000 {
+            deep.push('}');
+        }
+        match serde_json::from_str::<serde_json::Value>(&deep) {
+            Err(e) => {
+                assert!(
+                    e.is_syntax() && e.to_string().contains("recursion limit exceeded"),
+                    "100k-deep JSON must fail with a clean recursion-limit error, got {e}"
+                );
+            }
+            Ok(_) => panic!("100k-deep JSON must hit the recursion limit"),
+        }
+        // The storage-layer decode returns None (corrupt key) — no panic.
+        assert!(
+            decode_stored(&deep).is_none(),
+            "the storage decode must map a recursion-limit hit to None"
         );
     }
 }

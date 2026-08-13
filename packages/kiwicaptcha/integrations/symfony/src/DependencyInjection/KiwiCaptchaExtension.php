@@ -437,7 +437,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$minimumResolutionRatio', $riskConfig['calibration']['minimum_resolution_ratio'])
                     ->setArgument('$falsePositiveCost', $riskConfig['calibration']['false_positive_cost'])
                     ->setArgument('$falseNegativeCost', $riskConfig['calibration']['false_negative_cost'])
-                    ->setArgument('$outcomeTtlSecs', $riskConfig['calibration']['outcome_receipt_ttl_secs']));
+                    ->setArgument('$outcomeTtlSecs', $riskConfig['calibration']['outcome_receipt_ttl_secs'])
+                    ->setArgument('$scopeHmacKey', AggregateCalibrator::deriveScopeHmacKey($riskMaster)));
                 $calibrationRef = new Reference('kiwi_captcha.risk.calibration');
             }
 
@@ -616,6 +617,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         ]))
             ->setArgument('$region', $config['risk']['region'])
             ->setArgument('$issuer', null)
+            // Audit #108: the max-stale fail-closed window — past
+            // last_success + max_stale the validator fails verification
+            // closed (temporary_unavailable) and the controller refuses
+            // issuance with 503 SERVICE_UNAVAILABLE.
+            ->setArgument('$maxStaleSecs', $riskConfig['security_epoch_max_stale_secs'])
             ->setPublic(true));
 
         // ── Optional Ed25519 result-receipt signer (audit #80) ────────────
@@ -627,24 +633,31 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $receiptSeed,
         ]));
 
-        // ── Per-scope issuance cap (audit #89) ────────────────────────────
+        // ── Per-scope issuance cap (audit #89/#112) ───────────────────────
         // risk.max_challenges_per_scope_per_minute > 0 requires a Redis
         // client for the atomic fixed-window counter — refuse the config at
-        // compile time instead of silently minting unbilled challenges.
+        // compile time instead of silently minting unbilled challenges. The
+        // window key carries hex(hmac_sha256(scope, K_scope)) — the RAW
+        // scope string is never a Redis key component (audit #112); K_scope
+        // is derived from the risk master with
+        // hash_hkdf info 'kiwi/v2/scope-rate' (the same derivation the risk
+        // package uses for its calibration scope keys).
         $scopeCapRef = null;
         if ($riskConfig['max_challenges_per_scope_per_minute'] > 0) {
             $scopeCapRedis = $riskRedis ?? $redisRef;
             if ($scopeCapRedis === null) {
                 throw new \LogicException(
                     'kiwi_captcha.risk.max_challenges_per_scope_per_minute requires a Redis client for the atomic '.
-                    'fixed-window counter ({kiwi:<ns>}:issuance:<scope>:<minute>). Configure redis_service / '.
-                    'risk.redis_service (or a RedisStorage client) or set the cap to 0 (unlimited).'
+                    'fixed-window counter ({kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>). Configure '.
+                    'redis_service / risk.redis_service (or a RedisStorage client) or set the cap to 0 (unlimited).'
                 );
             }
+            $scopeHmacKey = ScopeIssuanceCap::deriveScopeHmacKey($riskConfig['master_secret'] ?? $config['secret_key']);
             $container->setDefinition('kiwi_captcha.risk.scope_issuance_cap', new Definition(ScopeIssuanceCap::class, [
                 $scopeCapRedis,
                 sprintf('{kiwi:%s}:issuance:', $namespace),
                 $riskConfig['max_challenges_per_scope_per_minute'],
+                $scopeHmacKey,
             ]));
             $scopeCapRef = new Reference('kiwi_captcha.risk.scope_issuance_cap');
         }
@@ -677,6 +690,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Audit #89: the per-scope issuance cap (fixed-window Redis
             // counter; null when disabled).
             ->setArgument('$scopeIssuanceCap', $scopeCapRef)
+            // Audit #108: the security-epoch monitor drives the issuance-side
+            // max-stale fail-closed check — a stale central policy read
+            // refuses issuance with 503 SERVICE_UNAVAILABLE.
+            ->setArgument('$epochMonitor', new Reference(SecurityEpochMonitor::class))
+            // Audit #104: the configured challenge TTL lets the anti-
+            // stockpiling admission run BEFORE the challenge state is
+            // created (the quota checks all precede the storage write).
+            ->setArgument('$challengeTtlSecs', $config['challenge_ttl_secs'])
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──

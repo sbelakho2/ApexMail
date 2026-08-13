@@ -575,6 +575,13 @@ fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Resul
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
+    // Audit #113: the HMAC-SHA256 tag is EXACTLY 64 hex characters — a
+    // longer signature is rejected before any hex::decode allocation
+    // (attacker-written oversized signature bytes never drive a decode
+    // buffer).
+    if signature.len() != 64 {
+        return Ok(false);
+    }
     let signature_bytes = match hex::decode(signature) {
         Some(bytes) => bytes,
         None => return Ok(false), // malformed signature can never match
@@ -594,6 +601,11 @@ fn verify_canonical_v2(
 ) -> Result<bool, SignError> {
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
+    }
+    // Audit #113: exact 64-hex-char signature pre-bound before any
+    // hex::decode allocation.
+    if signature.len() != 64 {
+        return Ok(false);
     }
     let signature_bytes = match hex::decode(signature) {
         Some(bytes) => bytes,
@@ -1261,6 +1273,65 @@ mod tests {
     }
 
     #[test]
+    fn oversized_signature_is_rejected_before_hex_decode() {
+        // Audit #113: the HMAC-SHA256 tag is exactly 64 hex characters — a
+        // longer signature is rejected as a mismatch BEFORE any hex::decode
+        // allocation (an attacker-written megabyte "signature" never drives
+        // a decode buffer), on both the v1 and v2 canonical paths.
+        let key = "0123456789abcdef0123456789abcdef";
+        let payload = ChallengePayload {
+            nonce: "n".into(),
+            scope: "login".into(),
+            ip_hash: hash_ip("9.9.9.9", key),
+            issued_at: 123,
+        };
+        for len in [65usize, 128, 1_000_000] {
+            let sig = "a".repeat(len);
+            assert!(
+                !verify_signature(&payload, &sig, key).unwrap(),
+                "a {len}-char signature must not verify"
+            );
+        }
+        let record = issue_challenge(
+            &ChallengeConfig {
+                secret_key: key.into(),
+                kid: 1,
+                algorithm: PoWAlgorithm::Sha256,
+                m_kib: 0,
+                t: 1,
+                p: 1,
+                target_bits: 4,
+                argon2_target_bits: 4,
+                ttl_secs: 120,
+                min_duration_ms: None,
+                auto_tune: false,
+                auto_tune_min_bits: 8,
+                auto_tune_max_bits: 20,
+                binding_mode: BindingMode::Bound,
+                region: None,
+                issuer: None,
+                policy_version: 1,
+            },
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap()
+        .record;
+        assert!(
+            !verify_signature_v2(&record, &"b".repeat(1_000_000), key).unwrap(),
+            "an oversized v2 signature must be rejected before hex decode"
+        );
+        assert!(
+            verify_signature_v2(&record, &"b".repeat(64), key).is_ok_and(|ok| !ok),
+            "a 64-char wrong signature is a plain mismatch"
+        );
+    }
+
+    #[test]
     fn hex_decode_round_trips() {
         assert_eq!(hex::decode("").unwrap(), Vec::<u8>::new());
         assert_eq!(hex::decode("00ff").unwrap(), vec![0x00, 0xff]);
@@ -1745,6 +1816,7 @@ mod tests {
                 record: &mut record,
                 secret_key: "test-key-16-bytes!",
                 secrets_by_kid: None,
+                revoked_kids: None,
                 counter,
                 duration_ms: 5000,
                 now_unix: 1_000_001,
@@ -1796,6 +1868,7 @@ mod tests {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            revoked_kids: None,
             counter,
             duration_ms: 5000,
             now_unix: 1_000_001,

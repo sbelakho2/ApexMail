@@ -10,7 +10,9 @@ namespace KiwiCaptcha\Risk;
  * Reasons are internal only (never exposed to the client) and capped at 4.
  * decisionId is a fresh random 16-byte hex id (internal handle used to
  * pair later confirmed outcomes back to this decision via calibration
- * receipts).
+ * receipts). modelRevision is the RiskModel generation the decision was
+ * computed under — exposed in the public JSON (bounded, unlike the
+ * internal decisionId).
  */
 final class RiskDecision implements \JsonSerializable
 {
@@ -26,6 +28,7 @@ final class RiskDecision implements \JsonSerializable
         public readonly ?int $retryAfterMs = null,
         public readonly int $band = 0,
         ?string $decisionId = null,
+        public readonly int $modelRevision = RiskModel::REVISION,
     ) {
         $this->decisionId = $decisionId ?? bin2hex(random_bytes(16));
         foreach ($reasons as $reason) {
@@ -50,6 +53,7 @@ final class RiskDecision implements \JsonSerializable
             'action' => $this->action->value,
             'reasons' => array_map(static fn (RiskReason $r): string => $r->value, $this->reasons),
             'policy_version' => $this->policyVersion,
+            'model_revision' => $this->modelRevision,
             'global_level' => $this->globalLevel,
             'retry_after_ms' => $this->retryAfterMs,
             'band' => $this->band,

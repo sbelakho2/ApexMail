@@ -2,6 +2,11 @@
 -- Used when calibration is DISABLED: the ledger is always-on so
 -- ConfirmedLegitimate/ConfirmedAbuse work identically with or without
 -- calibration. Three small scripts; each takes the ledger key.
+--
+-- SCRIPT BOUNDS (audit #101) — all bounded constants:
+--   max keys touched:     1
+--   max Redis calls:      1 (SET)
+--   max collection cardinality: none
 
 -- register: create a PENDING entry (SET NX EX).
 -- KEYS[1] ledger; ARGV[1] scope, ARGV[2] decision_hour, ARGV[3] score,

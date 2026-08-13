@@ -1,6 +1,13 @@
 -- Calibration confirmation: outcome ledger CAS + receipt + bucket,
 -- ATOMICALLY (canonical, shared PHP/Rust).
 --
+-- SCRIPT BOUNDS (audit #101) — all bounded constants:
+--   max keys touched:     3
+--   max Redis calls:      8 (2 GET + 1 DEL + 1 SET + 2 HINCRBYFLOAT +
+--                           1 EXPIRE + 1 HINCRBY)
+--   max collection cardinality: none (cjson decodes of the bounded
+--                           receipt/ledger strings only)
+--
 -- KEYS[1]  decision receipt (STRING, JSON:
 --          {"scope","band","action","decision_hour","score","sampled"})
 -- KEYS[2]  DECISION-TIME calibration bucket for (receipt.scope,

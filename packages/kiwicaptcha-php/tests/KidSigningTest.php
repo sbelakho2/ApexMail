@@ -24,6 +24,12 @@ use PHPUnit\Framework\TestCase;
  * rollback/forward guard), fails with VerifyError::UnknownKid. An empty
  * set keeps the legacy single-secret path (the verify() $secretKey
  * parameter).
+ *
+ * Compromise revocation (audit #117): a verifier configured with a
+ * revokedKids set rejects any record whose kid is in it with
+ * UnknownKid IMMEDIATELY — before the signature check — so revocation
+ * overrides the normal rotation grace even when the kid's secret is still
+ * present in secretsByKid.
  */
 final class KidSigningTest extends TestCase
 {
@@ -329,6 +335,159 @@ final class KidSigningTest extends TestCase
     public function testUnknownKidErrorValue(): void
     {
         self::assertSame('unknown signing key id', VerifyError::UnknownKid->value);
+    }
+
+    public function testRevokedKidRejectedEvenWhenSecretPresent(): void
+    {
+        // A PERFECTLY-SIGNED challenge under a revoked kid must fail with
+        // UnknownKid: compromise revocation overrides the rotation grace
+        // (kid 2's secret IS in secretsByKid and the signature would pass).
+        [$record, $token] = $this->issue(kid: 2, secret: self::SECRET_2);
+
+        $storage = new ArrayStorage();
+        $storage->store($record);
+
+        $verifier = new Verifier(
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+            secretsByKid: [1 => self::SECRET_1, 2 => self::SECRET_2],
+            revokedKids: [2],
+        );
+        $outcome = $verifier->verify(
+            $token,
+            self::SECRET_1,
+            'login',
+            '198.51.100.7',
+            nowNs: $record->issuedAtNs + 1_000_000,
+        );
+
+        self::assertSame(VerifyError::UnknownKid, $outcome->error, 'revocation must override the rotation grace');
+        self::assertNull($storage->find($record->nonce), 'a revoked-kid verification burns the record');
+    }
+
+    public function testRevokedKidRejectedBeforeSignatureWork(): void
+    {
+        // The revocation gate fires BEFORE the signature check: the stored
+        // record is TAMPERED (scope swapped) so the signature re-check
+        // would fail with BadSignature — yet the cheap revocation gate
+        // wins and reports UnknownKid. If the gate ever deferred to the
+        // signature comparison, this would surface BadSignature instead.
+        [$record, $token] = $this->issue(kid: 2, secret: self::SECRET_2);
+        $tampered = new ChallengeRecord(
+            nonce: $record->nonce,
+            scope: 'tampered',
+            bindingTag: $record->bindingTag,
+            issuedAt: $record->issuedAt,
+            expiresAt: $record->expiresAt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $record->prefix,
+            challenge: $record->challenge,
+            minDurationMs: $record->minDurationMs,
+            issuedAtNs: $record->issuedAtNs,
+            protocolVersion: $record->protocolVersion,
+            kid: $record->kid,
+        );
+
+        $storage = new ArrayStorage();
+        $storage->store($tampered);
+
+        $verifier = new Verifier(
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+            secretsByKid: [1 => self::SECRET_1, 2 => self::SECRET_2],
+            revokedKids: [2],
+        );
+        $outcome = $verifier->verify($token, self::SECRET_1, 'login', '198.51.100.7');
+
+        self::assertSame(VerifyError::UnknownKid, $outcome->error, 'revocation must beat the signature check');
+    }
+
+    public function testUnrevokedKidWithSecretStillVerifies(): void
+    {
+        // Revoking kid 1 must not affect kid 2: the secret is present and
+        // the challenge verifies normally.
+        [$record, $token] = $this->issue(kid: 2, secret: self::SECRET_2);
+
+        $storage = new ArrayStorage();
+        $storage->store($record);
+
+        $verifier = new Verifier(
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+            secretsByKid: [1 => self::SECRET_1, 2 => self::SECRET_2],
+            revokedKids: [1],
+        );
+        $outcome = $verifier->verify(
+            $token,
+            self::SECRET_1,
+            'login',
+            '198.51.100.7',
+            nowNs: $record->issuedAtNs + 1_000_000,
+        );
+
+        self::assertTrue($outcome->isOk(), sprintf('an unrevoked kid must verify, got %s', $outcome->code()));
+    }
+
+    public function testLegacySingleSecretPathUnaffectedByRevocationDefaults(): void
+    {
+        // The new parameter defaults to []: the legacy single-secret path
+        // (empty secretsByKid, no revocations) verifies any kid exactly as
+        // before the audit #117 change.
+        [$record, $token] = $this->issue(kid: 3, secret: self::SECRET_1);
+
+        $storage = new ArrayStorage();
+        $storage->store($record);
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->verify(
+            $token,
+            self::SECRET_1,
+            'login',
+            '198.51.100.7',
+            nowNs: $record->issuedAtNs + 1_000_000,
+        );
+
+        self::assertTrue($outcome->isOk(), sprintf('the legacy path must verify any kid, got %s', $outcome->code()));
+    }
+
+    public function testRevocationAppliesInLegacySingleSecretMode(): void
+    {
+        // Revocation is kid-based and applies unconditionally: even without
+        // a secretsByKid set, a revoked kid fails with UnknownKid before
+        // the signature check.
+        [$record, $token] = $this->issue(kid: 2, secret: self::SECRET_2);
+
+        $storage = new ArrayStorage();
+        $storage->store($record);
+
+        $verifier = new Verifier(
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+            revokedKids: [2],
+        );
+        $outcome = $verifier->verify($token, self::SECRET_2, 'login', '198.51.100.7');
+
+        self::assertSame(VerifyError::UnknownKid, $outcome->error);
+    }
+
+    public function testRevokedKidsConstructionValidation(): void
+    {
+        foreach ([[0], [-1], ['a'], [1.5], [null]] as $bad) {
+            try {
+                new Verifier(new ArrayStorage(), revokedKids: $bad);
+                self::fail('invalid revokedKids must be rejected at construction');
+            } catch (\InvalidArgumentException) {
+                // expected
+            }
+        }
+
+        new Verifier(new ArrayStorage(), revokedKids: [1, 2]);
+        self::assertTrue(true);
     }
 
     public function testKidSurvivesTheWrappedRedisRoundTrip(): void

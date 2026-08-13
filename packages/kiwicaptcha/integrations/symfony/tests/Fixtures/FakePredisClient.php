@@ -502,9 +502,11 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'Scope issuance cap')) {
-            // ScopeIssuanceCap::allow: KEYS[1] = {kiwi:<ns>}:issuance:<scope>:
-            // <minute>; ARGV[1] = cap. INCR -> EXPIRE 60 on the first
-            // increment -> refuse beyond the cap (0), else 1.
+            // ScopeIssuanceCap::allow: KEYS[1] =
+            // {kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>
+            // (audit #112 — the raw scope is never a key component);
+            // ARGV[1] = cap. INCR -> EXPIRE 60 on the first increment ->
+            // refuse beyond the cap (0), else 1.
             $key = (string) $keys[0];
             $cap = (int) $rest[0];
             $n = $this->fakeIncr([$key]);

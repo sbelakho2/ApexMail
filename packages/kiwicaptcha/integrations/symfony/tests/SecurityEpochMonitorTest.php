@@ -251,6 +251,171 @@ final class SecurityEpochMonitorTest extends TestCase
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'the monitored epoch must be enforced per verification (collapsed public code)');
     }
 
+    // ── Round 12: max-stale fail-closed (audit #108) ──────────────────────
+
+    /**
+     * Audit #108: within the max-stale window (now <= last_success +
+     * risk.security_epoch_max_stale_secs) a Redis outage is NOT stale — the
+     * cached max keeps serving and the revocation stays in force.
+     */
+    public function testWithinTheMaxStaleWindowTheCachedMaxStillServes(): void
+    {
+        [$issuer, $verifier] = $this->pair(1);
+        $revokedToken = $this->solveChallenge($issuer);
+
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 2);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...), maxStaleSecs: 60);
+        self::assertSame(2, $monitor->currentEpoch(), 'the central bump is observed at T0');
+        self::assertFalse($monitor->isStale(), 'right after a successful read the monitor is fresh');
+
+        // Redis dies at T0+5 s; at T0+30 s (well inside the 60 s window) the
+        // cached max 2 is still served AND the monitor is not stale.
+        $redis->failCommand = '*';
+        $this->clockMs = 30_000;
+        self::assertSame(2, $monitor->currentEpoch(), 'the cached max keeps serving during the outage');
+        self::assertFalse($monitor->isStale(), 'within the max-stale window the outage is NOT stale (audit #108)');
+        self::assertSame(
+            VerifyError::WrongPolicyVersion,
+            $verifier->verify($revokedToken, self::SECRET, 'login', '198.51.100.7')->error,
+            'the cached revocation stays in force within the window'
+        );
+    }
+
+    /**
+     * Audit #108: once now > last_success + max_stale the monitor IS stale —
+     * the cached epoch may be outdated (an emergency revocation could have
+     * landed while the node could not read) — and every caller fails closed.
+     */
+    public function testPastTheMaxStaleWindowTheMonitorIsStale(): void
+    {
+        [$issuer, $verifier] = $this->pair(1);
+
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 2);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...), maxStaleSecs: 60);
+        self::assertSame(2, $monitor->currentEpoch(), 'the central bump is observed at T0');
+
+        $redis->failCommand = '*';
+        $this->clockMs = 90_000; // last_success 0 + 60 s < 90 s
+        self::assertSame(2, $monitor->currentEpoch(), 'the cached max is still the enforced epoch');
+        self::assertTrue($monitor->isStale(), 'past last_success + max_stale the monitor is stale (audit #108)');
+
+        // A SUCCESSFUL read refreshes the deadline: the outage ends at
+        // T0+90 s, the next refresh confirms the central state and the
+        // monitor is fresh again.
+        $redis->failCommand = null;
+        $this->setCentralEpoch($redis, 3);
+        $this->clockMs = 91_000;
+        self::assertSame(3, $monitor->currentEpoch(), 'a recovered read observes the newest bump');
+        self::assertFalse($monitor->isStale(), 'a successful read refreshes the max-stale deadline');
+    }
+
+    public function testNeverSucceededReadIsImmediatelyStale(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $redis->failCommand = '*';
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...), maxStaleSecs: 60);
+        self::assertSame(1, $monitor->currentEpoch(), 'the configured epoch is the enforced floor');
+        self::assertTrue(
+            $monitor->isStale(),
+            'a monitor with a Redis client that NEVER succeeded a central read is stale immediately (an unobserved central policy is never trusted to be current)'
+        );
+    }
+
+    public function testMonitorWithoutRedisIsNeverStale(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $monitor = new SecurityEpochMonitor($verifier, null, 'test-ns', 1, 1, $this->clock(...), maxStaleSecs: 60);
+        $this->clockMs = 3_600_000;
+        self::assertFalse(
+            $monitor->isStale(),
+            'no central state by design (null Redis) is a configured posture, never a stale failure'
+        );
+    }
+
+    public function testMaxStaleBelowTenSecondsIsRefused(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $this->expectException(\InvalidArgumentException::class);
+        new SecurityEpochMonitor($verifier, null, 'test-ns', 1, 1, $this->clock(...), maxStaleSecs: 9);
+    }
+
+    /**
+     * Audit #108: the VALIDATOR fails verification CLOSED with the distinct
+     * temporary_unavailable violation when the monitor is stale — the token
+     * is NOT burned (retryable), the server refuses to trust its own cache.
+     */
+    public function testValidatorFailsClosedWithTemporaryUnavailableWhenStale(): void
+    {
+        [$issuer, $verifier] = $this->pair(1);
+        $token = $this->solveChallenge($issuer);
+        usleep(10 * 1000); // clear the min-duration floor
+
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 2);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...), maxStaleSecs: 60);
+        $monitor->currentEpoch(); // observe the central state at T0
+
+        // Within the window a verification still runs (and the cached
+        // revocation is enforced — the epoch-1 token fails as invalid).
+        $stack = new RequestStack();
+        $stack->push(JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, epochMonitor: $monitor);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engineValidator->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertSame(
+            KiwiCaptcha::INVALID_OR_EXPIRED_ERROR,
+            $engineValidator->validate($dto)[0]?->getCode(),
+            'within the window the cached revocation applies (epoch-1 token dies)'
+        );
+
+        // Past the window with Redis still down: verification fails CLOSED
+        // with temporary_unavailable — never invalid_or_expired (the token
+        // is not burned) and never a guessed success.
+        $redis->failCommand = '*';
+        $this->clockMs = 90_000;
+        $violations = $engineValidator->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(
+            KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR,
+            $violations[0]->getCode(),
+            'a stale security state fails verification closed with temporary_unavailable (audit #108)'
+        );
+    }
+
+    /**
+     * Audit #108: the CHALLENGE CONTROLLER refuses issuance with 503
+     * SERVICE_UNAVAILABLE when the monitor is stale — within the window the
+     * cached max still serves (issuance keeps working).
+     */
+    public function testControllerRefusesIssuanceWith503WhenStale(): void
+    {
+        [$issuer, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 2);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...), maxStaleSecs: 60);
+        $controller = new \BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController($issuer, epochMonitor: $monitor);
+
+        // Within the window: issuance works.
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'within the max-stale window issuance keeps serving');
+
+        // Past the window with Redis down: 503 SERVICE_UNAVAILABLE.
+        $redis->failCommand = '*';
+        $this->clockMs = 90_000;
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(503, $response->getStatusCode(), 'a stale security state refuses issuance with 503');
+        self::assertSame('SERVICE_UNAVAILABLE', json_decode((string) $response->getContent(), true)['error']['code']);
+    }
+
     private function hgetCount(FakePredisClient $redis): int
     {
         $count = 0;

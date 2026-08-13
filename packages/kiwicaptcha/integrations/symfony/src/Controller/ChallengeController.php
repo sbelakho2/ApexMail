@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\AmbiguousForwardingException;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Risk\UnknownScopeException;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
@@ -38,22 +39,39 @@ use Symfony\Component\HttpFoundation\Response;
  * X-Content-Type-Options nosniff — challenge bytes and client identity must
  * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
  *
- * Hardening order: NARROW HTTP first (audit #77/#65: non-POST stays 405 —
- * an OPTIONS preflight alone never authorizes anything; HTTP FRAMING is
- * rejected before any body is read — audit #83: a request carrying BOTH
- * Content-Length and Transfer-Encoding, or a duplicate Content-Length, is
- * request-smuggling ambiguity and gets 400 FRAMING_REJECTED; Content-Encoding
- * other than identity and Content-Type other than application/json are
- * rejected with 415 before any body is read — no decompression bombs, no
- * form-encoded smuggling), then the query-parameter and JSON-field audit
- * (audit #72: the POST accepts ONLY scope / algorithm? / request_binding —
- * any query string or unknown JSON field is a debug/override probe and gets
- * 422), then same-origin (CORS IS NOT AUTHORIZATION — audit #63: origin
- * enforcement runs on EVERY security response; the bundle never emits CORS
- * headers at all, so there is no preflight path that could authorize), then
- * the optional origin allowlist (origin_rejected 403) and Fetch Metadata
- * check (CROSS_SITE_REJECTED 403) — the origin-laundering defenses, also
- * before any state is written — then scope read, then the PROCESS-LOCAL
+ * Hardening order: PATH CANONICALITY first (audit #99 — the RAW request
+ * target must be the canonical path: no `//`, no `/./`, no `/../`, no
+ * percent-encoded bytes, no trailing slash — the raw REQUEST_URI is
+ * compared, never a normalized route; a noncanonical target gets 404
+ * CANONICAL_PATH_REQUIRED before any handling), then NARROW HTTP (audit
+ * #77/#65: non-POST stays 405 — an OPTIONS preflight alone never authorizes
+ * anything; HTTP FRAMING is rejected before any body is read — audit #83: a
+ * request carrying BOTH Content-Length and Transfer-Encoding, or a duplicate
+ * Content-Length, is request-smuggling ambiguity and gets 400
+ * FRAMING_REJECTED; the SECURITY-SINGULAR HEADER duplicates are rejected
+ * next — audit #100: Origin, Forwarded, X-Forwarded-For or X-Real-IP
+ * appearing more than once is a parser-ambiguity attack and gets 400
+ * DUPLICATE_HEADER before any header-derived identity is trusted; the
+ * client-IP resolver treats such a duplicate as ambiguous and the controller
+ * has already refused it; Content-Encoding other than identity and
+ * Content-Type other than application/json are rejected with 415 before any
+ * body is read — no decompression bombs, no form-encoded smuggling), then
+ * the query-parameter audit (audit #72: the POST accepts ONLY scope /
+ * algorithm? / request_binding — any query string is a debug/override probe
+ * and gets 422), then the SECURITY-STATE staleness check (audit #108: a
+ * monitor whose central policy read is past the max-stale window refuses
+ * issuance with 503 SERVICE_UNAVAILABLE — deliberate constrained
+ * degradation, documented in the README's availability trade-off), then
+ * same-origin (CORS IS NOT AUTHORIZATION — audit #63: origin enforcement
+ * runs on EVERY security response; the bundle never emits CORS headers at
+ * all, so there is no preflight path that could authorize), then the
+ * optional origin allowlist (origin_rejected 403) and Fetch Metadata check
+ * (CROSS_SITE_REJECTED 403) — the origin-laundering defenses, also before
+ * any state is written — then the DUPLICATE-JSON-KEY scan (audit #111: the
+ * raw body is scanned for repeated object keys — {"scope":"a","scope":"b"}
+ * is a parser-ambiguity probe and gets 422 DUPLICATE_FIELD, nested objects
+ * included), then the strict JSON-field audit (audit #72: only the
+ * documented fields, scalars only), then scope read, then the PROCESS-LOCAL
  * emergency admission step (audit #70: the engine's per-process cap is
  * checked BEFORE any Redis issuance limiter — a saturated process refuses
  * with the 429 risk-denied response without a single Redis round trip),
@@ -67,14 +85,27 @@ use Symfony\Component\HttpFoundation\Response;
  * recorded — double-counting removed; an escalated action raises the
  * difficulty of the issued challenge, an unknown scope in 'reject' mode
  * returns 429 RISK_DENIED without issuing), then the PER-SCOPE issuance cap
- * (audit #89: when risk.max_challenges_per_scope_per_minute is set, the
- * atomic {kiwi:<ns>}:issuance:<scope>:<minute> fixed-window counter refuses
- * 429 SCOPE_LIMITED beyond the cap — a public site key + claimed origin can
- * no longer create unlimited billed work per scope), then issuance (every
+ * (audit #89/#112: when risk.max_challenges_per_scope_per_minute is set,
+ * the atomic {kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, derived key))>:
+ * <minute> fixed-window counter refuses 429 SCOPE_LIMITED beyond the cap —
+ * the raw scope string is NEVER a Redis key component; the keyed form keeps
+ * attacker-controlled cardinality out of the keyspace — a public site key +
+ * claimed origin can no longer create unlimited billed work per scope),
+ * then the ANTI-STOCKPILING admission (audit #26/#104: the bounded
+ * outstanding counters are admitted BEFORE the challenge state is created
+ * when the configured challenge TTL is wired — the challenge-issuance
+ * sequence is local cap -> issuer limiter -> scope cap -> outstanding
+ * counters -> mint+store, so every quota check runs before the storage
+ * write; without a wired TTL the historical mint-then-admit race fallback
+ * applies, discarding the minted record on refusal), then issuance (every
  * minted challenge increments the atomic issuance-rate counter used by the
- * resource-pressure provider and is admitted into the bounded
- * outstanding-challenge counters — a cap refusal discards the minted record
- * and returns the risk-denied 429).
+ * resource-pressure provider).
+ *
+ * A syntactically INVALID scope or request binding is rejected at 422 with
+ * ZERO Redis operations (audit #103: the identifier-charset check runs
+ * BEFORE the rate limiter, the risk engine, the scope cap and the
+ * outstanding counters — a malformed identifier never touches shared
+ * infrastructure).
  *
  * The canonical client IP comes from {@see ClientIpResolver} (audit #64 —
  * risk.client_ip_mode / risk.trusted_proxies / risk.reject_ambiguous_
@@ -100,6 +131,15 @@ final class ChallengeController
     /** The ONLY JSON fields the challenge POST accepts (audit #72). */
     private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding'];
 
+    /**
+     * SECURITY-SINGULAR headers (audit #100): each of these carries client
+     * identity or forwarding trust and MUST appear at most once — a
+     * duplicate is parser-ambiguity (different intermediaries will pick
+     * different values) and gets 400 DUPLICATE_HEADER before any
+     * header-derived identity is trusted.
+     */
+    private const SECURITY_SINGULAR_HEADERS = ['origin', 'forwarded', 'x-forwarded-for', 'x-real-ip'];
+
     public function __construct(
         private readonly Issuer $issuer,
         private readonly ?IssuanceRateLimiter $rateLimiter = null,
@@ -116,11 +156,31 @@ final class ChallengeController
         private readonly ?ClientIpResolver $clientIpResolver = null,
         private readonly ?string $publicBaseUrl = null,
         private readonly ?ScopeIssuanceCap $scopeIssuanceCap = null,
+        private readonly ?SecurityEpochMonitor $epochMonitor = null,
+        private readonly ?int $challengeTtlSecs = null,
     ) {
     }
 
     public function challenge(Request $request): JsonResponse
     {
+        // PATH CANONICALITY (audit #99): the RAW REQUEST_URI must be the
+        // canonical request target — no `//` (empty segment), no `/.` /
+        // `/..` (dot segments), no percent-encoded bytes (the canonical
+        // target is a fixed ASCII path — ANY `%` in the path is an
+        // encoding probe: `/%76hallenge`, `%2F`, `%5C`...), no trailing
+        // slash, no backslashes. The check compares the RAW URI, never a
+        // normalized route: a noncanonical target gets 404
+        // CANONICAL_PATH_REQUIRED (the typed target does not exist on this
+        // server — the bundle never redirects, rewrites or normalizes it)
+        // BEFORE any handling. The proxy stack must reach the same decision
+        // at the edge (README — "Canonical request targets").
+        if (!$this->isCanonicalRequestTarget((string) $request->getRequestUri())) {
+            return $this->privateJson(
+                ['error' => ['code' => 'CANONICAL_PATH_REQUIRED', 'message' => 'The request target must be the canonical path (no empty, dot or percent-encoded segments).']],
+                Response::HTTP_NOT_FOUND,
+            );
+        }
+
         // NARROW HTTP (audit #77): the endpoint is POST-only — at the
         // CONTROLLER level too (the route already restricts the method, but
         // a direct invocation must behave identically). An OPTIONS preflight
@@ -151,6 +211,24 @@ final class ChallengeController
                 ['error' => ['code' => 'FRAMING_REJECTED', 'message' => 'The request carries ambiguous HTTP framing (Content-Length and Transfer-Encoding together, or a duplicate Content-Length).']],
                 Response::HTTP_BAD_REQUEST,
             );
+        }
+
+        // DUPLICATE SECURITY-SINGULAR HEADERS (audit #100): Origin,
+        // Forwarded, X-Forwarded-For and X-Real-IP are identity/trust
+        // inputs — a duplicate occurrence is parser ambiguity (one
+        // intermediary trusts the first value, another the last, and the
+        // same-origin check and the client-IP resolution would disagree).
+        // Refused with 400 DUPLICATE_HEADER before any header-derived
+        // identity is trusted; the client-IP resolver treats a duplicate as
+        // ambiguous and is never reached with one. The count is
+        // value-agnostic: two IDENTICAL values are still a duplicate.
+        foreach (self::SECURITY_SINGULAR_HEADERS as $headerName) {
+            if (\count($request->headers->all($headerName)) > 1) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'DUPLICATE_HEADER', 'message' => sprintf('The %s header must appear at most once.', $headerName)]],
+                    Response::HTTP_BAD_REQUEST,
+                );
+            }
         }
 
         // NO DECOMPRESSION BOMBS (audit #65): a request body that was
@@ -191,6 +269,24 @@ final class ChallengeController
                 ['error' => ['code' => 'QUERY_PARAMETERS_NOT_ALLOWED', 'message' => 'The challenge endpoint accepts no query parameters.']],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
+        }
+
+        // SECURITY-STATE STALENESS (audit #108): the security-epoch monitor
+        // tracks the last successful central policy read; once
+        // now > last_success + risk.security_epoch_max_stale_secs the
+        // central policy may have moved (an emergency revocation could have
+        // landed while this node could not read) — issuance is refused with
+        // 503 SERVICE_UNAVAILABLE (deliberate constrained degradation; the
+        // README documents the availability trade-off: within the window
+        // the cached max keeps serving, past it the endpoint fails closed).
+        if ($this->epochMonitor !== null) {
+            $this->epochMonitor->refresh();
+            if ($this->epochMonitor->isStale()) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'The security policy state could not be confirmed. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                );
+            }
         }
 
         if ($this->sameOriginOnly && !$this->isSameOrigin($request)) {
@@ -259,6 +355,23 @@ final class ChallengeController
             return $this->privateJson(
                 ['error' => ['code' => 'AMBIGUOUS_FORWARDING', 'message' => 'The request carries ambiguous forwarding headers (X-Forwarded-For and Forwarded together).']],
                 Response::HTTP_BAD_REQUEST,
+            );
+        }
+
+        // DUPLICATE JSON KEYS (audit #111): json_decode silently keeps the
+        // LAST occurrence of a repeated object key — two different
+        // intermediaries parsing the same document could disagree on the
+        // effective value ({"scope":"login","scope":"signup"} is a
+        // parser-ambiguity probe). The RAW body is scanned with a recursive
+        // duplicate-key detector BEFORE decoding; a duplicate at any depth
+        // gets 422 DUPLICATE_FIELD. The scanner is defensive: on a document
+        // it cannot walk it returns null and the strict json_decode below
+        // handles the malformed document (422 INVALID_JSON).
+        $duplicateKey = $this->scanForDuplicateJsonKey((string) $request->getContent());
+        if ($duplicateKey !== null) {
+            return $this->privateJson(
+                ['error' => ['code' => 'DUPLICATE_FIELD', 'message' => 'The challenge request carries a duplicate JSON key: '.$duplicateKey.'.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
 
@@ -475,17 +588,20 @@ final class ChallengeController
             }
         }
 
-        // PER-SCOPE ISSUANCE CAP (audit #89): when
+        // PER-SCOPE ISSUANCE CAP (audit #89/#112): when
         // risk.max_challenges_per_scope_per_minute is configured, the
-        // atomic {kiwi:<ns>}:issuance:<scope>:<minute> fixed-window counter
-        // (INCR + EXPIRE 60 in one Lua script) refuses 429 SCOPE_LIMITED
-        // beyond the cap — the public site key + claimed origin can no
-        // longer create unlimited billed verification work per scope. The
-        // check CONSUMES the slot it admits (a denial below is not
-        // double-counted; a challenge minted and later discarded by the
-        // outstanding race still counted — fail-safe direction). A Redis
-        // failure propagates (fail closed: no challenge without a checked
-        // scope bound).
+        // atomic {kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, derived key))>:
+        // <minute> fixed-window counter (INCR + EXPIRE 60 in one Lua script)
+        // refuses 429 SCOPE_LIMITED beyond the cap — the public site key +
+        // claimed origin can no longer create unlimited billed verification
+        // work per scope. The check CONSUMES the slot it admits (a denial
+        // below is not double-counted). The raw scope string is NEVER a
+        // Redis key component: the scope is attacker-controlled (bounded
+        // alphabet, unbounded cardinality) and the keyed form
+        // hex(hmac_sha256(scope, HKDF('kiwi/v2/scope-rate'))) keeps
+        // attacker-controlled cardinality out of the keyspace (audit #112).
+        // A Redis failure propagates (fail closed: no challenge without a
+        // checked scope bound).
         if ($this->scopeIssuanceCap !== null && !$this->scopeIssuanceCap->allow($scope)) {
             return $this->privateJson(
                 ['error' => ['code' => 'SCOPE_LIMITED', 'message' => 'Too many challenges issued for this scope. Try again later.']],
@@ -494,6 +610,32 @@ final class ChallengeController
                 $riskSession,
                 $mintedCookie,
             );
+        }
+
+        // ANTI-STOCKPILING PRE-MINT ADMISSION (audit #26/#104): when the
+        // configured challenge TTL is wired, the bounded outstanding
+        // counters are admitted BEFORE the challenge state is created —
+        // the challenge-issuance sequence is local cap -> issuer limiter ->
+        // risk assessment -> scope cap -> outstanding counters -> mint +
+        // store, so every quota check runs before the storage write (the
+        // FakePredis call ORDER test pins the limit/incr keys before the
+        // challenge SET key). ONE atomic Lua checks BOTH caps before
+        // incrementing (per-source + global, EXPIRE = challenge lifetime +
+        // ttl margin — the configured TTL equals the lifetime the issuer
+        // signs, profiles never change it). A refused admission never mints
+        // anything. A Redis failure propagates (fail closed: no challenge
+        // without a checked stockpile bound).
+        if ($this->outstanding !== null && $this->challengeTtlSecs !== null) {
+            $admitted = $this->outstanding->issue($clientIp, $this->challengeTtlSecs);
+            if ($admitted !== 1) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied: outstanding challenge limit reached. Try again later.']],
+                    Response::HTTP_TOO_MANY_REQUESTS,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
         }
 
         try {
@@ -510,19 +652,17 @@ final class ChallengeController
             );
         }
 
-        // Anti-stockpiling (audit #26): admit the minted challenge into the
-        // bounded outstanding counters — ONE atomic Lua checks BOTH caps
-        // before incrementing (per-source + global, EXPIRE = remaining
-        // challenge lifetime + ttl margin). A refusal here is a RACE the
+        // Anti-stockpiling POST-MINT FALLBACK (audit #26): a direct
+        // controller construction WITHOUT a wired challenge TTL keeps the
+        // historical mint-then-admit race handling — the minted record is
+        // admitted with its ACTUAL lifetime; a refusal here is a RACE the
         // pre-issuance checks did not see (concurrent issuances): the minted
         // record is discarded best-effort and the request gets the same 429
         // risk-denied response — a challenge is NEVER handed out when its
-        // stockpile admission failed. A Redis failure propagates (fail
-        // closed: no challenge without a checked stockpile bound).
-        if ($this->outstanding !== null) {
-            // The issued Challenge carries its lifetime (ttlSecs — the
-            // record's expiresAt - issuedAt at mint time); the counter TTL
-            // is that lifetime + the configured ttl margin.
+        // stockpile admission failed. Production wiring always provides the
+        // TTL (the extension passes challenge_ttl_secs), so the pre-mint
+        // path above is the deployment behavior.
+        if ($this->outstanding !== null && $this->challengeTtlSecs === null) {
             $admitted = $this->outstanding->issue($clientIp, max(1, $challenge->ttlSecs));
             if ($admitted !== 1) {
                 try {
@@ -714,6 +854,240 @@ final class ChallengeController
     }
 
     /**
+     * PATH CANONICALITY (audit #99): whether the RAW request target is the
+     * canonical path. The check runs over the raw REQUEST_URI — never a
+     * normalized route — and rejects
+     *
+     *  - any EMPTY segment (`//`, and a TRAILING slash `/challenge/`),
+     *  - any DOT segment (`/.`, `/./`, `/..`, `/../`),
+     *  - any percent-encoded byte (`%` — the canonical target is a fixed
+     *    ASCII path, so `/%76hallenge`, `%2F`, `%5C`, `%2e%2e` are all
+     *    encoding probes; a percent-encoded SEPARATOR is just the worst of
+     *    them),
+     *  - any backslash (`\` — a Windows path separator on some stacks).
+     *
+     * Only the PATH component is inspected (the query string is rejected
+     * separately with 422 QUERY_PARAMETERS_NOT_ALLOWED).
+     */
+    private function isCanonicalRequestTarget(string $rawRequestUri): bool
+    {
+        $path = $rawRequestUri;
+        $queryPos = strpos($rawRequestUri, '?');
+        if ($queryPos !== false) {
+            $path = substr($rawRequestUri, 0, $queryPos);
+        }
+        if (str_contains($path, '%') || str_contains($path, '\\')) {
+            return false;
+        }
+        // The empty element before a LEADING slash is the absolute-path
+        // marker, not a segment — every other empty segment (a `//` in the
+        // middle, or the trailing `/` of "/challenge/") is noncanonical.
+        $segments = explode('/', $path);
+        $start = $path !== '' && $path[0] === '/' ? 1 : 0;
+        for ($i = $start, $count = \count($segments); $i < $count; $i++) {
+            if ($segments[$i] === '' || $segments[$i] === '.' || $segments[$i] === '..') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * DUPLICATE JSON KEY SCANNER (audit #111): a small recursive walk over
+     * the RAW JSON document that reports the FIRST object key seen more
+     * than once at the same level — json_decode itself silently keeps the
+     * LAST occurrence, which is exactly the parser-ambiguity the endpoint
+     * must refuse ({"scope":"a","scope":"b"} parses differently across
+     * intermediaries). Nested objects are scanned recursively. Returns the
+     * duplicated key (for the error message), or null when the document is
+     * clean or cannot be walked (a malformed document is handled by the
+     * strict json_decode check that follows — 422 INVALID_JSON).
+     *
+     * The scanner is deliberately small and defensive: it only needs to be
+     * CORRECT on documents json_decode already accepts (the duplicate
+     * check runs before the decode, but a document the scanner refuses
+     * without a duplicate is never refused by it).
+     */
+    private function scanForDuplicateJsonKey(string $json): ?string
+    {
+        $offset = 0;
+        try {
+            $this->scanJsonValue($json, $offset);
+
+            return null;
+        } catch (DuplicateJsonKeyException $e) {
+            return $e->key;
+        } catch (MalformedJsonWalkException) {
+            return null;
+        }
+    }
+
+    /**
+     * Recursive JSON walker used by the duplicate-key scan. Consumes one
+     * value starting at $offset and returns nothing; throws
+     * {@see DuplicateJsonKeyException} on the first duplicated object key
+     * and {@see MalformedJsonWalkException} on anything it cannot walk
+     * (both are internal control flow — the walker never validates the
+     * document, it only scans it).
+     *
+     * @param int $offset position in the raw JSON string (by reference)
+     */
+    private function scanJsonValue(string $json, int &$offset): void
+    {
+        $length = \strlen($json);
+        $this->skipJsonWhitespace($json, $offset);
+        if ($offset >= $length) {
+            throw new MalformedJsonWalkException();
+        }
+        $ch = $json[$offset];
+
+        if ($ch === '{') {
+            $offset++;
+            $this->skipJsonWhitespace($json, $offset);
+            if ($offset < $length && $json[$offset] === '}') {
+                $offset++;
+
+                return;
+            }
+            $seen = [];
+            while (true) {
+                $this->skipJsonWhitespace($json, $offset);
+                $key = $this->scanJsonString($json, $offset);
+                if ($key === null) {
+                    throw new MalformedJsonWalkException();
+                }
+                if (isset($seen[$key])) {
+                    throw new DuplicateJsonKeyException($key);
+                }
+                $seen[$key] = true;
+                $this->skipJsonWhitespace($json, $offset);
+                if ($offset >= $length || $json[$offset] !== ':') {
+                    throw new MalformedJsonWalkException();
+                }
+                $offset++;
+                $this->scanJsonValue($json, $offset);
+                $this->skipJsonWhitespace($json, $offset);
+                if ($offset >= $length) {
+                    throw new MalformedJsonWalkException();
+                }
+                $ch = $json[$offset];
+                $offset++;
+                if ($ch === '}') {
+                    return;
+                }
+                if ($ch !== ',') {
+                    throw new MalformedJsonWalkException();
+                }
+            }
+        }
+
+        if ($ch === '[') {
+            $offset++;
+            $this->skipJsonWhitespace($json, $offset);
+            if ($offset < $length && $json[$offset] === ']') {
+                $offset++;
+
+                return;
+            }
+            while (true) {
+                $this->scanJsonValue($json, $offset);
+                $this->skipJsonWhitespace($json, $offset);
+                if ($offset >= $length) {
+                    throw new MalformedJsonWalkException();
+                }
+                $ch = $json[$offset];
+                $offset++;
+                if ($ch === ']') {
+                    return;
+                }
+                if ($ch !== ',') {
+                    throw new MalformedJsonWalkException();
+                }
+            }
+        }
+
+        if ($ch === '"') {
+            $this->scanJsonString($json, $offset);
+
+            return;
+        }
+
+        // number / true / false / null: skip a bare token.
+        while ($offset < $length) {
+            $ch = $json[$offset];
+            if ($ch === ',' || $ch === '}' || $ch === ']' || $ch === ' ' || $ch === "\t" || $ch === "\n" || $ch === "\r") {
+                break;
+            }
+            $offset++;
+        }
+    }
+
+    /**
+     * Consume one JSON string starting at $offset (which must point at the
+     * opening quote) and return its RAW content (escapes kept verbatim —
+     * the scan only needs EXACT identity for duplicate detection, and
+     * json_decode canonicalizes the escapes afterwards). null when the
+     * string cannot be walked.
+     *
+     * @param int $offset position in the raw JSON string (by reference)
+     */
+    private function scanJsonString(string $json, int &$offset): ?string
+    {
+        $length = \strlen($json);
+        if ($offset >= $length || $json[$offset] !== '"') {
+            return null;
+        }
+        $start = $offset + 1;
+        $offset++;
+        while ($offset < $length) {
+            $ch = $json[$offset];
+            $offset++;
+            if ($ch === '"') {
+                return substr($json, $start, $offset - $start - 1);
+            }
+            if ($ch === '\\') {
+                if ($offset >= $length) {
+                    return null;
+                }
+                // Skip the escaped character (\" \\ \/ \b \f \n \r \t
+                // \uXXXX — a bare skip covers all of them).
+                $offset++;
+            }
+        }
+
+        return null;
+    }
+
+    private function skipJsonWhitespace(string $json, int &$offset): void
+    {
+        $length = \strlen($json);
+        while ($offset < $length) {
+            $ch = $json[$offset];
+            if ($ch !== ' ' && $ch !== "\t" && $ch !== "\n" && $ch !== "\r") {
+                break;
+            }
+            $offset++;
+        }
+    }
+
+    /**
+     * The raw slice of the JSON string just consumed by the scanner: the
+     * key's content (unescaped characters are taken verbatim — the scan
+     * only needs an EXACT identity for duplicate detection, so escape
+     * sequences stay as written, which json_decode canonicalizes anyway;
+     * two spellings of one key ("a" vs "\u0061") are different RAW strings
+     * and are treated as distinct — matching the ambiguity being refused).
+     */
+    private function jsonKeySlice(string $json, int $cursor, int $start): string
+    {
+        $end = $cursor;
+        $raw = substr($json, $start + 1, $end - $start - 2);
+
+        return (string) $raw;
+    }
+
+    /**
      * All challenge responses share the private-document headers:
      *   Cache-Control: no-store, private, max-age=0   (never cache, never mirror)
      *   Pragma: no-cache                              (legacy proxies)
@@ -755,4 +1129,29 @@ final class ChallengeController
 
         return $response;
     }
+}
+
+/**
+ * @internal control-flow sentinel of the duplicate-JSON-key scan (audit
+ *           #111): thrown when the walker finds an object key it already
+ *           saw at the same level. Carries the raw key for the error
+ *           message. Never escapes the controller.
+ */
+final class DuplicateJsonKeyException extends \RuntimeException
+{
+    public function __construct(public readonly string $key)
+    {
+        parent::__construct();
+    }
+}
+
+/**
+ * @internal control-flow sentinel of the duplicate-JSON-key scan (audit
+ *           #111): thrown when the walker cannot advance through the
+ *           document. The strict json_decode check handles the malformed
+ *           body afterwards (422 INVALID_JSON). Never escapes the
+ *           controller.
+ */
+final class MalformedJsonWalkException extends \RuntimeException
+{
 }

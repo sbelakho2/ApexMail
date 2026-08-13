@@ -74,18 +74,38 @@ pub enum RiskError {
     ConfirmationApiRequired,
 }
 
+/// The risk model generation implemented by this package (audit #110).
+///
+/// Monotonically increasing (never reset). 17 is the current model
+/// generation: 16 prior generations covered the fixed-point score
+/// contract, class-normalized calibration, the random-sample resolution
+/// gate, the outcome ledger and the rate-of-change clamp; this revision
+/// adds the non-finite guards (audit #109) and the local-limiter warm-up
+/// ramp (audit #105) to the model's behavior surface.
+///
+/// Every [`RiskDecision`] carries the revision it was computed under
+/// (`model_revision`, exposed in the decision's public JSON — bounded,
+/// unlike the internal `decision_id`), so consumers can detect mixed-model
+/// fleets during a rollout. A model revision that MATERIALLY affects
+/// security requires a `policy_version` bump in the operator policy
+/// snapshot (see [`crate::policy::RiskPolicy`]).
+pub const RISK_MODEL_REVISION: u32 = 17;
+
 /// Immutable risk decision produced by the engine.
 ///
 /// Reasons are internal only (never exposed to the client) and capped at 4
 /// (policy overrides first, then top contributor reasons). `decision_id`
 /// identifies the decision for outcome calibration (see
-/// [`RiskEngine::record_feedback`]).
+/// [`RiskEngine::record_feedback`]); `model_revision` is the
+/// [`RISK_MODEL_REVISION`] generation the decision was computed under
+/// (public JSON, bounded).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskDecision {
     pub score: u16,
     pub action: RiskAction,
     pub reasons: [Option<RiskReason>; 4],
     pub policy_version: u32,
+    pub model_revision: u32,
     pub global_level: u8,
     pub retry_after_ms: Option<u32>,
     pub band: u8,
@@ -110,11 +130,12 @@ impl RiskDecision {
 impl Serialize for RiskDecision {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let reasons: Vec<&str> = self.reasons.iter().flatten().map(|r| r.as_str()).collect();
-        let mut state = serializer.serialize_struct("RiskDecision", 7)?;
+        let mut state = serializer.serialize_struct("RiskDecision", 8)?;
         state.serialize_field("score", &self.score)?;
         state.serialize_field("action", self.action.as_str())?;
         state.serialize_field("reasons", &reasons)?;
         state.serialize_field("policy_version", &self.policy_version)?;
+        state.serialize_field("model_revision", &self.model_revision)?;
         state.serialize_field("global_level", &self.global_level)?;
         state.serialize_field("retry_after_ms", &self.retry_after_ms)?;
         state.serialize_field("band", &self.band)?;
@@ -204,8 +225,26 @@ impl Saturations {
 /// and the policy's per-source overrides. When the window is saturated the
 /// engine denies immediately (HardRateLimit) instead of spending time/state
 /// on the request.
+///
+/// WARM-UP RAMP (audit #105): after every restart/autoscale the process
+/// must not start with a full burst — the effective cap ramps linearly
+/// from a floor of `max(1, process_per_second / 10)` to the full cap over
+/// the first `warmup_ramp_secs` seconds of the process's life:
+///
+/// ```text
+/// effective_cap = floor(process_per_second * min(1, elapsed / ramp))
+///                 floored at max(1, process_per_second / 10)
+/// ```
+///
+/// `elapsed` is measured from `start` on the monotonic `Instant` clock, so
+/// the ramp is immune to wall-clock jumps. `warmup_ramp_secs = 0` disables
+/// the ramp (full cap from the first call — the pre-audit behavior). The
+/// ramp only lowers the admission rate during startup; the DISTRIBUTED
+/// keyed limits remain authoritative — it never raises any limit beyond
+/// the configured `process_per_second`.
 pub struct ProcessEmergencyCap {
     process_per_second: u64,
+    warmup_ramp_secs: f64,
     stamps: Mutex<VecDeque<f64>>,
     start: Instant,
 }
@@ -218,22 +257,43 @@ impl Default for ProcessEmergencyCap {
 
 impl ProcessEmergencyCap {
     pub const DEFAULT_PROCESS_PER_SECOND: u64 = 10_000;
+    /// Default warm-up ramp length in seconds (audit #105).
+    pub const DEFAULT_WARMUP_RAMP_SECS: f64 = 10.0;
 
     /// Builds a cap with the default rate (10000 admissions per second,
-    /// per process).
+    /// per process) and the default warm-up ramp (10 s).
     pub fn new() -> ProcessEmergencyCap {
         ProcessEmergencyCap::with_capacity(Self::DEFAULT_PROCESS_PER_SECOND)
     }
 
-    /// Builds a cap with an explicit admissions-per-second rate.
+    /// Builds a cap with an explicit admissions-per-second rate and the
+    /// default 10 s warm-up ramp.
     ///
     /// # Panics
     ///
     /// Panics if `process_per_second < 1`.
     pub fn with_capacity(process_per_second: u64) -> ProcessEmergencyCap {
+        Self::with_capacity_and_ramp(process_per_second, Self::DEFAULT_WARMUP_RAMP_SECS)
+    }
+
+    /// Builds a cap with an explicit admissions-per-second rate and an
+    /// explicit warm-up ramp (`warmup_ramp_secs = 0.0` disables the ramp).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `process_per_second < 1` or `warmup_ramp_secs < 0.0`.
+    pub fn with_capacity_and_ramp(
+        process_per_second: u64,
+        warmup_ramp_secs: f64,
+    ) -> ProcessEmergencyCap {
         assert!(process_per_second >= 1, "process_per_second must be >= 1");
+        assert!(
+            warmup_ramp_secs >= 0.0,
+            "warmup_ramp_secs must be >= 0 (0 disables the ramp)"
+        );
         ProcessEmergencyCap {
             process_per_second,
+            warmup_ramp_secs,
             stamps: Mutex::new(VecDeque::new()),
             start: Instant::now(),
         }
@@ -242,6 +302,26 @@ impl ProcessEmergencyCap {
     /// The admissions-per-second cap.
     pub fn process_per_second(&self) -> u64 {
         self.process_per_second
+    }
+
+    /// The warm-up ramp length in seconds (0.0 = ramp disabled).
+    pub fn warmup_ramp_secs(&self) -> f64 {
+        self.warmup_ramp_secs
+    }
+
+    /// The cap in force at the given elapsed seconds: the full
+    /// `process_per_second` after the warm-up ramp, and during the ramp a
+    /// linear interpolation from the floor of `max(1, cap / 10)`. Monotonic
+    /// in elapsed, so the queue can never hold more than the full cap (the
+    /// O(1) amortized front-prune is preserved).
+    fn effective_cap(&self, elapsed_secs: f64) -> u64 {
+        if self.warmup_ramp_secs <= 0.0 || elapsed_secs >= self.warmup_ramp_secs {
+            return self.process_per_second;
+        }
+        let floor = (self.process_per_second / 10).max(1);
+        let ramped =
+            (self.process_per_second as f64 * elapsed_secs / self.warmup_ramp_secs).floor();
+        (ramped as u64).max(floor)
     }
 
     /// True when the process may proceed within the current window. Also
@@ -254,7 +334,7 @@ impl ProcessEmergencyCap {
         while stamps.front().is_some_and(|t| *t <= cutoff) {
             stamps.pop_front();
         }
-        if stamps.len() as u64 >= self.process_per_second {
+        if stamps.len() as u64 >= self.effective_cap(now) {
             return false;
         }
         stamps.push_back(now);
@@ -269,7 +349,7 @@ impl ProcessEmergencyCap {
         while stamps.front().is_some_and(|t| *t <= cutoff) {
             stamps.pop_front();
         }
-        stamps.len() as u64 >= self.process_per_second
+        stamps.len() as u64 >= self.effective_cap(now)
     }
 }
 
@@ -414,6 +494,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                 action: RiskAction::Deny,
                 reasons: [Some(RiskReason::HardRateLimit), None, None, None],
                 policy_version: self.policy.version,
+                model_revision: RISK_MODEL_REVISION,
                 global_level: self.current_global_level(),
                 retry_after_ms: Some(1000),
                 band: 10,
@@ -1302,6 +1383,7 @@ mod tests {
         assert_eq!(decision.score, 195); // 100 + weighted(500, 190)
         assert_eq!(decision.action, RiskAction::Sha18); // band Sha16 raised by global floor 2
         assert_eq!(decision.policy_version, 3);
+        assert_eq!(decision.model_revision, RISK_MODEL_REVISION); // audit #110
         assert_eq!(decision.global_level, 2);
         assert_eq!(decision.band, 1);
         assert_eq!(decision.decision_id.len(), 32);
@@ -1438,7 +1520,8 @@ mod tests {
 
     #[test]
     fn emergency_limiter_denies_with_retry_after() {
-        let limiter = ProcessEmergencyCap::with_capacity(100);
+        // Ramp disabled: the pre-audit full-burst window semantics.
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(100, 0.0);
         for _ in 0..100 {
             assert!(limiter.allow());
         }
@@ -1455,6 +1538,7 @@ mod tests {
         assert_eq!(decision.action, RiskAction::Deny);
         assert!(decision.has_reason(RiskReason::HardRateLimit));
         assert_eq!(decision.retry_after_ms, Some(1000));
+        assert_eq!(decision.model_revision, RISK_MODEL_REVISION); // audit #110
         assert_eq!(decision.decision_id.len(), 32);
         assert_eq!(
             engine.store.calls.load(Ordering::Relaxed),
@@ -1472,11 +1556,77 @@ mod tests {
             assert!(limiter.allow());
         }
         // ...and a saturated window denies.
-        let small = ProcessEmergencyCap::with_capacity(2);
+        let small = ProcessEmergencyCap::with_capacity_and_ramp(2, 0.0);
         assert!(small.allow());
         assert!(small.allow());
         assert!(!small.allow());
         assert!(small.is_open());
+    }
+
+    /// AUDIT #105 — warm-up ramp: a fresh process must NOT start with a
+    /// full burst. At t≈0 the effective cap is the floor
+    /// max(1, cap/10); cap 1000 -> floor 100: exactly 100 admissions fit,
+    /// the 101st is denied.
+    #[test]
+    fn warmup_fresh_cap_allows_only_the_floor_rate() {
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(1000, 0.3);
+        assert_eq!(limiter.warmup_ramp_secs(), 0.3);
+        for _ in 0..100 {
+            assert!(limiter.allow(), "floor admission");
+        }
+        assert!(limiter.is_open(), "the floor window must be saturated");
+        assert!(
+            !limiter.allow(),
+            "the floor+1th must be denied during the ramp"
+        );
+    }
+
+    /// AUDIT #105 — after the ramp the cap reaches the full value: a short
+    /// ramp + sleep (the implementation uses the fixed Instant clock).
+    #[test]
+    fn warmup_reaches_full_cap_after_the_ramp() {
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(1000, 0.3);
+        for _ in 0..100 {
+            assert!(limiter.allow());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        assert!(
+            !limiter.is_open(),
+            "the floor window must have expired with the ramp"
+        );
+        // The 100 ramp-phase stamps are still inside the sliding 1 s window,
+        // so 900 more admissions fit at the full cap (100 + 900 = 1000).
+        for _ in 0..900 {
+            assert!(limiter.allow(), "full-cap admission");
+        }
+        assert!(limiter.is_open());
+        assert!(!limiter.allow(), "the full cap+1th must be denied");
+    }
+
+    /// AUDIT #105 — the floor is never below 1 admission.
+    #[test]
+    fn warmup_floor_never_below_one() {
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(5, 0.3);
+        assert!(limiter.allow(), "cap 5 floors at max(1, 0) = 1");
+        assert!(limiter.is_open());
+        assert!(!limiter.allow(), "the 2nd must be denied during the ramp");
+    }
+
+    /// AUDIT #105 — the ramp must never raise the cap above the configured
+    /// value.
+    #[test]
+    fn warmup_never_exceeds_configured_cap() {
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(10, 0.3);
+        assert!(limiter.allow());
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        // The 1 ramp-phase stamp is still in the 1 s window: 9 more fit.
+        for _ in 0..9 {
+            assert!(limiter.allow(), "full-cap admission");
+        }
+        assert!(
+            !limiter.allow(),
+            "the ramp must not lift the cap above process_per_second"
+        );
     }
 
     #[test]
@@ -1490,7 +1640,7 @@ mod tests {
         );
         // A saturated 1-admission process cap: the pre-issue path must
         // deny...
-        let limiter = ProcessEmergencyCap::with_capacity(1);
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(1, 0.0);
         assert!(limiter.allow(), "burn the single admission");
         let engine = RiskEngine::with_components(
             store,
@@ -1770,7 +1920,10 @@ mod tests {
             json.get("decision_id").is_none(),
             "decision_id must never leak into the serialized decision"
         );
-        assert_eq!(json.as_object().unwrap().len(), 7);
+        // 8 public fields: score, action, reasons, policy_version,
+        // model_revision, global_level, retry_after_ms, band.
+        assert_eq!(json.as_object().unwrap().len(), 8);
+        assert_eq!(json["model_revision"], 17);
     }
 
     #[test]
@@ -2425,7 +2578,7 @@ mod tests {
             policy(),
             keys(),
             breaker::CircuitBreaker::default(),
-            ProcessEmergencyCap::with_capacity(5),
+            ProcessEmergencyCap::with_capacity_and_ramp(5, 0.0),
         );
 
         let mut allowed = 0;

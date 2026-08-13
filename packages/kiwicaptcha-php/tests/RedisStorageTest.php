@@ -545,4 +545,56 @@ final class RedisStorageTest extends TestCase
         self::assertSame('txn-A', $replay->requestBinding, 'the stored binding must be exposed');
     }
 
+    public function testTenMegabyteStoredBodyIsRejectedAtParse(): void
+    {
+        // Audit #113: a 10 MB stored JSON body must be rejected by the
+        // record parse (the 4096-byte string ceiling / required-field set)
+        // and surface as null — no exception, and no allocation beyond the
+        // body itself. A decode-before-cap regression would materialize the
+        // 10 MB payload into a record structure.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $client->store['kiwicaptcha:big'] = '{"nonce":"'.str_repeat('a', 10 * 1024 * 1024).'"}';
+
+        self::assertNull($storage->find('big'), 'an oversized stored body must parse to null, never throw');
+    }
+
+    public function testHundredThousandLevelNestingFailsCleanly(): void
+    {
+        // Audit #114/#115: json_decode runs at the default depth (512) — a
+        // 100k-level nested body must fail cleanly (null), never exhaust
+        // the stack and never surface an untyped exception.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $client->store['kiwicaptcha:deep'] = str_repeat('[', 100_000).str_repeat(']', 100_000);
+
+        self::assertNull($storage->find('deep'), 'a pathologically nested body must parse to null, never crash');
+    }
+
+    public function testBindingArgumentIsCappedBeforeEvalArgv(): void
+    {
+        // Audit #113: the binding embedded into the commit-result EVAL ARGV
+        // is the record's request_binding, which the strict record parse
+        // caps at 128 bytes of the identifier alphabet BEFORE it can reach
+        // evalScript — a 10 KB "binding" can never enter the ARGV.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+
+        try {
+            ChallengeRecord::fromArray([
+                'nonce' => 'n', 'scope' => 'login', 'binding_tag' => 't',
+                'issued_at' => 1, 'expires_at' => 100,
+                'algorithm' => 'sha256', 'm_kib' => 0, 't' => 1, 'p' => 1,
+                'target_bits' => 8, 'salt' => 's', 'prefix' => 'p',
+                'challenge' => 'c', 'min_duration_ms' => 0,
+                'request_binding' => str_repeat('x', 10_000),
+            ]);
+            self::fail('a 10 KB request_binding must be rejected at parse');
+        } catch (\KiwiCaptcha\MalformedRecordException) {
+            // expected: the 128-byte identifier cap fires before any EVAL
+        }
+
+        self::assertTrue(true);
+    }
+
 }

@@ -69,6 +69,10 @@ use KiwiCaptcha\Risk\RiskAction;
  * biasForScope() never returns a nonzero bias below the store's
  * minSamples threshold and clamps the raw bias to its maxAdjustment; the
  * final bias is rate-limited and cached in-process per scope for 30 s.
+ * NON-FINITE GUARD (audit #109): the returned bias is ALWAYS a bounded
+ * integer within ±maxAdjustment — a non-finite script reply (NaN/±Inf
+ * from corrupted bucket values) maps to +maxAdjustment (fail HIGH, never
+ * 0, never lower-risk-than-max).
  */
 interface CalibrationStore
 {

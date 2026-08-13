@@ -217,6 +217,7 @@ final class AggregateCalibrator implements CalibrationStore
         private readonly float $falsePositiveCost = self::DEFAULT_FALSE_POSITIVE_COST,
         private readonly float $falseNegativeCost = self::DEFAULT_FALSE_NEGATIVE_COST,
         private readonly int $outcomeTtlSecs = self::DEFAULT_OUTCOME_TTL_SECS,
+        private readonly string $scopeHmacKey = '',
     ) {
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Calibration namespace must be non-empty and free of braces');
@@ -271,6 +272,30 @@ final class AggregateCalibrator implements CalibrationStore
      * correction.lua own it; with calibration disabled the store's
      * outcome_*.lua scripts write the same key.
      */
+    /**
+     * Canonical HMAC-scoped calibration key component (audit #112): the raw
+     * scope must NEVER appear in Redis keys — an attacker can manufacture
+     * unbounded distinct scopes. K_scope = hash_hkdf('sha256', master, 32,
+     * 'kiwi/v2/scope-rate'), identical to the bundle's ScopeIssuanceCap.
+     */
+    public function scopeKey(int $scope): string
+    {
+        if ($this->scopeHmacKey === '') {
+            // @deprecated BC bridge: production wiring MUST pass the derived
+            // key (audit #112) — the raw scope in Redis keys is an
+            // attacker-controlled cardinality vector.
+            return (string) $scope;
+        }
+
+        return hash_hmac('sha256', (string) $scope, $this->scopeHmacKey);
+    }
+
+    public static function deriveScopeHmacKey(string $master): string
+    {
+        // Salt fixed for cross-language parity with the Rust HKDF.
+        return hash_hkdf('sha256', $master, 32, 'kiwi/v2/scope-rate', 'kiwicaptcha/deploy-salt/v1');
+    }
+
     public function ledgerKey(string $decisionId): string
     {
         return "{kiwi:{$this->namespace}}:outcome:{$decisionId}";
@@ -309,7 +334,7 @@ final class AggregateCalibrator implements CalibrationStore
     public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled, int $decisionHour, float $weight = 1.0): bool
     {
         $receiptKey = "{kiwi:{$this->namespace}}:cal:receipt:{$decisionId}";
-        $bucketKey = "{kiwi:{$this->namespace}}:cal:{$scope}:{$decisionHour}";
+        $bucketKey = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:{$decisionHour}";
         $ledgerKey = $this->ledgerKey($decisionId);
 
         $result = $this->client->eval(
@@ -378,7 +403,7 @@ final class AggregateCalibrator implements CalibrationStore
             return 0;
         }
         $hour = (int) ($data['decision_hour'] ?? 0);
-        $bucketKey = "{kiwi:{$this->namespace}}:cal:{$scope}:{$hour}";
+        $bucketKey = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:{$hour}";
         $ledgerKey = $this->ledgerKey($decisionId);
 
         $mode = match ($this->samplingMode) {
@@ -445,7 +470,7 @@ final class AggregateCalibrator implements CalibrationStore
         if ($scope < 1) {
             return false;
         }
-        $bucketKey = "{kiwi:{$this->namespace}}:cal:{$scope}:{$hour}";
+        $bucketKey = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:{$hour}";
 
         $result = (int) $this->client->eval(
             $this->correctionScript,
@@ -476,16 +501,24 @@ final class AggregateCalibrator implements CalibrationStore
         $hour = intdiv($now, 3_600_000);
         $keys = [];
         for ($i = 0; $i < self::WINDOW_HOURS; $i++) {
-            $keys[] = "{kiwi:{$this->namespace}}:cal:{$scope}:" . ($hour - $i);
+            $keys[] = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:" . ($hour - $i);
         }
         $result = $this->client->eval($this->samplingMetricsScript, count($keys), ...$keys);
         $total = (int) ($result[0] ?? 0);
         $resolved = (int) ($result[1] ?? 0);
+        // (float) cast: PHP 8.5 division returns exact INT results. The
+        // inputs are integers, so the ratio is ALWAYS finite; the
+        // is_finite() guard is defensive (audit #109) and maps a
+        // never-occurring non-finite ratio to 0.0 — the resolution gate
+        // stays suspended (fail-closed for bias movement).
+        $ratio = $total > 0 ? (float) ($resolved / $total) : 0.0;
+        if (!is_finite($ratio)) {
+            $ratio = 0.0;
+        }
         return [
             'sampledTotal' => $total,
             'sampledResolved' => $resolved,
-            // (float) cast: PHP 8.5 division returns exact INT results.
-            'resolutionRatio' => $total > 0 ? (float) ($resolved / $total) : 0.0,
+            'resolutionRatio' => $ratio,
             'sampledExpired' => max(0, $total - $resolved),
         ];
     }
@@ -501,9 +534,9 @@ final class AggregateCalibrator implements CalibrationStore
         $hour = intdiv($now, 3_600_000);
         $keys = [];
         for ($i = 0; $i < self::WINDOW_HOURS; $i++) {
-            $keys[] = "{kiwi:{$this->namespace}}:cal:{$scope}:" . ($hour - $i);
+            $keys[] = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:" . ($hour - $i);
         }
-        $keys[] = "{kiwi:{$this->namespace}}:cal:state:{$scope}";
+        $keys[] = "{kiwi:{$this->namespace}}:cal:state:{$this->scopeKey($scope)}";
 
         $mode = match ($this->samplingMode) {
             'complete' => self::MODE_COMPLETE,
@@ -511,19 +544,22 @@ final class AggregateCalibrator implements CalibrationStore
             default => self::MODE_RANDOM_SAMPLE,
         };
 
-        $bias = (int) $this->client->eval(
-            $this->calibrationScript,
-            count($keys),
-            ...array_merge($keys, [
-                $now,
-                $this->minSamples,
-                $this->maxAdjustment,
-                $this->maxChangePerMinute,
-                $this->minimumResolutionRatio,
-                $mode,
-                $this->falsePositiveCost,
-                $this->falseNegativeCost,
-            ]),
+        $bias = self::toBoundedBias(
+            $this->client->eval(
+                $this->calibrationScript,
+                count($keys),
+                ...array_merge($keys, [
+                    $now,
+                    $this->minSamples,
+                    $this->maxAdjustment,
+                    $this->maxChangePerMinute,
+                    $this->minimumResolutionRatio,
+                    $mode,
+                    $this->falsePositiveCost,
+                    $this->falseNegativeCost,
+                ]),
+            ),
+            $this->maxAdjustment,
         );
 
         if (count($this->biasCache) >= self::CACHE_CAP && !isset($this->biasCache[$scope])) {
@@ -533,6 +569,40 @@ final class AggregateCalibrator implements CalibrationStore
         }
         $this->biasCache[$scope] = ['bias' => $bias, 'expiresAt' => $nowFloat + self::CACHE_TTL_SECS];
         return $bias;
+    }
+
+    /**
+     * Maps the raw calibration.lua reply to a BOUNDED integer bias
+     * (audit #109). The canonical script guards its own output (a
+     * non-finite final_mp maps to +max_adjustment*1000 inside the Lua),
+     * so a well-behaved Redis never sends a non-finite value here — this
+     * is the defense-in-depth conversion boundary on the PHP side:
+     *
+     *   - NaN / ±Inf  -> +maxAdjustment  (fail HIGH: never 0, never
+     *     lower-risk-than-max; `(int)` alone would map both to 0)
+     *   - anything    -> clamped to ±maxAdjustment (bounded int output)
+     *
+     * @param float|int|string $raw the raw script reply
+     */
+    public static function toBoundedBias(float|int|string $raw, int $maxAdjustment): int
+    {
+        if (is_float($raw)) {
+            if (!is_finite($raw)) {
+                return $maxAdjustment; // NaN/±Inf: fail HIGH, never 0
+            }
+            // Out-of-range finite floats (e.g. 1e300) warn on an int cast
+            // (PHP 8.5) — clamp directly; the bounded return holds anyway.
+            if ($raw >= (float) PHP_INT_MAX) {
+                return $maxAdjustment;
+            }
+            if ($raw <= (float) PHP_INT_MIN) {
+                return -$maxAdjustment;
+            }
+            $bias = (int) $raw;
+        } else {
+            $bias = (int) $raw;
+        }
+        return max(-$maxAdjustment, min($maxAdjustment, $bias));
     }
 
     private static function loadScript(string $file): string

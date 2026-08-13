@@ -143,4 +143,55 @@ final class TwigRuntimeTest extends TestCase
         $this->expectExceptionMessage('sync-assets.sh');
         new KiwiCaptchaRuntime('/kiwi-captcha', '/nonexistent/assets/dir');
     }
+
+    // ── Round 12: backend-originated binding (audit #107) ─────────────────
+
+    /**
+     * Audit #107: the widget's rendered container carries ONLY the
+     * SERVER-provided binding — the value comes from the form option /
+     * runtime configuration (a flow_id stored server-side), never from the
+     * client. With a binding configured, the container carries exactly one
+     * data-kiwi-request-binding equal to the server value; without one, the
+     * container carries NO binding attribute at all.
+     */
+    public function testWidgetContainerCarriesOnlyTheServerProvidedBinding(): void
+    {
+        $loader = new ArrayLoader([
+            '@KiwiCaptcha/form_div_layout.html.twig' => file_get_contents(__DIR__.'/../src/Resources/views/form_div_layout.html.twig'),
+        ]);
+        $env = new Environment($loader);
+
+        // Backend-originated: the form/backend renders the binding into the
+        // container; the widget only ever forwards it.
+        $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', requestBinding: 'server-flow-id-42');
+        $html = $runtime->renderWidget($env, []);
+        self::assertSame(1, substr_count($html, 'data-kiwi-request-binding="server-flow-id-42"'), 'the container carries the server-provided binding exactly once');
+        self::assertStringNotContainsString('data-kiwi-request-binding="server-flow-id-42" data-kiwi-request-binding', $html, 'no second binding attribute may exist');
+        self::assertStringNotContainsString('randomUUID', $html, 'the rendered widget never synthesizes a binding client-side');
+
+        // No binding configured: the container renders NO binding attribute
+        // (the driver mentions the attribute in its source, but the
+        // container itself carries nothing for the client to fill in).
+        $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig');
+        $html = $runtime->renderWidget($env, []);
+        self::assertStringNotContainsString('data-kiwi-request-binding=', $html, 'without a server-provided binding the container carries no binding attribute');
+    }
+
+    /**
+     * Audit #107: the widget DRIVER never generates a transaction binding
+     * itself — no crypto.randomUUID / getRandomValues / Math.random binding
+     * synthesis. The ONLY source of the binding is the container attribute
+     * the server rendered (backend-originated mode), so a client can never
+     * mint a binding the backend did not issue.
+     */
+    public function testDriverNeverGeneratesATransactionBinding(): void
+    {
+        $driver = (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js');
+
+        self::assertStringContainsString('data-kiwi-request-binding', $driver, 'the driver reads the server-rendered binding attribute');
+        self::assertStringContainsString('var requestBinding = W.getAttribute("data-kiwi-request-binding")', $driver, 'the binding variable is assigned ONLY from the container attribute');
+        self::assertStringNotContainsString('randomUUID', $driver, 'the driver must never generate bindings with crypto.randomUUID');
+        self::assertStringNotContainsString('getRandomValues', $driver, 'the driver must never generate bindings with crypto.getRandomValues');
+        self::assertStringNotContainsString('Math.random', $driver, 'the driver must never generate bindings with Math.random');
+    }
 }

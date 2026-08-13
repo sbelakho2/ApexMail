@@ -155,6 +155,58 @@ final class SolutionTokenTest extends TestCase
         SolutionToken::decode($raw);
     }
 
+    public function testRejectsMegabyteTokenByLengthCapBeforeAnyDecode(): void
+    {
+        // Audit #113: the 32,768-byte length cap is checked BEFORE
+        // base64_decode — a 1 MB token must be rejected by the cap with no
+        // huge decoded allocation behind it. A decode-before-cap regression
+        // would materialize ~750 KB of plaintext here.
+        $this->expectException(DecodeError::class);
+
+        $plain = sprintf('%s.1.100.%s', self::NONCE, str_repeat('a', 1_000_000));
+        $raw = base64_encode($plain);
+        self::assertGreaterThan(1_000_000, \strlen($raw), 'precondition: token must exceed 1 MB');
+
+        SolutionToken::decode($raw);
+    }
+
+    public function testDeeplyNestedTelemetryJsonFailsCleanly(): void
+    {
+        // Audit #115: json_decode runs at the default depth (512). A
+        // telemetry segment nested far beyond it must fail cleanly with a
+        // typed DecodeError — never a stack exhaustion or an untyped
+        // JsonException escaping the parse path.
+        $this->expectException(DecodeError::class);
+
+        SolutionToken::decode(base64_encode(self::NONCE.'.1.100.'.str_repeat('[', 600).str_repeat(']', 600)));
+    }
+
+    public function testDecodeOnlyThrowsDecodeError(): void
+    {
+        // Audit #115: the public parse path must never throw anything
+        // except DecodeError — adversarial inputs (huge, deeply nested,
+        // non-numeric, malformed) all fail typed.
+        $inputs = [
+            '!!!not-base64!!!',
+            base64_encode(self::NONCE.'.1.100.{not-json'),
+            base64_encode(str_repeat('a', 50_000)),
+            base64_encode(self::NONCE.'.1.100.'.str_repeat('[', 600).str_repeat(']', 600)),
+            base64_encode(self::NONCE.'.'.str_repeat('9', 20).'.100.{}'),
+            base64_encode(self::NONCE.'.1.'.str_repeat('9', 20).'.{}'),
+            base64_encode(self::NONCE.'.1.100'),
+            base64_encode('x.1.100.{}'),
+        ];
+        foreach ($inputs as $input) {
+            try {
+                SolutionToken::decode($input);
+                self::fail('decode must reject input '.substr($input, 0, 40).'…');
+            } catch (DecodeError) {
+                // the only documented failure type
+            }
+        }
+        self::assertTrue(true);
+    }
+
     public function testRejectsWrongLengthNonce(): void
     {
         // A nonce must be exactly 44 chars (base64 of 32 bytes, standard

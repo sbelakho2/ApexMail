@@ -345,7 +345,7 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testEmergencyLimiterDeniesWithRetryAfter(): void
     {
-        $limiter = new ProcessEmergencyCap(processPerSecond: 100);
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: 0);
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
         }
@@ -604,7 +604,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ConfirmedAbuse], $observedEvents, 'the reputation event must still be recorded');
 
         // A limiter-hit decision also registers a receipt (silently).
-        $limiter = new ProcessEmergencyCap(processPerSecond: 100);
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100, warmupRampSecs: 0);
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
         }

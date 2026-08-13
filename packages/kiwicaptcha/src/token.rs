@@ -59,6 +59,15 @@ pub struct IssuedChallenge {
 /// Hard ceiling for the client-reported duration (telemetry only): 1 hour.
 pub const MAX_DURATION_MS: u64 = 3_600_000;
 
+/// Hard ceiling on the RAW token length (bytes) accepted by
+/// [`SolutionToken::decode`] (audit #113). The canonical wire form of a
+/// legitimate token is a few hundred bytes (32-byte nonce + counter +
+/// duration + a small telemetry object); 32 KiB is far beyond any of them.
+/// The bound is enforced BEFORE the base64 decode, so an oversized token is
+/// rejected with [`DecodeError::TooLarge`] without spending any work on —
+/// or allocating for — a decode of attacker-supplied bytes.
+pub const MAX_TOKEN_RAW_BYTES: usize = 32_768;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolutionToken {
     /// The nonce from the original challenge (base64, 32 bytes).
@@ -89,7 +98,7 @@ impl SolutionToken {
         // 32 KiB is far beyond any legitimate token (a real token is a few
         // hundred bytes), so anything larger is rejected before any work is
         // spent on it.
-        if raw.len() > 32_768 {
+        if raw.len() > MAX_TOKEN_RAW_BYTES {
             return Err(DecodeError::TooLarge);
         }
         // Strict canonical decode (audit #29): the input must be EXACTLY the
@@ -227,17 +236,54 @@ mod tests {
     #[test]
     fn decode_rejects_oversized_token() {
         // Raw input beyond the 32 KiB bound must be rejected without decoding.
-        let huge = "A".repeat(32_769);
+        let huge = "A".repeat(MAX_TOKEN_RAW_BYTES + 1);
         assert!(
             matches!(SolutionToken::decode(&huge), Err(DecodeError::TooLarge)),
             ">32 KiB token must be rejected with TooLarge"
         );
         // Exactly at the bound: not too large (may still fail base64/utf8,
         // but must NOT be a TooLarge error).
-        let boundary = "A".repeat(32_768);
+        let boundary = "A".repeat(MAX_TOKEN_RAW_BYTES);
         assert!(
             !matches!(SolutionToken::decode(&boundary), Err(DecodeError::TooLarge)),
             "32 KiB token must not be rejected as TooLarge"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_megabyte_token_by_length_cap() {
+        // Audit #113: a 1 MB token is rejected by the length cap BEFORE any
+        // base64 decode — no large allocation, no decode work, and no panic.
+        let mega = "A".repeat(1_000_000);
+        assert!(
+            matches!(SolutionToken::decode(&mega), Err(DecodeError::TooLarge)),
+            "a 1 MB token must be rejected by the pre-decode length cap"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_recursively_nested_telemetry() {
+        // Audit #114: the telemetry JSON parse respects serde_json's DEFAULT
+        // recursion limit (the crate never disables it) — a telemetry object
+        // nested deeper than the limit is rejected with Malformed (a clean
+        // error), never a stack overflow. 200 levels exceed the 128-level
+        // default while staying far inside the token length cap.
+        let mut telemetry = serde_json::json!({});
+        for _ in 0..200 {
+            telemetry = serde_json::json!({"a": telemetry});
+        }
+        let token = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 1,
+            duration_ms: 2,
+            telemetry,
+        };
+        assert!(
+            matches!(
+                SolutionToken::decode(&token.encode()),
+                Err(DecodeError::Malformed)
+            ),
+            "recursively nested telemetry must be rejected with Malformed, never a crash"
         );
     }
 

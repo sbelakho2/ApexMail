@@ -1,6 +1,14 @@
 -- Calibration: class-normalized score bias + proportional rate limit
 -- (canonical, shared PHP/Rust).
 --
+-- SCRIPT BOUNDS (audit #101) — all bounded constants:
+--   max keys touched:     25 (24 hourly buckets + 1 rate-limit state)
+--   max Redis calls:      30 (24 HGETALL + 1 TIME + 2 HGET + 3 HSET)
+--   max collection cardinality: 12 flat fields per bucket hash (6 fields
+--                           as flat HGETALL pairs); 25 HGETALL-equivalent
+--                           reads of the fixed 6-field shape — no
+--                           attacker-sized collections.
+--
 -- KEYS[1..24]  DECISION-TIME hourly score buckets for one scope (hash;
 --              fields legit_count / legit_score_sum / abuse_count /
 --              abuse_score_sum / sample_total / sample_resolved — exact
@@ -134,6 +142,20 @@ local lower = tonumber(prev_bias_mp) - allowed_mp
 local final_mp = raw_mp
 if final_mp > upper then final_mp = upper end
 if final_mp < lower then final_mp = lower end
+
+-- NON-FINITE GUARD (audit #109): a corrupted bucket/state value (e.g. a
+-- hash field replaced by "1e999", whose Lua 5.1 tonumber is +Inf) can
+-- propagate NaN/±Inf into final_mp through the fp/fn means or the stored
+-- bias_mp: NaN fails EVERY clamp comparison above, and Lua cannot convert
+-- NaN/±Inf to a Redis integer reply (the EVAL would error and the whole
+-- calibration read would fail). Fail HIGH: any non-finite final_mp maps
+-- to +max_adjustment*1000 — never 0, never lower-risk-than-max. Values
+-- beyond ±1e100 cannot be a legitimate bias (max_adjustment*1000 is
+-- bounded by the 64-bit integer ARGV at ~1e22), so the threshold is a
+-- safe finite marker.
+if not (final_mp == final_mp) or final_mp > 1e100 or final_mp < -1e100 then
+    final_mp = tonumber(ARGV[3]) * 1000
+end
 
 redis.call('HSET', KEYS[25], 'bias_mp', final_mp)
 return trunc_div(final_mp, 1000)

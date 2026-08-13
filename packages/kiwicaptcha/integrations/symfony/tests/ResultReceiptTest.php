@@ -18,12 +18,15 @@ use Symfony\Component\Validator\ConstraintValidatorFactory;
 use Symfony\Component\Validator\Validation;
 
 /**
- * Asymmetric result receipts (audit #80): the result verification is
+ * Asymmetric result receipts (audit #80/#106): the result verification is
  * CENTRAL-ONLY (the HMAC secret never leaves the server — no third party can
  * re-derive a result). The OPTIONAL Ed25519 receipt signer exports VALID
- * verification results as {jti, scope, binding, outcome, issued_at_ms}
- * receipts that customers verify with the PUBLIC key — never the private
- * seed.
+ * verification results as {jti, tenant, action, request_binding, issued_at,
+ * expires_at, issuer} receipts — the full replay-critical set signed from
+ * the CONSUMED record — that customers verify with the PUBLIC key — never
+ * the private seed. Signature verification alone is NOT sufficient for
+ * single-use actions: the integrator must atomically record the jti
+ * (verify_and_consume).
  */
 final class ResultReceiptTest extends TestCase
 {
@@ -36,7 +39,7 @@ final class ResultReceiptTest extends TestCase
 
     /**
      * Issue + solve a sha256 challenge (fast 8-bit) and run it through the
-     * validator, returning [validator, violations].
+     * validator, returning [validator, violations, nonce].
      */
     private function verifyThroughValidator(?ResultReceiptSigner $signer): array
     {
@@ -57,7 +60,10 @@ final class ResultReceiptTest extends TestCase
 
         $stack = new RequestStack();
         $stack->push(JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
-        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, receiptSigner: $signer);
+        // The receipt is signed from the CONSUMED RECORD (audit #106), so
+        // the validator needs the challenge storage wired — exactly as the
+        // extension wires it.
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, receiptSigner: $signer, storage: $storage);
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
         $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
 
@@ -82,14 +88,20 @@ final class ResultReceiptTest extends TestCase
         self::assertNotNull($payload, 'a valid verification must produce a signed receipt');
         self::assertNotNull($signature);
 
-        // The payload is exactly the documented receipt document.
+        // The payload carries the FULL replay-critical set from the consumed
+        // record (audit #106): jti, tenant (scope), action (PoW algorithm),
+        // request_binding, issued_at / expires_at (epoch ms), issuer.
         $receipt = json_decode($payload, true);
         self::assertSame($nonce, $receipt['jti'], 'the receipt jti is the verified challenge nonce');
-        self::assertSame('login', $receipt['scope']);
-        self::assertNull($receipt['binding'], 'an unbound record carries a null binding');
-        self::assertSame('valid', $receipt['outcome']);
-        self::assertIsInt($receipt['issued_at_ms']);
-        self::assertLessThanOrEqual((int) round(microtime(true) * 1000), $receipt['issued_at_ms']);
+        self::assertSame('login', $receipt['tenant'], 'the receipt tenant is the record scope');
+        self::assertSame('sha256', $receipt['action'], 'the receipt action is the record PoW algorithm');
+        self::assertNull($receipt['request_binding'], 'an unbound record carries a null request_binding');
+        self::assertIsInt($receipt['issued_at']);
+        self::assertIsInt($receipt['expires_at']);
+        self::assertSame(120, $receipt['expires_at'] - $receipt['issued_at'], 'expires_at = issued_at + the challenge lifetime (epoch seconds, the record wire unit)');
+        self::assertLessThanOrEqual((int) time(), $receipt['issued_at']);
+        self::assertArrayHasKey('issuer', $receipt, 'the receipt must carry the issuer field (null when unset)');
+        self::assertNull($receipt['issuer']);
 
         // CUSTOMERS verify with the PUBLIC key — never the private seed.
         $publicKey = base64_decode($signer->publicKeyBase64(), true);
@@ -114,21 +126,40 @@ final class ResultReceiptTest extends TestCase
 
         $payload = (string) $validator->verifiedReceiptPayload();
         $signature = (string) $validator->verifiedReceiptSignature();
+        $publicKey = base64_decode($signer->publicKeyBase64(), true);
 
-        // Flip one field (scope) — the signature must no longer verify.
+        // Audit #106: a tampered JTI — the single-use replay id — must fail
+        // verification (a swapped jti would otherwise let an integrator
+        // key the idempotency on an attacker-chosen value).
         $tampered = json_decode($payload, true);
-        $tampered['scope'] = 'signup';
+        $tampered['jti'] = 'attacker-chosen-nonce';
         $tamperedPayload = (string) json_encode($tampered);
-
         self::assertFalse(
-            sodium_crypto_sign_verify_detached(base64_decode($signature, true), $tamperedPayload, base64_decode($signer->publicKeyBase64(), true)),
-            'a tampered receipt payload must fail public-key verification'
+            sodium_crypto_sign_verify_detached(base64_decode($signature, true), $tamperedPayload, $publicKey),
+            'a receipt with a tampered jti must fail public-key verification'
         );
+
+        // Every other replay-critical field is equally protected: a flipped
+        // tenant, an extended expires_at (receipt freshness forgery), a
+        // swapped request_binding and a changed issuer all fail.
+        foreach ([
+            'tenant' => 'signup',
+            'expires_at' => (json_decode($payload, true)['expires_at'] ?? 0) + 3_600_000,
+            'request_binding' => 'different-txn',
+            'issuer' => 'prod',
+        ] as $field => $value) {
+            $tampered = json_decode($payload, true);
+            $tampered[$field] = $value;
+            self::assertFalse(
+                sodium_crypto_sign_verify_detached(base64_decode($signature, true), (string) json_encode($tampered), $publicKey),
+                sprintf('a tampered "%s" field must fail public-key verification', $field)
+            );
+        }
 
         // A tampered SIGNATURE fails too (valid length, altered bytes).
         $badSignature = base64_encode(str_repeat("\x01", 64));
         self::assertFalse(
-            sodium_crypto_sign_verify_detached(base64_decode($badSignature, true), $payload, base64_decode($signer->publicKeyBase64(), true))
+            sodium_crypto_sign_verify_detached(base64_decode($badSignature, true), $payload, $publicKey)
         );
     }
 
@@ -185,7 +216,22 @@ final class ResultReceiptTest extends TestCase
     {
         $signer = new ResultReceiptSigner();
         self::assertFalse($signer->enabled());
-        self::assertNull($signer->sign('jti-1', 'login', null, 123));
+        self::assertNull($signer->sign($this->issuedRecord()), 'a disabled signer signs no record');
+    }
+
+    /**
+     * A real minted record (issue + store) to exercise sign() with — the
+     * receipt payload is built from the record's own fields (audit #106).
+     */
+    private function issuedRecord(): \KiwiCaptcha\ChallengeRecord
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-42');
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+
+        return $record;
     }
 
     public function testBoundChallengeReceiptCarriesTheBinding(): void
@@ -210,7 +256,7 @@ final class ResultReceiptTest extends TestCase
         $request = JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
         $request->request->set('kiwi_request_binding', 'txn-42');
         $stack->push($request);
-        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, receiptSigner: $signer);
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, receiptSigner: $signer, storage: $storage);
         $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
         $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
 
@@ -224,7 +270,7 @@ final class ResultReceiptTest extends TestCase
         $violations = $engineValidator->validate($dto);
         self::assertCount(0, $violations);
         $receipt = json_decode((string) $validator->verifiedReceiptPayload(), true);
-        self::assertSame('txn-42', $receipt['binding'], 'the receipt carries the SIGNED transaction binding');
+        self::assertSame('txn-42', $receipt['request_binding'], 'the receipt carries the SIGNED transaction binding');
     }
 
     private function seedFor(ResultReceiptSigner $signer): string

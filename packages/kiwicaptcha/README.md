@@ -15,7 +15,7 @@ Browser behavioral telemetry is a **supplement, not the security boundary** — 
 - **Difficulty derived per algorithm** — SHA-256 scales to 20 bits (~1M hashes); Argon2id is capped at 10 bits because every memory-hard hash is ~1000x more expensive.
 - **Server-side minimum solve duration** — a **timing-anomaly heuristic**, not a proof of human behavior: PoW is probabilistic (a valid solution can occur at counter 0) and a fast bot can wait before submitting, so the floor only rejects solves that **arrive** faster than the theoretical minimum, measured **server-side** from challenge issuance to verification receipt (high-resolution issuance timestamp vs server receipt time). The client-reported duration is forgeable (a custom client can submit `duration_ms=5000`) and is used **only as telemetry**. Clock policy: when the verifier clock is behind the issuer clock, a skew within 5 s (`SKEW_TOLERANCE_US`) skips the floor heuristic (the apparent negative elapsed time carries no signal) and a larger skew is rejected as `TooFast`; records without a high-resolution issuance timestamp (`issued_at_ns == 0`) are **malformed** — the legacy client-duration fallback was removed.
 - **Comprehensive record validation before any hash** — `verify_solution` runs `validate_record` first (right after attempt accounting): scope bounds, nonce = 32 bytes, salt = 16 bytes, `expires_at - issued_at <= 300 s`, `prefix == challenge|salt|`, SHA-256 difficulty 1..=20, Argon2id difficulty 1..=10 with `p == 1`, `t` 3..=6, `m_kib` 8..=65536. A malformed or attacker-crafted record is rejected as `MalformedRecord` before any signature or hash work.
-- **HMAC-signed challenges, protocol v2** — the signed canonical input covers the full parameter set (`v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`, with `region`/`request_binding`/`issuer` rendering as the EMPTY segment when unset — kid is the FINAL field, audits #67/#91), so no issuance parameter can be tampered with without breaking the signature. The challenge string is `base64(canonical).hex_tag` for both protocol versions; v1 records (legacy canonical `nonce|scope|ip_hash|issued_at`) keep verifying during the migration window (max TTL). The TTL check also rejects challenges issued more than `MAX_CLOCK_SKEW_SECS` (60) in the future (audit #76). Key rotation (audit #91): the record's `kid` selects the signing secret from the verifier's `secrets_by_kid` map — an unknown kid, or a kid newer than the map's newest id (the forward/rollback guard), rejects with `UnknownKid`.
+- **HMAC-signed challenges, protocol v2** — the signed canonical input covers the full parameter set (`v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`, with `region`/`request_binding`/`issuer` rendering as the EMPTY segment when unset — kid is the FINAL field, audits #67/#91), so no issuance parameter can be tampered with without breaking the signature. The challenge string is `base64(canonical).hex_tag` for both protocol versions; v1 records (legacy canonical `nonce|scope|ip_hash|issued_at`) keep verifying during the migration window (max TTL). The TTL check also rejects challenges issued more than `MAX_CLOCK_SKEW_SECS` (60) in the future (audit #76). Key rotation (audit #91): the record's `kid` selects the signing secret from the verifier's `secrets_by_kid` map — an unknown kid, or a kid newer than the map's newest id (the forward/rollback guard), rejects with `UnknownKid`. Compromise revocation (audit #117): `with_revoked_kids` / `VerifyContext::revoked_kids` rejects any challenge keyed with a revoked kid IMMEDIATELY — before the signature check — even while its secret is still present: revocation **overrides** the rotation grace (a leaked key can stay in `secrets_by_kid` while the deployment retires it, but its challenges never verify).
 - **Nonce-bound IP binding** — the record stores `binding_tag`, an HMAC over the nonce + canonical IP bytes (IPv4-mapped IPv6 normalized to 4-byte IPv4). The tag changes with every nonce, so the record **creates no stable IP-derived identifier**. Verification recomputes the tag from the submitting IP and compares in constant time; an empty `binding_tag` (i.e. the challenge was issued with `BindingMode::None`) disables the check; a `None` client IP with a NON-EMPTY tag fails closed with `MissingClientIp`. This is a **relay mitigation, not a guarantee**: IPs legitimately change behind NAT/proxies, and operators can disable the check.
 - **POST-DERIVE final re-validation (audit #59)** — after the proof derives successfully and BEFORE the outcome is declared valid, the verifier re-checks the CURRENT server time and the CURRENT expectations (policy epoch, region, issuer): a challenge that expired DURING the expensive derivation is `Expired` even though the record was already consumed. The production verifier re-reads the clock at this final step.
 - **Single-use with bounded verification cost** — verification consumes the challenge, and the verification path includes per-nonce attempt accounting (`max_attempts`) that bounds the server-side cost of wrong candidates (critical for memory-hard Argon2id verification). Per-nonce attempt caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) ships both: `rate_limit` (per-IP issuance window, optionally Redis/PSR-6 backed) and `argon2_max_concurrent_verifications` (per-process semaphore). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. the consumed-state Lua transition in `RedisChallengeStore` — the record is KEPT with a storage-level `state` and the winner's committed outcome, so a concurrent loser returns the SAME outcome instead of re-deriving, audit #74).
@@ -219,6 +219,9 @@ let mut ctx = VerifyContext {
     record: &mut record,
     secret_key: &config.secret_key, // must match issuance; >= 16 bytes
     secrets_by_kid: None,        // Some(&{kid: secret, ..}) for key rotation (audit #91)
+    revoked_kids: None,          // Some(&{kid, ..}) to hard-revoke compromised keys
+                                 // (audit #117): rejected before the signature
+                                 // check, even when the secret is present
     counter: solution.counter,
     duration_ms: solution.duration_ms, // client-reported — telemetry only
     now_unix,                          // TTL check (seconds)
@@ -303,6 +306,32 @@ Requires `cargo`, the `wasm32-unknown-unknown` target, and `wasm-bindgen-cli`
 pure Rust — no Node.js, no wasm-pack: `build.sh` runs `cargo build`, the
 `wasm-bindgen` CLI, and the embed tool in `packages/kiwicaptcha-wasm/tools/embed/`.
 
+## Lua script versioning (audit #116)
+
+The single-use consumed-state transition and the outcome commit are
+implemented as two Lua scripts — `CONSUME_TRANSITION_LUA` and
+`COMMIT_RESULT_LUA` in `src/redis_verify.rs`, mirrored **byte-for-byte** by
+the PHP core's `RedisStorage`. Their deployment model:
+
+- **Application-versioned immutable resources.** The scripts ship inside the
+  application release: the Rust constant and the PHP constant are pinned to
+  the same release, and the CI **sha256 parity check** between the two
+  enforces that every deployment runs byte-identical script text. A script
+  change is a new application version — never a runtime configuration.
+- **No Redis Functions.** The scripts are plain `EVAL`/`EVALSHA` scripts —
+  there is no `FUNCTION LOAD`, no function-cache state to manage, and any
+  Redis with Lua support works (Redis ≥ 5).
+- **The EVAL text is the version.** Redis keys its script cache by the
+  **SHA-1 of the script text**, so the text hash *is* the script version:
+  deployments never name scripts, they ship text. Two nodes running the same
+  application release carry identical script hashes by construction; a
+  release rollback rolls the script text (and its hash) back with it.
+- **NOSCRIPT is self-healing.** The client re-loads the script text on
+  demand whenever a `SCRIPT FLUSH` (or a server restart) empties the cache —
+  with a bounded retry loop (`invoke_script`, audit #102), so verification
+  recovers deterministically even if the cache is flushed mid-flight: the
+  record is never burned and the verification proceeds normally.
+
 ## API Reference
 
 | Type | Purpose |
@@ -313,7 +342,7 @@ pure Rust — no Node.js, no wasm-pack: `build.sh` runs `cargo build`, the
 | `Issued` / `IssuedChallenge` | The client-facing challenge (send as JSON) |
 | `ChallengeRecord` | Server-side state (store in Redis); `protocol_version` 1 (legacy) or 2 (full-parameter signing); `binding_tag` (nonce-bound) with `ip_hash` read-alias; `region` (always-present JSON key, `null` when unbound) |
 | `SolutionToken` | Client-submitted solution (from `kiwi__token`); counters above `SOLVER_MAX_HASHES` (5M) are rejected at decode; decode accepts exactly one canonical base64 encoding (strict, padded, standard alphabet) |
-| `VerifyContext` | Parameters for server-side verification (client IP, expected region, server-side timing, telemetry, attempt cap) |
+| `VerifyContext` | Parameters for server-side verification (client IP, expected region, revoked kids — audit #117, server-side timing, telemetry, attempt cap) |
 | `verify_solution()` | Validate the record (cheap phase, before any hash), re-verify the signature (v1/v2 canonical per `protocol_version`; v2 uses the HKDF-derived challenge key), enforce TTL, scope (`WrongScope`), region (`WrongRegion`), nonce-bound IP binding, hard Argon2id parameter ceilings (after signature auth, before allocation), server-side minimum duration (with clock-skew policy), attempt cap, then re-derive the hash and check leading zero bits; the `Valid` outcome carries the consumed nonce (jti) |
 | `score_telemetry()` | Supplementary headless/automated-client scoring (client-controlled input) |
 | `kiwi_widget_html()` | Inline HTML + JS widget with optional CSP nonce |

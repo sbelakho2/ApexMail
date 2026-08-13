@@ -27,10 +27,30 @@ namespace KiwiCaptcha\Risk\Storage;
  * memory); no cross-process synchronization is performed. When the window
  * is saturated the engine denies immediately (HardRateLimit) instead of
  * spending time/state on the request.
+ *
+ * WARM-UP RAMP (audit #105): after every restart/autoscale the process
+ * must not start with a full burst — the effective cap ramps linearly
+ * from a floor of `max(1, processPerSecond / 10)` to the full cap over
+ * the first `warmupRampSecs` seconds of the process's life:
+ *
+ *   effective_cap = floor(processPerSecond * min(1, elapsed / warmupRampSecs))
+ *                   floored at max(1, processPerSecond / 10)
+ *
+ * elapsed is measured on the SAME monotonic hrtime clock as the window,
+ * so the ramp is immune to wall-clock jumps (a jump can neither extend
+ * the ramp nor finish it early). `warmupRampSecs = 0` disables the ramp
+ * (the full cap applies from the first call — the pre-audit behavior).
+ * The ramp only lowers the admission rate during startup; the DISTRIBUTED
+ * keyed limits (source_fast/source_slow velocity in risk-v1 plus the
+ * caller's per-source rate limiter) remain authoritative — the ramp
+ * never raises any limit beyond the configured processPerSecond.
  */
 final class ProcessEmergencyCap
 {
     public const DEFAULT_PROCESS_PER_SECOND = 10000;
+
+    /** Default warm-up ramp length in seconds (audit #105). */
+    public const DEFAULT_WARMUP_RAMP_SECS = 10;
 
     /** Window length in nanoseconds (1 s on the monotonic hrtime clock). */
     private const WINDOW_NS = 1_000_000_000;
@@ -38,13 +58,27 @@ final class ProcessEmergencyCap
     /** @var \SplQueue<int> hrtime(true) nanosecond stamps of recent allowances */
     private \SplQueue $stamps;
 
+    /** hrtime(true) nanoseconds at construction: the ramp's t=0. */
+    private readonly int $startedAtNs;
+
     public function __construct(
         private readonly int $processPerSecond = self::DEFAULT_PROCESS_PER_SECOND,
+        private readonly float $warmupRampSecs = self::DEFAULT_WARMUP_RAMP_SECS,
     ) {
         if ($processPerSecond < 1) {
             throw new \InvalidArgumentException('Limiter window must be >= 1');
         }
+        if ($warmupRampSecs < 0.0) {
+            throw new \InvalidArgumentException('warmupRampSecs must be >= 0 (0 disables the ramp)');
+        }
+        $this->startedAtNs = hrtime(true);
         $this->stamps = new \SplQueue();
+    }
+
+    /** The warm-up ramp length in seconds (0 = ramp disabled). */
+    public function warmupRampSecs(): float
+    {
+        return $this->warmupRampSecs;
     }
 
     /**
@@ -55,7 +89,7 @@ final class ProcessEmergencyCap
     {
         $now = hrtime(true);
         $this->prune($now);
-        if ($this->stamps->count() >= $this->processPerSecond) {
+        if ($this->stamps->count() >= $this->effectiveCap($now)) {
             return false;
         }
         $this->stamps->enqueue($now);
@@ -65,8 +99,30 @@ final class ProcessEmergencyCap
     /** True when the window is currently saturated. */
     public function isOpen(): bool
     {
-        $this->prune(hrtime(true));
-        return $this->stamps->count() >= $this->processPerSecond;
+        $now = hrtime(true);
+        $this->prune($now);
+        return $this->stamps->count() >= $this->effectiveCap($now);
+    }
+
+    /**
+     * The cap in force at $nowNs: the full processPerSecond after the
+     * warm-up ramp, and during the ramp a linear interpolation from the
+     * floor of max(1, processPerSecond / 10). Monotonic in elapsed, so
+     * the queue can never hold more than the full cap (O(1) amortized
+     * prune is preserved).
+     */
+    private function effectiveCap(int $nowNs): int
+    {
+        if ($this->warmupRampSecs <= 0.0) {
+            return $this->processPerSecond;
+        }
+        $elapsedSecs = ($nowNs - $this->startedAtNs) / 1_000_000_000;
+        if ($elapsedSecs >= $this->warmupRampSecs) {
+            return $this->processPerSecond;
+        }
+        $floor = max(1, intdiv($this->processPerSecond, 10));
+        $ramped = (int) floor($this->processPerSecond * $elapsedSecs / $this->warmupRampSecs);
+        return max($floor, $ramped);
     }
 
     /**

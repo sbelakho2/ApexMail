@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
+use KiwiCaptcha\ChallengeRecord;
+
 /**
  * OPTIONAL Ed25519 signer for EXPORTED verification results (audit #80).
  *
@@ -12,17 +14,29 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  * verification result on its own. What this signer enables is an ASYMMETRIC
  * receipt of a server-verified result: when risk.result_receipt_signing_key
  * (base64 32-byte Ed25519 seed) is configured, the validator signs every
- * valid verification into the canonical payload
+ * valid verification into the canonical payload — the FULL REPLAY-CRITICAL
+ * SET (audit #106), taken from the CONSUMED record
+ * ({@see ChallengeRecord}, passed to {@see sign()})
  *
- *     {jti, scope, binding, outcome, issued_at_ms}
+ *     {jti, tenant, action, request_binding, issued_at, expires_at, issuer}
+ *
+ *   - jti             the challenge nonce (the single-use replay id)
+ *   - tenant          the flow scope the challenge was minted for
+ *   - action          the PoW action the challenge required
+ *                     (sha256 | argon2id — the record's algorithm)
+ *   - request_binding the signed transaction binding (null when unbound)
+ *   - issued_at       the record's issuance epoch (SECONDS — the record
+ *                     wire unit, shared with the Rust schema)
+ *   - expires_at      the record's expiry epoch (seconds) — a receipt is
+ *                     only acceptable while now <= expires_at (+ application
+ *                     skew)
+ *   - issuer          the deployment issuer (audit #67; null when unset)
  *
  * with sodium_crypto_sign_detached, and the application can hand the payload
  * + signature to any party holding the PUBLIC key (derived from the seed via
  * {@see publicKeyBase64()}) — never the private key. The payload is fully
- * public by construction: it carries the challenge jti, the flow scope, the
- * signed transaction binding, the fixed outcome "valid" and the issuance
- * (receipt) timestamp in ms — no secret material, no client identity beyond
- * what the challenge already carried.
+ * public by construction: no secret material, no client identity beyond what
+ * the challenge already carried.
  *
  * The signature format is the raw 64-byte Ed25519 detached signature,
  * base64-encoded (88 chars). Verification:
@@ -33,9 +47,15 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  *         base64_decode($publicKeyBase64),
  *     )
  *
- * A receipt of a valid result is only as fresh as its issued_at_ms — the
- * application must bound how long a receipt stays acceptable (the challenge
- * lifetime bounds the result itself).
+ * SINGLE-USE SEMANTICS (audit #106): signature verification alone is NOT
+ * sufficient for single-use actions — a valid signature proves the payload
+ * was signed by the server, NOT that the jti has not already been consumed
+ * elsewhere. An integrator accepting a receipt for a one-time action MUST
+ * additionally record the jti atomically (INSERT jti IF NOT EXISTS on an
+ * idempotency table / `SET <key> NX`, or a UNIQUE constraint) and treat a
+ * pre-existing jti as a replay: verify_and_consume — verify the signature,
+ * then atomically insert the jti; only a FIRST insert proceeds with the
+ * action. See the README ("Asymmetric result receipts").
  */
 final class ResultReceiptSigner
 {
@@ -100,21 +120,30 @@ final class ResultReceiptSigner
     /**
      * Sign a valid verification result into a detached Ed25519 receipt.
      *
+     * The payload carries the FULL replay-critical set from the CONSUMED
+     * record (audit #106): jti (the nonce), tenant (the record's scope),
+     * action (the record's PoW algorithm), request_binding, issued_at /
+     * expires_at (epoch SECONDS — the record wire unit) and issuer — so an
+     * integrator can key its idempotency, freshness and scope checks on the
+     * receipt alone.
+     *
      * @return array{payload: string, signature: string}|null the canonical
      *         JSON payload and its base64 detached signature, or null when
      *         signing is disabled (risk.result_receipt_signing_key unset)
      */
-    public function sign(string $jti, string $scope, ?string $binding, int $issuedAtMs): ?array
+    public function sign(ChallengeRecord $record): ?array
     {
         if (!$this->enabled()) {
             return null;
         }
         $payload = (string) json_encode([
-            'jti' => $jti,
-            'scope' => $scope,
-            'binding' => $binding,
-            'outcome' => 'valid',
-            'issued_at_ms' => $issuedAtMs,
+            'jti' => $record->nonce,
+            'tenant' => $record->scope,
+            'action' => $record->algorithm->value,
+            'request_binding' => $record->requestBinding,
+            'issued_at' => $record->issuedAt,
+            'expires_at' => $record->expiresAt,
+            'issuer' => $record->issuer,
         ], JSON_UNESCAPED_SLASHES);
 
         $signature = \sodium_crypto_sign_detached($payload, $this->secretKey);

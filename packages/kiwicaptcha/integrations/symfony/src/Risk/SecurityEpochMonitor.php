@@ -16,7 +16,7 @@ use KiwiCaptcha\Verifier;
  * central policy bump revokes outstanding challenges within one cache window
  * instead of waiting for a redeploy.
  *
- * Three hardening properties:
+ * Four hardening properties:
  *
  *  1. MONOTONIC max: once this process has OBSERVED epoch N it never accepts
  *     a lower epoch, even if the central value regresses (a misconfigured
@@ -27,6 +27,17 @@ use KiwiCaptcha\Verifier;
  *     keeps enforcing the newest epoch it ever saw, never a weaker one.
  *  3. BOUNDED latency: the central value is re-read at most once per cache
  *     window, so the revocation latency is one TTL, never unbounded.
+ *  4. MAX-STALE FAIL-CLOSED (audit #108): after the last SUCCESSFUL central
+ *     read, once `now > last_success + risk.security_epoch_max_stale_secs`
+ *     (default 60 s, min 10 s) the monitor reports {@see isStale()}. A stale
+ *     monitor is the deliberate constrained degradation: the cached max may
+ *     no longer reflect the central policy (an emergency revocation could
+ *     have landed while the node could not read), so the validator fails
+ *     verification closed (temporary_unavailable) and the challenge
+ *     controller refuses issuance with 503 SERVICE_UNAVAILABLE. Within the
+ *     window the cached max keeps serving (availability is preserved for a
+ *     bounded outage). A monitor WITHOUT a Redis client is never stale —
+ *     "no central state by design" is a configured posture, not a failure.
  *
  * The effective epoch is `max(configuredEpoch, observedMax)`: the local
  * risk.policy_version is the floor (a node never expects less than its own
@@ -56,11 +67,22 @@ final class SecurityEpochMonitor
     private float $refreshedAtMs = -PHP_FLOAT_MAX;
 
     /**
+     * The wall-clock ms of the last SUCCESSFUL central read (the HGET call
+     * itself answered — the field may be absent). -PHP_FLOAT_MAX = never
+     * succeeded: with a Redis client configured, that state is immediately
+     * stale (fail closed — an unobserved central policy can never be
+     * trusted to be current).
+     */
+    private float $lastSuccessAtMs = -PHP_FLOAT_MAX;
+
+    /**
      * @param \Redis|\Predis\Client|null $redis         the security Redis
      *                                                   (null = central state
      *                                                   unavailable — the
      *                                                   configured epoch is
-     *                                                   authoritative)
+     *                                                   authoritative and the
+     *                                                   monitor is never
+     *                                                   stale)
      * @param string                     $namespace     the sanitized risk
      *                                                   namespace ({kiwi:<ns>})
      * @param int                        $configuredEpoch the local
@@ -80,6 +102,14 @@ final class SecurityEpochMonitor
      *                                                   deployment issuer
      *                                                   (audit #67) — same
      *                                                   re-apply rule
+     * @param int                        $maxStaleSecs  max-stale window
+     *                                                   (risk.security_epoch_
+     *                                                   max_stale_secs, >= 10):
+     *                                                   once now exceeds
+     *                                                   last_success +
+     *                                                   max_stale, the
+     *                                                   monitor reports stale
+     *                                                   (audit #108)
      */
     public function __construct(
         private readonly Verifier $verifier,
@@ -90,9 +120,13 @@ final class SecurityEpochMonitor
         private $nowMs = null,
         private readonly ?string $region = null,
         private readonly ?string $issuer = null,
+        private readonly int $maxStaleSecs = 60,
     ) {
         if ($cacheSecs < 1) {
             throw new \InvalidArgumentException('security-epoch cache window must be >= 1 s');
+        }
+        if ($maxStaleSecs < 10) {
+            throw new \InvalidArgumentException('security-epoch max-stale window must be >= 10 s');
         }
         $this->currentEpoch = $configuredEpoch;
     }
@@ -111,7 +145,7 @@ final class SecurityEpochMonitor
         $now = $this->nowMs();
         if ($now - $this->refreshedAtMs >= $this->cacheSecs * 1000) {
             $this->refreshedAtMs = $now;
-            $central = $this->readCentralEpoch();
+            $central = $this->readCentralEpoch($now);
             if ($central !== null) {
                 $this->observedMax = max($this->observedMax, $central);
             }
@@ -145,16 +179,43 @@ final class SecurityEpochMonitor
     }
 
     /**
-     * The last-observed central epoch, or null when the read failed or the
-     * field is absent.
+     * MAX-STALE FAIL-CLOSED (audit #108): true when the central policy state
+     * has NOT been confirmed successfully for longer than the max-stale
+     * window (risk.security_epoch_max_stale_secs). The cached max may then
+     * be outdated — an emergency revocation could have landed while this
+     * node could not read — so the caller must fail closed: the validator
+     * returns temporary_unavailable, the challenge controller refuses
+     * issuance with 503 SERVICE_UNAVAILABLE. Within the window the cached
+     * max keeps serving (bounded outage tolerance). A monitor without a
+     * Redis client is NEVER stale (no central state by design — the
+     * configured epoch is authoritative). A monitor that NEVER succeeded a
+     * central read (Redis down from boot) is stale immediately: an
+     * unobserved central policy is never trusted to be current.
      */
-    private function readCentralEpoch(): ?int
+    public function isStale(): bool
+    {
+        if ($this->redis === null) {
+            return false;
+        }
+
+        return $this->nowMs() > $this->lastSuccessAtMs + $this->maxStaleSecs * 1000;
+    }
+
+    /**
+     * The last-observed central epoch, or null when the read failed or the
+     * field is absent. A successful read — the HGET call itself answered,
+     * even with an absent field (the "no central policy configured" state is
+     * legitimate and confirmed) — refreshes the max-stale deadline; a
+     * thrown read leaves {@see isStale()} to drift toward true.
+     */
+    private function readCentralEpoch(float $now): ?int
     {
         if ($this->redis === null) {
             return null;
         }
         try {
             $value = $this->redis->hget($this->policyKey(), self::MIN_POLICY_EPOCH_FIELD);
+            $this->lastSuccessAtMs = $now;
         } catch (\Throwable) {
             // Fail-safe: serve the last-observed max, never a weaker epoch.
             return null;

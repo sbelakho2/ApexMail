@@ -26,6 +26,7 @@ fn rust_verifies_php_issued_record() {
         record: &mut rec,
         secret_key: "0123456789abcdef0123456789abcdef",
         secrets_by_kid: None,
+        revoked_kids: None,
         counter,
         duration_ms: 5000,
         now_unix: std::time::SystemTime::now()
@@ -55,6 +56,7 @@ fn rust_verifies_php_issued_record() {
         record: &mut rec2,
         secret_key: "0123456789abcdef0123456789abcdef",
         secrets_by_kid: None,
+        revoked_kids: None,
         counter,
         duration_ms: 5000,
         now_unix: std::time::SystemTime::now()
