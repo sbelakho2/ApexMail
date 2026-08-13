@@ -31,7 +31,7 @@ final class RiskWiringTest extends TestCase
 {
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
-    private function load(array $risk): ContainerBuilder
+    private function load(array $risk, array $topLevel = []): ContainerBuilder
     {
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'test');
@@ -40,6 +40,7 @@ final class RiskWiringTest extends TestCase
             'secret_key' => self::SECRET,
             'difficulty_bits' => 8,
             'risk' => $risk,
+            ...$topLevel,
         ]], $container);
 
         return $container;
@@ -64,7 +65,7 @@ final class RiskWiringTest extends TestCase
         self::assertSame([10000], $definition->getArguments(), 'args = [hard_limits.process_per_second] (the single per-process cap)');
     }
 
-    public function testCalibratorReceivesTheBoundKnobsAndReceiptTtl(): void
+    public function testCalibratorReceivesTheBoundKnobsReceiptTtlAndSamplingContract(): void
     {
         $risk = $this->riskDefaults();
         $risk['calibration'] = ['enabled' => true, 'min_samples' => 500, 'max_adjustment' => 77, 'max_change_per_minute' => 5, 'receipt_ttl_secs' => 600];
@@ -79,6 +80,15 @@ final class RiskWiringTest extends TestCase
         self::assertSame(77, $args[3], 'arg 3 = max_adjustment');
         self::assertSame(5, $args[4], 'arg 4 = max_change_per_minute');
         self::assertSame(600, $args[5], 'arg 5 = receipt_ttl_secs (the AggregateCalibrator ctor position after maxChangePerMinute)');
+        self::assertSame('random_sample', $args['$samplingMode'], 'samplingMode follows calibration.mode (default random_sample)');
+        self::assertSame(100000, $args['$samplingProbabilityPpm'], 'samplingProbabilityPpm follows calibration.sampling_probability_ppm (default 100000)');
+
+        // Explicit sampling config flows through to the calibrator.
+        $risk = $this->riskDefaults();
+        $risk['calibration'] = ['enabled' => true, 'mode' => 'weighted', 'sampling_probability_ppm' => 500000];
+        $args = $this->load($risk)->getDefinition('kiwi_captcha.risk.calibration')->getArguments();
+        self::assertSame('weighted', $args['$samplingMode']);
+        self::assertSame(500000, $args['$samplingProbabilityPpm']);
 
         // The default receipt TTL is the audit's 300 s.
         $risk = $this->riskDefaults();
@@ -102,7 +112,7 @@ final class RiskWiringTest extends TestCase
         self::assertFalse($container->getDefinition('kiwi_captcha.risk.engine')->getArgument('$enableGlobalPressure'), 'enableGlobalPressure must follow global_pressure.enabled');
     }
 
-    public function testProviderWiredWithCounterKeyClientAndHardLimit(): void
+    public function testProviderWiredWithCounterKeyClientAndDeploymentCapacity(): void
     {
         $risk = $this->riskDefaults();
         $risk['hard_limits'] = ['process_per_second' => 250];
@@ -114,7 +124,16 @@ final class RiskWiringTest extends TestCase
         self::assertNull($args[0], 'no argon semaphore wired (sha256) -> null');
         self::assertInstanceOf(Reference::class, $args[1], 'arg 1 = the risk Redis client for the counter reads');
         self::assertSame('{kiwi:wiring-test}:issuance:', $args[2], 'arg 2 = the issuance counter key prefix (hash-tagged)');
-        self::assertSame(250, $args[3], 'arg 3 = hard_limits.process_per_second (the single per-process cap)');
+        self::assertSame(20000, $args[3], 'arg 3 = resource_capacity.issuance_per_second (the DEPLOYMENT-WIDE denominator, default 20000)');
+
+        // The deployment denominator is a SEPARATE knob from the per-process
+        // emergency cap: hard_limits.process_per_second stays exclusively on
+        // the emergency limiter.
+        $risk = $this->riskDefaults();
+        $risk['hard_limits'] = ['process_per_second' => 999];
+        $container = $this->load($risk, ['resource_capacity' => ['issuance_per_second' => 12345]]);
+        self::assertSame(12345, $container->getDefinition('kiwi_captcha.risk.resource_pressure')->getArguments()[3], 'the provider denominator follows resource_capacity.issuance_per_second (root-level node)');
+        self::assertSame([999], $container->getDefinition('kiwi_captcha.risk.emergency_limiter')->getArguments(), 'hard_limits.process_per_second remains ONLY the local emergency cap');
 
         // The breaker is hoisted for the ENGINE's degraded mode only — the
         // provider no longer consumes it (no riskBackendHealth field).

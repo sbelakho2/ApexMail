@@ -145,13 +145,28 @@ Files:
     the event_id; a duplicate returns the CURRENT signals with
     `is_duplicate=1` (state untouched) — identical in both languages.
 
-12. Calibration — bounded Redis aggregate buckets
-    `{kiwi:<ns>}:cal:<scope>:<hour>` (fields `b<band>a<action>:legit|abuse`,
-    48 h TTL, at most 24 keys per scope) with JSON-string decision receipts
-    `{kiwi:<ns>}:cal:receipt:<decision_id>` (EX 300, consumed via GETDEL).
-    Bias = clamp(((abuse - legit) * 1000 / total) * 2 / 10, -200, 200),
-    integer division; applied to the score BEFORE band mapping in both
-    languages.
+12. Calibration — bounded Redis aggregate buckets with EXACT scores.
+    `{kiwi:<ns>}:cal:<scope>:<hour>` (fields `legit_count`,
+    `legit_score_sum`, `abuse_count`, `abuse_score_sum`, 48 h TTL, at most
+    24 keys per scope) with JSON-string decision receipts
+    `{kiwi:<ns>}:cal:receipt:<decision_id>` (EX = receipt TTL, default 300):
+    `{"scope","band","action","score","sampled"}` — no IP or identity.
+    Confirmation is ATOMIC via the canonical `confirm.lua` (GET receipt →
+    validate → DEL receipt → HINCRBYFLOAT bucket → EXPIRE → return scope);
+    a confirmed outcome is either fully recorded or not consumed. Bias is
+    EXACT score calibration: FP = Σ legit_score_sum, FN = Σ
+    (abuse_count*1000 − abuse_score_sum), raw = (FN−FP)*2/(total*10),
+    clamped to ±max_adjustment, moved toward the target through the
+    proportional per-minute rate limiter (milli-points; below min_samples
+    the target is 0 but the path is still rate-limited). Applied to the
+    score BEFORE band mapping in both languages.
+    SAMPLING CONTRACT: at assessment time the engine marks each receipt
+    `sampled` (mode complete → always; random_sample →
+    random < sampling_probability_ppm; weighted → always, the application
+    supplies the inverse sampling probability as the weight). In
+    random_sample mode an unsampled confirmation is discarded by
+    confirm.lua — the label can never select itself into the calibration
+    population.
 
 13. Degraded mode applies `strongest(scope.degraded, scope.minimum,
     global_floors[min(last_known_level, 4)])` — the last known global

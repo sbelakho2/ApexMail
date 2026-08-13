@@ -322,19 +322,23 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // no identity): adjusts only the per-scope bias, bounded by the
             // configured min_samples / max_adjustment / max_change_per_minute
             // knobs, with the receipt TTL passed through (also the TTL of the
-            // gateway's nonce->decision handles). Receipts are keyed on
+            // gateway's nonce->decision handles) and the LABEL-SELECTION
+            // contract (calibration.mode + sampling_probability_ppm) passed
+            // to the calibrator's sampling knobs. Receipts are keyed on
             // decision ids, so the same Predis client + namespace as the risk
             // state store keeps every calibration key in one hash-tag family.
             $calibrationRef = null;
             if ($riskConfig['calibration']['enabled']) {
-                $container->setDefinition('kiwi_captcha.risk.calibration', new Definition(AggregateCalibrator::class, [
+                $container->setDefinition('kiwi_captcha.risk.calibration', (new Definition(AggregateCalibrator::class, [
                     $riskRedis,
                     $namespace,
                     $riskConfig['calibration']['min_samples'],
                     $riskConfig['calibration']['max_adjustment'],
                     $riskConfig['calibration']['max_change_per_minute'],
                     $riskConfig['calibration']['receipt_ttl_secs'],
-                ]));
+                ]))
+                    ->setArgument('$samplingMode', $riskConfig['calibration']['mode'])
+                    ->setArgument('$samplingProbabilityPpm', $riskConfig['calibration']['sampling_probability_ppm']));
                 $calibrationRef = new Reference('kiwi_captcha.risk.calibration');
             }
 
@@ -391,11 +395,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
 
             // Live resource pressure: remaining Redis admission-semaphore
             // slots (argon_capacity.enabled gate) and real per-second
-            // issuance headroom as the remaining FRACTION of
-            // hard_limits.process_per_second (fixed-point 0..1000). Risk
-            // backend health is NOT a snapshot field anymore — the engine's
-            // degraded mode consumes the shared circuit breaker directly.
-            // Unobservable sources stay nominal (1000).
+            // issuance headroom as the remaining FRACTION of the
+            // deployment-wide resource_capacity.issuance_per_second
+            // (fixed-point 0..1000). hard_limits.process_per_second is NOT
+            // the denominator — it stays exclusively on the per-process
+            // emergency limiter above. Risk backend health is NOT a snapshot
+            // field anymore — the engine's degraded mode consumes the shared
+            // circuit breaker directly. Unobservable sources stay nominal
+            // (1000) for issuance, conservative 0 for the argon gate.
             $container->setDefinition('kiwi_captcha.risk.resource_pressure', new Definition(RedisRiskHealthProvider::class, [
                 $riskConfig['argon_capacity']['enabled']
                     ? ($container->hasDefinition('kiwi_captcha.argon2_redis_semaphore')
@@ -404,7 +411,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     : null,
                 $riskRedis,
                 $issuanceKeyPrefix,
-                $riskConfig['hard_limits']['process_per_second'],
+                $config['resource_capacity']['issuance_per_second'],
             ]));
             $loggerRef = $container->hasDefinition('logger') || $container->hasAlias('logger')
                 ? new Reference('logger')

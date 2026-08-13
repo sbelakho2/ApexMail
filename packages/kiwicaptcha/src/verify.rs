@@ -196,6 +196,8 @@ pub enum VerifyError {
     RecordNotFound,
     #[error("verification capacity exceeded — try again shortly")]
     CapacityExceeded,
+    #[error("admission gate unavailable — try again shortly")]
+    AdmissionUnavailable,
 }
 
 /// Comprehensive structural validation of a stored [`ChallengeRecord`].

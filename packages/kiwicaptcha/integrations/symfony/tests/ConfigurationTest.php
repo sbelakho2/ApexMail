@@ -185,4 +185,52 @@ final class ConfigurationTest extends TestCase
         self::assertSame('reject', $this->process(['risk' => ['unknown_scope' => ['mode' => 'reject']]])['risk']['unknown_scope']['mode']);
         self::assertSame('baseline', $this->process(['risk' => ['unknown_scope' => ['mode' => 'baseline']]])['risk']['unknown_scope']['mode']);
     }
+
+    public function testResourceCapacityDefaultsToDeploymentWideIssuanceDenominator(): void
+    {
+        $capacity = $this->process()['resource_capacity'];
+
+        self::assertSame(20000, $capacity['issuance_per_second'], 'issuance_per_second defaults to 20000 (deployment-wide, the shared Redis counter denominator)');
+        self::assertSame(1, $this->process(['resource_capacity' => ['issuance_per_second' => 1]])['resource_capacity']['issuance_per_second']);
+        self::assertSame(250, $this->process(['resource_capacity' => ['issuance_per_second' => 250]])['resource_capacity']['issuance_per_second']);
+    }
+
+    public function testResourceCapacityBelowOneIsRejected(): void
+    {
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['resource_capacity' => ['issuance_per_second' => 0]]);
+    }
+
+    public function testCalibrationSamplingDefaultsToRandomSample(): void
+    {
+        $calibration = $this->process()['risk']['calibration'];
+
+        self::assertSame('random_sample', $calibration['mode'], 'the label-selection contract defaults to random_sample (Kiwi samples at assessment time)');
+        self::assertSame(100000, $calibration['sampling_probability_ppm'], 'sampling_probability_ppm defaults to 100000 (10%)');
+    }
+
+    public function testCalibrationSamplingModesAndBoundsAreValidated(): void
+    {
+        self::assertSame('complete', $this->process(['risk' => ['calibration' => ['mode' => 'complete']]])['risk']['calibration']['mode']);
+        self::assertSame('weighted', $this->process(['risk' => ['calibration' => ['mode' => 'weighted']]])['risk']['calibration']['mode']);
+        self::assertSame(1, $this->process(['risk' => ['calibration' => ['sampling_probability_ppm' => 1]]])['risk']['calibration']['sampling_probability_ppm']);
+        self::assertSame(1000000, $this->process(['risk' => ['calibration' => ['sampling_probability_ppm' => 1000000]]])['risk']['calibration']['sampling_probability_ppm']);
+    }
+
+    public function testCalibrationSamplingInvalidValuesAreRejected(): void
+    {
+        $invalid = [
+            ['risk' => ['calibration' => ['mode' => 'bogus']]],
+            ['risk' => ['calibration' => ['sampling_probability_ppm' => 0]]],
+            ['risk' => ['calibration' => ['sampling_probability_ppm' => 1000001]]],
+        ];
+        foreach ($invalid as $config) {
+            try {
+                $this->process($config);
+                self::fail('invalid calibration sampling config must be rejected by the tree: '.json_encode($config));
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+    }
 }

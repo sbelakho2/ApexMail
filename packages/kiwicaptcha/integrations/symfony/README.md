@@ -215,9 +215,9 @@ minted**:
   trips the circuit breaker and the engine returns the scope's `degraded`
   action (default `allow`): challenges are still issued with the bundle's
   configured difficulty. The risk layer is a hardening layer, never a
-  single point of failure. The resource-pressure provider derives its
-  `riskBackendHealth` from that same circuit breaker (no per-request PING)
-  and caches snapshots in-process (~100 ms).
+  single point of failure. The engine's degraded mode consumes the shared
+  circuit breaker directly (no per-request PING), and the resource-pressure
+  provider caches its snapshots in-process (~100 ms).
 
 **Opt-in and off by default** (privacy posture — enabling it adds a
 first-party continuity cookie, see below):
@@ -275,6 +275,17 @@ kiwi_captcha:
         #     min_samples: 1000             # passed to the AggregateCalibrator
         #     max_adjustment: 150           #   (bias clamp bound)
         #     max_change_per_minute: 10     #   (adjustment rate bound)
+        #     mode: random_sample           # label selection: complete |
+        #                                   # random_sample (Kiwi samples at
+        #                                   # assessment time; unsampled
+        #                                   # confirmations are discarded so
+        #                                   # the label can never select
+        #                                   # itself into the population) |
+        #                                   # weighted (the app supplies the
+        #                                   # inverse sampling probability
+        #                                   # per confirmation)
+        #     sampling_probability_ppm: 100000  # PPM chance a decision is
+        #                                   # sampled (random_sample mode)
         continuity_cookie:
             name: kiwi_risk_session
             ttl_secs: 15552000              # 180 days; 0 = session cookie
@@ -314,13 +325,22 @@ first-class feedback methods for the remaining server-derived events —
 (called automatically by the challenge controller before every 429,
 including the risk-denied responses) and `expiredChallenge()` (the verifier
 path already covers expiry via `solveOutcome`). Application-level
-confirmations go through `confirmedLegitimate()` / `confirmedAbuse()` —
-both REQUIRE the `decisionId` of the decision being confirmed (the engine
-throws `InvalidArgumentException` without it; the gateway passes it
-through). `metricsSnapshot()` returns aggregate decision counters, global
-level, store latency — no identity labels. Decisions are logged through the
-app's `logger` (info for decisions, warning for denials) with
-scope/action/score/reasons only — never an IP or cookie value.
+confirmations split into two paths:
+`recordConfirmedReputation()` / `confirmedLegitimate()` /
+`confirmedAbuse()` (all requiring the `decisionId` of the decision being
+confirmed — the engine throws `InvalidArgumentException` without it; the
+gateway passes it through) are the CONTEXT-FUL path — the engine confirms
+the decision atomically against its calibration receipt and records the
+reputation event against the source/session/principal signals.
+`confirmDecisionOutcome()` is the CALIBRATION-ONLY path for DELAYED
+confirmations (email confirmation, fraud review, chargeback, moderation):
+just a decision id + outcome — no IP, no scope, no session — and an
+optional inverse sampling probability (`$samplingProbabilityPpm`,
+weight = 1_000_000/ppm) for weighted calibration. `metricsSnapshot()`
+returns aggregate decision counters, global level, store latency — no
+identity labels. Decisions are logged through the app's `logger` (info for
+decisions, warning for denials) with scope/action/score/reasons only —
+never an IP or cookie value.
 
 ## Usage
 

@@ -14,15 +14,21 @@ use KiwiCaptcha\Risk\ResourcePressure;
  *  - argonCapacity: remaining slots of the Redis-backed Argon2id admission
  *    semaphore (0 = saturated, 1000 = idle). Null semaphore (no Redis
  *    semaphore wired, or argon_capacity.enabled = false) -> nominal 1000.
+ *    An UNKNOWN usage — the semaphore is wired but its live-lease read
+ *    failed (usage() -> null) — is treated CONSERVATIVELY as 0 (saturated):
+ *    the policy's capacity paths then escalate Argon to Sha20/StepUp
+ *    instead of admitting more memory-hard work on a gate that cannot be
+ *    measured (never fabricate headroom for a resource that is not
+ *    observable).
  *  - issuanceCapacity: REAL per-second issuance headroom from the atomic
  *    Redis issuance-rate signal ({kiwi:<ns>}:issuance:<second>, incremented
  *    by the challenge controller on every minted challenge) as the REMAINING
- *    FRACTION of the configured hard_limits.process_per_second:
+ *    FRACTION of the deployment-wide resource_capacity.issuance_per_second:
  *    clamp(round(max(0, cap - rate) * 1000 / cap), 0..1000) — 100% remaining
  *    -> 1000, 50% -> 500, 10% -> 100, 0% -> 0 (the ResourcePressure contract
  *    is fixed-point 0..1000; 1000 = full headroom, and the policy denies when
  *    headroom drops below 100). A counter unbounded by a cap
- *    (process_per_second <= 0) or an unavailable counter (no client / Redis
+ *    (issuance_per_second <= 0) or an unavailable counter (no client / Redis
  *    failure) -> nominal 1000.
  *
  * The whole snapshot() is cached for 100 ms (in-process timestamp cache):
@@ -30,14 +36,18 @@ use KiwiCaptcha\Risk\ResourcePressure;
  * risk-state round trip, instead of a PING + two semaphore queries per
  * request.
  *
- * Any source that cannot be observed reports the nominal 1000 — pressure is
- * an availability signal and an unavailable source must never fabricate
- * artificial scarcity. The policy's capacity-denial paths
- * (issuanceCapacity < 100 denies, argonCapacity < 300 degrades Argon to
- * Sha20) therefore only engage when the bundle can actually measure the
- * resource. Risk-backend health is NOT part of this snapshot anymore: the
- * engine's degraded mode consumes the shared circuit breaker directly (the
- * breaker is wired into the engine), so the provider never needs it.
+ * The two dimensions are asymmetric on an unobservable source by design:
+ * an unobservable issuance COUNTER reports nominal 1000 (pressure is an
+ * availability signal and an unavailable source must never fabricate
+ * artificial scarcity), while an unobservable Argon GATE reports 0 (the
+ * gate bounds a real memory resource — when it cannot be measured, assume
+ * it is saturated rather than admit unbounded Argon work). The policy's
+ * capacity-denial paths (issuanceCapacity < 100 denies, argonCapacity < 300
+ * degrades Argon to Sha20) therefore only engage on measured scarcity for
+ * issuance, and on BOTH measured and unknown scarcity for Argon.
+ * Risk-backend health is NOT part of this snapshot anymore: the engine's
+ * degraded mode consumes the shared circuit breaker directly (the breaker
+ * is wired into the engine), so the provider never needs it.
  */
 final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
 {
@@ -56,7 +66,7 @@ final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
         private readonly ?RedisAdmissionSemaphore $semaphore = null,
         private readonly \Redis|\Predis\Client|null $redis = null,
         private readonly string $issuanceKeyPrefix = '{kiwi:kiwi}:issuance:',
-        private readonly int $processPerSecond = 10000,
+        private readonly int $issuancePerSecond = 20000,
     ) {
     }
 
@@ -86,14 +96,21 @@ final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
         if ($capacity <= 0) {
             return 1000;
         }
-        $usage = max(0, min($capacity, $this->semaphore->usage()));
+        $usage = $this->semaphore->usage();
+        if ($usage === null) {
+            // Unknown usage (backend unavailable): conservative 0 — the
+            // policy escalates Argon to Sha20/StepUp instead of admitting
+            // more memory-hard work on an unmeasurable gate.
+            return 0;
+        }
+        $usage = max(0, min($capacity, $usage));
 
         return max(0, min(1000, (int) round((1 - $usage / $capacity) * 1000)));
     }
 
     private function issuanceCapacity(): int
     {
-        if ($this->redis === null || $this->processPerSecond <= 0) {
+        if ($this->redis === null || $this->issuancePerSecond <= 0) {
             return 1000;
         }
         try {
@@ -103,8 +120,8 @@ final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
             return 1000;
         }
 
-        $remaining = max(0, $this->processPerSecond - $rate);
+        $remaining = max(0, $this->issuancePerSecond - $rate);
 
-        return max(0, min(1000, (int) round($remaining * 1000 / $this->processPerSecond)));
+        return max(0, min(1000, (int) round($remaining * 1000 / $this->issuancePerSecond)));
     }
 }

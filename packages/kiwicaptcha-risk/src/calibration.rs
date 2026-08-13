@@ -5,32 +5,34 @@
 //! The store is Redis-backed and BOUNDED (identical design to PHP):
 //!
 //! - Hourly aggregate buckets `{kiwi:<ns>}:cal:<scope>:<hour>` (hour =
-//!   `now_ms / 3600000`, integer) — a hash of
-//!   `b<band>a<action>:legit` / `b<band>a<action>:abuse` counters,
-//!   `HINCRBY` + `EXPIRE 48h`. At most 24 keys per scope are ever read.
-//! - Decision receipts `{kiwi:<ns>}:cal:receipt:<decision_id>` — HSET
-//!   scope/band/action, EXPIRE 300 s, consumed with GETDEL.
+//!   `now_ms / 3600000`, integer) — a hash of flat fields
+//!   `legit_count` / `legit_score_sum` / `abuse_count` / `abuse_score_sum`
+//!   (EXACT scores, not band-quantized), written by
+//!   `HINCRBYFLOAT` + `EXPIRE 48h`. At most 24 keys per scope are ever read.
+//! - Decision receipts `{kiwi:<ns>}:cal:receipt:<decision_id>` — a STRING
+//!   JSON `{"scope":..,"band":..,"action":"..","score":..,"sampled":0|1}`,
+//!   EXPIRE `receipt_ttl_secs`, consumed ONCE by the atomic confirm script.
 //!
 //! Bias (byte-identical integer math with PHP, ALL i64 truncating division,
 //! executed inside ONE canonical Lua invocation — the script at
 //! `resources/calibration.lua`, shared verbatim with PHP):
 //!
-//! TRUE SCORE calibration (not prevalence adaptation): each confirmed
-//! observation is weighted by the ORIGINAL decision's risk band
-//! (predicted_risk = band * 100):
+//! EXACT SCORE calibration (not prevalence adaptation): each confirmed
+//! observation carries its original risk score (0..1000):
 //!
 //! ```text
-//! fn_pressure = Σ abuse × (1000 − band×100)
-//! fp_pressure = Σ legit × (band×100)
-//! total       = legit + abuse              (summed over the last 24 buckets)
+//! fn_pressure = Σ abuse × 1000 − Σ abuse_scores   (abuse_count × 1000 − abuse_score_sum)
+//! fp_pressure = Σ legit_scores                    (legit_score_sum)
+//! total       = legit_count + abuse_count          (summed over the last 24 buckets)
 //! raw         = (fn_pressure − fp_pressure) × 2 / (total × 10)
 //! bias        = clamp(raw, −max_adjustment, +max_adjustment)   (default ±150)
 //! ```
 //!
-//! A perfectly separating classifier (legit @ band 0, abuse @ band 10)
-//! contributes ~zero pressure and stays near bias 0; abuse predicted at low
-//! risk pushes the bias UP, legitimate traffic predicted at high risk
-//! pushes it DOWN. The target is 0 below `min_samples` (default 1000).
+//! A perfectly separating classifier (legit at low scores, abuse at high
+//! scores) contributes ~zero pressure and stays near bias 0; abuse
+//! predicted at low risk pushes the bias UP, legitimate traffic predicted
+//! at high risk pushes it DOWN. The target is 0 below `min_samples`
+//! (default 1000).
 //!
 //! The rate limiter is PROPORTIONAL to elapsed time and applies to the
 //! PATH, not just the target: internal bias is stored in MILLI-POINTS at
@@ -42,10 +44,19 @@
 //! threshold the stored bias still moves toward 0 through the same rate
 //! limiter (never an instant snap) — all atomically in the one script.
 //!
+//! Confirmation is ATOMIC via `resources/confirm.lua` (one script
+//! invocation: GET receipt → DEL → HINCRBYFLOAT into the bucket → EXPIRE):
+//! there is no crash window between consuming the receipt and recording
+//! the outcome. In random-sample mode an unsampled decision is discarded
+//! (deleted, never counted) so a label can never select itself into the
+//! calibration population; weighted mode applies the caller's inverse
+//! sampling probability as a float weight.
+//!
 //! `bias_for_scope` caches the per-scope result in-process for 30 s (bounded
 //! to ~1024 scopes, oldest evicted): cache hits make ZERO Redis calls (0 is
-//! cached too). The engine applies `clamp(base + bias, 0, 1000)` BEFORE band
-//! mapping.
+//! cached too). Recording a confirmed outcome invalidates the scope's entry
+//! so the next assessment re-aggregates. The engine applies
+//! `clamp(base + bias, 0, 1000)` BEFORE band mapping.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -65,25 +76,69 @@ pub enum CalibrationError {
     Backend(String),
 }
 
-/// The receipt stored for one decision, consumed when the outcome is
-/// confirmed (GETDEL).
+/// Outcome-confirmation sampling strategy (wire ints shared with PHP:
+/// 0 complete, 1 random_sample, 2 weighted).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CalibrationReceipt {
-    pub scope: u32,
-    pub band: u8,
-    pub action: RiskAction,
+pub enum SamplingMode {
+    /// Every confirmed outcome is recorded (weight 1.0).
+    Complete,
+    /// Only decisions whose receipt was registered with `sampled: 1` are
+    /// recorded; the confirm script discards the rest (a label can never
+    /// select itself into the calibration population).
+    RandomSample,
+    /// Every decision is sampled; the caller supplies the inverse sampling
+    /// probability as the confirm weight so the population stays unbiased.
+    Weighted,
+}
+
+impl SamplingMode {
+    /// The ARGV[1] wire int shared with `resources/confirm.lua`.
+    fn as_int(self) -> u8 {
+        match self {
+            SamplingMode::Complete => 0,
+            SamplingMode::RandomSample => 1,
+            SamplingMode::Weighted => 2,
+        }
+    }
 }
 
 /// Outcome-feedback calibration store.
 pub trait CalibrationStore: Send + Sync {
-    /// Records one confirmed outcome into the current hourly bucket.
-    fn record(
+    /// Registers the calibration receipt of one issued decision: a STRING
+    /// JSON `{"scope":..,"band":..,"action":"..","score":..,"sampled":0|1}`
+    /// with EXPIRE `receipt_ttl_secs`. `score` is the decision's EXACT risk
+    /// score (0..1000); `sampled` is the [`CalibrationStore::sample`] flag.
+    fn record_receipt(
         &self,
+        decision_id: &str,
         scope: u32,
         band: u8,
         action: RiskAction,
-        legitimate: bool,
+        score: u32,
+        sampled: bool,
     ) -> Result<(), CalibrationError>;
+
+    /// Confirms the outcome of one decision ATOMICALLY (one canonical Lua
+    /// invocation — `resources/confirm.lua`): consumes the receipt and
+    /// records the exact score into the scope's current hourly bucket, or
+    /// discards an unsampled receipt in random-sample mode.
+    ///
+    /// `Ok(Some(scope))` when the outcome was recorded, `Ok(None)` when the
+    /// receipt is missing/already consumed/discarded. `weight` is the
+    /// HINCRBYFLOAT weight (default 1.0; the inverse sampling probability
+    /// in weighted mode). Any backend failure is an error (the engine
+    /// treats calibration as best-effort).
+    fn confirm_outcome(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+    ) -> Result<Option<u32>, CalibrationError>;
+
+    /// The sampling flag stamped on every new receipt: Complete/Weighted
+    /// always sample; RandomSample samples with probability
+    /// `sampling_probability_ppm / 1_000_000`.
+    fn sample(&self) -> bool;
 
     /// Bias adjustment for a scope at `now_ms` (epoch milliseconds).
     ///
@@ -93,42 +148,6 @@ pub trait CalibrationStore: Send + Sync {
     /// in-process for 30 s (hits make no backend calls; 0 is cached too).
     /// Any backend failure returns 0 (fail-open).
     fn bias_for_scope(&self, scope: u32, now_ms: i64) -> i32;
-
-    /// Registers the calibration receipt of one issued decision.
-    fn record_receipt(
-        &self,
-        decision_id: &str,
-        scope: u32,
-        band: u8,
-        action: RiskAction,
-    ) -> Result<(), CalibrationError>;
-
-    /// Consumes (GETDEL) the receipt for a decision_id, if it is still
-    /// alive. `None` when absent or expired.
-    fn consume_receipt(&self, decision_id: &str) -> Option<CalibrationReceipt>;
-}
-
-/// Maps a risk score to its band (`score / 100`) and records the outcome
-/// with the action that was taken (PHP `CalibrationRecorder` equivalent).
-pub struct CalibrationRecorder<'a> {
-    store: &'a dyn CalibrationStore,
-}
-
-impl<'a> CalibrationRecorder<'a> {
-    pub fn new(store: &'a dyn CalibrationStore) -> CalibrationRecorder<'a> {
-        CalibrationRecorder { store }
-    }
-
-    pub fn record(
-        &self,
-        scope: u32,
-        score: u16,
-        action: RiskAction,
-        legitimate: bool,
-    ) -> Result<(), CalibrationError> {
-        let band = (score.clamp(0, 1000) / 100) as u8;
-        self.store.record(scope, band, action, legitimate)
-    }
 }
 
 /// Redis-backed bounded aggregator implementing the calibration contract.
@@ -140,8 +159,11 @@ pub struct RedisCalibrationStore {
     max_adjustment: i32,
     max_change_per_minute: i32,
     receipt_ttl_secs: u64,
+    mode: SamplingMode,
+    sampling_probability_ppm: u32,
     cache: Mutex<BiasCache>,
     script: redis::Script,
+    confirm_script: redis::Script,
     script_calls: AtomicUsize,
 }
 
@@ -199,6 +221,12 @@ impl BiasCache {
 /// per-minute allowance and returns the final integer bias in points.
 const CALIBRATION_LUA: &str = include_str!("../resources/calibration.lua");
 
+/// The CANONICAL atomic confirm script, shared verbatim with PHP
+/// (`protocol/risk-v1/confirm.lua`). One invocation consumes the receipt
+/// (DEL) and records the exact score into the bucket (HINCRBYFLOAT +
+/// EXPIRE) — or discards an unsampled receipt in random-sample mode.
+const CONFIRM_LUA: &str = include_str!("../resources/confirm.lua");
+
 impl RedisCalibrationStore {
     /// Bucket retention (48 h; 24 buckets per scope are ever read).
     pub const BUCKET_EXPIRE_S: u64 = 48 * 3600;
@@ -213,6 +241,10 @@ impl RedisCalibrationStore {
     pub const DEFAULT_MAX_ADJUSTMENT: i32 = 150;
     /// Maximum bias movement per minute.
     pub const DEFAULT_MAX_CHANGE_PER_MINUTE: i32 = 10;
+    /// Default confirmation sampling strategy.
+    pub const DEFAULT_MODE: SamplingMode = SamplingMode::RandomSample;
+    /// Default random-sample probability (100_000 ppm = 10 %).
+    pub const DEFAULT_SAMPLING_PROBABILITY_PPM: u32 = 100_000;
     /// In-process per-scope bias cache TTL.
     pub const CACHE_TTL_S: u64 = 30;
     /// Bounded in-process cache capacity (oldest entries are evicted).
@@ -275,6 +307,40 @@ impl RedisCalibrationStore {
         max_change_per_minute: i32,
         receipt_ttl_secs: u64,
     ) -> RedisCalibrationStore {
+        RedisCalibrationStore::with_options(
+            client,
+            namespace,
+            min_samples,
+            max_adjustment,
+            max_change_per_minute,
+            receipt_ttl_secs,
+            Self::DEFAULT_MODE,
+            Self::DEFAULT_SAMPLING_PROBABILITY_PPM,
+        )
+    }
+
+    /// Builds a store with every calibration knob explicit: the safety
+    /// limits, the receipt lifetime and the confirmation sampling strategy
+    /// (`mode` + `sampling_probability_ppm`, default RandomSample / 100_000
+    /// — preserved by the [`RedisCalibrationStore::with_limits`] and
+    /// [`RedisCalibrationStore::with_receipt_ttl`] shorthands).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the namespace is empty or contains `{`/`}`, if
+    /// `min_samples < 1` / `max_adjustment < 0` / `max_change_per_minute < 0`,
+    /// or if `receipt_ttl_secs < 1`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_options(
+        client: redis::Client,
+        namespace: &str,
+        min_samples: i64,
+        max_adjustment: i32,
+        max_change_per_minute: i32,
+        receipt_ttl_secs: u64,
+        mode: SamplingMode,
+        sampling_probability_ppm: u32,
+    ) -> RedisCalibrationStore {
         assert!(
             !namespace.is_empty() && !namespace.contains(['{', '}']),
             "Calibration namespace must be non-empty and free of braces"
@@ -294,11 +360,14 @@ impl RedisCalibrationStore {
             max_adjustment,
             max_change_per_minute,
             receipt_ttl_secs,
+            mode,
+            sampling_probability_ppm,
             cache: Mutex::new(BiasCache::new(
                 Self::CACHE_CAP,
                 Duration::from_secs(Self::CACHE_TTL_S),
             )),
             script: redis::Script::new(CALIBRATION_LUA),
+            confirm_script: redis::Script::new(CONFIRM_LUA),
             script_calls: AtomicUsize::new(0),
         }
     }
@@ -322,28 +391,42 @@ impl RedisCalibrationStore {
             .insert(scope, bias, now);
     }
 
-    /// Records into an EXPLICIT hourly bucket (`now_ms` injected — used by
-    /// tests; `record` uses the current clock).
+    /// Seeds an EXPLICIT hourly bucket with one exact-score observation
+    /// (flat fields `legit_count` / `legit_score_sum` /
+    /// `abuse_count` / `abuse_score_sum`, `HINCRBYFLOAT` + `EXPIRE 48h` —
+    /// the exact wire shape `resources/confirm.lua` produces; `now_ms`
+    /// injected so tests can pin the hour). Ops/tests seeding: the
+    /// production confirm path is [`CalibrationStore::confirm_outcome`].
     pub fn record_at(
         &self,
         scope: u32,
-        band: u8,
-        action: RiskAction,
+        score: u32,
         legitimate: bool,
         now_ms: i64,
     ) -> Result<(), CalibrationError> {
         let hour = now_ms / 3_600_000;
         let key = self.bucket_key(scope, hour);
-        let field = format!(
-            "b{band}a{}:{}",
-            action.as_str(),
-            if legitimate { "legit" } else { "abuse" }
-        );
+        let (count_field, sum_field) = if legitimate {
+            ("legit_count", "legit_score_sum")
+        } else {
+            ("abuse_count", "abuse_score_sum")
+        };
         let mut guard = self.connection()?;
         let conn = guard.as_mut().ok_or_else(|| {
             CalibrationError::Backend("calibration connection vanished".to_string())
         })?;
-        conn.hincr::<_, _, _, ()>(&key, field, 1).map_err(backend)?;
+        redis::cmd("HINCRBYFLOAT")
+            .arg(&key)
+            .arg(count_field)
+            .arg(1.0)
+            .query::<()>(conn)
+            .map_err(backend)?;
+        redis::cmd("HINCRBYFLOAT")
+            .arg(&key)
+            .arg(sum_field)
+            .arg(score as f64)
+            .query::<()>(conn)
+            .map_err(backend)?;
         conn.expire::<_, ()>(&key, Self::BUCKET_EXPIRE_S as i64)
             .map_err(backend)?;
         // A fresh outcome invalidates the scope's cached bias so the next
@@ -394,16 +477,6 @@ fn now_ms() -> i64 {
 }
 
 impl CalibrationStore for RedisCalibrationStore {
-    fn record(
-        &self,
-        scope: u32,
-        band: u8,
-        action: RiskAction,
-        legitimate: bool,
-    ) -> Result<(), CalibrationError> {
-        self.record_at(scope, band, action, legitimate, now_ms())
-    }
-
     fn bias_for_scope(&self, scope: u32, now_ms: i64) -> i32 {
         let now = Instant::now();
         // Cache hit (including a cached 0): ZERO Redis calls.
@@ -456,6 +529,8 @@ impl CalibrationStore for RedisCalibrationStore {
         scope: u32,
         band: u8,
         action: RiskAction,
+        score: u32,
+        sampled: bool,
     ) -> Result<(), CalibrationError> {
         let key = self.receipt_key(decision_id);
         let mut guard = self.connection()?;
@@ -463,13 +538,16 @@ impl CalibrationStore for RedisCalibrationStore {
             CalibrationError::Backend("calibration connection vanished".to_string())
         })?;
         // Wire format shared with PHP: a JSON string
-        // {"scope":..,"band":..,"action":".."} with EXPIRE `receipt_ttl_secs`
-        // (default 300 s), consumed once, atomically, via GETDEL (GETDEL is
-        // STRING-only in Redis).
+        // {"scope":..,"band":..,"action":"..","score":..,"sampled":0|1}
+        // with EXPIRE `receipt_ttl_secs` (default 300 s), consumed once,
+        // atomically, by the confirm script (GETDEL would lose the exact
+        // score; the script DELs and increments in the same invocation).
         let json = serde_json::json!({
             "scope": scope,
             "band": band,
             "action": action.as_str(),
+            "score": score.clamp(0, 1000),
+            "sampled": sampled as u8,
         })
         .to_string();
         redis::cmd("SET")
@@ -482,25 +560,84 @@ impl CalibrationStore for RedisCalibrationStore {
         Ok(())
     }
 
-    fn consume_receipt(&self, decision_id: &str) -> Option<CalibrationReceipt> {
-        let key = self.receipt_key(decision_id);
-        let mut guard = self.connection().ok()?;
-        let conn = guard.as_mut()?;
-        let json: Option<String> = redis::cmd("GETDEL").arg(&key).query(conn).ok()?;
-        let json = json?;
-        let value: serde_json::Value = serde_json::from_str(&json).ok()?;
-        Some(CalibrationReceipt {
-            scope: value.get("scope")?.as_u64()?.try_into().ok()?,
-            band: value.get("band")?.as_u64()?.try_into().ok()?,
-            action: value.get("action")?.as_str()?.parse().ok()?,
+    fn confirm_outcome(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+    ) -> Result<Option<u32>, CalibrationError> {
+        let receipt_key = self.receipt_key(decision_id);
+        let mut guard = self.connection()?;
+        let conn = guard.as_mut().ok_or_else(|| {
+            CalibrationError::Backend("calibration connection vanished".to_string())
+        })?;
+
+        // Key discovery: the bucket key needs the receipt's scope, which
+        // only the receipt itself carries. The pre-read GET is
+        // NON-destructive — the confirm script re-checks the receipt under
+        // the same key, so a concurrent consumption simply yields 0 (the
+        // outcome is recorded exactly once) and a receipt deleted in
+        // between is a no-op, never a double record.
+        let raw: Option<String> = redis::cmd("GET")
+            .arg(&receipt_key)
+            .query(conn)
+            .map_err(backend)?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => return Ok(None), // malformed: script would discard it
+        };
+        let Some(scope) = value.get("scope").and_then(|v| v.as_u64()) else {
+            return Ok(None);
+        };
+        let Ok(scope) = u32::try_from(scope) else {
+            return Ok(None);
+        };
+        let bucket_key = self.bucket_key(scope, now_ms() / 3_600_000);
+
+        // ONE canonical script invocation: GET receipt -> DEL -> (discard
+        // or) HINCRBYFLOAT the exact score into the bucket + EXPIRE. ARGV =
+        // mode int, weight (float; default 1.0), legitimate 1/0,
+        // bucket TTL.
+        let mut invoke = self.confirm_script.prepare_invoke();
+        invoke.key(receipt_key.as_str());
+        invoke.key(bucket_key.as_str());
+        invoke.arg(self.mode.as_int().to_string());
+        invoke.arg(weight.unwrap_or(1.0).to_string());
+        invoke.arg(if legitimate { "1" } else { "0" });
+        invoke.arg(Self::BUCKET_EXPIRE_S.to_string());
+        let recorded: i64 = invoke.invoke(conn).map_err(backend)?;
+        if recorded != 0 {
+            // A recorded outcome invalidates the scope's cached bias so the
+            // next assessment re-aggregates (same as the old record path).
+            self.cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entries
+                .remove(&scope);
+        }
+        Ok(if recorded == 0 {
+            None
+        } else {
+            Some(recorded as u32)
         })
+    }
+
+    fn sample(&self) -> bool {
+        match self.mode {
+            SamplingMode::Complete | SamplingMode::Weighted => true,
+            SamplingMode::RandomSample => {
+                rand::random::<u32>() % 1_000_000 < self.sampling_probability_ppm
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     const T0: i64 = 1_700_000_000_000;
 
@@ -564,22 +701,52 @@ mod tests {
     fn fill(
         store: &RedisCalibrationStore,
         scope: u32,
-        band: u8,
-        action: RiskAction,
+        score: u32,
         legit: i64,
         abuse: i64,
         at: i64,
     ) {
         for _ in 0..legit {
-            store.record_at(scope, band, action, true, at).unwrap();
+            store.record_at(scope, score, true, at).unwrap();
         }
         for _ in 0..abuse {
-            store.record_at(scope, band, action, false, at).unwrap();
+            store.record_at(scope, score, false, at).unwrap();
         }
     }
 
+    /// A store in an explicit sampling mode on a fresh namespace.
+    fn store_mode(prefix: &str, mode: SamplingMode, ppm: u32) -> RedisCalibrationStore {
+        RedisCalibrationStore::with_options(
+            client(),
+            &unique_namespace(prefix),
+            1,
+            150,
+            10,
+            300,
+            mode,
+            ppm,
+        )
+    }
+
+    fn hget_f64(conn: &mut redis::Connection, key: &str, field: &str) -> f64 {
+        let v: Option<String> = redis::cmd("HGET")
+            .arg(key)
+            .arg(field)
+            .query(conn)
+            .expect("hget");
+        v.map(|s| s.parse().expect("float")).unwrap_or(0.0)
+    }
+
+    fn bucket_key(ns: &str, scope: u32) -> String {
+        format!("{{kiwi:{ns}}}:cal:{scope}:{}", now_ms() / 3_600_000)
+    }
+
+    fn receipt_key(ns: &str, id: &str) -> String {
+        format!("{{kiwi:{ns}}}:cal:receipt:{id}")
+    }
+
     #[test]
-    fn bias_formula_is_score_sensitive() {
+    fn bias_formula_is_exact_score_sensitive() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
@@ -590,10 +757,11 @@ mod tests {
         // the raw value is reached in full.
         let s = store_limits("bias", 1, 150, 100_000);
 
-        // Perfect separator: legit predicted at band 0 + abuse predicted at
-        // band 10 -> ~zero pressure on both sides -> bias stays ~0.
-        fill(&s, 1, 0, RiskAction::Allow, 10, 0, T0);
-        fill(&s, 1, 10, RiskAction::Deny, 0, 10, T0);
+        // Perfect separator: legit predicted at score 100 (fp = 10*100 =
+        // 1000) + abuse predicted at score 900 (fn = 10*1000 - 10*900 =
+        // 1000) -> exactly zero pressure on both sides -> bias stays ~0.
+        fill(&s, 1, 100, 10, 0, T0);
+        fill(&s, 1, 900, 0, 10, T0);
         assert_eq!(s.bias_for_scope(1, T0), 0, "first call seeds the state");
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, T0 + 60_000),
@@ -601,30 +769,30 @@ mod tests {
             "a perfectly separating classifier contributes no bias"
         );
 
-        // Abuse predicted at LOW risk (band 1): the engine under-predicted
-        // the threat -> bias moves UP: fn = 10*900 = 9000;
+        // Abuse predicted at LOW score (100): the engine under-predicted
+        // the threat -> bias moves UP: fn = 10*1000 - 10*100 = 9000;
         // raw = (9000*2)/(10*10) = 180 -> clamped to max_adjustment 150.
-        fill(&s, 2, 1, RiskAction::Sha16, 0, 10, T0);
+        fill(&s, 2, 100, 0, 10, T0);
         assert_eq!(s.bias_for_scope(2, T0), 0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(2, T0 + 60_000),
             150
         );
 
-        // Legit traffic predicted at HIGH risk (band 9): the engine
+        // Legit traffic predicted at HIGH score (900): the engine
         // over-predicted -> bias moves DOWN: fp = 10*900 = 9000 -> -180 ->
         // clamped -150.
-        fill(&s, 3, 9, RiskAction::Sha20, 10, 0, T0);
+        fill(&s, 3, 900, 10, 0, T0);
         assert_eq!(s.bias_for_scope(3, T0), 0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(3, T0 + 60_000),
             -150
         );
 
-        // Mixed: 60 legit@band9 (fp 54000) + 40 abuse@band1 (fn 36000):
+        // Mixed: 60 legit@900 (fp 54000) + 40 abuse@100 (fn 36000):
         // (-18000*2)/(100*10) = -36.
-        fill(&s, 4, 9, RiskAction::Sha20, 60, 0, T0);
-        fill(&s, 4, 1, RiskAction::Sha16, 0, 40, T0);
+        fill(&s, 4, 900, 60, 0, T0);
+        fill(&s, 4, 100, 0, 40, T0);
         assert_eq!(s.bias_for_scope(4, T0), 0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(4, T0 + 60_000),
@@ -639,9 +807,9 @@ mod tests {
         );
 
         // Truncation toward zero, byte-identical with PHP trunc_div:
-        // abuse 2 @band1 (fn 1800) / legit 1 @band1 (fp 100) (total 3):
-        // (1700*2)/(3*10) = 3400/30 = 113.33 -> 113.
-        fill(&s, 5, 1, RiskAction::Sha16, 1, 2, T0);
+        // abuse 2 @score 100 (fn 1800) / legit 1 @score 100 (fp 100)
+        // (total 3): (1700*2)/(3*10) = 3400/30 = 113.33 -> 113.
+        fill(&s, 5, 100, 1, 2, T0);
         assert_eq!(s.bias_for_scope(5, T0), 0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(5, T0 + 60_000),
@@ -656,15 +824,15 @@ mod tests {
             return;
         };
         let s = store_limits("mins", 1000, 150, 10);
-        // 999 outcomes (all abuse@band1): below the threshold -> exactly 0,
-        // no bias (the state is still seeded: bias_mp = 0, ts = T0).
-        fill(&s, 1, 1, RiskAction::Sha16, 0, 999, T0);
+        // 999 outcomes (all abuse@score 100): below the threshold -> exactly
+        // 0, no bias (the state is still seeded: bias_mp = 0, ts = T0).
+        fill(&s, 1, 100, 0, 999, T0);
         assert_eq!(s.bias_for_scope(1, T0), 0);
         // The 1000th sample (record_at invalidates the cache) unlocks the
         // bias: raw 180 -> clamped to max_adjustment 150, but the
         // proportional allowance started at the seeded ts (T0): one minute
         // later it admits exactly max_change_per_minute = 10 points.
-        fill(&s, 1, 1, RiskAction::Sha16, 0, 1, T0);
+        fill(&s, 1, 100, 0, 1, T0);
         assert_eq!(
             store_on(s.namespace(), 1000, 150, 10).bias_for_scope(1, T0 + 60_000),
             10
@@ -678,7 +846,7 @@ mod tests {
             return;
         };
         let s = store_limits("roc", 1, 150, 60);
-        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0);
+        fill(&s, 1, 100, 0, 10, T0);
         // First call seeds bias_mp = 0 / ts = T0: the raw 150 is clamped
         // against 0 by a zero allowance.
         assert_eq!(s.bias_for_scope(1, T0), 0);
@@ -695,13 +863,12 @@ mod tests {
             10
         );
 
-        // Flip to legit predicted at HIGH risk: 1000 legit@band9 (fp
-        // 900000) vs the 10 abuse@band1 (fn 9000): raw = (-891000*2)/
-        // (1010*10) = -176 -> clamped -150, but the allowance from the last
-        // ts (T0 + 10 s) over 50 s is 60 * 1000 * 50000 / 60000 =
-        // 50000 mp = 50 points: 10 - 50 = -40 (truncating division, byte
-        // identical with PHP).
-        fill(&s, 1, 9, RiskAction::Sha20, 1000, 0, T0);
+        // Flip to legit predicted at HIGH score: 1000 legit@900 (fp 900000)
+        // vs the 10 abuse@100 (fn 9000): raw = (-891000*2)/(1010*10) = -176
+        // -> clamped -150, but the allowance from the last ts (T0 + 10 s)
+        // over 50 s is 60 * 1000 * 50000 / 60000 = 50000 mp = 50 points:
+        // 10 - 50 = -40 (truncating division, byte identical with PHP).
+        fill(&s, 1, 900, 1000, 0, T0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 60).bias_for_scope(1, T0 + 60_000),
             -40
@@ -715,7 +882,7 @@ mod tests {
             return;
         };
         let s = store_limits("bthr", 1, 150, 60);
-        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0);
+        fill(&s, 1, 100, 0, 10, T0);
         assert_eq!(s.bias_for_scope(1, T0), 0);
         // 60 s after the seed the allowance is exactly 60 points: raw 150 ->
         // 60 (60 * 1000 * 60000 / 60000 milli-points).
@@ -754,7 +921,7 @@ mod tests {
             return;
         };
         let s = store_limits("cache", 1, 150, 100_000);
-        fill(&s, 7, 1, RiskAction::Sha16, 0, 10, T0);
+        fill(&s, 7, 100, 0, 10, T0);
         assert_eq!(s.bias_for_scope(7, T0), 0);
         // Exactly ONE canonical script invocation over 24 bucket keys + the
         // state key (the old hot path issued TWO scripts).
@@ -800,26 +967,87 @@ mod tests {
             return;
         };
         let s = store_limits("inval", 1, 150, 100_000);
-        // 10 abuse@band1 (fn 9000) + 90 legit@band1 (fp 9000) -> raw 0:
-        // a 1:9 abuse:legit ratio at the same band balances the pressures.
-        fill(&s, 7, 1, RiskAction::Sha16, 0, 10, T0);
+        // 10 abuse@100 (fn 9000) + 90 legit@100 (fp 9000) -> raw 0:
+        // a 1:9 abuse:legit ratio at the same score balances the pressures.
+        fill(&s, 7, 100, 90, 10, T0);
         assert_eq!(s.bias_for_scope(7, T0), 0);
         assert_eq!(s.script_calls(), 1);
         // Cache hit: no backend call.
         assert_eq!(s.bias_for_scope(7, T0 + 60_000), 0);
         assert_eq!(s.script_calls(), 1);
 
-        // A fresh outcome (record_at/record) drops the scope's cache entry:
-        // the next call re-invokes the script and serves the new aggregate.
+        // A fresh outcome (record_at) drops the scope's cache entry: the
+        // next call re-invokes the script and serves the new aggregate.
         for _ in 0..90 {
-            s.record_at(7, 1, RiskAction::Sha16, true, T0 + 3_600_000)
-                .unwrap();
+            s.record_at(7, 900, true, T0 + 3_600_000).unwrap();
         }
-        assert_eq!(s.bias_for_scope(7, T0 + 3_600_000), 0); // balanced -> raw 0
+        // 90 legit@100 + 90 legit@900 (fp 90000) vs 10 abuse@100 (fn 9000):
+        // raw = (-81000*2)/(190*10) = -85.26 -> -85.
+        assert_eq!(s.bias_for_scope(7, T0 + 3_600_000), -85);
         assert_eq!(
             s.script_calls(),
             2,
             "record() must invalidate the cached bias"
+        );
+    }
+
+    #[test]
+    fn confirm_invalidates_the_cached_bias_and_feeds_the_bias() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = RedisCalibrationStore::with_options(
+            client(),
+            &unique_namespace("cinv"),
+            1,
+            150,
+            100_000,
+            300,
+            SamplingMode::Complete,
+            0,
+        );
+        fill(&s, 7, 100, 0, 10, T0);
+        assert_eq!(s.bias_for_scope(7, T0), 0);
+        assert_eq!(s.script_calls(), 1);
+        // Cache hit: no backend call.
+        assert_eq!(s.bias_for_scope(7, T0 + 60_000), 0);
+        assert_eq!(s.script_calls(), 1);
+
+        // A confirm on the same scope drops the cache entry even though it
+        // lands in the CURRENT hour (outside the T0 window): the next call
+        // MUST re-invoke the script, which now serves the T0-window
+        // aggregate in full (10 abuse@100 -> raw 180 -> clamped 150; the
+        // state was seeded at T0, so the allowance is huge).
+        s.record_receipt("c-1", 7, 4, RiskAction::Sha16, 100, true)
+            .unwrap();
+        assert_eq!(s.confirm_outcome("c-1", false, None).unwrap(), Some(7));
+        assert_eq!(s.bias_for_scope(7, T0 + 60_000), 150);
+        assert_eq!(
+            s.script_calls(),
+            2,
+            "confirm_outcome must invalidate the cached bias"
+        );
+
+        // The confirmed exact score feeds the bias in the CURRENT window:
+        // a fresh scope (fresh state) seeded at the real now, queried one
+        // minute later by a COLD store (the in-process cache is
+        // Instant-based, so synthetic deltas must cross store instances) ->
+        // full raw 180 -> 150.
+        let s2 = store_on(s.namespace(), 1, 150, 100_000);
+        s2.record_receipt("c-2", 8, 4, RiskAction::Sha16, 100, true)
+            .unwrap();
+        assert_eq!(s2.confirm_outcome("c-2", false, None).unwrap(), Some(8));
+        let now = now_ms();
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(8, now),
+            0,
+            "first call seeds the state"
+        );
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(8, now + 60_000),
+            150,
+            "the confirmed abuse@100 must push the bias up"
         );
     }
 
@@ -850,12 +1078,12 @@ mod tests {
             return;
         };
         let s = store_limits("buckets", 1, 150, 100_000);
-        // Same scope, three hours: 30 abuse@band1 -> fn 27000 -> raw 180 ->
+        // Same scope, three hours: 30 abuse@100 -> fn 27000 -> raw 180 ->
         // clamped 150 (the first call seeds; a cold store one minute later
         // serves the raw in full).
-        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0);
-        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0 - 3_600_000);
-        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0 - 7_200_000);
+        fill(&s, 1, 100, 0, 10, T0);
+        fill(&s, 1, 100, 0, 10, T0 - 3_600_000);
+        fill(&s, 1, 100, 0, 10, T0 - 7_200_000);
         assert_eq!(s.bias_for_scope(1, T0), 0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, T0 + 60_000),
@@ -865,7 +1093,7 @@ mod tests {
         // Buckets older than 24 hours are out of the window (the record_at
         // fills invalidate the cache, so this re-aggregates; the total is
         // still 30 -> raw 150).
-        fill(&s, 1, 1, RiskAction::Sha16, 0, 100, T0 - 25 * 3_600_000);
+        fill(&s, 1, 100, 0, 100, T0 - 25 * 3_600_000);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, T0 + 120_000),
             150
@@ -886,7 +1114,7 @@ mod tests {
             10,
             1,
         );
-        s.record_receipt("decision-ttl", 7, 4, RiskAction::Argon16)
+        s.record_receipt("decision-ttl", 7, 4, RiskAction::Argon16, 900, true)
             .unwrap();
         let mut conn = client().get_connection().expect("connection");
         let ttl: i64 = redis::cmd("TTL")
@@ -900,7 +1128,7 @@ mod tests {
 
         // The default knob stays 300 s.
         let d = store("ttldef");
-        d.record_receipt("decision-def", 7, 4, RiskAction::Argon16)
+        d.record_receipt("decision-def", 7, 4, RiskAction::Argon16, 900, true)
             .unwrap();
         let ttl: i64 = redis::cmd("TTL")
             .arg(format!(
@@ -913,41 +1141,216 @@ mod tests {
     }
 
     #[test]
-    fn receipts_round_trip_and_consume_once() {
+    fn receipts_carry_score_and_sampled() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
-        let s = store("receipts");
-        s.record_receipt("decision-1", 7, 4, RiskAction::Argon16)
+        let s = store("rcarries");
+        s.record_receipt("decision-1", 7, 4, RiskAction::Argon16, 900, true)
             .unwrap();
-
-        let receipt = s.consume_receipt("decision-1");
-        assert_eq!(
-            receipt,
-            Some(CalibrationReceipt {
-                scope: 7,
-                band: 4,
-                action: RiskAction::Argon16,
-            })
-        );
-        // GETDEL: consumed exactly once.
-        assert_eq!(s.consume_receipt("decision-1"), None);
-
-        // Unknown id -> None (never errors).
-        assert_eq!(s.consume_receipt("decision-missing"), None);
+        s.record_receipt("decision-2", 8, 9, RiskAction::Deny, 1000, false)
+            .unwrap();
+        let mut conn = client().get_connection().expect("connection");
+        let json1: String = conn
+            .get(receipt_key(s.namespace(), "decision-1"))
+            .expect("get");
+        let value: serde_json::Value = serde_json::from_str(&json1).expect("json");
+        assert_eq!(value["scope"], 7);
+        assert_eq!(value["band"], 4);
+        assert_eq!(value["action"], "argon16");
+        assert_eq!(value["score"], 900);
+        assert_eq!(value["sampled"], 1);
+        let json2: String = conn
+            .get(receipt_key(s.namespace(), "decision-2"))
+            .expect("get");
+        let value: serde_json::Value = serde_json::from_str(&json2).expect("json");
+        assert_eq!(value["score"], 1000);
+        assert_eq!(value["sampled"], 0);
     }
 
     #[test]
-    fn recorder_maps_score_to_band() {
+    fn complete_mode_records_every_confirm() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
-        let store: Arc<dyn CalibrationStore> = Arc::new(store("recorder"));
-        let recorder = CalibrationRecorder::new(store.as_ref());
-        // Band from score, engine-side: recorded into the current hour.
-        let _ = recorder.record(1, 555, RiskAction::Sha20, true);
-        assert_eq!((555u16).clamp(0, 1000) / 100, 5);
+        let s = store_mode("complete", SamplingMode::Complete, 0);
+        assert!(s.sample(), "Complete mode always samples");
+        s.record_receipt("d-1", 7, 4, RiskAction::Argon16, 900, s.sample())
+            .unwrap();
+        assert_eq!(s.confirm_outcome("d-1", true, None).unwrap(), Some(7));
+        let mut conn = client().get_connection().expect("connection");
+        let key = bucket_key(s.namespace(), 7);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 1.0);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_score_sum"), 900.0);
+        assert_eq!(hget_f64(&mut conn, &key, "abuse_count"), 0.0);
+    }
+
+    #[test]
+    fn random_sample_discards_unsampled_confirms() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("rand", SamplingMode::RandomSample, 0);
+        assert!(!s.sample(), "ppm 0 never samples");
+
+        // Unsampled: discarded atomically (receipt deleted, no bucket
+        // fields, returns None).
+        s.record_receipt("d-unsampled", 7, 4, RiskAction::Argon16, 900, false)
+            .unwrap();
+        assert_eq!(
+            s.confirm_outcome("d-unsampled", true, None).unwrap(),
+            None,
+            "an unsampled receipt must be discarded"
+        );
+        let mut conn = client().get_connection().expect("connection");
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg(receipt_key(s.namespace(), "d-unsampled"))
+            .query(&mut conn)
+            .expect("exists");
+        assert_eq!(exists, 0, "the discarded receipt must be deleted");
+        let fields: Vec<(String, String)> =
+            conn.hgetall(bucket_key(s.namespace(), 7)).expect("hgetall");
+        assert!(
+            fields.is_empty(),
+            "a discarded confirm must not touch the bucket"
+        );
+
+        // Sampled: recorded.
+        s.record_receipt("d-sampled", 7, 4, RiskAction::Argon16, 900, true)
+            .unwrap();
+        assert_eq!(s.confirm_outcome("d-sampled", true, None).unwrap(), Some(7));
+        assert_eq!(
+            hget_f64(&mut conn, &bucket_key(s.namespace(), 7), "legit_count"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn weighted_mode_applies_the_weight() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("weighted", SamplingMode::Weighted, 0);
+        assert!(s.sample(), "Weighted mode always samples");
+        s.record_receipt("d-w", 7, 4, RiskAction::Argon16, 500, s.sample())
+            .unwrap();
+        // Inverse sampling probability 10: the outcome counts 10-fold.
+        assert_eq!(s.confirm_outcome("d-w", true, Some(10.0)).unwrap(), Some(7));
+        let mut conn = client().get_connection().expect("connection");
+        let key = bucket_key(s.namespace(), 7);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 10.0);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_score_sum"), 5000.0);
+    }
+
+    #[test]
+    fn confirm_outcome_records_and_consumes_once() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("confirm", SamplingMode::Complete, 0);
+        s.record_receipt("decision-1", 7, 4, RiskAction::Argon16, 900, true)
+            .unwrap();
+        assert_eq!(
+            s.confirm_outcome("decision-1", true, None).unwrap(),
+            Some(7)
+        );
+
+        // Consumed exactly once: the second confirm is a no-op.
+        assert_eq!(s.confirm_outcome("decision-1", true, None).unwrap(), None);
+
+        // Unknown id -> None (never errors).
+        assert_eq!(
+            s.confirm_outcome("decision-missing", true, None).unwrap(),
+            None
+        );
+
+        let mut conn = client().get_connection().expect("connection");
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg(receipt_key(s.namespace(), "decision-1"))
+            .query(&mut conn)
+            .expect("exists");
+        assert_eq!(exists, 0, "the consumed receipt must be deleted");
+        let key = bucket_key(s.namespace(), 7);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 1.0);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_score_sum"), 900.0);
+    }
+
+    #[test]
+    fn concurrent_double_confirm_records_once() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let ns = unique_namespace("race");
+        let s = RedisCalibrationStore::with_options(
+            client(),
+            &ns,
+            1,
+            150,
+            10,
+            300,
+            SamplingMode::Complete,
+            0,
+        );
+        s.record_receipt("race-1", 7, 4, RiskAction::Sha16, 500, true)
+            .unwrap();
+        // Two INDEPENDENT stores on the same namespace: no shared
+        // connection, so the race exercises the script's atomicity (the
+        // GETDEL+increment has no crash window; the loser sees no receipt).
+        let a = RedisCalibrationStore::with_options(
+            client(),
+            &ns,
+            1,
+            150,
+            10,
+            300,
+            SamplingMode::Complete,
+            0,
+        );
+        let b = RedisCalibrationStore::with_options(
+            client(),
+            &ns,
+            1,
+            150,
+            10,
+            300,
+            SamplingMode::Complete,
+            0,
+        );
+        std::thread::scope(|scope| {
+            let ha = scope.spawn(move || a.confirm_outcome("race-1", true, None));
+            let hb = scope.spawn(move || b.confirm_outcome("race-1", true, None));
+            let ra = ha.join().expect("thread").expect("confirm");
+            let rb = hb.join().expect("thread").expect("confirm");
+            let recorded = [ra, rb].iter().filter(|r| r.is_some()).count();
+            assert_eq!(recorded, 1, "exactly one concurrent confirm may record");
+        });
+        let mut conn = client().get_connection().expect("connection");
+        let key = bucket_key(&ns, 7);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 1.0);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_score_sum"), 500.0);
+    }
+
+    #[test]
+    fn sample_respects_sampling_probability() {
+        // Pure logic: no Redis connection is ever made.
+        let client = redis::Client::open("redis://127.0.0.1:6399").expect("url parses");
+        let make = |mode: SamplingMode, ppm: u32| {
+            RedisCalibrationStore::with_options(client.clone(), "smp", 1, 150, 10, 300, mode, ppm)
+        };
+        // Wire ints shared with PHP (confirm.lua ARGV[1]).
+        assert_eq!(SamplingMode::Complete.as_int(), 0);
+        assert_eq!(SamplingMode::RandomSample.as_int(), 1);
+        assert_eq!(SamplingMode::Weighted.as_int(), 2);
+        // Complete/Weighted always sample; RandomSample follows the ppm.
+        assert!(make(SamplingMode::Complete, 0).sample());
+        assert!(make(SamplingMode::Weighted, 0).sample());
+        assert!(!make(SamplingMode::RandomSample, 0).sample());
+        assert!(make(SamplingMode::RandomSample, 1_000_000).sample());
     }
 }

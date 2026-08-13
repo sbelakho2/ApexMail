@@ -13,14 +13,16 @@ use PHPUnit\Framework\TestCase;
 /**
  * Live resource-pressure provider: remaining Redis admission-semaphore slots
  * (argonCapacity) and real per-second issuance headroom as the REMAINING
- * FRACTION of the global cap (issuanceCapacity, fixed-point 0..1000: 100%
- * remaining -> 1000, 50% -> 500, 10% -> 100, 0% -> 0). The whole snapshot()
- * is cached in-process for ~100 ms so the hot path does at most one Redis
- * read per 100 ms. Any unobservable source must report the nominal 1000 —
- * pressure is an availability signal and an unavailable source must never
- * fabricate artificial scarcity. Risk-backend health is NOT a snapshot field
- * anymore: the engine's degraded mode consumes the shared circuit breaker
- * directly.
+ * FRACTION of the deployment-wide resource_capacity.issuance_per_second
+ * (issuanceCapacity, fixed-point 0..1000: 100% remaining -> 1000, 50% ->
+ * 500, 10% -> 100, 0% -> 0). The whole snapshot() is cached in-process for
+ * ~100 ms so the hot path does at most one Redis read per 100 ms. The two
+ * dimensions are asymmetric on an unobservable source: an unavailable
+ * issuance COUNTER reports the nominal 1000 (never fabricate artificial
+ * scarcity), while an UNKNOWN argon-gate usage reports 0 (conservative —
+ * never fabricate headroom for a memory resource that cannot be measured).
+ * Risk-backend health is NOT a snapshot field anymore: the engine's degraded
+ * mode consumes the shared circuit breaker directly.
  */
 final class RedisRiskHealthProviderTest extends TestCase
 {
@@ -72,6 +74,30 @@ final class RedisRiskHealthProviderTest extends TestCase
         self::assertSame(1000, $pressure->argonCapacity, 'a disabled cap (0) must report nominal, not zero');
     }
 
+    public function testArgonCapacityConservativeZeroWhenBackendUnknown(): void
+    {
+        // A wired semaphore whose live-usage read FAILS (backend unknown)
+        // must report 0 (saturated) — never nominal: the policy escalates
+        // Argon to Sha20/StepUp instead of admitting memory-hard work on a
+        // gate that cannot be measured.
+        $broken = new class extends \Predis\Client {
+            public function __call($commandID, $arguments)
+            {
+                if (strtoupper((string) $commandID) === 'EVAL') {
+                    throw new \RuntimeException('connection refused');
+                }
+
+                return null;
+            }
+        };
+        $semaphore = new RedisAdmissionSemaphore($broken, 4, 'cap-unknown');
+        self::assertNull($semaphore->usage(), 'usage() must report null (unknown), never 0, on a backend failure');
+
+        $pressure = (new RedisRiskHealthProvider($semaphore))->snapshot();
+        self::assertSame(0, $pressure->argonCapacity, 'an unknown usage must be treated conservatively as saturated (0)');
+        self::assertSame(1000, $pressure->issuanceCapacity, 'the issuance side stays nominal (no client wired)');
+    }
+
     public function testIssuanceHeadroomTracksTheLiveCounterAsFraction(): void
     {
         $client = $this->requirePredis();
@@ -85,10 +111,10 @@ final class RedisRiskHealthProviderTest extends TestCase
         $counter->record();
         $counter->record();
         self::assertSame(2, $client->counters[$key]);
-        self::assertSame(998, $provider()->snapshot()->issuanceCapacity, 'headroom = remaining fraction of process_per_second');
+        self::assertSame(998, $provider()->snapshot()->issuanceCapacity, 'headroom = remaining fraction of resource_capacity.issuance_per_second');
 
         $client->counters[$key] = 1000;
-        self::assertSame(0, $provider()->snapshot()->issuanceCapacity, 'rate at the global cap -> 0% remaining');
+        self::assertSame(0, $provider()->snapshot()->issuanceCapacity, 'rate at the deployment cap -> 0% remaining');
 
         $client->counters[$key] = 5000;
         self::assertSame(0, $provider()->snapshot()->issuanceCapacity, 'a burst above the cap clamps to zero, never negative');
@@ -121,12 +147,25 @@ final class RedisRiskHealthProviderTest extends TestCase
         self::assertSame(0, $provider('{kiwi:b5}:issuance:', 10000)->snapshot()->issuanceCapacity, '1/10000 remaining rounds to 0');
     }
 
+    public function testIssuanceCapacityOnTheDefaultDeploymentDenominator(): void
+    {
+        // The audit boundary pair on the DEFAULT resource_capacity
+        // denominator (20000): rate 0 -> full headroom; rate 19000 -> 50.
+        $client = $this->requirePredis();
+        $provider = fn (): RedisRiskHealthProvider => new RedisRiskHealthProvider(null, $client, '{kiwi:d1}:issuance:');
+
+        self::assertSame(1000, $provider()->snapshot()->issuanceCapacity, 'rate 0 on the default cap 20000 -> 100% remaining');
+
+        $client->counters[IssuanceCounter::rateKey('{kiwi:d1}:issuance:')] = 19000;
+        self::assertSame(50, $provider()->snapshot()->issuanceCapacity, 'cap 20000 rate 19000 -> 1000/20000 = 5% -> 50');
+    }
+
     public function testIssuanceNominalWhenCounterUnobservable(): void
     {
         // No client: no observability -> nominal.
         self::assertSame(1000, (new RedisRiskHealthProvider())->snapshot()->issuanceCapacity);
 
-        // A global cap of 0 (operator disabled the hard limit) -> nominal.
+        // A deployment cap of 0 (operator disabled the denominator) -> nominal.
         self::assertSame(1000, (new RedisRiskHealthProvider(null, $this->requirePredis(), '{kiwi:t}:issuance:', 0))->snapshot()->issuanceCapacity);
 
         // A failing client must never fabricate artificial scarcity.

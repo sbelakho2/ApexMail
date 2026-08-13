@@ -200,6 +200,27 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         self::assertSame(0, (new RedisAdmissionSemaphore($client, 0))->usage(), 'disabled cap reports 0 usage');
     }
 
+    public function testUsageReportsNullWhenBackendUnavailable(): void
+    {
+        // usage() must distinguish "unknown" from "zero": a backend failure
+        // returns null (never 0 — 0 means the gate is verifiably empty, null
+        // means it cannot be measured; the resource-pressure provider treats
+        // null conservatively as saturated).
+        $broken = new class extends \Predis\Client {
+            public function __call($commandID, $arguments)
+            {
+                if (strtoupper((string) $commandID) === 'EVAL') {
+                    throw new \RuntimeException('connection refused');
+                }
+
+                return null;
+            }
+        };
+        $semaphore = new RedisAdmissionSemaphore($broken, 2, 'usage-unknown');
+        self::assertNull($semaphore->usage(), 'a backend failure must report null (unknown), never 0');
+        self::assertSame(2, $semaphore->capacity(), 'the configured cap stays readable without the backend');
+    }
+
     public function testUsageIsAtomicLiveAndReapsExpiredLeases(): void
     {
         // usage() must be ATOMIC-LIVE: ONE Lua script (TIME -> prune ->

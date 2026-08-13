@@ -16,10 +16,15 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
  *  - ZSET primitives: ZADD, ZREM, ZREMRANGEBYSCORE, ZCARD, PEXPIRE — used by
  *    the tokenized-lease semaphore (sorted set of lease tokens) and the
  *    sliding-window rate limiter (sorted sets of hit timestamps).
- *  - EVAL: interprets the bundle's three Lua scripts by their shape:
+ *  - HINCRBYFLOAT: one hash field bump (the calibration score-bucket
+ *    outcome counters).
+ *  - EVAL: interprets the bundle's Lua scripts by their shape:
  *      - semaphore ACQUIRE (1 key, 3 args, TIME + prune + cap + ZADD),
  *      - semaphore RELEASE (ZREM of one member),
  *      - rate-limiter (2 keys, 4 args, TIME + prune both + caps + ZADD both),
+ *      - calibration CONFIRM (2 keys: receipt + bucket; GET + discard
+ *        when unsampled + DEL + HINCRBYFLOAT + EXPIRE, mirroring the
+ *        canonical confirm.lua),
  *    mirroring the scripts' semantics exactly.
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
@@ -38,6 +43,9 @@ final class FakePredisClient extends \Predis\Client
 
     /** @var array<string, string> plain strings (SET / GETDEL decision handles) */
     public array $strings = [];
+
+    /** @var array<string, array<string, float>> hashes (HINCRBYFLOAT calibration buckets) */
+    public array $hashes = [];
 
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
@@ -102,8 +110,24 @@ final class FakePredisClient extends \Predis\Client
             'GET' => $this->fakeGet($arguments),
             'GETDEL' => $this->fakeGetdel($arguments),
             'SET' => $this->fakeSet($arguments),
+            'HINCRBYFLOAT' => $this->fakeHincrbyfloat($arguments),
             default => null,
         };
+    }
+
+    /**
+     * HINCRBYFLOAT: bump one hash field (the calibration score-bucket
+     * outcome counters) and return the new value as a string.
+     */
+    private function fakeHincrbyfloat(array $arguments): string
+    {
+        $key = (string) $arguments[0];
+        $field = (string) $arguments[1];
+        $delta = (float) $arguments[2];
+        $this->hashes[$key] ??= [];
+        $this->hashes[$key][$field] = ($this->hashes[$key][$field] ?? 0.0) + $delta;
+
+        return (string) $this->hashes[$key][$field];
     }
 
     /**
@@ -239,6 +263,7 @@ final class FakePredisClient extends \Predis\Client
             unset($this->expirations[(string) $key]);
             unset($this->counters[(string) $key]);
             unset($this->strings[(string) $key]);
+            unset($this->hashes[(string) $key]);
         }
 
         return $removed;
@@ -269,6 +294,61 @@ final class FakePredisClient extends \Predis\Client
             $this->fakePexpire([$key, 1000]);
 
             return $n;
+        }
+
+        if (str_contains($script, 'cjson.decode(raw)')) {
+            // Calibration CONFIRM (canonical confirm.lua): GET the receipt
+            // JSON -> discard when unsampled in random_sample mode (mode 1)
+            // or malformed -> DEL -> HINCRBYFLOAT the hourly score bucket ->
+            // EXPIRE the bucket -> return the receipt scope (0 when the
+            // receipt is missing/consumed/discarded). Mirrors the script's
+            // semantics exactly (weighted: weight = inverse sampling
+            // probability; score clamped 0..1000).
+            $receiptKey = (string) $keys[0];
+            $bucketKey = (string) $keys[1];
+            $mode = (int) $rest[0];
+            $weight = (float) $rest[1];
+            $legitimate = (int) $rest[2] === 1;
+            $bucketTtlSecs = (int) $rest[3];
+
+            $raw = $this->strings[$receiptKey] ?? null;
+            if ($raw === null) {
+                return 0;
+            }
+            $receipt = json_decode($raw, true);
+            if (!\is_array($receipt) || !isset($receipt['scope'])) {
+                unset($this->strings[$receiptKey]);
+
+                return 0;
+            }
+            if ($mode === 1 && (int) ($receipt['sampled'] ?? 0) !== 1) {
+                unset($this->strings[$receiptKey]);
+
+                return 0;
+            }
+            unset($this->strings[$receiptKey]);
+
+            if ($weight < 0) {
+                $weight = 0;
+            }
+            $score = (float) ($receipt['score'] ?? 0);
+            if ($score < 0) {
+                $score = 0;
+            }
+            if ($score > 1000) {
+                $score = 1000;
+            }
+
+            if ($legitimate) {
+                $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
+                $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
+            } else {
+                $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $weight]);
+                $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
+            }
+            $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
+
+            return (int) $receipt['scope'];
         }
 
         if (!str_contains($script, 'ZREMRANGEBYSCORE')) {

@@ -8,22 +8,25 @@ use KiwiCaptcha\Risk\RiskAction;
 use Predis\Client;
 
 /**
- * Aggregate calibrator: REDIS-BACKED bounded score-bucket statistics.
+ * Aggregate calibrator: REDIS-BACKED bounded exact-score calibration.
  *
- * Buckets are hourly hashes keyed {kiwi:<ns>}:cal:<scope>:<hour> with one
- * HINCRBY per recorded outcome and a 48 h EXPIRE — at most 24 keys per
- * scope, so the aggregate state is bounded and shared across processes.
- * No in-process samples, no pruning loops.
+ * Buckets are hourly hashes keyed {kiwi:<ns>}:cal:<scope>:<hour> with
+ * fields legit_count / legit_score_sum / abuse_count / abuse_score_sum
+ * (EXACT scores, not band-quantized), written ONLY by the canonical
+ * confirm.lua script (atomic receipt consumption + HINCRBYFLOAT + EXPIRE
+ * 48 h) — at most 24 keys per scope, so the aggregate state is bounded and
+ * shared across processes. No in-process samples, no pruning loops.
  *
- * Bias is derived from the last 24 hourly buckets (legit_total vs
- * abuse_total), integer math truncating toward zero (intdiv):
- *   total = legit + abuse
- *   total < minSamples -> bias 0 (no nonzero bias below the threshold)
- *   raw   = ((abuse - legit) * 1000 / total) * 2 / 10
- *   bias  = clamp(raw, -maxAdjustment, +maxAdjustment)
- * The whole read (24 HGETALLs) plus the rate-of-change clamp plus the
- * state write runs in ONE Lua script (single round trip); the clamp is
- * atomic (read prev -> clamp -> write) so concurrent processes never race.
+ * Bias is derived from the last 24 hourly buckets (calibration.lua, exact
+ * score semantics):
+ *   fp_pressure = legit_score_sum
+ *   fn_pressure = abuse_count * 1000 - abuse_score_sum
+ *   raw         = (fn_pressure - fp_pressure) * 2 / (total * 10)
+ *   bias        = clamp(raw, -maxAdjustment, +maxAdjustment)
+ * below minSamples the TARGET is 0. The whole read (24 HGETALLs) plus the
+ * rate-of-change clamp plus the state write runs in ONE Lua script (single
+ * round trip); the clamp is atomic (read prev -> clamp -> write) so
+ * concurrent processes never race.
  *
  * Rate of change: the previous bias and its timestamp live in the hash
  * {kiwi:<ns>}:cal:state:<scope> (fields bias_mp/ts, bias in MILLI-POINTS
@@ -34,19 +37,24 @@ use Predis\Client;
  * check, so a fresh scope can never jump straight to ±maxAdjustment; the
  * timestamp is refreshed on EVERY call (below threshold too), so a long
  * below-threshold period cannot accumulate movement allowance. Below the
- * threshold the returned bias is 0 and bias_mp is untouched.
+ * threshold the returned bias is 0 but the stored bias_mp still moves
+ * toward 0 through the SAME rate limiter (never an instant snap).
  *
  * The final bias is cached in-process per scope for 30 s (bounded to
  * 1024 scopes, oldest evicted first); cache hits never touch Redis — the
- * 0-below-threshold result is cached too. record() invalidates the
- * cached entry for the recorded scope so fresh outcomes are visible
+ * 0-below-threshold result is cached too. confirmOutcome() invalidates the
+ * cached entry for the confirmed scope so fresh outcomes are visible
  * immediately.
  *
- * Receipts pair a decision_id with its scope/band/action so a later
- * confirmed outcome (legit/abuse) is recorded against the ORIGINAL
- * decision's bucket: {kiwi:<ns>}:cal:receipt:<decision_id> holds the JSON
- * string {"scope":..,"band":..,"action":".."} with EXPIRE 300 s, consumed
- * once, atomically, via GETDEL (string-only in Redis).
+ * Receipts pair a decision_id with its scope/band/action/score/sampled so
+ * a later confirmed outcome (legit/abuse) is recorded against the ORIGINAL
+ * decision's scope bucket: {kiwi:<ns>}:cal:receipt:<decision_id> holds the
+ * JSON string {"scope":..,"band":..,"action":"..","score":..,"sampled":0|1}
+ * with EXPIRE 300 s, consumed EXACTLY ONCE, atomically, by the canonical
+ * confirm.lua script (GET -> decode -> DEL -> HINCRBYFLOAT -> EXPIRE in one
+ * round trip — no crash window between reading and incrementing). In
+ * random_sample mode an unsampled decision (sampled == 0) is discarded by
+ * the script so the label can never select itself into the population.
  */
 final class AggregateCalibrator implements CalibrationStore
 {
@@ -56,22 +64,38 @@ final class AggregateCalibrator implements CalibrationStore
     public const CACHE_TTL_SECS = 30;
     public const CACHE_CAP = 1024;
 
+    private const MODE_COMPLETE = 0;
+    private const MODE_RANDOM_SAMPLE = 1;
+    private const MODE_WEIGHTED = 2;
+
     /**
-     * The canonical cross-language calibration script, bundled with this
-     * package at resources/calibration.lua (self-contained — no monorepo
-     * paths), resolved via dirname(__DIR__, 2) . '/resources/calibration.lua'
+     * The canonical cross-language scripts, bundled with this package at
+     * resources/calibration.lua and resources/confirm.lua (self-contained —
+     * no monorepo paths), resolved via dirname(__DIR__, 2) . '/resources/'
      * and loaded at construction like RedisRiskStateStore loads risk-v1.lua.
      *
-     * One atomic read->clamp->write:
-     *   KEYS[1..24]  hourly score buckets (hash, fields b<band>a<action>:legit|:abuse)
+     * calibration.lua — one atomic read->clamp->write:
+     *   KEYS[1..24]  hourly score buckets (hash, fields legit_count /
+     *                legit_score_sum / abuse_count / abuse_score_sum)
      *   KEYS[25]     rate-limit state (hash, fields bias_mp/ts)
      *   ARGV[1]      now (epoch ms)
      *   ARGV[2]      minSamples
      *   ARGV[3]      maxAdjustment (points)
      *   ARGV[4]      maxChangePerMinute (points/minute)
-     * Returns the final integer bias (points).
+     *   Returns the final integer bias (points).
+     *
+     * confirm.lua — one atomic consume-and-record:
+     *   KEYS[1]      receipt (STRING JSON)
+     *   KEYS[2]      hourly bucket for receipt.scope
+     *   ARGV[1]      mode (0 complete | 1 random_sample | 2 weighted)
+     *   ARGV[2]      weight (float)
+     *   ARGV[3]      legitimate (0/1)
+     *   ARGV[4]      bucket TTL (seconds)
+     *   Returns the receipt scope, or 0 when missing/consumed/discarded.
      */
-    private readonly string $script;
+    private readonly string $calibrationScript;
+
+    private readonly string $confirmScript;
 
     private readonly string $namespace;
 
@@ -85,6 +109,8 @@ final class AggregateCalibrator implements CalibrationStore
         private readonly int $maxAdjustment = 150,
         private readonly int $maxChangePerMinute = 10,
         private readonly int $receiptTtlSecs = self::RECEIPT_TTL_SECS,
+        private readonly string $samplingMode = 'random_sample',
+        private readonly int $samplingProbabilityPpm = 100_000,
     ) {
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Calibration namespace must be non-empty and free of braces');
@@ -92,19 +118,15 @@ final class AggregateCalibrator implements CalibrationStore
         if ($minSamples < 1 || $maxAdjustment < 1 || $maxChangePerMinute < 1 || $receiptTtlSecs < 1) {
             throw new \InvalidArgumentException('minSamples, maxAdjustment, maxChangePerMinute and receiptTtlSecs must be >= 1');
         }
+        if (!in_array($samplingMode, ['complete', 'random_sample', 'weighted'], true)) {
+            throw new \InvalidArgumentException('samplingMode must be one of: complete, random_sample, weighted');
+        }
+        if ($samplingProbabilityPpm < 1 || $samplingProbabilityPpm > 1_000_000) {
+            throw new \InvalidArgumentException('samplingProbabilityPpm must be within 1..1000000');
+        }
         $this->namespace = $namespace;
-        $path = dirname(__DIR__, 2) . '/resources/calibration.lua';
-        if (!is_file($path)) {
-            throw new \RuntimeException(
-                'Cannot locate the bundled calibration script at resources/calibration.lua ' .
-                '(resolved from ' . __DIR__ . '). The script ships with this package.'
-            );
-        }
-        $script = @file_get_contents($path);
-        if ($script === false) {
-            throw new \RuntimeException(sprintf('Cannot read the bundled calibration script at %s', $path));
-        }
-        $this->script = $script;
+        $this->calibrationScript = self::loadScript('calibration.lua');
+        $this->confirmScript = self::loadScript('confirm.lua');
     }
 
     /**
@@ -126,16 +148,91 @@ final class AggregateCalibrator implements CalibrationStore
         return $this->namespace;
     }
 
-    public function record(int $scope, int $band, RiskAction $action, bool $legitimate): void
+    /**
+     * The assessment-time sampling decision: 'complete' and 'weighted'
+     * always sample (in weighted mode the HOST governs the rate via the
+     * weight it supplies at confirmation); 'random_sample' samples with
+     * probability samplingProbabilityPpm / 1_000_000.
+     */
+    public function sample(): bool
     {
-        // Invalidate the cached bias for this scope so a fresh outcome is
-        // visible immediately (Rust parity).
-        unset($this->biasCache[$scope]);
+        if ($this->samplingMode !== 'random_sample') {
+            return true;
+        }
+        return random_int(0, 999_999) < $this->samplingProbabilityPpm;
+    }
+
+    public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+    {
+        $key = "{kiwi:{$this->namespace}}:cal:receipt:{$decisionId}";
+        $this->client->set(
+            $key,
+            (string) json_encode([
+                'scope' => $scope,
+                'band' => $band,
+                'action' => $action->value,
+                'score' => $score,
+                'sampled' => $sampled ? 1 : 0,
+            ]),
+            'EX',
+            $this->receiptTtlSecs
+        );
+    }
+
+    /**
+     * Atomically consumes the receipt and records the outcome in ONE
+     * canonical confirm.lua script (no crash window between GETDEL and the
+     * bucket increment). The bucket is the CURRENT hour of the receipt's
+     * scope; the bucket hour for a decision can never drift because the
+     * receipt is immutable once written (the pre-read only derives the
+     * bucket key — the script itself re-checks the receipt atomically).
+     *
+     * @return int|null the receipt scope when the outcome was recorded,
+     *                  or null when the receipt is missing / already
+     *                  consumed / discarded by random sampling
+     */
+    public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): ?int
+    {
+        $receiptKey = "{kiwi:{$this->namespace}}:cal:receipt:{$decisionId}";
+        $raw = $this->client->get($receiptKey);
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+        $data = json_decode($raw, true);
+        if (!is_array($data)) {
+            return null;
+        }
+        $scope = (int) ($data['scope'] ?? 0);
+        if ($scope < 1) {
+            return null;
+        }
         $hour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
-        $key = "{kiwi:{$this->namespace}}:cal:{$scope}:{$hour}";
-        $field = sprintf('b%da%s:%s', $band, $action->value, $legitimate ? 'legit' : 'abuse');
-        $this->client->hincrby($key, $field, 1);
-        $this->client->expire($key, self::BUCKET_TTL_SECS);
+        $bucketKey = "{kiwi:{$this->namespace}}:cal:{$scope}:{$hour}";
+
+        $mode = match ($this->samplingMode) {
+            'complete' => self::MODE_COMPLETE,
+            'weighted' => self::MODE_WEIGHTED,
+            default => self::MODE_RANDOM_SAMPLE,
+        };
+
+        $result = (int) $this->client->eval(
+            $this->confirmScript,
+            2,
+            $receiptKey,
+            $bucketKey,
+            (string) $mode,
+            (string) ($weight ?? 1.0),
+            $legitimate ? '1' : '0',
+            (string) self::BUCKET_TTL_SECS,
+        );
+
+        if ($result > 0) {
+            // Invalidate the cached bias for this scope so a fresh outcome
+            // is visible immediately (Rust parity).
+            unset($this->biasCache[$result]);
+            return $result;
+        }
+        return null;
     }
 
     public function biasForScope(int $scope, int $now): int
@@ -154,7 +251,7 @@ final class AggregateCalibrator implements CalibrationStore
         $keys[] = "{kiwi:{$this->namespace}}:cal:state:{$scope}";
 
         $bias = (int) $this->client->eval(
-            $this->script,
+            $this->calibrationScript,
             count($keys),
             ...array_merge($keys, [$now, $this->minSamples, $this->maxAdjustment, $this->maxChangePerMinute]),
         );
@@ -168,34 +265,18 @@ final class AggregateCalibrator implements CalibrationStore
         return $bias;
     }
 
-    public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action): void
+    private static function loadScript(string $file): string
     {
-        $key = "{kiwi:{$this->namespace}}:cal:receipt:{$decisionId}";
-        $this->client->set(
-            $key,
-            (string) json_encode(['scope' => $scope, 'band' => $band, 'action' => $action->value]),
-            'EX',
-            $this->receiptTtlSecs
-        );
-    }
-
-    public function consumeReceipt(string $decisionId): ?array
-    {
-        $key = "{kiwi:{$this->namespace}}:cal:receipt:{$decisionId}";
-        // GETDEL is string-only in Redis: the receipt is stored as a JSON
-        // string, so one atomic GETDEL both reads and removes it.
-        $result = $this->client->getdel($key);
-        if (!is_string($result) || $result === '') {
-            return null;
+        $path = dirname(__DIR__, 2) . '/resources/' . $file;
+        if (!is_file($path)) {
+            throw new \RuntimeException(
+                sprintf('Cannot locate the bundled script at resources/%s (resolved from %s). The script ships with this package.', $file, __DIR__)
+            );
         }
-        $data = json_decode($result, true);
-        if (!is_array($data)) {
-            return null;
+        $script = @file_get_contents($path);
+        if ($script === false) {
+            throw new \RuntimeException(sprintf('Cannot read the bundled script at %s', $path));
         }
-        return [
-            'scope' => (int) ($data['scope'] ?? 0),
-            'band' => (int) ($data['band'] ?? 0),
-            'action' => (string) ($data['action'] ?? 'allow'),
-        ];
+        return $script;
     }
 }

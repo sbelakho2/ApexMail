@@ -42,6 +42,21 @@ use Symfony\Component\HttpFoundation\RequestStack;
  * gateway never derives them from its own decisions (the engine requires a
  * decision id for them and throws InvalidArgumentException without one).
  *
+ * CONFIRMATION SPLIT: outcome confirmation is two deliberately separate
+ * paths —
+ *  - {@see confirmDecisionOutcome()} is CALIBRATION-ONLY: a decision id +
+ *    outcome (and optionally the inverse sampling probability for weighted
+ *    calibration), no network identity, no scope. It targets DELAYED
+ *    confirmations (email confirmation, fraud review, chargeback,
+ *    moderation) where the original request context is long gone, and
+ *    delegates to the engine's confirmOutcome (atomic canonical confirm.lua:
+ *    consume the receipt + record the score-weighted outcome in ONE script).
+ *  - {@see recordConfirmedReputation()} (and the confirmedLegitimate /
+ *    confirmedAbuse wrappers) is the CONTEXT-FUL path: when the
+ *    source/session/principal context IS available, the engine confirms the
+ *    decision atomically and then records the reputation event against the
+ *    source/session/principal pseudonyms.
+ *
  * Every FEEDBACK path is guarded against unknown scopes: when the scope is
  * not configured and unknown_scope.mode is "reject"/"baseline" (the engine
  * declines to evaluate), the signal is skipped with a debug log — feedback
@@ -281,33 +296,123 @@ final class RiskGateway
     }
 
     /**
+     * CALIBRATION-ONLY confirmation of a decision outcome — no network
+     * identity, no scope, no session: the target of DELAYED confirmations
+     * (email confirmation, fraud review, chargeback, moderation) where the
+     * original request's source/session/principal context is long gone.
+     * Confirms the decision against its calibration receipt atomically via
+     * the engine's confirmOutcome (the canonical confirm.lua: consume
+     * receipt + record the score-weighted outcome in one script).
+     *
+     * Sampling contract: with the calibration mode 'random_sample', Kiwi
+     * sampled the decision at assessment time (the receipt carries a
+     * "sampled" flag) and an unsampled receipt is discarded — the label can
+     * never select itself into the calibration population. With mode
+     * 'weighted', the application supplies the inverse sampling probability
+     * $samplingProbabilityPpm (parts per million, 1..1_000_000); the gateway
+     * converts it to weight = 1_000_000/ppm so labels with known selection
+     * bias are re-weighted into the population. Never requires an IP (there
+     * is nothing to attribute a delayed confirmation to — it is a pure
+     * calibration signal).
+     *
+     * @return int|null the receipt's scope id when the outcome was recorded,
+     *                  null when there is no receipt (already consumed /
+     *                  expired) or it was discarded (unsampled)
+     *
+     * @throws \InvalidArgumentException when $samplingProbabilityPpm is
+     *                                   outside 1..1_000_000
+     */
+    public function confirmDecisionOutcome(string $decisionId, bool $legitimate, ?int $samplingProbabilityPpm = null): ?int
+    {
+        if ($samplingProbabilityPpm !== null && ($samplingProbabilityPpm < 1 || $samplingProbabilityPpm > 1_000_000)) {
+            throw new \InvalidArgumentException(sprintf(
+                'samplingProbabilityPpm must be 1..1000000 (got %d) — it is the inverse sampling probability in parts per million (weight = 1_000_000/ppm)',
+                $samplingProbabilityPpm,
+            ));
+        }
+
+        return $this->engine->confirmOutcome(
+            $decisionId,
+            $legitimate,
+            $samplingProbabilityPpm !== null ? 1_000_000 / $samplingProbabilityPpm : null,
+        );
+    }
+
+    /**
      * Confirmed-legitimate signal (APPLICATION-only, e.g. from post-hoc
-     * account checks): routed through {@see AdaptiveRiskEngine::record_feedback()}
-     * so the decision's calibration receipt is consumed. The decision id is
-     * REQUIRED by the engine contract — it throws InvalidArgumentException
-     * without one, and the gateway lets that enforcement surface.
+     * account checks): the context-ful reputation path — used when the
+     * source/session/principal context IS still available. Routes through
+     * {@see recordConfirmedReputation()}: the engine confirms the decision
+     * atomically against its calibration receipt, then records the
+     * ConfirmedLegitimate reputation event. The decision id is REQUIRED by
+     * the engine contract — it throws InvalidArgumentException without one,
+     * and the gateway lets that enforcement surface.
      *
      * @throws \InvalidArgumentException when the engine requires a decisionId
      *                                   for confirmed events and none is given
      */
     public function confirmedLegitimate(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null): ?EventReceipt
     {
-        return $this->recordConfirmation(RiskEventKind::ConfirmedLegitimate, $scope, $ip, $session, $idempotencyKey, $decisionId);
+        return $this->recordConfirmedReputation(true, $scope, $ip, $session, $idempotencyKey, $decisionId);
     }
 
     /**
      * Confirmed-abuse signal (APPLICATION-only, e.g. from post-hoc account
-     * checks): routed through {@see AdaptiveRiskEngine::record_feedback()}
-     * so the decision's calibration receipt is consumed. The decision id is
-     * REQUIRED by the engine contract — it throws InvalidArgumentException
-     * without one, and the gateway lets that enforcement surface.
+     * checks): the context-ful reputation path — used when the
+     * source/session/principal context IS still available. Routes through
+     * {@see recordConfirmedReputation()}: the engine confirms the decision
+     * atomically against its calibration receipt, then records the
+     * ConfirmedAbuse reputation event. The decision id is REQUIRED by the
+     * engine contract — it throws InvalidArgumentException without one, and
+     * the gateway lets that enforcement surface.
      *
      * @throws \InvalidArgumentException when the engine requires a decisionId
      *                                   for confirmed events and none is given
      */
     public function confirmedAbuse(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null): ?EventReceipt
     {
-        return $this->recordConfirmation(RiskEventKind::ConfirmedAbuse, $scope, $ip, $session, $idempotencyKey, $decisionId);
+        return $this->recordConfirmedReputation(false, $scope, $ip, $session, $idempotencyKey, $decisionId);
+    }
+
+    /**
+     * Context-ful confirmed-outcome path (legitimate/abuse): used when the
+     * request's source/session/principal context IS available — the engine
+     * confirms the decision atomically against its calibration receipt and
+     * then records the reputation event (source/session/principal signals)
+     * via the engine's first-class confirmed* methods. Unlike the
+     * calibration-only {@see confirmDecisionOutcome()}, an unparseable
+     * client IP has nothing to attribute the reputation event to and the
+     * signal is skipped (null).
+     *
+     * @throws \InvalidArgumentException when the engine requires a decisionId
+     *                                   for confirmed events and none is given
+     */
+    public function recordConfirmedReputation(bool $legitimate, string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null): ?EventReceipt
+    {
+        $scopeId = $this->tryScopeId($scope);
+        if ($scopeId === null) {
+            return null;
+        }
+        if ($ip === '' || filter_var($ip, FILTER_VALIDATE_IP) === false) {
+            // Invalid client IP: nothing to attribute the signal to.
+            return null;
+        }
+        $context = new RiskContext(
+            scope: $scopeId,
+            sourceIp: $ip,
+            sessionId: $session,
+            principalId: $this->resolvePrincipal($scope),
+            event: $legitimate ? RiskEventKind::ConfirmedLegitimate : RiskEventKind::ConfirmedAbuse,
+            networkFlags: $this->classifier->classify($ip),
+            resources: $this->resources(),
+        );
+
+        // Route through the engine's first-class confirmation methods so the
+        // package enforces the decisionId requirement (InvalidArgumentException
+        // without it) — the gateway never infers confirmations itself.
+        return $legitimate
+            ? $this->engine->confirmedLegitimate($context, $decisionId, $idempotencyKey)
+            : $this->engine->confirmedAbuse($context, $decisionId, $idempotencyKey);
     }
 
     /**
@@ -528,34 +633,6 @@ final class RiskGateway
     public function metricsSnapshot(): array
     {
         return $this->engine->metrics()->snapshot();
-    }
-
-    private function recordConfirmation(RiskEventKind $kind, string $scope, string $ip, ?string $session, ?string $idempotencyKey, ?string $decisionId): ?EventReceipt
-    {
-        $scopeId = $this->tryScopeId($scope);
-        if ($scopeId === null) {
-            return null;
-        }
-        if ($ip === '' || filter_var($ip, FILTER_VALIDATE_IP) === false) {
-            // Invalid client IP: nothing to attribute the signal to.
-            return null;
-        }
-        $context = new RiskContext(
-            scope: $scopeId,
-            sourceIp: $ip,
-            sessionId: $session,
-            principalId: $this->resolvePrincipal($scope),
-            event: $kind,
-            networkFlags: $this->classifier->classify($ip),
-            resources: $this->resources(),
-        );
-
-        // Route through the engine's first-class confirmation methods so the
-        // package enforces the decisionId requirement (InvalidArgumentException
-        // without it) — the gateway never infers confirmations itself.
-        return $kind === RiskEventKind::ConfirmedLegitimate
-            ? $this->engine->confirmedLegitimate($context, $decisionId, $idempotencyKey)
-            : $this->engine->confirmedAbuse($context, $decisionId, $idempotencyKey);
     }
 
     /**

@@ -16,10 +16,12 @@ namespace KiwiCaptcha\Risk\Storage;
  * source_fast/source_slow velocity in risk-v1 plus the keyed rate limiter
  * the caller feeds back through SourceRateLimitHit).
  *
- * Timestamps live in an SplQueue: expired entries are dequeued from the
- * FRONT in O(1) amortized time, so a saturated window never degrades into
- * an O(n) scan (no `$denied` bookkeeping — it contributed nothing and made
- * the limiter CPU-amplifying under flood).
+ * Timestamps live in an SplQueue as hrtime(true) NANOSECONDS (monotonic
+ * clock — a wall-clock jump can never hold the window open or reopen it
+ * early); expired entries are dequeued from the FRONT in O(1) amortized
+ * time, so a saturated window never degrades into an O(n) scan (no
+ * `$denied` bookkeeping — it contributed nothing and made the limiter
+ * CPU-amplifying under flood).
  *
  * The contract is deliberately per-process (timestamps in this process's
  * memory); no cross-process synchronization is performed. When the window
@@ -30,7 +32,10 @@ final class ProcessEmergencyCap
 {
     public const DEFAULT_PROCESS_PER_SECOND = 10000;
 
-    /** @var \SplQueue<float> microtime(true) stamps of recent allowances */
+    /** Window length in nanoseconds (1 s on the monotonic hrtime clock). */
+    private const WINDOW_NS = 1_000_000_000;
+
+    /** @var \SplQueue<int> hrtime(true) nanosecond stamps of recent allowances */
     private \SplQueue $stamps;
 
     public function __construct(
@@ -48,7 +53,7 @@ final class ProcessEmergencyCap
      */
     public function allow(): bool
     {
-        $now = microtime(true);
+        $now = hrtime(true);
         $this->prune($now);
         if ($this->stamps->count() >= $this->processPerSecond) {
             return false;
@@ -60,14 +65,18 @@ final class ProcessEmergencyCap
     /** True when the window is currently saturated. */
     public function isOpen(): bool
     {
-        $this->prune(microtime(true));
+        $this->prune(hrtime(true));
         return $this->stamps->count() >= $this->processPerSecond;
     }
 
-    /** Dequeues every entry at or before now - 1.0 from the queue front. */
-    private function prune(float $now): void
+    /**
+     * Dequeues every entry at or before now - 1 s from the queue front.
+     * hrtime is monotonic: elapsed can never be negative, so a wall-clock
+     * jump backwards cannot extend the window.
+     */
+    private function prune(int $now): void
     {
-        $cutoff = $now - 1.0;
+        $cutoff = $now - self::WINDOW_NS;
         while (!$this->stamps->isEmpty() && $this->stamps->bottom() <= $cutoff) {
             $this->stamps->dequeue();
         }

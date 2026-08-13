@@ -1,36 +1,37 @@
--- Calibration: score-sensitive bias + proportional rate limit
+-- Calibration: exact score-sensitive bias + proportional rate limit
 -- (canonical, shared PHP/Rust).
 --
 -- KEYS[1..24]  hourly score buckets for one scope (hash; fields
---              b<band>a<action>:legit | b<band>a<action>:abuse)
+--              legit_count / legit_score_sum / abuse_count /
+--              abuse_score_sum — EXACT scores, not band-quantized)
 -- KEYS[25]     rate-limit state (hash; fields bias_mp / ts)
 -- ARGV[1]      now (epoch ms)
 -- ARGV[2]      min_samples       (below this the TARGET bias is 0)
 -- ARGV[3]      max_adjustment    (points, ±clamp on the raw bias)
 -- ARGV[4]      max_change_per_minute (points/minute, proportional allowance)
 --
--- TRUE score calibration, not prevalence adaptation: each confirmed
--- observation is weighted by the ORIGINAL decision's risk band
--- (predicted_risk = band * 100):
+-- EXACT score calibration: every confirmed outcome carries its original
+-- risk score (0..1000). Per hourly bucket we keep
 --
---   false_positive_pressure = Σ legit_count(band)  × predicted_risk
---   false_negative_pressure = Σ abuse_count(band)  × (1000 - predicted_risk)
---   calibration_error       = fn_pressure - fp_pressure
+--   legit_count, legit_score_sum, abuse_count, abuse_score_sum
 --
--- A perfectly separating classifier (legit @ band 0, abuse @ band 10)
--- contributes ~zero pressure and stays near bias 0; abuse predicted at
--- low risk pushes the bias up, legitimate traffic predicted at high risk
--- pushes it down. raw = calibration_error * 2 / (total * 10) keeps the
--- same ±~200 point scale as the old prevalence formula.
+--   FP pressure = legit_score_sum
+--   FN pressure = abuse_count * 1000 - abuse_score_sum
+--   raw         = (FN - FP) * 2 / (total * 10)
+--
+-- A perfectly separating classifier (legitimate traffic at low scores,
+-- abuse at high scores) contributes ~zero pressure and stays near bias 0;
+-- abuse predicted at low risk pushes the bias up, legitimate traffic
+-- predicted at high risk pushes it down. Bands remain only for
+-- observability — the bias is computed from exact scores.
 --
 -- The rate limiter is PROPORTIONAL to elapsed time and applies to the
 -- PATH, not just the target: internal bias is stored in MILLI-POINTS
 -- (1 point = 1000 units) and allowed = max_change_per_minute * 1000 *
 -- elapsed_ms / 60000. Below min_samples the TARGET is 0, but the stored
--- bias still moves toward zero through the SAME rate limiter — a sample
--- count that dips below the threshold can never snap +150 → 0 instantly.
--- The state timestamp is refreshed on EVERY call (below threshold too),
--- so a long quiet period cannot accumulate movement allowance.
+-- bias still moves toward zero through the SAME rate limiter. The state
+-- timestamp is refreshed on EVERY call (below threshold too), so a long
+-- quiet period cannot accumulate movement allowance.
 
 local function trunc_div(n, d)
     local q = n / d
@@ -38,26 +39,23 @@ local function trunc_div(n, d)
     return math.ceil(q)
 end
 
-local fn_pressure = 0
-local fp_pressure = 0
-local total = 0
+local legit_count = 0
+local legit_score_sum = 0
+local abuse_count = 0
+local abuse_score_sum = 0
 for i = 1, 24 do
     local b = redis.call('HGETALL', KEYS[i])
     for j = 1, #b, 2 do
         local field = b[j]
-        local count = tonumber(b[j + 1]) or 0
-        if count > 0 then
-            local band = tonumber(string.match(field, '^b(%d+)a'))
-            if band then
-                local predicted = band * 100
-                if string.sub(field, -6) == ':legit' then
-                    fp_pressure = fp_pressure + count * predicted
-                    total = total + count
-                elseif string.sub(field, -6) == ':abuse' then
-                    fn_pressure = fn_pressure + count * (1000 - predicted)
-                    total = total + count
-                end
-            end
+        local value = tonumber(b[j + 1]) or 0
+        if field == 'legit_count' then
+            legit_count = legit_count + value
+        elseif field == 'legit_score_sum' then
+            legit_score_sum = legit_score_sum + value
+        elseif field == 'abuse_count' then
+            abuse_count = abuse_count + value
+        elseif field == 'abuse_score_sum' then
+            abuse_score_sum = abuse_score_sum + value
         end
     end
 end
@@ -75,9 +73,12 @@ if not prev_ts then
 end
 redis.call('HSET', KEYS[25], 'ts', now)
 
--- Target: score-sensitive calibration above the threshold, 0 below.
+-- Target: exact score calibration above the threshold, 0 below.
 local raw_mp = 0
+local total = legit_count + abuse_count
 if total >= tonumber(ARGV[2]) and total > 0 then
+    local fn_pressure = abuse_count * 1000 - abuse_score_sum
+    local fp_pressure = legit_score_sum
     local raw = trunc_div((fn_pressure - fp_pressure) * 2, total * 10)
     local max_adj = tonumber(ARGV[3])
     if raw > max_adj then raw = max_adj end

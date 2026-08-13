@@ -225,17 +225,19 @@ final class AdaptiveRiskEngine
      * EventReceipt. Store failures are silent (zero signals, not a
      * duplicate).
      *
-     * When the event is ConfirmedLegitimate/ConfirmedAbuse AND $decisionId
-     * is given, the calibration receipt registered for that decision is
-     * consumed and the outcome recorded against the ORIGINAL decision's
-     * scope/band/action.
+     * Calibration is NOT part of this path: confirmed outcomes must be
+     * routed through confirmedLegitimate()/confirmedAbuse(), which first
+     * run the calibrator's atomic confirmOutcome() (receipt consumed
+     * exactly once) and then record the reputation event here.
      *
      * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
      *                                    (HMAC-SHA256, event+scope domain
      *                                    separated) before use as the dedupe
      *                                    suffix; null/empty = fresh random id
-     * @param string|null $decisionId     the RiskDecision::decisionId being
-     *                                    confirmed (calibration pairing)
+     * @param string|null $decisionId     accepted for backward
+     *                                    compatibility; the confirmation is
+     *                                    handled by confirmedLegitimate()/
+     *                                    confirmedAbuse() via confirmOutcome()
      */
     public function record_feedback(RiskEventKind $event, RiskContext $c, ?string $idempotencyKey = null, ?string $decisionId = null): EventReceipt
     {
@@ -248,10 +250,6 @@ final class AdaptiveRiskEngine
             $this->breaker->recordFailure();
             $vector = SignalVector::zero();
             $isDuplicate = false;
-        }
-
-        if (($event === RiskEventKind::ConfirmedLegitimate || $event === RiskEventKind::ConfirmedAbuse) && $decisionId !== null) {
-            $this->consumeCalibrationReceipt($decisionId, $event === RiskEventKind::ConfirmedLegitimate);
         }
 
         return new EventReceipt(
@@ -279,10 +277,33 @@ final class AdaptiveRiskEngine
     }
 
     /**
+     * Best-effort atomic calibration confirmation: consumes the decision's
+     * receipt EXACTLY ONCE (single canonical confirm.lua script) and
+     * records the outcome against the ORIGINAL decision's scope bucket.
+     * Returns the receipt scope when the outcome was recorded, or null
+     * when calibration is not configured or the receipt is missing /
+     * already consumed / discarded by sampling. Never throws — the
+     * reputation feedback is the primary purpose.
+     */
+    public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): ?int
+    {
+        if ($this->calibration === null) {
+            return null;
+        }
+        try {
+            return $this->calibration->confirmOutcome($decisionId, $legitimate, $weight);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
      * Confirmed-legitimate outcome: REQUIRES the id of the decision being
      * confirmed so the outcome is recorded against the ORIGINAL decision's
-     * scope/band/action (calibration receipt). Delegates EXCLUSIVELY
-     * through record_feedback() — there is no band-0/Allow fallback.
+     * scope bucket. FIRST runs the calibrator's atomic confirm (receipt
+     * consumed exactly once, best-effort — the reputation event proceeds
+     * even when the receipt was already consumed), THEN records the
+     * ConfirmedLegitimate reputation event via record_feedback().
      *
      * @throws \InvalidArgumentException when $decisionId is null or empty
      */
@@ -291,14 +312,17 @@ final class AdaptiveRiskEngine
         if ($decisionId === null || $decisionId === '') {
             throw new \InvalidArgumentException('confirmedLegitimate requires the decision id being confirmed');
         }
-        return $this->record_feedback(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey, $decisionId);
+        $this->confirmOutcome($decisionId, true);
+        return $this->record_feedback(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey);
     }
 
     /**
      * Confirmed-abuse outcome: REQUIRES the id of the decision being
      * confirmed so the outcome is recorded against the ORIGINAL decision's
-     * scope/band/action (calibration receipt). Delegates EXCLUSIVELY
-     * through record_feedback() — there is no band-10/Deny fallback.
+     * scope bucket. FIRST runs the calibrator's atomic confirm (receipt
+     * consumed exactly once, best-effort — the reputation event proceeds
+     * even when the receipt was already consumed), THEN records the
+     * ConfirmedAbuse reputation event via record_feedback().
      *
      * @throws \InvalidArgumentException when $decisionId is null or empty
      */
@@ -307,7 +331,8 @@ final class AdaptiveRiskEngine
         if ($decisionId === null || $decisionId === '') {
             throw new \InvalidArgumentException('confirmedAbuse requires the decision id being confirmed');
         }
-        return $this->record_feedback(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey, $decisionId);
+        $this->confirmOutcome($decisionId, false);
+        return $this->record_feedback(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey);
     }
 
     /**
@@ -412,8 +437,11 @@ final class AdaptiveRiskEngine
 
     /**
      * Registers the calibration receipt for one decision so a later
-     * confirmed outcome can be paired back to its scope/band/action.
-     * Failures are silent — calibration never breaks issuance.
+     * confirmed outcome can be paired back to its scope/band/action. The
+     * receipt carries the EXACT risk score and the assessment-time
+     * sampling flag (sample() decides; the label can never select itself
+     * into the calibration population in random_sample mode). Failures are
+     * silent — calibration never breaks issuance.
      */
     private function registerCalibrationReceipt(int $scope, RiskDecision $decision): void
     {
@@ -421,32 +449,17 @@ final class AdaptiveRiskEngine
             return;
         }
         try {
-            $this->calibration->recordReceipt($decision->decisionId, $scope, $decision->band, $decision->action);
+            $this->calibration->recordReceipt(
+                $decision->decisionId,
+                $scope,
+                $decision->band,
+                $decision->action,
+                $decision->score,
+                $this->calibration->sample() ? 1 : 0,
+            );
         } catch (\Throwable) {
             // calibration must never break issuance
         }
-    }
-
-    /**
-     * Consumes the calibration receipt for $decisionId (if any) and records
-     * the confirmed outcome against the ORIGINAL decision's
-     * scope/band/action. Failures are silent.
-     */
-    private function consumeCalibrationReceipt(string $decisionId, bool $legitimate): void
-    {
-        if ($this->calibration === null) {
-            return;
-        }
-        try {
-            $receipt = $this->calibration->consumeReceipt($decisionId);
-        } catch (\Throwable) {
-            return;
-        }
-        if ($receipt === null) {
-            return;
-        }
-        $action = RiskAction::tryFrom((string) ($receipt['action'] ?? '')) ?? RiskAction::Allow;
-        $this->calibration->record((int) ($receipt['scope'] ?? 0), (int) ($receipt['band'] ?? 0), $action, $legitimate);
     }
 
     private function recordDecisionMetrics(int $scope, RiskDecision $decision): void

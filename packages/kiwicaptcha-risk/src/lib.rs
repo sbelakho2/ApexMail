@@ -56,6 +56,10 @@ pub enum RiskError {
     /// decision.
     #[error("confirmed outcomes require the decision_id of the assessed decision")]
     EmptyDecisionId,
+    /// The calibration backend could not be reached; the confirm was not
+    /// applied (callers treat calibration as best-effort).
+    #[error("calibration backend failure: {0}")]
+    Calibration(String),
 }
 
 /// Immutable risk decision produced by the engine.
@@ -515,8 +519,11 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     ///
     /// When the event is ConfirmedLegitimate/ConfirmedAbuse AND
     /// `decision_id` is given, the calibration receipt of that decision is
-    /// consumed (GETDEL) and the outcome is recorded into the scope's
-    /// hourly buckets.
+    /// confirmed FIRST (one atomic script invocation — consume receipt +
+    /// record the exact score into the scope's hourly bucket); the
+    /// reputation event is then recorded regardless of whether the receipt
+    /// was still alive (an already-consumed receipt is a no-op). Calibration
+    /// is best-effort: any backend failure is silent.
     ///
     /// # Errors
     ///
@@ -531,6 +538,22 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     ) -> Result<EventReceipt, RiskError> {
         let now_ms = now_ms();
         let observation = self.build_observation(&ctx, now_ms, idempotency_key)?;
+
+        let confirmed = matches!(
+            event,
+            RiskEventKind::ConfirmedLegitimate | RiskEventKind::ConfirmedAbuse
+        );
+        if confirmed {
+            if let Some(receipt_id) = decision_id.filter(|d| !d.is_empty()) {
+                let legitimate = event == RiskEventKind::ConfirmedLegitimate;
+                // FIRST the atomic calibrator confirm; calibration is
+                // best-effort (backend failure is silent, and the reputation
+                // event below happens even when the receipt was already
+                // consumed -> confirm returns None).
+                let _ = self.confirm_outcome(&receipt_id, legitimate, None);
+            }
+        }
+
         let observed = self
             .store
             .observe(&observation)
@@ -541,31 +564,43 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                 is_duplicate: false,
             });
 
-        let confirmed = matches!(
-            event,
-            RiskEventKind::ConfirmedLegitimate | RiskEventKind::ConfirmedAbuse
-        );
-        if confirmed {
-            if let Some(receipt_id) = decision_id.filter(|d| !d.is_empty()) {
-                if let Some(calibration) = &self.calibration {
-                    if let Some(receipt) = calibration.consume_receipt(&receipt_id) {
-                        let legitimate = event == RiskEventKind::ConfirmedLegitimate;
-                        let _ = calibration.record(
-                            receipt.scope,
-                            receipt.band,
-                            receipt.action,
-                            legitimate,
-                        );
-                    }
-                }
-            }
-        }
-
         Ok(EventReceipt {
             event_id: observation.event_id,
             is_duplicate: observed.is_duplicate,
             signals: observed.vector,
         })
+    }
+
+    /// Confirms the outcome of a previously assessed decision: one atomic
+    /// calibrator invocation that consumes the decision's receipt and
+    /// records the exact score into the scope's hourly bucket (or discards
+    /// it when the receipt is missing/already consumed/unsampled).
+    ///
+    /// `Ok(Some(scope))` when the outcome was recorded; `Ok(None)` when
+    /// there was nothing to record. `weight` is the inverse sampling
+    /// probability for weighted sampling (default 1.0). Only records — the
+    /// reputation event is booked separately via
+    /// [`RiskEngine::record_feedback`].
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::EmptyDecisionId`] when `decision_id` is empty;
+    /// [`RiskError::Calibration`] when the calibration backend fails.
+    pub fn confirm_outcome(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+    ) -> Result<Option<u32>, RiskError> {
+        if decision_id.is_empty() {
+            return Err(RiskError::EmptyDecisionId);
+        }
+        match &self.calibration {
+            Some(calibration) => calibration
+                .confirm_outcome(decision_id, legitimate, weight)
+                .map_err(|e| RiskError::Calibration(e.to_string())),
+            None => Ok(None),
+        }
     }
 
     /// Deprecated alias of [`RiskEngine::record_feedback`].
@@ -755,7 +790,8 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         decision.reasons = out;
     }
 
-    /// Assigns the decision_id and registers the calibration receipt
+    /// Assigns the decision_id and registers the calibration receipt with
+    /// the decision's EXACT risk score + the calibrator's sampling flag
     /// (silently on failure — never breaks issuance).
     fn finalize_decision(&self, scope: u32, mut decision: RiskDecision) -> RiskDecision {
         let mut id = [0u8; 16];
@@ -767,6 +803,8 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                 scope,
                 decision.band,
                 decision.action,
+                decision.score as u32,
+                calibration.sample(),
             );
         }
         decision
@@ -1418,89 +1456,91 @@ mod tests {
 
     // ── Calibration bias parity (in-memory calibration store) ──
 
+    /// (decision_id, scope, band, action, score, sampled).
+    type ReceiptLog = Vec<(String, u32, u8, RiskAction, u32, bool)>;
+
     struct StaticCalibration {
         bias: i32,
-        receipts: Mutex<Vec<(String, u32, u8, RiskAction)>>,
-        consumed: Mutex<Vec<String>>,
-        recorded: Mutex<Vec<(u32, u8, RiskAction, bool)>>,
+        confirm_result: Option<u32>,
+        receipts: Mutex<ReceiptLog>,
+        confirmed: Mutex<Vec<(String, bool, Option<f64>)>>,
     }
 
     impl CalibrationStore for StaticCalibration {
-        fn record(
-            &self,
-            scope: u32,
-            band: u8,
-            action: RiskAction,
-            legitimate: bool,
-        ) -> Result<(), crate::calibration::CalibrationError> {
-            self.recorded
-                .lock()
-                .unwrap()
-                .push((scope, band, action, legitimate));
-            Ok(())
-        }
-
-        fn bias_for_scope(&self, _scope: u32, _now_ms: i64) -> i32 {
-            self.bias
-        }
-
         fn record_receipt(
             &self,
             decision_id: &str,
             scope: u32,
             band: u8,
             action: RiskAction,
+            score: u32,
+            sampled: bool,
         ) -> Result<(), crate::calibration::CalibrationError> {
-            self.receipts
-                .lock()
-                .unwrap()
-                .push((decision_id.to_string(), scope, band, action));
+            self.receipts.lock().unwrap().push((
+                decision_id.to_string(),
+                scope,
+                band,
+                action,
+                score,
+                sampled,
+            ));
             Ok(())
         }
 
-        fn consume_receipt(
+        fn confirm_outcome(
             &self,
             decision_id: &str,
-        ) -> Option<crate::calibration::CalibrationReceipt> {
-            self.consumed.lock().unwrap().push(decision_id.to_string());
-            Some(crate::calibration::CalibrationReceipt {
-                scope: 1,
-                band: 1,
-                action: RiskAction::Sha16,
-            })
+            legitimate: bool,
+            weight: Option<f64>,
+        ) -> Result<Option<u32>, crate::calibration::CalibrationError> {
+            self.confirmed
+                .lock()
+                .unwrap()
+                .push((decision_id.to_string(), legitimate, weight));
+            Ok(self.confirm_result)
         }
+
+        fn sample(&self) -> bool {
+            true
+        }
+
+        fn bias_for_scope(&self, _scope: u32, _now_ms: i64) -> i32 {
+            self.bias
+        }
+    }
+
+    fn static_calibration(bias: i32, confirm_result: Option<u32>) -> Arc<StaticCalibration> {
+        Arc::new(StaticCalibration {
+            bias,
+            confirm_result,
+            receipts: Mutex::new(Vec::new()),
+            confirmed: Mutex::new(Vec::new()),
+        })
     }
 
     #[test]
     fn calibration_bias_applies_to_base_before_band_mapping() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let cal = Arc::new(StaticCalibration {
-            bias: 60,
-            receipts: Mutex::new(Vec::new()),
-            consumed: Mutex::new(Vec::new()),
-            recorded: Mutex::new(Vec::new()),
-        });
+        let cal = static_calibration(60, Some(1));
         let engine =
             RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
         let decision = engine.assess_pre_issue(context(), None).unwrap();
         // base 100 + bias 60 = 160 -> band 1, score 160.
         assert_eq!(decision.score, 160);
         assert_eq!(decision.band, 1);
-        // A receipt was registered for the decision.
+        // A receipt was registered for the decision with the exact score
+        // and the sampling flag.
         let receipts = cal.receipts.lock().unwrap();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].1, 1); // scope
+        assert_eq!(receipts[0].4, 160); // exact risk score
+        assert!(receipts[0].5); // sampled (Complete-like mock)
     }
 
     #[test]
     fn confirmed_outcome_consumes_receipt_and_records() {
         let store = MockStore::new(SignalVector::zero(), 0);
-        let cal = Arc::new(StaticCalibration {
-            bias: 0,
-            receipts: Mutex::new(Vec::new()),
-            consumed: Mutex::new(Vec::new()),
-            recorded: Mutex::new(Vec::new()),
-        });
+        let cal = static_calibration(0, Some(1));
         let engine =
             RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
         let ctx = RiskContext::new(
@@ -1521,14 +1561,73 @@ mod tests {
             )
             .unwrap();
         assert!(!receipt.is_duplicate);
-        assert!(cal
-            .consumed
-            .lock()
-            .unwrap()
-            .contains(&"decision-x".to_string()));
-        let recorded = cal.recorded.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0], (1, 1, RiskAction::Sha16, true));
+        // FIRST the atomic confirm (legitimate, default weight 1.0)...
+        let confirmed = cal.confirmed.lock().unwrap();
+        assert_eq!(confirmed.len(), 1);
+        assert_eq!(
+            confirmed[0],
+            ("decision-x".to_string(), true, None),
+            "the calibrator must be confirmed before the reputation event"
+        );
+    }
+
+    #[test]
+    fn reputation_event_survives_an_already_consumed_receipt() {
+        let store = MockStore::new(SignalVector::zero(), 0);
+        // confirm_result None: the receipt was already consumed elsewhere.
+        let cal = static_calibration(0, None);
+        let engine =
+            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        let ctx = RiskContext::new(
+            1,
+            "203.0.113.27".parse().unwrap(),
+            None,
+            None,
+            RiskEventKind::ConfirmedAbuse,
+            NetworkFlags::default(),
+            ResourcePressure::default(),
+        );
+        let receipt = engine.confirmed_abuse(ctx, None, "decision-x").unwrap();
+        assert!(!receipt.is_duplicate);
+        // The calibrator was still asked to confirm (returned None -> no
+        // record) AND the reputation event went through anyway.
+        assert_eq!(cal.confirmed.lock().unwrap().len(), 1);
+        assert_eq!(engine.store.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(receipt.event_id.len(), 32);
+    }
+
+    #[test]
+    fn engine_confirm_outcome_delegates_and_validates() {
+        let store = MockStore::new(SignalVector::zero(), 0);
+        let cal = static_calibration(0, Some(7));
+        let engine =
+            RiskEngine::new(store, classifier(), policy(), keys()).with_calibration(cal.clone());
+        assert_eq!(
+            engine.confirm_outcome("", true, None),
+            Err(RiskError::EmptyDecisionId)
+        );
+        assert_eq!(
+            engine
+                .confirm_outcome("decision-z", false, Some(10.0))
+                .unwrap(),
+            Some(7),
+            "the engine delegates to the calibrator (weight included)"
+        );
+        assert_eq!(
+            cal.confirmed.lock().unwrap()[0],
+            ("decision-z".to_string(), false, Some(10.0))
+        );
+        // Without a calibration store: no-op, never an error.
+        let plain = RiskEngine::new(
+            MockStore::new(SignalVector::zero(), 0),
+            classifier(),
+            policy(),
+            keys(),
+        );
+        assert_eq!(
+            plain.confirm_outcome("decision-z", true, None).unwrap(),
+            None
+        );
     }
 
     #[test]

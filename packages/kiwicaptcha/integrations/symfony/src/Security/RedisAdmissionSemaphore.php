@@ -139,11 +139,16 @@ LUA;
     /**
      * Live number of held leases (atomic TIME + prune + ZCARD in ONE Lua
      * script, so the count is LIVE — expired leases are reaped exactly as
-     * the next acquire would reap them), or 0 when the cap is disabled or
-     * the backend is unreachable. Read-side telemetry for the
-     * resource-pressure provider — never breaks the caller.
+     * the next acquire would reap them), or 0 when the cap is disabled
+     * (genuinely zero leases — the sentinel path never touches Redis).
+     *
+     * A Throwable from the backend (connection failure, script error)
+     * returns null — "unknown", never 0: 0 means the gate is verifiably
+     * empty, null means the gate cannot be measured. The caller (the
+     * resource-pressure provider) treats null conservatively as saturated.
+     * Read-side telemetry — never breaks the caller.
      */
-    public function usage(): int
+    public function usage(): ?int
     {
         if ($this->maxConcurrent <= 0) {
             return 0;
@@ -151,7 +156,7 @@ LUA;
         try {
             return (int) $this->eval(self::USAGE_SCRIPT, [$this->key], []);
         } catch (\Throwable) {
-            return 0;
+            return null;
         }
     }
 

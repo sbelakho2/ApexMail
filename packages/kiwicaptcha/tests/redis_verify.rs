@@ -10,6 +10,7 @@
 #![cfg(feature = "redis")]
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,9 +18,86 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use kiwicaptcha::challenge::{
     issue_challenge, BindingMode, ChallengeConfig, ChallengeRecord, PoWAlgorithm,
 };
-use kiwicaptcha::redis_verify::{ProductionVerifier, RedisChallengeStore};
+use kiwicaptcha::redis_verify::{
+    AdmissionError, ArgonAdmissionGate, ArgonLease, ProductionVerifier, RedisChallengeStore,
+    DEFAULT_POOL_SIZE,
+};
 use kiwicaptcha::token::SolutionToken;
 use kiwicaptcha::verify::{solve_for_test, VerifyError, VerifyOutcome};
+
+/// Gate that flatly grants (`true`) or refuses (`false`) capacity — the
+/// trait-based replacement for the old closure gates.
+#[derive(Clone, Copy)]
+struct BoolGate(bool);
+
+struct UnitLease;
+
+impl ArgonLease for UnitLease {}
+
+impl ArgonAdmissionGate for BoolGate {
+    fn acquire(
+        &self,
+        _record: &ChallengeRecord,
+    ) -> Result<Option<Box<dyn ArgonLease>>, AdmissionError> {
+        if self.0 {
+            Ok(Some(Box::new(UnitLease)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// Gate + RAII lease pair that counts acquires, in-flight leases, and
+/// releases — proves one acquire corresponds to exactly one Drop.
+struct CountingGate {
+    active: Arc<AtomicUsize>,
+    acquired: Arc<AtomicUsize>,
+    released: Arc<AtomicUsize>,
+    accept: bool,
+}
+
+struct CountingLease {
+    active: Arc<AtomicUsize>,
+    released: Arc<AtomicUsize>,
+}
+
+impl ArgonLease for CountingLease {}
+
+impl Drop for CountingLease {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.released.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl ArgonAdmissionGate for CountingGate {
+    fn acquire(
+        &self,
+        _record: &ChallengeRecord,
+    ) -> Result<Option<Box<dyn ArgonLease>>, AdmissionError> {
+        if !self.accept {
+            return Ok(None);
+        }
+        self.acquired.fetch_add(1, Ordering::SeqCst);
+        self.active.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(Box::new(CountingLease {
+            active: Arc::clone(&self.active),
+            released: Arc::clone(&self.released),
+        })))
+    }
+}
+
+/// Gate whose capacity backend is unavailable.
+struct UnavailableGate;
+
+impl ArgonAdmissionGate for UnavailableGate {
+    fn acquire(
+        &self,
+        _record: &ChallengeRecord,
+    ) -> Result<Option<Box<dyn ArgonLease>>, AdmissionError> {
+        Err(AdmissionError::Unavailable)
+    }
+}
 
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
 const IP: &str = "198.51.100.7";
@@ -328,7 +406,7 @@ fn gate_rejection_does_not_consume_the_record() {
     let issued_at_ns = issued.record.issued_at_ns;
 
     // Gate refuses capacity: CapacityExceeded, no derivation, NO consume.
-    let rejecting = verifier_for(&url, &prefix).with_argon_gate(|_| false);
+    let rejecting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(false));
     rejecting.store().store(&issued.record).unwrap();
     assert_eq!(
         verify_at(&rejecting, &token, issued_at_ns),
@@ -337,7 +415,7 @@ fn gate_rejection_does_not_consume_the_record() {
 
     // The record survives the gate rejection: a second verify with an
     // accepting gate still derives and succeeds.
-    let accepting = verifier_for(&url, &prefix).with_argon_gate(|_| true);
+    let accepting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(true));
     assert_eq!(
         verify_at(&accepting, &token, issued_at_ns),
         VerifyOutcome::Valid,
@@ -402,7 +480,7 @@ fn argon_gate_rejects_before_derivation_and_accepts_when_clear() {
         issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
     let issued_at_ns = issued.record.issued_at_ns;
-    let rejecting = verifier_for(&url, &prefix).with_argon_gate(|_| false);
+    let rejecting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(false));
     rejecting.store().store(&issued.record).unwrap();
     assert_eq!(
         verify_at(
@@ -418,7 +496,7 @@ fn argon_gate_rejects_before_derivation_and_accepts_when_clear() {
         issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
     let issued_at_ns = issued.record.issued_at_ns;
-    let accepting = verifier_for(&url, &prefix).with_argon_gate(|_| true);
+    let accepting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(true));
     accepting.store().store(&issued.record).unwrap();
     assert_eq!(
         verify_at(
@@ -428,6 +506,194 @@ fn argon_gate_rejects_before_derivation_and_accepts_when_clear() {
         ),
         VerifyOutcome::Valid
     );
+}
+
+#[test]
+fn argon_lease_is_held_during_verify_and_released_by_drop() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("lease-hold");
+    let issued =
+        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let acquired = Arc::new(AtomicUsize::new(0));
+    let released = Arc::new(AtomicUsize::new(0));
+    let gate = CountingGate {
+        active: Arc::clone(&active),
+        acquired: Arc::clone(&acquired),
+        released: Arc::clone(&released),
+        accept: true,
+    };
+    let verifier = Arc::new(verifier_for(&url, &prefix).with_argon_gate(gate));
+    verifier.store().store(&issued.record).unwrap();
+
+    // Verify on a worker thread so the main thread can OBSERVE the lease in
+    // flight: it must be held (count == 1) across the atomic GETDEL and the
+    // Argon2id derivation, i.e. DURING the verify call.
+    let worker = Arc::clone(&verifier);
+    let worker_token = token.clone();
+    let handle =
+        thread::spawn(move || worker.verify(&worker_token, "login", IP, issued_at_ns + 1_000_000));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut seen_in_flight = false;
+    while std::time::Instant::now() < deadline {
+        if active.load(Ordering::SeqCst) == 1 {
+            seen_in_flight = true;
+            break;
+        }
+        thread::sleep(std::time::Duration::from_micros(100));
+    }
+    assert!(
+        seen_in_flight,
+        "the lease (count 1) must be held while verify() runs"
+    );
+    assert_eq!(
+        handle.join().unwrap(),
+        VerifyOutcome::Valid,
+        "a granted lease must let the verification succeed"
+    );
+    assert_eq!(acquired.load(Ordering::SeqCst), 1, "exactly one acquire");
+    assert_eq!(
+        active.load(Ordering::SeqCst),
+        0,
+        "after verify returns, Drop must have released the lease"
+    );
+    assert_eq!(released.load(Ordering::SeqCst), 1, "exactly one release");
+}
+
+#[test]
+fn gate_ok_none_is_capacity_exceeded_and_does_not_consume() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("gate-ok-none");
+    let issued =
+        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // acquire -> Ok(None): CapacityExceeded, no lease handed out, NO consume.
+    let active = Arc::new(AtomicUsize::new(0));
+    let acquired = Arc::new(AtomicUsize::new(0));
+    let released = Arc::new(AtomicUsize::new(0));
+    let rejecting = verifier_for(&url, &prefix).with_argon_gate(CountingGate {
+        active: Arc::clone(&active),
+        acquired: Arc::clone(&acquired),
+        released: Arc::clone(&released),
+        accept: false,
+    });
+    rejecting.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&rejecting, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::CapacityExceeded)
+    );
+    assert_eq!(
+        acquired.load(Ordering::SeqCst),
+        0,
+        "Ok(None) must not acquire"
+    );
+    assert_eq!(active.load(Ordering::SeqCst), 0, "no lease must be held");
+    assert_eq!(released.load(Ordering::SeqCst), 0, "nothing to release");
+
+    // The record survives: a second verify with a granting gate succeeds.
+    let accepting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(true));
+    assert_eq!(
+        verify_at(&accepting, &token, issued_at_ns),
+        VerifyOutcome::Valid,
+        "an Ok(None) rejection must not burn the record"
+    );
+}
+
+#[test]
+fn gate_error_is_admission_unavailable_and_does_not_consume() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("gate-unavailable");
+    let issued =
+        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // acquire -> Err(AdmissionError::Unavailable): AdmissionUnavailable, no
+    // consume — the client can retry once the gate backend recovers.
+    let rejecting = verifier_for(&url, &prefix).with_argon_gate(UnavailableGate);
+    rejecting.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&rejecting, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::AdmissionUnavailable)
+    );
+
+    // The record survives: a second verify with a healthy gate succeeds.
+    let accepting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(true));
+    assert_eq!(
+        verify_at(&accepting, &token, issued_at_ns),
+        VerifyOutcome::Valid,
+        "an AdmissionUnavailable rejection must not burn the record"
+    );
+}
+
+#[test]
+fn sha256_records_are_never_gated() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("sha-ungated");
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // A gate that always errors: SHA-256 records are cheap and must never
+    // consult it (matching the PHP verifier), so the verify still succeeds.
+    let verifier = verifier_for(&url, &prefix).with_argon_gate(UnavailableGate);
+    verifier.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&verifier, &token, issued_at_ns),
+        VerifyOutcome::Valid,
+        "SHA-256 records must skip the Argon admission gate"
+    );
+}
+
+#[test]
+fn connection_pool_reuses_connections_round_robin() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("pool");
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // Default pool size is DEFAULT_POOL_SIZE; with_pool_size overrides it.
+    assert_eq!(store_for(&url, &prefix).pool_size(), DEFAULT_POOL_SIZE);
+    assert_eq!(
+        RedisChallengeStore::with_pool_size(
+            redis::Client::open(url.clone()).unwrap(),
+            prefix.clone(),
+            2
+        )
+        .pool_size(),
+        2
+    );
+
+    // Many operations over a tiny pool: every slot is lazily opened, reused
+    // round-robin, and the one-shot semantics are unaffected.
+    let verifier = ProductionVerifier::new(
+        RedisChallengeStore::with_pool_size(
+            redis::Client::open(url.clone()).unwrap(),
+            prefix.clone(),
+            2,
+        ),
+        SECRET,
+    );
+    for _ in 0..8 {
+        verifier.store().store(&issued.record).unwrap();
+        assert_eq!(
+            verify_at(&verifier, &token, issued_at_ns),
+            VerifyOutcome::Valid
+        );
+        verifier.store().consume(&issued.record.nonce).unwrap();
+    }
 }
 
 #[test]

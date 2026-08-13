@@ -53,6 +53,13 @@ use crate::verify::{
     VerifyOutcome, SKEW_TOLERANCE_US,
 };
 
+use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
+
+/// Default number of pooled Redis connections.
+pub const DEFAULT_POOL_SIZE: usize = 4;
+
 /// Redis-backed challenge store with atomic single-use semantics.
 ///
 /// Records are stored as JSON at `{prefix}{nonce}` with an EX TTL of
@@ -64,24 +71,78 @@ use crate::verify::{
 /// so two concurrent consumers can never both win the record. `find()`
 /// peeks with a plain GET — the non-consuming read the verify flow runs
 /// before the atomic consume.
-#[derive(Debug, Clone)]
+///
+/// Connections come from a lazily-initialized round-robin pool (default
+/// size [`DEFAULT_POOL_SIZE`], see [`RedisChallengeStore::with_pool_size`]):
+/// each operation borrows a pooled `Connection` instead of opening a fresh
+/// one, so concurrent verifies still genuinely race the GETDEL in Redis
+/// (each pooled connection has its own socket) without per-request
+/// connection churn.
 pub struct RedisChallengeStore {
     client: redis::Client,
     prefix: String,
+    pool: ConnectionPool,
+}
+
+/// Lazy round-robin pool of sync Redis connections — the same pattern as
+/// `kiwicaptcha-risk`'s `ConnectionPool`: `pool_size` slots, each opened
+/// on first use, handed out round-robin via an atomic counter.
+pub(crate) struct ConnectionPool {
+    slots: Vec<Mutex<Option<redis::Connection>>>,
+    next: AtomicUsize,
+}
+
+impl ConnectionPool {
+    fn new(pool_size: usize) -> ConnectionPool {
+        assert!(pool_size >= 1, "pool_size must be >= 1");
+        ConnectionPool {
+            slots: (0..pool_size).map(|_| Mutex::new(None)).collect(),
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    /// Picks the next slot round-robin and lazily opens its connection.
+    fn get(
+        &self,
+        client: &redis::Client,
+    ) -> redis::RedisResult<MutexGuard<'_, Option<redis::Connection>>> {
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+        let mut guard = self.slots[idx].lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_none() {
+            *guard = Some(client.get_connection()?);
+        }
+        Ok(guard)
+    }
 }
 
 impl RedisChallengeStore {
     /// Build a store for the given Redis client and key prefix (the PHP core
-    /// default prefix is `"kiwicaptcha:"`).
-    ///
-    /// A fresh connection is opened per operation (`redis::Client` is
-    /// thread-safe; a `Connection` is not), so concurrent verifies genuinely
-    /// race the GETDEL in Redis rather than serializing on a shared socket.
+    /// default prefix is `"kiwicaptcha:"`), with the default pool size
+    /// [`DEFAULT_POOL_SIZE`].
     pub fn new(client: redis::Client, prefix: impl Into<String>) -> Self {
+        RedisChallengeStore::with_pool_size(client, prefix, DEFAULT_POOL_SIZE)
+    }
+
+    /// Build a store with an explicit connection pool size (>= 1).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pool_size` is 0.
+    pub fn with_pool_size(
+        client: redis::Client,
+        prefix: impl Into<String>,
+        pool_size: usize,
+    ) -> Self {
         RedisChallengeStore {
             client,
             prefix: prefix.into(),
+            pool: ConnectionPool::new(pool_size),
         }
+    }
+
+    /// The configured connection pool size.
+    pub fn pool_size(&self) -> usize {
+        self.pool.slots.len()
     }
 
     /// Persist a record with `EX ttl = max(1, expires_at - now)` — the exact
@@ -96,13 +157,16 @@ impl RedisChallengeStore {
             .expect("ChallengeRecord JSON serialization is infallible");
         let now_unix = now_epoch_micros() / 1_000_000;
         let ttl = record.expires_at.saturating_sub(now_unix).max(1);
-        let mut conn = self.client.get_connection()?;
+        let mut guard = self.pool.get(&self.client)?;
+        let conn = guard.as_mut().ok_or_else(|| {
+            redis::RedisError::from((redis::ErrorKind::IoError, "pooled connection vanished"))
+        })?;
         redis::cmd("SET")
             .arg(key)
             .arg(value)
             .arg("EX")
             .arg(ttl)
-            .query::<()>(&mut conn)
+            .query::<()>(conn)
     }
 
     /// Load a record WITHOUT consuming it — the peek of the verify flow
@@ -114,8 +178,11 @@ impl RedisChallengeStore {
     /// `RedisStorage::decode()`).
     pub fn find(&self, nonce: &str) -> redis::RedisResult<Option<ChallengeRecord>> {
         let key = format!("{}{}", self.prefix, nonce);
-        let mut conn = self.client.get_connection()?;
-        let raw: Option<String> = redis::cmd("GET").arg(key).query(&mut conn)?;
+        let mut guard = self.pool.get(&self.client)?;
+        let conn = guard.as_mut().ok_or_else(|| {
+            redis::RedisError::from((redis::ErrorKind::IoError, "pooled connection vanished"))
+        })?;
+        let raw: Option<String> = redis::cmd("GET").arg(key).query(conn)?;
         Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
     }
 
@@ -128,19 +195,70 @@ impl RedisChallengeStore {
     /// already consumed: a replay can never win.
     pub fn consume(&self, nonce: &str) -> redis::RedisResult<Option<ChallengeRecord>> {
         let key = format!("{}{}", self.prefix, nonce);
-        let mut conn = self.client.get_connection()?;
-        let raw: Option<String> = redis::cmd("GETDEL").arg(key).query(&mut conn)?;
+        let mut guard = self.pool.get(&self.client)?;
+        let conn = guard.as_mut().ok_or_else(|| {
+            redis::RedisError::from((redis::ErrorKind::IoError, "pooled connection vanished"))
+        })?;
+        let raw: Option<String> = redis::cmd("GETDEL").arg(key).query(conn)?;
         Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
     }
 }
 
-/// Admission-control closure for memory-hard (Argon2id) verifications.
+impl fmt::Debug for RedisChallengeStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RedisChallengeStore")
+            .field("prefix", &self.prefix)
+            .field("pool_size", &self.pool_size())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Admission control for memory-hard (Argon2id) verifications: a real
+/// lease lifecycle instead of a bare predicate.
 ///
-/// Mirrors the PHP `VerificationAdmissionGate` concept minimally: `false`
-/// rejects the verification with [`VerifyError::CapacityExceeded`] before
-/// any hash is derived. Only applies to Argon2id records (SHA-256 records
-/// are cheap to verify and never gated), matching the PHP verifier.
-pub type ArgonAdmissionGate = Box<dyn Fn(&ChallengeRecord) -> bool + Send + Sync>;
+/// Mirrors the PHP `VerificationAdmissionGate` acquire/hold/release
+/// semantics: [`ArgonAdmissionGate::acquire`] hands out a [`ArgonLease`]
+/// that is released by `Drop` — exactly one `acquire` corresponds to
+/// exactly one release. The lease is held across the atomic GETDEL and
+/// the single hash derivation in [`ProductionVerifier::verify`], then
+/// released when it drops (PHP's acquire/hold/release-in-finally).
+///
+/// `Ok(None)` rejects the verification with
+/// [`VerifyError::CapacityExceeded`]; `Err(_)` rejects with
+/// [`VerifyError::AdmissionUnavailable`]. Both happen BEFORE any hash is
+/// derived and never consume the record. Only Argon2id records are gated
+/// (SHA-256 records are cheap to verify and never gated), matching the
+/// PHP verifier.
+pub trait ArgonAdmissionGate: Send + Sync {
+    /// Try to acquire a capacity lease for one verification of `record`.
+    ///
+    /// - `Ok(Some(lease))` — capacity granted; the caller holds `lease`
+    ///   through the consume + derive and `Drop` performs the release.
+    /// - `Ok(None)` — capacity unavailable (`CapacityExceeded`).
+    /// - `Err(AdmissionError::Unavailable)` — the gate backend itself is
+    ///   unavailable (`AdmissionUnavailable`).
+    ///
+    /// Must not consume the record: `record` is the peeked (non-consumed)
+    /// copy and a rejection leaves it in the store for a retry.
+    fn acquire(
+        &self,
+        record: &ChallengeRecord,
+    ) -> Result<Option<Box<dyn ArgonLease>>, AdmissionError>;
+}
+
+/// A held admission lease: capacity reserved for exactly one verification.
+///
+/// The lease is released by `Drop` — one `acquire` corresponds to exactly
+/// one release, mirroring the PHP acquire/hold/release-in-finally
+/// semantics. Implementors must release their capacity slot in `Drop`.
+pub trait ArgonLease: Send {}
+
+/// Why an admission gate could not grant a lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionError {
+    /// The gate's capacity backend is unavailable.
+    Unavailable,
+}
 
 /// Production verifier: the PHP core's one-shot flow, backed by
 /// [`RedisChallengeStore`] for distributed single-use.
@@ -149,7 +267,7 @@ pub type ArgonAdmissionGate = Box<dyn Fn(&ChallengeRecord) -> bool + Send + Sync
 pub struct ProductionVerifier {
     store: RedisChallengeStore,
     secret_key: String,
-    argon_gate: Option<ArgonAdmissionGate>,
+    argon_gate: Option<Box<dyn ArgonAdmissionGate>>,
     accept_legacy_v1: bool,
 }
 
@@ -165,12 +283,11 @@ impl ProductionVerifier {
         }
     }
 
-    /// Add an Argon2id admission gate (default: none). `false` → reject with
-    /// [`VerifyError::CapacityExceeded`] before any hash derivation.
-    pub fn with_argon_gate(
-        mut self,
-        gate: impl Fn(&ChallengeRecord) -> bool + Send + Sync + 'static,
-    ) -> Self {
+    /// Add an Argon2id admission gate (default: none). `acquire` returning
+    /// `Ok(None)` rejects with [`VerifyError::CapacityExceeded`]; returning
+    /// `Err(_)` rejects with [`VerifyError::AdmissionUnavailable`] — both
+    /// before any hash derivation, without consuming the record.
+    pub fn with_argon_gate(mut self, gate: impl ArgonAdmissionGate + 'static) -> Self {
         self.argon_gate = Some(Box::new(gate));
         self
     }
@@ -202,13 +319,15 @@ impl ProductionVerifier {
     ///   shared with the PHP core), used with the record's `issued_at_ns`
     ///   for the server-measured minimum-duration check.
     ///
-    /// Flow: decode → PEEK (GET) → cheap validation → Argon admission gate →
-    /// atomic CONSUME (GETDEL) → TOCTOU re-validation of the consumed record
-    /// → single derive → leading-zero check. The cheap checks and the gate
-    /// never consume, so a malformed/expired/mismatched token or a capacity
-    /// rejection leaves the record in place for a retry; the record is
-    /// burned exactly once, at the GETDEL, so at most one hash derivation
-    /// ever runs per nonce (concurrent losers see `RecordNotFound`).
+    /// Flow: decode → PEEK (GET) → cheap validation → Argon admission gate
+    /// (acquire → RAII lease) → atomic CONSUME (GETDEL) → TOCTOU
+    /// re-validation of the consumed record → single derive → leading-zero
+    /// check → lease released by Drop. The cheap checks and the gate never
+    /// consume, so a malformed/expired/mismatched token or a capacity /
+    /// availability rejection leaves the record in place for a retry; the
+    /// record is burned exactly once, at the GETDEL, so at most one hash
+    /// derivation ever runs per nonce (concurrent losers see
+    /// `RecordNotFound`).
     pub fn verify(&self, token: &str, scope: &str, client_ip: &str, now_ns: u64) -> VerifyOutcome {
         // 1. Token decode. The counter is bounded here too: the decoder
         //    rejects counter >= SOLVER_MAX_HASHES (VerifyError::CounterTooLarge
@@ -237,15 +356,26 @@ impl ProductionVerifier {
 
         // 4. Argon2id admission gate (optional): capacity control before the
         //    memory-hard hash. Only Argon2id records are gated, matching PHP.
-        //    A rejection returns CapacityExceeded WITHOUT consuming — the
-        //    record stays and the client can retry once capacity frees up.
-        if peek.algorithm == PoWAlgorithm::Argon2id {
-            if let Some(gate) = &self.argon_gate {
-                if !gate(&peek) {
-                    return VerifyOutcome::Invalid(VerifyError::CapacityExceeded);
-                }
+        //    acquire() hands out an RAII LEASE: exactly one acquire
+        //    corresponds to exactly one release (Drop). The lease binding
+        //    stays ALIVE through the atomic GETDEL, the TOCTOU re-check and
+        //    the single derivation below, and is released by Drop when
+        //    `_lease` goes out of scope — mirroring the PHP
+        //    acquire/hold/release-in-finally semantics. Both the `Ok(None)`
+        //    (CapacityExceeded) and `Err(_)` (AdmissionUnavailable) paths
+        //    return WITHOUT consuming — the record stays for a retry.
+        let _lease: Option<Box<dyn ArgonLease>> = if peek.algorithm == PoWAlgorithm::Argon2id {
+            match &self.argon_gate {
+                Some(gate) => match gate.acquire(&peek) {
+                    Ok(Some(lease)) => Some(lease),
+                    Ok(None) => return VerifyOutcome::Invalid(VerifyError::CapacityExceeded),
+                    Err(_) => return VerifyOutcome::Invalid(VerifyError::AdmissionUnavailable),
+                },
+                None => None,
             }
-        }
+        } else {
+            None
+        };
 
         // 5. Atomic CONSUME (GETDEL). The one-shot bound: exactly one caller
         //    observes the record, so exactly one derive can ever happen per

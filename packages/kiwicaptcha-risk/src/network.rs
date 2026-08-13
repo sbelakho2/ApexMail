@@ -29,7 +29,11 @@ impl NetworkFlags {
     /// Fixed-point network risk contribution, matching the PHP built-in
     /// values: 1000 blocked, 950 reserved, 750 known proxy, 650 Tor exit,
     /// 600 known hosting, 0 otherwise. When several flags are set the worst
-    /// category wins. The policy's `>= 900` hard deny fires for blocked
+    /// category wins. The policy's `>= 900` hard deny fires for BLOCKED and
+    /// RESERVED sources (both are operator-supplied CIDR rules that must
+    /// never appear as legitimate remote sources); known proxies/hosting and
+    /// Tor raise the adaptive score without hard-denying. The `>= 900`
+    /// hard deny fires for blocked
     /// sources only.
     pub fn network_risk(self) -> u16 {
         if self.blocked() {

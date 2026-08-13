@@ -51,6 +51,34 @@ final class ProcessEmergencyCapTest extends TestCase
         self::assertFalse($limiter->allow(), 'the 10001st must be denied at the default cap');
     }
 
+    public function testStampsAreMonotonicNanoseconds(): void
+    {
+        // The window runs on hrtime(true) NANOSECONDS (monotonic clock): a
+        // wall-clock jump backwards can never extend the window, and a
+        // jump forwards can never hold it open early.
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100);
+        self::assertTrue($limiter->allow());
+        $prop = new \ReflectionProperty(ProcessEmergencyCap::class, 'stamps');
+        $queue = $prop->getValue($limiter);
+        $first = $queue->bottom();
+        self::assertIsInt($first, 'stamps must be hrtime(true) nanoseconds (integer, monotonic)');
+        self::assertGreaterThan(10_000_000_000, $first, 'nanosecond scale (microtime(true) is ~1.7e9, never beyond 1e10)');
+
+        // The clock is monotonic: a later allowance is never earlier.
+        self::assertTrue($limiter->allow());
+        self::assertGreaterThanOrEqual($first, $queue->top(), 'hrtime must never move backwards');
+
+        // The window semantics still hold on the nanosecond clock.
+        for ($i = 0; $i < 98; $i++) {
+            self::assertTrue($limiter->allow(), "allow #" . ($i + 3));
+        }
+        self::assertTrue($limiter->isOpen());
+        self::assertFalse($limiter->allow(), 'the cap+1th must be denied on the nanosecond window too');
+        usleep(1_050_000);
+        self::assertFalse($limiter->isOpen(), 'the nanosecond window must slide after 1 s');
+        self::assertTrue($limiter->allow());
+    }
+
     public function testBcAliasStillResolves(): void
     {
         self::assertTrue(class_exists(LocalEmergencyLimiter::class));

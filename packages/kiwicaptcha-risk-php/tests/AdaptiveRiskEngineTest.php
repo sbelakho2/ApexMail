@@ -430,44 +430,48 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame(SignalVector::zero()->toArray(), $receipt->signals->toArray());
     }
 
-    public function testCalibrationReceiptRegisteredAndConsumed(): void
+    public function testCalibrationReceiptRegisteredWithScoreAndSampled(): void
     {
         $capturedReceipts = [];
-        $consumed = [];
-        $recorded = [];
-        $calibration = new class($capturedReceipts, $consumed, $recorded) implements CalibrationStore {
+        $confirmed = [];
+        $observedEvents = [];
+        $calibration = new class($capturedReceipts, $confirmed) implements CalibrationStore {
             public function __construct(
                 private array &$capturedReceipts,
-                private array &$consumed,
-                private array &$recorded,
+                private array &$confirmed,
             ) {
             }
 
-            public function record(int $scope, int $band, RiskAction $action, bool $legitimate): void
+            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
             {
-                $this->recorded[] = [$scope, $band, $action, $legitimate];
+                $this->capturedReceipts[] = [$decisionId, $scope, $band, $action, $score, $sampled];
+            }
+
+            public function sample(): bool
+            {
+                return true;
+            }
+
+            public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): ?int
+            {
+                $this->confirmed[] = [$decisionId, $legitimate, $weight];
+                return 1;
             }
 
             public function biasForScope(int $scope, int $now): int
             {
                 return 0;
             }
-
-            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action): void
-            {
-                $this->capturedReceipts[] = [$decisionId, $scope, $band, $action];
-            }
-
-            public function consumeReceipt(string $decisionId): ?array
-            {
-                $this->consumed[] = $decisionId;
-                return ['scope' => 1, 'band' => 1, 'action' => 'sha16'];
-            }
         };
 
-        $store = new class implements RiskStateStoreInterface {
+        $store = new class($observedEvents) implements RiskStateStoreInterface {
+            public function __construct(private array &$observedEvents)
+            {
+            }
+
             public function observe(RiskObservation $observation): SignalVector
             {
+                $this->observedEvents[] = $observation->event;
                 return SignalVector::zero();
             }
         };
@@ -483,18 +487,17 @@ final class AdaptiveRiskEngineTest extends TestCase
 
         $decision = $engine->assess($this->context());
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $decision->decisionId);
-        self::assertSame([[$decision->decisionId, 1, $decision->band, $decision->action]], $capturedReceipts);
-
-        // ConfirmedAbuse with the decision id consumes the receipt and
-        // records the outcome against the ORIGINAL scope/band/action.
-        $engine->record_feedback(
-            RiskEventKind::ConfirmedAbuse,
-            $this->context(event: RiskEventKind::ConfirmedAbuse),
-            null,
-            $decision->decisionId,
+        self::assertSame(
+            [[$decision->decisionId, 1, $decision->band, $decision->action, $decision->score, 1]],
+            $capturedReceipts,
+            'the receipt must carry the EXACT score and the assessment-time sampling flag'
         );
-        self::assertSame([$decision->decisionId], $consumed);
-        self::assertSame([[1, 1, RiskAction::Sha16, false]], $recorded);
+
+        // confirmedAbuse: FIRST the calibrator's atomic confirm (receipt
+        // consumed exactly once), THEN the reputation event.
+        $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), $decision->decisionId);
+        self::assertSame([[$decision->decisionId, false, null]], $confirmed, 'the atomic confirm must run first (legitimate=false)');
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ConfirmedAbuse], $observedEvents, 'the reputation event must still be recorded');
 
         // A limiter-hit decision also registers a receipt (silently).
         $limiter = new ProcessEmergencyCap(processPerSecond: 100);
@@ -513,7 +516,66 @@ final class AdaptiveRiskEngineTest extends TestCase
         );
         $denied = $engine->assess($this->context());
         self::assertTrue($denied->hasReason(RiskReason::HardRateLimit));
-        self::assertSame([[$denied->decisionId, 1, 10, RiskAction::Deny]], array_slice($capturedReceipts, 1));
+        self::assertSame([[$denied->decisionId, 1, 10, RiskAction::Deny, 1000, 1]], array_slice($capturedReceipts, 1));
+    }
+
+    public function testConfirmedFeedbackRunsReputationEventEvenWhenReceiptConsumed(): void
+    {
+        $confirmed = [];
+        $observedEvents = [];
+        $calibration = new class($confirmed) implements CalibrationStore {
+            public function __construct(private array &$confirmed)
+            {
+            }
+
+            public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled): void
+            {
+            }
+
+            public function sample(): bool
+            {
+                return true;
+            }
+
+            public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): ?int
+            {
+                $this->confirmed[] = [$decisionId, $legitimate, $weight];
+                return null; // receipt already consumed: calibration is best-effort
+            }
+
+            public function biasForScope(int $scope, int $now): int
+            {
+                return 0;
+            }
+        };
+
+        $store = new class($observedEvents) implements RiskStateStoreInterface {
+            public function __construct(private array &$observedEvents)
+            {
+            }
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                $this->observedEvents[] = $observation->event;
+                return SignalVector::zero();
+            }
+        };
+        $engine = new AdaptiveRiskEngine(
+            store: $store,
+            classifier: new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]),
+            identityFactory: new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat(chr(0x42), 32))),
+            scorer: new RiskScorer(),
+            policy: $this->policy(),
+            keys: RiskKeys::fromMaster(str_repeat(chr(0x42), 32)),
+            calibration: $calibration,
+        );
+
+        $decisionId = str_repeat('a', 32);
+        $receipt = $engine->confirmedLegitimate($this->context(event: RiskEventKind::ConfirmedLegitimate), $decisionId);
+        self::assertSame([[$decisionId, true, null]], $confirmed, 'the atomic confirm must still run');
+        self::assertSame([RiskEventKind::ConfirmedLegitimate], $observedEvents, 'the reputation event must happen even when the receipt was already consumed');
+        self::assertInstanceOf(EventReceipt::class, $receipt);
+        self::assertNull($engine->confirmOutcome($decisionId, true), 'confirmOutcome() delegates to the calibrator (null here)');
     }
 
     public function testStoreFailureDegradesAndOpensBreaker(): void
