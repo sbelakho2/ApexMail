@@ -55,13 +55,13 @@ final class RiskWiringTest extends TestCase
         ];
     }
 
-    public function testEmergencyLimiterUsesProcessEmergencyCapWithHardLimits(): void
+    public function testEmergencyLimiterUsesProcessEmergencyCapWithSingleHardLimit(): void
     {
         $container = $this->load($this->riskDefaults());
 
         $definition = $container->getDefinition('kiwi_captcha.risk.emergency_limiter');
         self::assertSame(ProcessEmergencyCap::class, $definition->getClass(), 'the bundle must use the NEW ProcessEmergencyCap class name');
-        self::assertSame([100, 10000], $definition->getArguments(), 'args = hard_limits.source_per_second, hard_limits.global_per_second');
+        self::assertSame([10000], $definition->getArguments(), 'args = [hard_limits.process_per_second] (the single per-process cap)');
     }
 
     public function testCalibratorReceivesTheBoundKnobsAndReceiptTtl(): void
@@ -105,7 +105,7 @@ final class RiskWiringTest extends TestCase
     public function testProviderWiredWithCounterKeyClientAndHardLimit(): void
     {
         $risk = $this->riskDefaults();
-        $risk['hard_limits'] = ['source_per_second' => 50, 'global_per_second' => 250];
+        $risk['hard_limits'] = ['process_per_second' => 250];
         $container = $this->load($risk);
 
         $definition = $container->getDefinition('kiwi_captcha.risk.resource_pressure');
@@ -114,7 +114,7 @@ final class RiskWiringTest extends TestCase
         self::assertNull($args[0], 'no argon semaphore wired (sha256) -> null');
         self::assertInstanceOf(Reference::class, $args[1], 'arg 1 = the risk Redis client for the counter reads');
         self::assertSame('{kiwi:wiring-test}:issuance:', $args[2], 'arg 2 = the issuance counter key prefix (hash-tagged)');
-        self::assertSame(250, $args[3], 'arg 3 = hard_limits.global_per_second');
+        self::assertSame(250, $args[3], 'arg 3 = hard_limits.process_per_second (the single per-process cap)');
 
         // The breaker is hoisted for the ENGINE's degraded mode only — the
         // provider no longer consumes it (no riskBackendHealth field).
@@ -174,10 +174,10 @@ final class RiskWiringTest extends TestCase
         self::assertSame('kiwi_captcha.risk.issuance_counter', (string) $controllerArgs[5], 'the controller receives the issuance counter');
     }
 
-    public function testGatewayReceivesBaselineUnknownScopeModeByDefault(): void
+    public function testGatewayReceivesMinimumUnknownScopeModeByDefault(): void
     {
         $container = $this->load($this->riskDefaults());
-        self::assertSame('baseline', $container->getDefinition(RiskGateway::class)->getArgument('$unknownScopeMode'));
+        self::assertSame('minimum', $container->getDefinition(RiskGateway::class)->getArgument('$unknownScopeMode'), 'unknown_scope.mode defaults to minimum (synthetic sha20 policy for scope typos)');
 
         $risk = $this->riskDefaults();
         $risk['unknown_scope'] = ['mode' => 'reject'];

@@ -28,7 +28,7 @@ final class CidrNetworkClassifierTest extends TestCase
         self::assertFalse($flags->knownProxy);
         self::assertFalse($flags->torExit);
         self::assertFalse($flags->blocked());
-        self::assertSame(1000, $flags->networkRisk());
+        self::assertSame(600, $flags->networkRisk());
     }
 
     public function testTorExit(): void
@@ -36,7 +36,7 @@ final class CidrNetworkClassifierTest extends TestCase
         $flags = $this->classifier()->classify('198.51.100.9');
         self::assertTrue($flags->torExit);
         self::assertFalse($flags->knownHosting);
-        self::assertSame(600, $flags->networkRisk());
+        self::assertSame(650, $flags->networkRisk());
     }
 
     public function testBlocked(): void
@@ -46,6 +46,17 @@ final class CidrNetworkClassifierTest extends TestCase
         self::assertTrue($flags->reserved);
         self::assertSame(1000, $flags->networkRisk());
         self::assertSame(255, $flags->localRiskBucket);
+    }
+
+    public function testReservedOnly(): void
+    {
+        $classifier = new CidrNetworkClassifier([
+            ['cidr' => '198.18.0.0/15', 'flags' => ['reserved']],
+        ]);
+        $flags = $classifier->classify('198.18.3.4');
+        self::assertTrue($flags->reserved);
+        self::assertFalse($flags->blocked());
+        self::assertSame(950, $flags->networkRisk(), 'reserved/impossible is below the policy deny line');
     }
 
     public function testUnknownIp(): void
@@ -63,7 +74,7 @@ final class CidrNetworkClassifierTest extends TestCase
     {
         $flags = $this->classifier()->classify('2001:db8:1::42');
         self::assertTrue($flags->knownProxy);
-        self::assertSame(1000, $flags->networkRisk());
+        self::assertSame(750, $flags->networkRisk());
 
         $flags = $this->classifier()->classify('2001:db8:2::42');
         self::assertSame(0, $flags->networkRisk());
@@ -93,7 +104,7 @@ final class CidrNetworkClassifierTest extends TestCase
         $flags = $classifier->classify('10.1.2.3');
         self::assertTrue($flags->knownHosting);
         self::assertTrue($flags->torExit);
-        self::assertSame(1000, $flags->networkRisk());
+        self::assertSame(650, $flags->networkRisk(), 'flag union: the highest risk wins (tor 650 over hosting 600)');
     }
 
     public function testFromFile(): void

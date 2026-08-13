@@ -59,18 +59,21 @@ use Symfony\Component\HttpFoundation\RequestStack;
  * RiskIdentityFactory HMAC-pseudonymizes it before Redis storage.
  *
  * DECISION HANDLES: {@see preIssue()} and {@see postSolveDecision()} record
- * the decision id on the owned {@see RiskDecisionContext} (request-local,
- * read via {@see decisionContext()}). For cross-request confirmation the
- * controller pairs the minted challenge nonce to the decision id via
- * {@see attachDecisionForNonce()} — a short-lived server-side mapping in the
- * risk Redis ({kiwi:<ns>}:decision:<nonce>, TTL = the calibration receipt
- * TTL, default 300) consumed once with GETDEL via
+ * the decision id of the current request via {@see setCurrentDecisionId()}
+ * (request-local — the RequestStack main request's `_kiwi_risk_decision_id`
+ * attribute, read via {@see currentDecisionId()}, so a long-running worker
+ * can never leak one request's decision into the next). For cross-request
+ * confirmation the controller pairs the minted challenge nonce to the
+ * decision id via {@see attachDecisionForNonce()} — a short-lived
+ * server-side mapping in the risk Redis ({kiwi:<ns>}:decision:<nonce>, TTL =
+ * the calibration receipt TTL, default 300) consumed once with GETDEL via
  * {@see resolveDecisionForNonce()}. The mapping carries ONLY the decision id
  * — no IP, no identity.
  */
 final class RiskGateway
 {
-    private readonly RiskDecisionContext $decisionContext;
+    /** Request attribute holding the current request's decision id. */
+    private const DECISION_ATTRIBUTE = '_kiwi_risk_decision_id';
 
     /**
      * @param array<string, int>                  $scopeIds         application scope string => risk-v1 int scope
@@ -105,7 +108,6 @@ final class RiskGateway
         if (!\in_array($unknownScopeMode, ['reject', 'baseline', 'minimum'], true)) {
             throw new \InvalidArgumentException(sprintf('unknownScopeMode must be "reject", "baseline" or "minimum" (got "%s")', $unknownScopeMode));
         }
-        $this->decisionContext = new RiskDecisionContext();
     }
 
     /** The configured unknown-scope mode ('reject' | 'baseline' | 'minimum'). */
@@ -154,20 +156,38 @@ final class RiskGateway
 
     /**
      * The decision id of the current request's decision (set by preIssue /
-     * postSolveDecision), or null when the risk engine was not consulted.
-     * Request-local: overwritten on every decision, never used for
-     * cross-request pairing.
+     * postSolveDecision / the validator's nonce consumption), or null when
+     * the risk engine was not consulted.
+     *
+     * Request-local: the id lives on the RequestStack main request's
+     * `_kiwi_risk_decision_id` attribute, so one worker serving many
+     * requests can never leak a previous request's decision into the next
+     * (a fresh request carries an empty attribute set).
      */
-    public function decisionContext(): RiskDecisionContext
+    public function currentDecisionId(): ?string
     {
-        return $this->decisionContext;
+        $id = $this->requestStack?->getMainRequest()?->attributes->get(self::DECISION_ATTRIBUTE);
+
+        return \is_string($id) && $id !== '' ? $id : null;
+    }
+
+    /**
+     * Record the decision id of the current request's decision on the
+     * RequestStack main request (request-local; no-op without a request in
+     * scope). The application reads it back via {@see currentDecisionId()}
+     * to confirm this challenge's decision (e.g. a later
+     * ConfirmedLegitimate / ConfirmedAbuse signal).
+     */
+    public function setCurrentDecisionId(string $decisionId): void
+    {
+        $this->requestStack?->getMainRequest()?->attributes->set(self::DECISION_ATTRIBUTE, $decisionId);
     }
 
     /**
      * PRE-ISSUE assessment: one observation (event PreIssue) + decision via
      * {@see AdaptiveRiskEngine::assessPreIssue()} (emergency limiter +
      * observation + decision). The decision id is recorded on the
-     * request-local {@see RiskDecisionContext}.
+     * request-local decision context ({@see setCurrentDecisionId()}).
      *
      * @throws UnknownScopeException   when the scope is unknown in 'reject'/'baseline' mode
      * @throws \InvalidArgumentException when the client IP is not a valid
@@ -191,7 +211,7 @@ final class RiskGateway
             ),
             $idempotencyKey,
         );
-        $this->decisionContext->set($decision->decisionId);
+        $this->setCurrentDecisionId($decision->decisionId);
         $this->logDecision($scope, $decision);
 
         return $decision;
@@ -204,7 +224,7 @@ final class RiskGateway
      * never deny a valid solve. A materially changed security context (e.g.
      * a global attack storm while the client was solving) can still demand
      * DENY or STEP-UP even after a valid proof. The decision id is recorded
-     * on the request-local {@see RiskDecisionContext}.
+     * on the request-local decision context ({@see setCurrentDecisionId()}).
      *
      * The outcome is NOT fed back by the gateway: ConfirmedLegitimate /
      * ConfirmedAbuse are application-only signals (they require a decision
@@ -232,7 +252,7 @@ final class RiskGateway
             resources: $this->resources(),
         );
         $decision = $this->engine->reassess($context, $idempotencyKey);
-        $this->decisionContext->set($decision->decisionId);
+        $this->setCurrentDecisionId($decision->decisionId);
         $this->logDecision($scope, $decision);
 
         return $decision;
@@ -323,10 +343,98 @@ final class RiskGateway
      * turned the request away. Records RiskEventKind::RateLimitHit; the
      * controller calls this BEFORE returning 429 so the risk state learns
      * the source was refused.
+     *
+     * Prefer the attributed signals over this generic one:
+     * {@see sourceRateLimitHit()} (per-source cap), {@see globalCapacityHit()}
+     * (deployment-wide cap, identity-neutral) and {@see riskDenied()} (the
+     * risk engine itself already denied — no double-counting).
      */
     public function rateLimitHit(string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null): ?EventReceipt
     {
         return $this->recordFeedback(RiskEventKind::RateLimitHit, $scope, $ip, $session, $idempotencyKey, null);
+    }
+
+    /**
+     * Server-derived signal: the issuer's PER-CLIENT rate limit turned the
+     * request away. Records RiskEventKind::SourceRateLimitHit (bad +3000 on
+     * the source/session reputation). The scope is the already-resolved
+     * risk-v1 int scope id (refusal paths run before any principal
+     * resolution, so no principal signal is attached). An unparseable
+     * client IP has nothing to attribute the signal to and is skipped.
+     *
+     * @return EventReceipt|null null when the signal was skipped (invalid
+     *                           client IP)
+     */
+    public function sourceRateLimitHit(int $scope, string $ip, ?string $sessionId = null, ?string $idempotencyKey = null): ?EventReceipt
+    {
+        if ($ip === '' || filter_var($ip, FILTER_VALIDATE_IP) === false) {
+            // Invalid client IP: nothing to attribute the signal to.
+            return null;
+        }
+
+        return $this->engine->sourceRateLimitHit(
+            $this->rateContext($scope, $ip, $sessionId, RiskEventKind::SourceRateLimitHit),
+            $idempotencyKey,
+        );
+    }
+
+    /**
+     * Server-derived signal: the DEPLOYMENT-GLOBAL issuance cap turned the
+     * request away. Records RiskEventKind::GlobalCapacityHit — global-only
+     * bad pressure (the canonical risk-v1 Lua raises the global attack
+     * pressure and NEVER touches the source/session/principal reputation:
+     * deployment overload must not contaminate an individual visitor).
+     *
+     * No source IP is needed: the event is identity-neutral, so the context
+     * is built with the identity-neutral unspecified address (0.0.0.0) and
+     * the Lua only ever mutates the global state for this event. The
+     * session signal is still carried when one exists.
+     */
+    public function globalCapacityHit(int $scope, ?string $sessionId = null, ?string $idempotencyKey = null): ?EventReceipt
+    {
+        try {
+            return $this->engine->globalCapacityHit(
+                $this->rateContext($scope, '0.0.0.0', $sessionId, RiskEventKind::GlobalCapacityHit),
+                $idempotencyKey,
+            );
+        } catch (\InvalidArgumentException) {
+            return null;
+        }
+    }
+
+    /**
+     * Server-derived signal: the risk engine itself already denied this
+     * request (RiskEventKind::RiskDenied — a deliberate no-op in the
+     * canonical Lua, so a decision that already scored the evidence is
+     * never double-counted). The controller does NOT call this on its Deny
+     * path; it exists for applications that refuse a request based on a
+     * risk decision OUTSIDE the challenge flow.
+     */
+    public function riskDenied(int $scope, string $ip, ?string $sessionId = null, ?string $idempotencyKey = null): ?EventReceipt
+    {
+        if ($ip === '' || filter_var($ip, FILTER_VALIDATE_IP) === false) {
+            // Invalid client IP: nothing to attribute the signal to.
+            return null;
+        }
+
+        return $this->engine->riskDenied(
+            $this->rateContext($scope, $ip, $sessionId, RiskEventKind::RiskDenied),
+            $idempotencyKey,
+        );
+    }
+
+    /** The RiskContext for one int-scope rate/denial signal (no principal). */
+    private function rateContext(int $scope, string $ip, ?string $sessionId, RiskEventKind $event): RiskContext
+    {
+        return new RiskContext(
+            scope: $scope,
+            sourceIp: $ip,
+            sessionId: $sessionId,
+            principalId: null,
+            event: $event,
+            networkFlags: $this->classifier->classify($ip),
+            resources: $this->resources(),
+        );
     }
 
     /**

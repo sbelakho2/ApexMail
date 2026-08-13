@@ -310,11 +310,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $container->setDefinition('kiwi_captcha.risk.metrics', new Definition(RiskMetrics::class));
 
             // In-process emergency limiter (cheap admission BEFORE the risk
-            // engine): fixed per-process windows from hard_limits — source
-            // AND global (assess() runs both before any state backend).
+            // engine): ONE honest per-process window from hard_limits —
+            // process_per_second (assessPreIssue() checks the single cap
+            // once before any state backend; per-source throttling belongs
+            // to the distributed keyed layer).
             $container->setDefinition('kiwi_captcha.risk.emergency_limiter', new Definition(ProcessEmergencyCap::class, [
-                max(1, $riskConfig['hard_limits']['source_per_second']),
-                max(1, $riskConfig['hard_limits']['global_per_second']),
+                $riskConfig['hard_limits']['process_per_second'],
             ]));
 
             // Redis-backed aggregate calibration (score-bucket statistics,
@@ -350,8 +351,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // are passed BY NAME against the final package contract
             // (principalTtlSecs, saturations, calibration) so their position
             // in the constructor cannot drift from this wiring. The session
-            // TTL lives on the state store, the global per-second limit on
-            // the emergency limiter — both wired above.
+            // TTL lives on the state store, the per-process emergency cap on
+            // the limiter — both wired above.
             $container->setDefinition('kiwi_captcha.risk.engine', (new Definition(AdaptiveRiskEngine::class, [
                 new Reference('kiwi_captcha.risk.store'),
                 new Reference('kiwi_captcha.risk.classifier'),
@@ -391,7 +392,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Live resource pressure: remaining Redis admission-semaphore
             // slots (argon_capacity.enabled gate) and real per-second
             // issuance headroom as the remaining FRACTION of
-            // hard_limits.global_per_second (fixed-point 0..1000). Risk
+            // hard_limits.process_per_second (fixed-point 0..1000). Risk
             // backend health is NOT a snapshot field anymore — the engine's
             // degraded mode consumes the shared circuit breaker directly.
             // Unobservable sources stay nominal (1000).
@@ -403,7 +404,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     : null,
                 $riskRedis,
                 $issuanceKeyPrefix,
-                $riskConfig['hard_limits']['global_per_second'],
+                $riskConfig['hard_limits']['process_per_second'],
             ]));
             $loggerRef = $container->hasDefinition('logger') || $container->hasAlias('logger')
                 ? new Reference('logger')

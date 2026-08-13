@@ -31,15 +31,28 @@ final class NetworkFlags
     }
 
     /**
-     * Fixed-point network risk contribution: 1000 for reserved/hosting/
-     * proxy/blocked sources, 600 for Tor exits, 0 otherwise.
+     * Fixed-point network risk contribution (P1 rescale — only deliberately
+     * blocked/impossible networks hard-deny; the policy's >= 900 Deny rule
+     * is reached by blocked (1000) and reserved/impossible (950) alone):
+     * blocked -> 1000, reserved -> 950, known_proxy -> 750, tor -> 650,
+     * known_hosting -> 600, ordinary -> 0. When several flags apply the
+     * highest risk wins.
      */
     public function networkRisk(): int
     {
-        if ($this->reserved || $this->knownHosting || $this->knownProxy || $this->blocked()) {
+        if ($this->blocked()) {
             return 1000;
         }
+        if ($this->reserved) {
+            return 950;
+        }
+        if ($this->knownProxy) {
+            return 750;
+        }
         if ($this->torExit) {
+            return 650;
+        }
+        if ($this->knownHosting) {
             return 600;
         }
         return 0;

@@ -17,12 +17,12 @@ use KiwiCaptcha\Risk\ResourcePressure;
  *  - issuanceCapacity: REAL per-second issuance headroom from the atomic
  *    Redis issuance-rate signal ({kiwi:<ns>}:issuance:<second>, incremented
  *    by the challenge controller on every minted challenge) as the REMAINING
- *    FRACTION of the configured hard_limits.global_per_second:
+ *    FRACTION of the configured hard_limits.process_per_second:
  *    clamp(round(max(0, cap - rate) * 1000 / cap), 0..1000) — 100% remaining
  *    -> 1000, 50% -> 500, 10% -> 100, 0% -> 0 (the ResourcePressure contract
  *    is fixed-point 0..1000; 1000 = full headroom, and the policy denies when
- *    headroom drops below 100). A counter unbounded by a global cap
- *    (global_per_second <= 0) or an unavailable counter (no client / Redis
+ *    headroom drops below 100). A counter unbounded by a cap
+ *    (process_per_second <= 0) or an unavailable counter (no client / Redis
  *    failure) -> nominal 1000.
  *
  * The whole snapshot() is cached for 100 ms (in-process timestamp cache):
@@ -56,7 +56,7 @@ final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
         private readonly ?RedisAdmissionSemaphore $semaphore = null,
         private readonly \Redis|\Predis\Client|null $redis = null,
         private readonly string $issuanceKeyPrefix = '{kiwi:kiwi}:issuance:',
-        private readonly int $globalPerSecond = 10000,
+        private readonly int $processPerSecond = 10000,
     ) {
     }
 
@@ -93,7 +93,7 @@ final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
 
     private function issuanceCapacity(): int
     {
-        if ($this->redis === null || $this->globalPerSecond <= 0) {
+        if ($this->redis === null || $this->processPerSecond <= 0) {
             return 1000;
         }
         try {
@@ -103,8 +103,8 @@ final class RedisRiskHealthProvider implements ResourcePressureProviderInterface
             return 1000;
         }
 
-        $remaining = max(0, $this->globalPerSecond - $rate);
+        $remaining = max(0, $this->processPerSecond - $rate);
 
-        return max(0, min(1000, (int) round($remaining * 1000 / $this->globalPerSecond)));
+        return max(0, min(1000, (int) round($remaining * 1000 / $this->processPerSecond)));
     }
 }

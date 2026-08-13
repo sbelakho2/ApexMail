@@ -6,7 +6,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Validator\Constraints;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Verifier;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Validator\Constraint;
@@ -73,6 +75,17 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // client IP is not a risk signal and must never break the form
         // submit (RiskGateway skips it internally).
         //
+        // NONCE -> DECISION CONSUMPTION: after a VALID verification the
+        // bounded solution token is decoded to its nonce and the short-lived
+        // nonce -> decision handle is CONSUMED (GETDEL, at most one winner).
+        // On scopes WITHOUT post_solve_check the ORIGINAL pre-issue decision
+        // id becomes the request's current decision id
+        // ({@see RiskGateway::setCurrentDecisionId()}), so the application
+        // can confirm this challenge's original decision. On post_solve_check
+        // scopes the old mapping is still consumed (cleanup — it can never be
+        // confirmed against a stale decision), and the fresh POST-SOLVE
+        // decision becomes the current confirmation target instead.
+        //
         // POST-SOLVE CHECK: when the scope opts in (post_solve_check), a
         // VALID solve additionally runs a fresh SolveSuccess assessment with
         // the same context. A Deny there fails the validation with the
@@ -87,7 +100,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         if ($this->risk !== null) {
             $session = $request !== null ? $this->continuityCookie?->read($request) : null;
             $ip = (string) ($clientIp ?? '');
-            if ($outcome->isOk() && $this->risk->postSolveCheck($constraint->scope)) {
+            $postSolveScope = $outcome->isOk() && $this->risk->postSolveCheck($constraint->scope);
+
+            if ($outcome->isOk()) {
+                $originalDecisionId = $this->consumeDecisionForToken($value);
+                if (!$postSolveScope && $originalDecisionId !== null) {
+                    $this->risk->setCurrentDecisionId($originalDecisionId);
+                }
+            }
+
+            if ($postSolveScope) {
                 try {
                     $postSolve = $this->risk->postSolveDecision($constraint->scope, $ip, $session);
                 } catch (\InvalidArgumentException) {
@@ -119,5 +141,23 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 ->setCode(KiwiCaptcha::NOT_SOLVED_ERROR)
                 ->addViolation();
         }
+    }
+
+    /**
+     * Decode the bounded solution token to its nonce and CONSUME the
+     * nonce -> decision handle (GETDEL — at most one consumer wins).
+     * Returns the paired ORIGINAL pre-issue decision id, or null when the
+     * token cannot be decoded or no handle exists. Never throws: a valid
+     * verification implies a decodable token (defense in depth).
+     */
+    private function consumeDecisionForToken(string $token): ?string
+    {
+        try {
+            $nonce = SolutionToken::decode($token)->nonce;
+        } catch (DecodeError) {
+            return null;
+        }
+
+        return $this->risk?->resolveDecisionForNonce($nonce);
     }
 }

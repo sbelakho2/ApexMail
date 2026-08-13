@@ -59,6 +59,13 @@
 --   ConfirmedLegitimate (12)   → trust
 --   ConfirmedAbuse (13)         → bad + mal
 --   RateLimitHit (14)           → bad (source/global abuse pressure)
+--   SourceRateLimitHit (15)     → bad on source/session (per-source limit)
+--   GlobalCapacityHit (16)      → global-only bad pressure; never touches
+--                                 source/session/principal reputation
+--                                 (deployment overload must not contaminate
+--                                 an individual visitor)
+--   RiskDenied (17)             → no state mutation (a risk decision that
+--                                 already denied must not be double-counted)
 --
 -- Only PreIssue counts as a REQUEST for velocity purposes; feedback events
 -- mutate only their own channels.
@@ -176,6 +183,12 @@ local function apply_feedback(s, event, scope)
         s.mal = s.mal + 2500
     elseif event == 14 then       -- RateLimitHit
         s.bad = s.bad + 3000
+    elseif event == 15 then       -- SourceRateLimitHit: per-source limit
+        s.bad = s.bad + 3000
+    elseif event == 16 then       -- GlobalCapacityHit: identity-neutral
+        -- deliberately nothing: the global state carries the pressure
+    elseif event == 17 then       -- RiskDenied: already scored, no-op
+        -- deliberately nothing
     end
 end
 
@@ -274,6 +287,12 @@ local g = read_state(KEYS[9], now)
 local prev_level = g.scope
 if not is_duplicate then
     apply_event(g, event, scope)
+    if event == 16 then
+        -- GlobalCapacityHit: deployment overload raises the global
+        -- attack/resource pressure WITHOUT contaminating the visitor's
+        -- source/session/principal reputation.
+        g.bad = g.bad + 3000
+    end
     save(KEYS[9], g, 0)
 end
 

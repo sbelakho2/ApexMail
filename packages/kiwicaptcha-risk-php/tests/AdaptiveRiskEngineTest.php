@@ -73,6 +73,19 @@ final class AdaptiveRiskEngineTest extends TestCase
         );
     }
 
+    /**
+     * The engine's normalization contract: HMAC-SHA256 of the domain-
+     * separated message, keyed by the master-derived event key.
+     */
+    private function expectedEventId(RiskEventKind $event, int $scope, string $key): string
+    {
+        return hash_hmac(
+            'sha256',
+            pack('N', $scope) . chr($event->value) . $key,
+            RiskKeys::fromMaster(str_repeat(chr(0x42), 32))->event,
+        );
+    }
+
     public function testAssessNormalPath(): void
     {
         $store = new class implements RiskStateStoreInterface {
@@ -138,7 +151,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame($observation->sourceEpoch, $observation->subnetEpoch); // both 900 s epochs
         self::assertNull($observation->sessionId);
         self::assertNull($observation->principalId);
-        self::assertSame(1000, $observation->networkRisk); // hosting flag
+        self::assertSame(600, $observation->networkRisk); // hosting flag
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $observation->eventId);
     }
 
@@ -158,13 +171,48 @@ final class AdaptiveRiskEngineTest extends TestCase
         };
         $engine = $this->engine($store);
         $key = 'caller-supplied-event-42';
-        $expected = hash('sha256', "kiwi-risk-event-v1\0" . $key);
+        $expected = $this->expectedEventId(RiskEventKind::PreIssue, 1, $key);
         $engine->assess($this->context(), $key);
-        self::assertSame([$expected], $captured, 'the caller idempotency key must be normalized (sha256) before the store');
+        self::assertSame([$expected], $captured, 'the caller idempotency key must be normalized (HMAC, event+scope domain separated) before the store');
 
         $engine->assess($this->context(), $key);
         self::assertSame([$expected, $expected], $captured, 'retries with the same key must normalize identically (dedupe by the Lua)');
         self::assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $expected);
+        self::assertStringNotContainsString($key, $expected, 'the raw caller key must never appear in the dedupe id');
+    }
+
+    public function testNormalizationIsDomainSeparatedByEventAndScope(): void
+    {
+        $captured = [];
+        $store = new class($captured) implements RiskStateStoreInterface {
+            public function __construct(private array &$captured)
+            {
+            }
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                $this->captured[] = [$observation->event, $observation->scope, $observation->eventId];
+                return SignalVector::zero();
+            }
+        };
+        $engine = $this->engine($store);
+        $key = 'shared-raw-key';
+
+        $engine->record_feedback(RiskEventKind::RateLimitHit, $this->context(event: RiskEventKind::RateLimitHit), $key);
+        $engine->record_feedback(RiskEventKind::SourceRateLimitHit, $this->context(event: RiskEventKind::SourceRateLimitHit), $key);
+        $engine->record_feedback(RiskEventKind::GlobalCapacityHit, $this->context(event: RiskEventKind::GlobalCapacityHit), $key);
+        $engine->record_feedback(RiskEventKind::RiskDenied, $this->context(event: RiskEventKind::RiskDenied), $key);
+        $engine->record_feedback(RiskEventKind::RateLimitHit, $this->context(scope: 2, event: RiskEventKind::RateLimitHit), $key);
+
+        $ids = array_map(static fn (array $entry): string => $entry[2], $captured);
+        self::assertSame([
+            $this->expectedEventId(RiskEventKind::RateLimitHit, 1, $key),
+            $this->expectedEventId(RiskEventKind::SourceRateLimitHit, 1, $key),
+            $this->expectedEventId(RiskEventKind::GlobalCapacityHit, 1, $key),
+            $this->expectedEventId(RiskEventKind::RiskDenied, 1, $key),
+            $this->expectedEventId(RiskEventKind::RateLimitHit, 2, $key),
+        ], $ids, 'the same raw key dedupes independently per event kind and scope');
+        self::assertCount(5, array_unique($ids), 'event+scope domain separation must produce distinct ids');
     }
 
     public function testEmptyIdempotencyKeyBecomesRandom(): void
@@ -218,7 +266,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         };
         $engine = $this->engine($store);
         $key = 'shared-idempotency-key';
-        $expected = hash('sha256', "kiwi-risk-event-v1\0" . $key);
+        $preIssue = $this->expectedEventId(RiskEventKind::PreIssue, 1, $key);
 
         $engine->assessPreIssue($this->context(), $key);
         $engine->reassess($this->context(), $key);
@@ -227,13 +275,19 @@ final class AdaptiveRiskEngineTest extends TestCase
         $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), str_repeat('b', 32), $key);
         $engine->record(RiskEventKind::ExpiredChallenge, 1, '203.0.113.27', 'sess', null);
 
-        self::assertSame([$expected, $expected, $expected, $expected, $expected], array_slice($captured, 0, 5), 'every idempotency-key entry point must send the normalized 64-hex value');
+        self::assertSame([
+            $preIssue,
+            $preIssue, // same event+scope retry dedupes identically
+            $this->expectedEventId(RiskEventKind::RateLimitHit, 1, $key),
+            $this->expectedEventId(RiskEventKind::ConfirmedLegitimate, 1, $key),
+            $this->expectedEventId(RiskEventKind::ConfirmedAbuse, 1, $key),
+        ], array_slice($captured, 0, 5), 'every idempotency-key entry point must send the normalized 64-hex value');
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $captured[5], 'record() without a key gets a fresh random id');
     }
 
     public function testEmergencyLimiterDeniesWithRetryAfter(): void
     {
-        $limiter = new ProcessEmergencyCap();
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100);
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
         }
@@ -254,12 +308,10 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame(0, $store->calls, 'the store must not be touched when the limiter is open');
     }
 
-    public function testGlobalEmergencyLimiterDeniesWithRetryAfter(): void
+    public function testCustomProcessCapDeniesWithRetryAfter(): void
     {
-        $limiter = new ProcessEmergencyCap(globalPerSecond: 100);
-        for ($i = 0; $i < 100; $i++) {
-            $limiter->allowGlobal();
-        }
+        $limiter = new ProcessEmergencyCap(processPerSecond: 1);
+        self::assertTrue($limiter->allow(), 'the single allowance is consumed by the cap');
         $store = new class implements RiskStateStoreInterface {
             public int $calls = 0;
 
@@ -275,18 +327,15 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertTrue($decision->hasReason(RiskReason::HardRateLimit));
         self::assertSame(1000, $decision->retryAfterMs);
         self::assertSame(10, $decision->band);
-        self::assertSame(0, $store->calls, 'the store must not be touched when the global window is open');
+        self::assertSame(0, $store->calls, 'the store must not be touched when the process window is open');
     }
 
     public function testReassessSkipsEmergencyLimiter(): void
     {
-        // Both limiter windows fully exhausted: pre-issue assessment is
-        // denied, but a post-solve reassessment must still score.
-        $limiter = new ProcessEmergencyCap(globalPerSecond: 1, maxPerSecond: 1);
-        for ($i = 0; $i < 100; $i++) {
-            $limiter->allow();
-            $limiter->allowGlobal();
-        }
+        // The single process window fully exhausted: pre-issue assessment
+        // is denied, but a post-solve reassessment must still score.
+        $limiter = new ProcessEmergencyCap(processPerSecond: 1);
+        $limiter->allow();
         $store = new class implements RiskStateStoreInterface {
             public int $calls = 0;
 
@@ -304,7 +353,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame(0, $store->calls, 'pre-issue assessment is gated on the limiter');
 
         $reassessed = $engine->reassess($this->context());
-        self::assertNotSame(\KiwiCaptcha\Risk\RiskAction::Deny, $reassessed->action, 'reassess must never be denied by the emergency caps');
+        self::assertNotSame(\KiwiCaptcha\Risk\RiskAction::Deny, $reassessed->action, 'reassess must never be denied by the emergency cap');
         self::assertFalse($reassessed->hasReason(RiskReason::HardRateLimit));
         self::assertSame(195, $reassessed->score);
         self::assertSame(1, $store->calls, 'reassess must still run the full pipeline against the store');
@@ -312,11 +361,8 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testAssessIsAliasOfAssessPreIssue(): void
     {
-        $limiter = new ProcessEmergencyCap(globalPerSecond: 1, maxPerSecond: 1);
-        for ($i = 0; $i < 100; $i++) {
-            $limiter->allow();
-            $limiter->allowGlobal();
-        }
+        $limiter = new ProcessEmergencyCap(processPerSecond: 1);
+        $limiter->allow();
         $store = new class implements RiskStateStoreInterface {
             public int $calls = 0;
 
@@ -339,9 +385,8 @@ final class AdaptiveRiskEngineTest extends TestCase
 
     public function testRecordFeedbackSkipsLimiterAndDecision(): void
     {
-        $limiter = new ProcessEmergencyCap(globalPerSecond: 1, maxPerSecond: 1);
+        $limiter = new ProcessEmergencyCap(processPerSecond: 1);
         $limiter->allow();
-        $limiter->allowGlobal();
 
         $captured = [];
         $store = new class($captured) implements RiskStateStoreInterface {
@@ -360,7 +405,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         $key = str_repeat('cd', 16);
         $receipt = $engine->record_feedback(RiskEventKind::ProtectedActionFailure, $this->context(event: RiskEventKind::ProtectedActionFailure), $key);
         self::assertInstanceOf(EventReceipt::class, $receipt);
-        self::assertSame(hash('sha256', "kiwi-risk-event-v1\0" . $key), $receipt->eventId, 'feedback event ids are normalized too');
+        self::assertSame($this->expectedEventId(RiskEventKind::ProtectedActionFailure, 1, $key), $receipt->eventId, 'feedback event ids are normalized too');
         self::assertFalse($receipt->isDuplicate);
         self::assertSame(500, $receipt->signals->sourceFast);
         self::assertSame(RiskEventKind::ProtectedActionFailure, $captured[0]->event, 'feedback must not be rewritten to PreIssue');
@@ -452,7 +497,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame([[1, 1, RiskAction::Sha16, false]], $recorded);
 
         // A limiter-hit decision also registers a receipt (silently).
-        $limiter = new ProcessEmergencyCap();
+        $limiter = new ProcessEmergencyCap(processPerSecond: 100);
         for ($i = 0; $i < 100; $i++) {
             $limiter->allow();
         }

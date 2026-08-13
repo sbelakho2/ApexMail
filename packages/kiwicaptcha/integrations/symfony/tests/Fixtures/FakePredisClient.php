@@ -253,6 +253,24 @@ final class FakePredisClient extends \Predis\Client
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $rest = \array_slice($keysAndArgs, $numKeys);
 
+        if (str_contains($script, 'return redis.call(\'ZCARD\', KEYS[1])')) {
+            // Semaphore USAGE: TIME -> prune -> ZCARD in one script
+            // (atomic-live — matches the acquire pruning).
+            $key = (string) $keys[0];
+            $this->fakeZremrangebyscore([$key, '-inf', (string) $this->timeMs()]);
+
+            return $this->zcard($key);
+        }
+
+        if (str_contains($script, 'redis.call(\'INCR\', KEYS[1])')) {
+            // Issuance counter: INCR + EXPIRE 1 in one atomic script.
+            $key = (string) $keys[0];
+            $n = $this->fakeIncr([$key]);
+            $this->fakePexpire([$key, 1000]);
+
+            return $n;
+        }
+
         if (!str_contains($script, 'ZREMRANGEBYSCORE')) {
             // Release: return redis.call('ZREM', KEYS[1], ARGV[1]).
             return $this->fakeZrem([$keys[0], $rest[0]]);

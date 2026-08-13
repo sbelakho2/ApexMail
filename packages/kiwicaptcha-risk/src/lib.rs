@@ -1,12 +1,11 @@
 //! KiwiCaptcha Adaptive Risk Engine (risk-v1 protocol).
 //!
 //! One pipeline turns a [`RiskContext`] into a [`RiskDecision`]:
-//! emergency caps (per-process source window + optional per-process global
-//! window; the distributed Redis source limiter handles per-source limits)
-//! → observation (epoch-scoped ephemeral pseudonyms) → circuit
-//! breaker → state store (canonical Lua via EVALSHA) → scorer (with
-//! calibration bias) → policy → top contributor reasons. Backend failure
-//! degrades instead of failing the request.
+//! emergency cap (one per-process window; the distributed Redis source
+//! limiter handles per-source limits) → observation (epoch-scoped ephemeral
+//! pseudonyms) → circuit breaker → state store (canonical Lua via EVALSHA)
+//! → scorer (with calibration bias) → policy → top contributor reasons.
+//! Backend failure degrades instead of failing the request.
 
 pub mod action;
 pub mod breaker;
@@ -174,17 +173,24 @@ impl Saturations {
     }
 }
 
-/// In-process emergency guard: a fixed-window cap of 100 observations per
-/// second PER PROCESS, enforced BEFORE any state backend is touched.
+/// In-process emergency guard: a fixed-window cap of `process_per_second`
+/// observations per second PER PROCESS (default 10000), enforced BEFORE any
+/// state backend is touched.
 ///
 /// This is deliberately a PER-PROCESS cap (a `VecDeque` of timestamps in
-/// this process's memory); no cross-process synchronization is performed —
-/// the distributed Redis source limiter handles per-source limits across
-/// processes. When the window is saturated the engine denies immediately
-/// (HardRateLimit) instead of spending time/state on the request.
+/// this process's memory); no cross-process synchronization is performed.
+/// It is the last line of defense when the Redis/state controls fail — it
+/// bounds how much work one process can push at a degraded backend so a
+/// burst cannot saturate this process's Redis connection. Per-source (and
+/// per-identity) throttling belongs to the DISTRIBUTED keyed layer: the
+/// Redis source velocity channels (`source_fast`/`source_slow` in risk-v1)
+/// and the policy's per-source overrides. When the window is saturated the
+/// engine denies immediately (HardRateLimit) instead of spending time/state
+/// on the request.
 pub struct ProcessEmergencyCap {
-    stamps: Mutex<VecDeque<u64>>,
-    max_per_second: usize,
+    process_per_second: u64,
+    stamps: Mutex<VecDeque<f64>>,
+    start: Instant,
 }
 
 impl Default for ProcessEmergencyCap {
@@ -194,22 +200,44 @@ impl Default for ProcessEmergencyCap {
 }
 
 impl ProcessEmergencyCap {
-    pub const MAX_PER_SECOND: usize = 100;
+    pub const DEFAULT_PROCESS_PER_SECOND: u64 = 10_000;
 
+    /// Builds a cap with the default rate (10000 admissions per second,
+    /// per process).
     pub fn new() -> ProcessEmergencyCap {
+        ProcessEmergencyCap::with_capacity(Self::DEFAULT_PROCESS_PER_SECOND)
+    }
+
+    /// Builds a cap with an explicit admissions-per-second rate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `process_per_second < 1`.
+    pub fn with_capacity(process_per_second: u64) -> ProcessEmergencyCap {
+        assert!(process_per_second >= 1, "process_per_second must be >= 1");
         ProcessEmergencyCap {
+            process_per_second,
             stamps: Mutex::new(VecDeque::new()),
-            max_per_second: Self::MAX_PER_SECOND,
+            start: Instant::now(),
         }
     }
 
+    /// The admissions-per-second cap.
+    pub fn process_per_second(&self) -> u64 {
+        self.process_per_second
+    }
+
     /// True when the process may proceed within the current window. Also
-    /// marks the current moment as consumed.
+    /// marks the current moment as consumed. Expired entries are dequeued
+    /// from the FRONT (amortized O(1) per admission).
     pub fn allow(&self) -> bool {
-        let now = now_ms();
+        let now = self.start.elapsed().as_secs_f64();
+        let cutoff = now - 1.0;
         let mut stamps = self.stamps.lock().unwrap_or_else(|p| p.into_inner());
-        prune(&mut stamps, now);
-        if stamps.len() >= self.max_per_second {
+        while stamps.front().is_some_and(|t| *t <= cutoff) {
+            stamps.pop_front();
+        }
+        if stamps.len() as u64 >= self.process_per_second {
             return false;
         }
         stamps.push_back(now);
@@ -218,89 +246,13 @@ impl ProcessEmergencyCap {
 
     /// True when the window is currently saturated.
     pub fn is_open(&self) -> bool {
-        let now = now_ms();
-        let mut stamps = self.stamps.lock().unwrap_or_else(|p| p.into_inner());
-        prune(&mut stamps, now);
-        stamps.len() >= self.max_per_second
-    }
-}
-
-fn prune(stamps: &mut VecDeque<u64>, now: u64) {
-    let cutoff = now.saturating_sub(1000);
-    while stamps.front().is_some_and(|t| *t <= cutoff) {
-        stamps.pop_front();
-    }
-}
-
-/// In-process GLOBAL emergency window: `max_per_second` admissions per
-/// second for THIS process (mirrors the PHP implementation's
-/// `LocalEmergencyLimiter::allowGlobal()` exactly — same fixed-window math,
-/// `t > now - 1.0` pruning, `count >= cap` denies). Deliberately a
-/// PER-PROCESS cap by contract: no cross-process synchronization is
-/// performed; the distributed Redis source limiter handles per-source
-/// limits across processes. It NEVER touches Redis, so it keeps working
-/// when the backend is down; the per-process source window is the primary
-/// guard and this is the deployment-scale coarse cap.
-pub struct GlobalEmergencyCap {
-    max_per_second: u64,
-    stamps: Mutex<Vec<f64>>,
-    start: std::time::Instant,
-}
-
-impl GlobalEmergencyCap {
-    pub const DEFAULT_MAX_PER_SECOND: u64 = 10_000;
-
-    /// Builds a cap with the default rate (10000 admissions per second,
-    /// per process).
-    pub fn new() -> GlobalEmergencyCap {
-        GlobalEmergencyCap {
-            max_per_second: Self::DEFAULT_MAX_PER_SECOND,
-            stamps: Mutex::new(Vec::new()),
-            start: std::time::Instant::now(),
-        }
-    }
-
-    /// Builds a cap with an explicit admissions-per-second rate.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `max_per_second < 1`.
-    pub fn with_capacity(max_per_second: u64) -> GlobalEmergencyCap {
-        assert!(max_per_second >= 1, "max_per_second must be >= 1");
-        GlobalEmergencyCap {
-            max_per_second,
-            stamps: Mutex::new(Vec::new()),
-            start: std::time::Instant::now(),
-        }
-    }
-
-    /// The admissions-per-second cap.
-    pub fn max_per_second(&self) -> u64 {
-        self.max_per_second
-    }
-
-    /// True when an admission is allowed in the current window; also marks
-    /// the current moment as consumed. Same semantics as the PHP
-    /// `allowGlobal()` (fixed 1-second window, `count >= cap` denies).
-    pub fn allow(&self) -> bool {
         let now = self.start.elapsed().as_secs_f64();
         let cutoff = now - 1.0;
-        let mut stamps = match self.stamps.lock() {
-            Ok(guard) => guard,
-            Err(p) => p.into_inner(),
-        };
-        stamps.retain(|t| *t > cutoff);
-        if stamps.len() as u64 >= self.max_per_second {
-            return false;
+        let mut stamps = self.stamps.lock().unwrap_or_else(|p| p.into_inner());
+        while stamps.front().is_some_and(|t| *t <= cutoff) {
+            stamps.pop_front();
         }
-        stamps.push(now);
-        true
-    }
-}
-
-impl Default for GlobalEmergencyCap {
-    fn default() -> Self {
-        Self::new()
+        stamps.len() as u64 >= self.process_per_second
     }
 }
 
@@ -326,7 +278,6 @@ pub struct RiskEngine<S: RiskStateStore, N: NetworkClassifier> {
     pub dedupe_ttl_secs: u64,
     pub saturations: Saturations,
     limiter: ProcessEmergencyCap,
-    global_limiter: Option<GlobalEmergencyCap>,
     calibration: Option<Arc<dyn CalibrationStore>>,
     metrics: Metrics,
     current_global_level: AtomicU8,
@@ -336,9 +287,8 @@ pub struct RiskEngine<S: RiskStateStore, N: NetworkClassifier> {
 impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     /// Builds an engine with the contract defaults (900 s epochs, 1800 s
     /// session TTL, 86400 s principal TTL, 60 s dedupe TTL, default
-    /// saturations, 2-failure/1000 ms breaker, 100 req/s source cap).
-    /// No global cap and no calibration store (both optional via
-    /// [`RiskEngine::with_global_cap`] / [`RiskEngine::with_calibration`]).
+    /// saturations, 2-failure/1000 ms breaker, 10000 req/s process cap).
+    /// No calibration store (optional via [`RiskEngine::with_calibration`]).
     /// Global pressure is enabled (see [`RiskEngine::with_global_pressure`]).
     pub fn new(
         store: S,
@@ -360,7 +310,6 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             dedupe_ttl_secs: 60,
             saturations: Saturations::default(),
             limiter: ProcessEmergencyCap::default(),
-            global_limiter: None,
             calibration: None,
             metrics: Metrics::new(),
             current_global_level: AtomicU8::new(0),
@@ -368,7 +317,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         }
     }
 
-    /// Builds an engine with explicit breaker and caps (tests).
+    /// Builds an engine with explicit breaker and process cap (tests).
     pub fn with_components(
         store: S,
         classifier: N,
@@ -381,13 +330,6 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         engine.breaker = breaker;
         engine.limiter = limiter;
         engine
-    }
-
-    /// Attaches the per-process global admission cap (checked AFTER the
-    /// per-process source window in [`RiskEngine::assess_pre_issue`]).
-    pub fn with_global_cap(mut self, cap: GlobalEmergencyCap) -> RiskEngine<S, N> {
-        self.global_limiter = Some(cap);
-        self
     }
 
     /// Toggles the global-pressure signal, level and cooldown (default:
@@ -426,12 +368,11 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
 
     /// Assesses ONE PreIssue request and returns a [`RiskDecision`].
     ///
-    /// The emergency caps are checked FIRST (per-process source window,
-    /// then the optional per-process global window); on a cap hit the
-    /// engine returns a HardRateLimit decision without touching the store.
-    /// `idempotency_key` becomes the event_id (dedupe key) via
-    /// [`normalize_idempotency_key`]; `None` draws a random 16-byte hex id.
-    /// Every decision gets a fresh `decision_id` and registers a
+    /// The emergency cap is checked FIRST (the single per-process window);
+    /// on a cap hit the engine returns a HardRateLimit decision without
+    /// touching the store. `idempotency_key` becomes the event_id (dedupe
+    /// key) via [`normalize_idempotency_key`]; `None` draws a random 16-byte
+    /// hex id. Every decision gets a fresh `decision_id` and registers a
     /// calibration receipt.
     ///
     /// # Errors
@@ -443,7 +384,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         idempotency_key: Option<String>,
     ) -> Result<RiskDecision, RiskError> {
-        if !self.limiter.allow() || !self.global_limiter_allows() {
+        if !self.limiter.allow() {
             self.metrics.incr("denied:limiter");
             let decision = RiskDecision {
                 score: 1000,
@@ -477,7 +418,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     /// pipeline to [`RiskEngine::assess_pre_issue`] (observation, breaker,
     /// store, scorer with calibration bias, policy, receipt) minus the
     /// limiter gate — used for follow-up assessments of an already-admitted
-    /// flow, where the caps must not apply.
+    /// flow, where the cap must not apply.
     ///
     /// # Errors
     ///
@@ -691,11 +632,60 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         )
     }
 
-    fn global_limiter_allows(&self) -> bool {
-        match &self.global_limiter {
-            None => true,
-            Some(limiter) => limiter.allow(),
-        }
+    /// Records a per-source rate-limit hit (event 15): `bad + 3000` on the
+    /// source/session reputation only — the caller observed its OWN limit
+    /// being enforced. The context's `event` field must be
+    /// `SourceRateLimitHit`.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
+    pub fn source_rate_limit_hit(
+        &self,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+    ) -> Result<EventReceipt, RiskError> {
+        self.record_feedback(
+            RiskEventKind::SourceRateLimitHit,
+            ctx,
+            idempotency_key,
+            None,
+        )
+    }
+
+    /// Records a deployment-capacity hit (event 16): raises ONLY the
+    /// global pressure (never the visitor's source/session/principal
+    /// reputation) so an overloaded deployment is not blamed on individual
+    /// traffic. The context's `event` field must be `GlobalCapacityHit`.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
+    pub fn global_capacity_hit(
+        &self,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+    ) -> Result<EventReceipt, RiskError> {
+        self.record_feedback(RiskEventKind::GlobalCapacityHit, ctx, idempotency_key, None)
+    }
+
+    /// Records a risk-denied outcome (event 17): a NO-OP in the state
+    /// script — a decision that already denied must not be double-counted,
+    /// this only books the idempotency receipt. The context's `event` field
+    /// must be `RiskDenied`.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
+    pub fn risk_denied(
+        &self,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+    ) -> Result<EventReceipt, RiskError> {
+        self.record_feedback(RiskEventKind::RiskDenied, ctx, idempotency_key, None)
     }
 
     fn build_observation(
@@ -710,9 +700,16 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         let session_id = ctx.session_id.map(|s| self.identity.session_id(s));
         let principal_id = ctx.principal_id.map(|p| self.identity.principal_id(p));
         // Canonical idempotency normalization shared with PHP: verbatim keys
-        // become sha256 hex, empty/None draw a random 16-byte id, and keys
-        // over 4096 bytes are rejected.
-        let event_id = normalize_idempotency_key(idempotency_key.as_deref())?;
+        // become the lowercase hex of
+        // HMAC-SHA256(event_key, pack('N', scope) . chr(event) . key) —
+        // domain-separated per scope and event kind; empty/None draw a
+        // random 16-byte id, and keys over 4096 bytes are rejected.
+        let event_id = normalize_idempotency_key(
+            idempotency_key.as_deref(),
+            ctx.scope,
+            ctx.event,
+            &self.keys.event,
+        )?;
 
         Ok(RiskObservation {
             event: ctx.event,
@@ -993,7 +990,7 @@ mod tests {
         assert_ne!(observation.source_id_prev, observation.source_id_next);
         assert_eq!(observation.session_id, None);
         assert_eq!(observation.principal_id, None);
-        assert_eq!(observation.network_risk, 1000); // hosting flag
+        assert_eq!(observation.network_risk, 600); // hosting flag
         assert_eq!(observation.event_id.len(), 32);
 
         // The epochs in the observation match the engine windows.
@@ -1013,10 +1010,37 @@ mod tests {
         let captured = engine.store.0.lock().unwrap();
         assert_eq!(
             captured[0].event_id,
-            crate::event::normalize_idempotency_key(Some("deadbeef")).unwrap(),
-            "verbatim keys are sha256-hashed before they become Redis suffixes"
+            crate::event::normalize_idempotency_key(
+                Some("deadbeef"),
+                1,
+                RiskEventKind::PreIssue,
+                &keys().event,
+            )
+            .unwrap(),
+            "verbatim keys are HMAC'd (scope + event domain-separated) before they become Redis suffixes"
         );
         assert_eq!(captured[0].event_id.len(), 64);
+
+        // The same caller key under a DIFFERENT event kind (e.g. a feedback
+        // wrapper) must never collide with the PreIssue dedupe id.
+        let engine2 = RiskEngine::new(
+            CapturingStore(Mutex::new(Vec::new())),
+            classifier(),
+            policy(),
+            keys(),
+        );
+        let mut feedback_ctx = context();
+        feedback_ctx.event = RiskEventKind::ChallengeIssued;
+        engine2
+            .record_feedback(
+                RiskEventKind::ChallengeIssued,
+                feedback_ctx,
+                Some("deadbeef".to_string()),
+                None,
+            )
+            .unwrap();
+        let captured2 = engine2.store.0.lock().unwrap();
+        assert_ne!(captured[0].event_id, captured2[0].event_id);
     }
 
     #[test]
@@ -1050,7 +1074,7 @@ mod tests {
 
     #[test]
     fn emergency_limiter_denies_with_retry_after() {
-        let limiter = ProcessEmergencyCap::new();
+        let limiter = ProcessEmergencyCap::with_capacity(100);
         for _ in 0..100 {
             assert!(limiter.allow());
         }
@@ -1076,7 +1100,23 @@ mod tests {
     }
 
     #[test]
-    fn reassess_ignores_the_emergency_caps() {
+    fn emergency_limiter_defaults_to_10000_per_second() {
+        let limiter = ProcessEmergencyCap::new();
+        assert_eq!(limiter.process_per_second(), 10_000);
+        // A healthy burst far below the default cap is admitted...
+        for _ in 0..1000 {
+            assert!(limiter.allow());
+        }
+        // ...and a saturated window denies.
+        let small = ProcessEmergencyCap::with_capacity(2);
+        assert!(small.allow());
+        assert!(small.allow());
+        assert!(!small.allow());
+        assert!(small.is_open());
+    }
+
+    #[test]
+    fn reassess_ignores_the_emergency_cap() {
         let store = MockStore::new(
             SignalVector {
                 source_fast: 500,
@@ -1084,10 +1124,18 @@ mod tests {
             },
             2,
         );
-        // A saturated 1-admission global cap: the pre-issue path must deny...
-        let global = GlobalEmergencyCap::with_capacity(1);
-        assert!(global.allow(), "burn the single admission");
-        let engine = RiskEngine::new(store, classifier(), policy(), keys()).with_global_cap(global);
+        // A saturated 1-admission process cap: the pre-issue path must
+        // deny...
+        let limiter = ProcessEmergencyCap::with_capacity(1);
+        assert!(limiter.allow(), "burn the single admission");
+        let engine = RiskEngine::with_components(
+            store,
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::default(),
+            limiter,
+        );
 
         let denied = engine.assess_pre_issue(context(), None).unwrap();
         assert!(denied.has_reason(RiskReason::HardRateLimit));
@@ -1097,7 +1145,7 @@ mod tests {
             "the limiter gate must fire before the store"
         );
 
-        // ...but reassess NEVER consults the caps: the same saturated engine
+        // ...but reassess NEVER consults the cap: the same saturated engine
         // still runs the full pipeline and returns a real decision.
         let decision = engine.reassess(context(), None).unwrap();
         assert!(!decision.has_reason(RiskReason::HardRateLimit));
@@ -1188,7 +1236,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             receipt.event_id,
-            crate::event::normalize_idempotency_key(Some("feedback-1")).unwrap()
+            crate::event::normalize_idempotency_key(
+                Some("feedback-1"),
+                1,
+                RiskEventKind::ProtectedActionFailure,
+                &keys().event,
+            )
+            .unwrap()
         );
         assert!(!receipt.is_duplicate);
 
@@ -1253,6 +1307,64 @@ mod tests {
                 b"principal-1"
             ))
         );
+    }
+
+    #[test]
+    fn new_events_record_through_wrappers_without_limiter_or_assess() {
+        let store = CapturingStore(Mutex::new(Vec::new()));
+        let engine = RiskEngine::new(store, classifier(), policy(), keys());
+        let ctx = |event| {
+            RiskContext::new(
+                1,
+                "203.0.113.27".parse().unwrap(),
+                None,
+                None,
+                event,
+                NetworkFlags::default(),
+                ResourcePressure::default(),
+            )
+        };
+
+        let receipt = engine
+            .source_rate_limit_hit(
+                ctx(RiskEventKind::SourceRateLimitHit),
+                Some("srl-1".to_string()),
+            )
+            .unwrap();
+        assert!(!receipt.is_duplicate);
+        let receipt = engine
+            .global_capacity_hit(
+                ctx(RiskEventKind::GlobalCapacityHit),
+                Some("gch-1".to_string()),
+            )
+            .unwrap();
+        assert!(!receipt.is_duplicate);
+        let receipt = engine
+            .risk_denied(ctx(RiskEventKind::RiskDenied), Some("deny-1".to_string()))
+            .unwrap();
+        assert!(!receipt.is_duplicate);
+
+        let events: Vec<RiskEventKind> = {
+            let captured = engine.store.0.lock().unwrap();
+            captured.iter().map(|o| o.event).collect()
+        };
+        assert_eq!(
+            events,
+            vec![
+                RiskEventKind::SourceRateLimitHit,
+                RiskEventKind::GlobalCapacityHit,
+                RiskEventKind::RiskDenied,
+            ]
+        );
+        // The dedupe ids are event-domain-separated: the same caller key
+        // across the three wrappers maps to three different event_ids.
+        let ids: Vec<String> = {
+            let captured = engine.store.0.lock().unwrap();
+            captured.iter().map(|o| o.event_id.clone()).collect()
+        };
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
     }
 
     #[test]
@@ -1452,16 +1564,15 @@ mod tests {
     // ── End-to-end with the Redis store (skipped unless RISK_REDIS_URL) ──
 
     #[test]
-    fn global_cap_caps_admissions_per_process() {
-        // In-process fixed-window cap (mirrors the PHP implementation):
-        // 5 admissions fit the window, the 6th and 7th must be denied
-        // with HardRateLimit. Needs Redis for the store backend; skipped
-        // unless RISK_REDIS_URL is set.
+    fn process_cap_caps_admissions_per_process() {
+        // In-process fixed-window cap: 5 admissions fit the window, the 6th
+        // and 7th must be denied with HardRateLimit. Needs Redis for the
+        // store backend; skipped unless RISK_REDIS_URL is set.
         let Some(raw_url) = std::env::var("RISK_REDIS_URL")
             .ok()
             .filter(|u| !u.is_empty())
         else {
-            eprintln!("skipping global limiter test: RISK_REDIS_URL not set");
+            eprintln!("skipping process limiter test: RISK_REDIS_URL not set");
             return;
         };
         let url = if let Some(rest) = raw_url.strip_prefix("tcp://") {
@@ -1476,8 +1587,14 @@ mod tests {
             ::redis::Client::open(url).expect("url parses"),
             &namespace,
         );
-        let engine = RiskEngine::new(store, classifier(), policy(), keys())
-            .with_global_cap(GlobalEmergencyCap::with_capacity(5));
+        let engine = RiskEngine::with_components(
+            store,
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::default(),
+            ProcessEmergencyCap::with_capacity(5),
+        );
 
         let mut allowed = 0;
         let mut denied = 0;
@@ -1549,7 +1666,7 @@ mod tests {
         } else {
             raw_url
         };
-        let client = ::redis::Client::open(url).expect("url parses");
+        let client = ::redis::Client::open(url.clone()).expect("url parses");
         let mut suffix = [0u8; 4];
         thread_rng().fill_bytes(&mut suffix);
         let store = redis::RedisRiskStateStore::new(client, &format!("e2e{}", hex::encode(suffix)));
@@ -1610,9 +1727,50 @@ mod tests {
             .unwrap();
         let decision = engine.assess_pre_issue(context(), None).unwrap();
         assert!(decision.score <= 1000);
-        assert!(
-            decision.has_reason(RiskReason::LocalNetworkRisk),
-            "hosting network risk must hard-deny"
+        // Hosting is a 600 network risk: it contributes weight but does NOT
+        // trip the >= 900 hard deny (that override is reserved for blocked
+        // sources). A fresh source IP on the same namespace keeps the
+        // velocity clean so the hosting assessment cannot be denied by
+        // other channels.
+        let hosting_ctx = RiskContext::new(
+            1,
+            "198.51.100.5".parse().unwrap(),
+            None,
+            None,
+            RiskEventKind::PreIssue,
+            NetworkFlags {
+                known_hosting: true,
+                ..Default::default()
+            },
+            ResourcePressure::default(),
         );
+        let hosting = engine.assess_pre_issue(hosting_ctx, None).unwrap();
+        assert_ne!(
+            hosting.action,
+            RiskAction::Deny,
+            "hosting (600) must not hard-deny"
+        );
+
+        // Blocked sources still hard-deny through the same policy override.
+        let blocked_classifier = CidrNetworkClassifier::from_entries(vec![(
+            CidrEntry::parse("203.0.113.0/24").unwrap(),
+            NetworkFlags {
+                local_risk_bucket: 255,
+                ..Default::default()
+            },
+        )]);
+        let blocked_store = redis::RedisRiskStateStore::new(
+            ::redis::Client::open(url).expect("url parses"),
+            &format!("e2eb{}", hex::encode(suffix)),
+        );
+        let blocked_engine = RiskEngine::new(blocked_store, blocked_classifier, policy(), keys());
+        let mut blocked_ctx = context();
+        blocked_ctx.network_flags = NetworkFlags {
+            local_risk_bucket: 255,
+            ..Default::default()
+        };
+        let denied = blocked_engine.assess_pre_issue(blocked_ctx, None).unwrap();
+        assert!(denied.has_reason(RiskReason::LocalNetworkRisk));
+        assert_eq!(denied.action, RiskAction::Deny);
     }
 }

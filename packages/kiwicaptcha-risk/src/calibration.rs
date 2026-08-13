@@ -15,20 +15,32 @@
 //! executed inside ONE canonical Lua invocation — the script at
 //! `resources/calibration.lua`, shared verbatim with PHP):
 //!
+//! TRUE SCORE calibration (not prevalence adaptation): each confirmed
+//! observation is weighted by the ORIGINAL decision's risk band
+//! (predicted_risk = band * 100):
+//!
 //! ```text
-//! total = legit + abuse            (summed over the last 24 hourly buckets)
-//! bias  = 0                        when total < min_samples (default 1000)
-//! raw   = ((abuse - legit) * 1000 / total) * 2 / 10
-//! bias  = clamp(raw, -max_adjustment, +max_adjustment)   (default ±150)
-//! final = clamp(bias, prev - allowed, prev + allowed)     with
-//!         allowed = max_change_per_minute * 1000 * elapsed_ms / 60000
-//!         (bias is persisted in MILLI-POINTS at
-//!          `{kiwi:<ns>}:cal:state:<scope>`; the FIRST call ever seeds
-//!          bias_mp = 0 / ts = now BEFORE the sample threshold is evaluated,
-//!          ts is refreshed on EVERY call, and below the threshold the
-//!          result is 0 with bias_mp untouched — all atomically in the one
-//!          script)
+//! fn_pressure = Σ abuse × (1000 − band×100)
+//! fp_pressure = Σ legit × (band×100)
+//! total       = legit + abuse              (summed over the last 24 buckets)
+//! raw         = (fn_pressure − fp_pressure) × 2 / (total × 10)
+//! bias        = clamp(raw, −max_adjustment, +max_adjustment)   (default ±150)
 //! ```
+//!
+//! A perfectly separating classifier (legit @ band 0, abuse @ band 10)
+//! contributes ~zero pressure and stays near bias 0; abuse predicted at low
+//! risk pushes the bias UP, legitimate traffic predicted at high risk
+//! pushes it DOWN. The target is 0 below `min_samples` (default 1000).
+//!
+//! The rate limiter is PROPORTIONAL to elapsed time and applies to the
+//! PATH, not just the target: internal bias is stored in MILLI-POINTS at
+//! `{kiwi:<ns>}:cal:state:<scope>` (1 point = 1000 units) and
+//! `allowed = max_change_per_minute × 1000 × elapsed_ms / 60000`. The
+//! FIRST call ever seeds bias_mp = 0 / ts = now BEFORE the sample threshold
+//! is evaluated; `ts` is refreshed on EVERY call (below threshold too) so a
+//! long quiet period cannot accumulate movement allowance; below the
+//! threshold the stored bias still moves toward 0 through the same rate
+//! limiter (never an instant snap) — all atomically in the one script.
 //!
 //! `bias_for_scope` caches the per-scope result in-process for 30 s (bounded
 //! to ~1024 scopes, oldest evicted): cache hits make ZERO Redis calls (0 is
@@ -567,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn bias_formula_matches_contract() {
+    fn bias_formula_is_score_sensitive() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
@@ -578,29 +590,45 @@ mod tests {
         // the raw value is reached in full.
         let s = store_limits("bias", 1, 150, 100_000);
 
-        // All abuse -> ((n*1000/n)*2)/10 = 200 -> clamped to max_adjustment
-        // 150 (the clamp is knob-driven).
-        fill(&s, 1, 3, RiskAction::Sha20, 0, 10, T0);
+        // Perfect separator: legit predicted at band 0 + abuse predicted at
+        // band 10 -> ~zero pressure on both sides -> bias stays ~0.
+        fill(&s, 1, 0, RiskAction::Allow, 10, 0, T0);
+        fill(&s, 1, 10, RiskAction::Deny, 0, 10, T0);
         assert_eq!(s.bias_for_scope(1, T0), 0, "first call seeds the state");
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, T0 + 60_000),
-            150
+            0,
+            "a perfectly separating classifier contributes no bias"
         );
 
-        // All legit -> -150.
-        fill(&s, 2, 3, RiskAction::Sha20, 10, 0, T0);
+        // Abuse predicted at LOW risk (band 1): the engine under-predicted
+        // the threat -> bias moves UP: fn = 10*900 = 9000;
+        // raw = (9000*2)/(10*10) = 180 -> clamped to max_adjustment 150.
+        fill(&s, 2, 1, RiskAction::Sha16, 0, 10, T0);
         assert_eq!(s.bias_for_scope(2, T0), 0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(2, T0 + 60_000),
-            -150
+            150
         );
 
-        // 60% abuse / 40% legit: ((20*1000)/100)*2/10 = 40.
-        fill(&s, 3, 3, RiskAction::Sha20, 40, 60, T0);
+        // Legit traffic predicted at HIGH risk (band 9): the engine
+        // over-predicted -> bias moves DOWN: fp = 10*900 = 9000 -> -180 ->
+        // clamped -150.
+        fill(&s, 3, 9, RiskAction::Sha20, 10, 0, T0);
         assert_eq!(s.bias_for_scope(3, T0), 0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(3, T0 + 60_000),
-            40
+            -150
+        );
+
+        // Mixed: 60 legit@band9 (fp 54000) + 40 abuse@band1 (fn 36000):
+        // (-18000*2)/(100*10) = -36.
+        fill(&s, 4, 9, RiskAction::Sha20, 60, 0, T0);
+        fill(&s, 4, 1, RiskAction::Sha16, 0, 40, T0);
+        assert_eq!(s.bias_for_scope(4, T0), 0);
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(4, T0 + 60_000),
+            -36
         );
 
         // No samples -> 0.
@@ -610,13 +638,14 @@ mod tests {
             0
         );
 
-        // Truncation toward zero, byte-identical with PHP intdiv:
-        // abuse 2 / legit 1 (total 3): (1*1000/3)*2/10 = 333*2/10 = 66.
-        fill(&s, 4, 3, RiskAction::Sha20, 1, 2, T0);
-        assert_eq!(s.bias_for_scope(4, T0), 0);
+        // Truncation toward zero, byte-identical with PHP trunc_div:
+        // abuse 2 @band1 (fn 1800) / legit 1 @band1 (fp 100) (total 3):
+        // (1700*2)/(3*10) = 3400/30 = 113.33 -> 113.
+        fill(&s, 5, 1, RiskAction::Sha16, 1, 2, T0);
+        assert_eq!(s.bias_for_scope(5, T0), 0);
         assert_eq!(
-            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(4, T0 + 60_000),
-            66
+            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(5, T0 + 60_000),
+            113
         );
     }
 
@@ -627,15 +656,15 @@ mod tests {
             return;
         };
         let s = store_limits("mins", 1000, 150, 10);
-        // 999 outcomes (all abuse): below the threshold -> exactly 0, no
-        // bias (the state is still seeded: bias_mp = 0, ts = T0).
-        fill(&s, 1, 3, RiskAction::Sha20, 0, 999, T0);
+        // 999 outcomes (all abuse@band1): below the threshold -> exactly 0,
+        // no bias (the state is still seeded: bias_mp = 0, ts = T0).
+        fill(&s, 1, 1, RiskAction::Sha16, 0, 999, T0);
         assert_eq!(s.bias_for_scope(1, T0), 0);
         // The 1000th sample (record_at invalidates the cache) unlocks the
-        // bias: raw 200 -> clamped to max_adjustment 150, but the
+        // bias: raw 180 -> clamped to max_adjustment 150, but the
         // proportional allowance started at the seeded ts (T0): one minute
         // later it admits exactly max_change_per_minute = 10 points.
-        fill(&s, 1, 3, RiskAction::Sha20, 0, 1, T0);
+        fill(&s, 1, 1, RiskAction::Sha16, 0, 1, T0);
         assert_eq!(
             store_on(s.namespace(), 1000, 150, 10).bias_for_scope(1, T0 + 60_000),
             10
@@ -649,7 +678,7 @@ mod tests {
             return;
         };
         let s = store_limits("roc", 1, 150, 60);
-        fill(&s, 1, 3, RiskAction::Sha20, 0, 10, T0);
+        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0);
         // First call seeds bias_mp = 0 / ts = T0: the raw 150 is clamped
         // against 0 by a zero allowance.
         assert_eq!(s.bias_for_scope(1, T0), 0);
@@ -666,11 +695,13 @@ mod tests {
             10
         );
 
-        // Flip to all-legit: raw -198 -> -150, but the allowance from the
-        // last ts (T0 + 10 s) over 50 s is 60 * 1000 * 50000 / 60000 =
+        // Flip to legit predicted at HIGH risk: 1000 legit@band9 (fp
+        // 900000) vs the 10 abuse@band1 (fn 9000): raw = (-891000*2)/
+        // (1010*10) = -176 -> clamped -150, but the allowance from the last
+        // ts (T0 + 10 s) over 50 s is 60 * 1000 * 50000 / 60000 =
         // 50000 mp = 50 points: 10 - 50 = -40 (truncating division, byte
         // identical with PHP).
-        fill(&s, 1, 3, RiskAction::Sha20, 1000, 0, T0);
+        fill(&s, 1, 9, RiskAction::Sha20, 1000, 0, T0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 60).bias_for_scope(1, T0 + 60_000),
             -40
@@ -678,13 +709,13 @@ mod tests {
     }
 
     #[test]
-    fn below_threshold_returns_zero_and_leaves_bias_untouched() {
+    fn below_threshold_decays_toward_zero_at_allowed_rate() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
         let s = store_limits("bthr", 1, 150, 60);
-        fill(&s, 1, 3, RiskAction::Sha20, 0, 10, T0);
+        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0);
         assert_eq!(s.bias_for_scope(1, T0), 0);
         // 60 s after the seed the allowance is exactly 60 points: raw 150 ->
         // 60 (60 * 1000 * 60000 / 60000 milli-points).
@@ -693,17 +724,26 @@ mod tests {
             60
         );
 
-        // A below-threshold VIEW of the same data: returns 0, leaves
-        // bias_mp (60) untouched, but refreshes ts to T0 + 120 s.
+        // A below-threshold VIEW of the same data: the TARGET is 0, but the
+        // stored bias (60000 mp) only moves toward it through the rate
+        // limiter — 30 s later it is 60 - 30 = 30, NOT an instant snap to 0.
         let low = store_on(s.namespace(), 1_000_000, 150, 60);
-        assert_eq!(low.bias_for_scope(1, T0 + 120_000), 0);
+        assert_eq!(low.bias_for_scope(1, T0 + 90_000), 30);
 
-        // Back above the threshold: the bias resumes from the stored 60 and
-        // the allowance counts ONLY from the refreshed ts (T0 + 120 s):
-        // over 60 s that is 60 points -> final = min(150, 60 + 60) = 120.
+        // ts is refreshed on EVERY call (below threshold too): the next call
+        // 60 s later allows exactly 60 more points, closing the decay
+        // (30 - 60 clamped to the 0 target).
         assert_eq!(
-            store_on(s.namespace(), 1, 150, 60).bias_for_scope(1, T0 + 180_000),
-            120
+            store_on(s.namespace(), 1_000_000, 150, 60).bias_for_scope(1, T0 + 150_000),
+            0
+        );
+
+        // Back above the threshold: the bias resumes from 0 and the
+        // allowance counts ONLY from the refreshed ts (T0 + 150 s): over
+        // 60 s that is 60 points -> final = min(150, 0 + 60) = 60.
+        assert_eq!(
+            store_on(s.namespace(), 1, 150, 60).bias_for_scope(1, T0 + 210_000),
+            60
         );
     }
 
@@ -714,7 +754,7 @@ mod tests {
             return;
         };
         let s = store_limits("cache", 1, 150, 100_000);
-        fill(&s, 7, 3, RiskAction::Sha20, 0, 10, T0);
+        fill(&s, 7, 1, RiskAction::Sha16, 0, 10, T0);
         assert_eq!(s.bias_for_scope(7, T0), 0);
         // Exactly ONE canonical script invocation over 24 bucket keys + the
         // state key (the old hot path issued TWO scripts).
@@ -760,7 +800,9 @@ mod tests {
             return;
         };
         let s = store_limits("inval", 1, 150, 100_000);
-        fill(&s, 7, 3, RiskAction::Sha20, 0, 10, T0);
+        // 10 abuse@band1 (fn 9000) + 90 legit@band1 (fp 9000) -> raw 0:
+        // a 1:9 abuse:legit ratio at the same band balances the pressures.
+        fill(&s, 7, 1, RiskAction::Sha16, 0, 10, T0);
         assert_eq!(s.bias_for_scope(7, T0), 0);
         assert_eq!(s.script_calls(), 1);
         // Cache hit: no backend call.
@@ -769,11 +811,11 @@ mod tests {
 
         // A fresh outcome (record_at/record) drops the scope's cache entry:
         // the next call re-invokes the script and serves the new aggregate.
-        for _ in 0..10 {
-            s.record_at(7, 3, RiskAction::Sha20, true, T0 + 3_600_000)
+        for _ in 0..90 {
+            s.record_at(7, 1, RiskAction::Sha16, true, T0 + 3_600_000)
                 .unwrap();
         }
-        assert_eq!(s.bias_for_scope(7, T0 + 3_600_000), 0); // 10 legit vs 10 abuse -> raw 0
+        assert_eq!(s.bias_for_scope(7, T0 + 3_600_000), 0); // balanced -> raw 0
         assert_eq!(
             s.script_calls(),
             2,
@@ -808,24 +850,25 @@ mod tests {
             return;
         };
         let s = store_limits("buckets", 1, 150, 100_000);
-        // Same scope, three hours: 30 abuse + 30 legit -> raw 0 (the first
-        // call seeds; a cold store one minute later serves the raw 0).
-        fill(&s, 1, 2, RiskAction::Sha18, 10, 0, T0);
-        fill(&s, 1, 2, RiskAction::Sha18, 10, 10, T0 - 3_600_000);
-        fill(&s, 1, 2, RiskAction::Sha18, 10, 20, T0 - 7_200_000);
+        // Same scope, three hours: 30 abuse@band1 -> fn 27000 -> raw 180 ->
+        // clamped 150 (the first call seeds; a cold store one minute later
+        // serves the raw in full).
+        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0);
+        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0 - 3_600_000);
+        fill(&s, 1, 1, RiskAction::Sha16, 0, 10, T0 - 7_200_000);
         assert_eq!(s.bias_for_scope(1, T0), 0);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, T0 + 60_000),
-            0
+            150
         );
 
         // Buckets older than 24 hours are out of the window (the record_at
         // fills invalidate the cache, so this re-aggregates; the total is
-        // still 60 -> raw 0).
-        fill(&s, 1, 2, RiskAction::Sha18, 0, 100, T0 - 25 * 3_600_000);
+        // still 30 -> raw 150).
+        fill(&s, 1, 1, RiskAction::Sha16, 0, 100, T0 - 25 * 3_600_000);
         assert_eq!(
             store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, T0 + 120_000),
-            0
+            150
         );
     }
 

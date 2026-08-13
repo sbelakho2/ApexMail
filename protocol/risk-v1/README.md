@@ -6,7 +6,7 @@ The Rust implementation (`packages/kiwicaptcha-risk`) and the PHP
 implementation (`packages/kiwicaptcha-risk-php`) MUST be byte-for-byte
 identical in:
 
-1. `RiskEventKind` — fixed enum, values 1..14:
+1. `RiskEventKind` — fixed enum, values 1..17:
 
    | value | name |
    |-------|------|
@@ -24,6 +24,17 @@ identical in:
    | 12 | ConfirmedLegitimate |
    | 13 | ConfirmedAbuse |
    | 14 | RateLimitHit |
+   | 15 | SourceRateLimitHit |
+   | 16 | GlobalCapacityHit |
+   | 17 | RiskDenied |
+
+   Event semantics: only `PreIssue` (1) counts as a REQUEST (velocity);
+   feedback events mutate only their own channels. `SourceRateLimitHit`
+   (15) adds bad pressure to source/session only; `GlobalCapacityHit`
+   (16) raises the GLOBAL attack/resource pressure without touching any
+   source/session/principal reputation (deployment overload must not
+   contaminate an individual visitor); `RiskDenied` (17) performs no state
+   mutation (a risk decision that already denied is never double-counted).
 
 2. `SignalVector` — 13 fixed-point fields (u16/int, each 0..1000), in this
    exact order (JSON keys in `fixtures.json`):

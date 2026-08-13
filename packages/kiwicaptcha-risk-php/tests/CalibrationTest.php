@@ -13,8 +13,11 @@ use Predis\Command\CommandInterface;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Redis-backed calibration tests. AggregateCalibrator cases are skipped
- * unless RISK_REDIS_URL is set; the recorder interface test runs always.
+ * Redis-backed calibration tests (TRUE-score semantics of the canonical
+ * calibration.lua: fn_pressure = Σ abuse×(1000−band×100), fp_pressure =
+ * Σ legit×(band×100), raw = (fn−fp)×2/(total×10), proportional rate
+ * limiter over milli-points). AggregateCalibrator cases are skipped unless
+ * RISK_REDIS_URL is set; the recorder interface test runs always.
  */
 final class CalibrationTest extends TestCase
 {
@@ -79,34 +82,52 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $this->nowMs()));
     }
 
-    public function testAllAbuseBiasIsPositiveAndBounded(): void
+    public function testPerfectSeparatorStaysNearZero(): void
     {
+        // A perfectly separating classifier (legit @ band 0, abuse @
+        // band 10) contributes ~zero calibration pressure: fn_pressure =
+        // 1000×(1000−1000) = 0, fp_pressure = 1000×0 = 0 -> raw 0.
         $c = $this->calibrator();
-        $this->record($c, 1000, false);
+        $this->record($c, 1000, true, 0);
+        $this->record($c, 1000, false, 10);
+        $t = $this->t0();
+        self::assertSame(0, $c->biasForScope(1, $t), 'first call ever seeds the rate-limit state and returns 0');
+        $this->clearCache($c);
+        self::assertSame(0, $c->biasForScope(1, $t + 900_000), 'perfect separation must keep the bias at 0 even with full movement allowance');
+    }
+
+    public function testAbuseAtLowBandPushesBiasUpAndIsBounded(): void
+    {
+        // 1000 abuse @ band 1: fn_pressure = 1000×900 = 900000,
+        // raw = 900000×2/10000 = 180 -> clamped to maxAdjustment +150.
+        $c = $this->calibrator();
+        $this->record($c, 1000, false, 1);
         $t = $this->t0();
         // The first call ever seeds the rate-limit state (bias_mp = 0 /
         // ts = now) BEFORE the threshold check and returns 0 — a fresh
         // scope can never jump straight to ±maxAdjustment.
         self::assertSame(0, $c->biasForScope(1, $t));
-        // raw = ((1000 - 0) * 1000 / 1000) * 2 / 10 = 200 -> clamped to the
-        // constructor maxAdjustment (+150). Reaching it takes 15 minutes
-        // at maxChangePerMinute 10 (10 points/minute * 15).
+        // Reaching +150 takes 15 minutes at maxChangePerMinute 10
+        // (10 points/minute * 15).
         $this->clearCache($c);
         self::assertSame(150, $c->biasForScope(1, $t + 900_000));
     }
 
-    public function testAllLegitBiasIsNegativeAndBounded(): void
+    public function testLegitAtHighBandPushesBiasDownAndIsBounded(): void
     {
+        // 1000 legit @ band 9: fp_pressure = 1000×900 = 900000,
+        // raw = −900000×2/10000 = −180 -> clamped to −maxAdjustment.
         $c = $this->calibrator();
-        $this->record($c, 1000, true);
+        $this->record($c, 1000, true, 9);
         $t = $this->t0();
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->clearCache($c);
         self::assertSame(-150, $c->biasForScope(1, $t + 900_000));
     }
 
-    public function testBalancedBiasIsZero(): void
+    public function testBalancedSameBandBiasIsZero(): void
     {
+        // Balanced at the same band: fn = fp = 500×500 = 250000 -> raw 0.
         $c = $this->calibrator();
         $this->record($c, 500, true);
         $this->record($c, 500, false);
@@ -116,33 +137,35 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t + 900_000));
     }
 
-    public function testMixedBiasIntegerMath(): void
+    public function testMixedBiasScoreSensitive(): void
     {
-        // 750 abuse, 250 legit: ((500 * 1000) / 1000) * 2 / 10 = 100,
-        // reachable after 10 minutes at maxChangePerMinute 10.
+        // 750 abuse + 250 legit @ band 5: fn = 375000, fp = 125000,
+        // raw = 250000×2/10000 = 50, reachable after 5 minutes at
+        // maxChangePerMinute 10.
         $c = $this->calibrator();
         $this->record($c, 750, false);
         $this->record($c, 250, true);
         $t = $this->t0();
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->clearCache($c);
-        self::assertSame(100, $c->biasForScope(1, $t + 600_000));
+        self::assertSame(50, $c->biasForScope(1, $t + 300_000));
 
-        // 550 abuse, 450 legit: ((100 * 1000) / 1000) * 2 / 10 = 20 (2 min).
+        // 550 abuse + 450 legit @ band 5: fn = 275000, fp = 225000,
+        // raw = 50000×2/10000 = 10 (1 min).
         $c = $this->calibrator();
         $this->record($c, 550, false);
         $this->record($c, 450, true);
         $t = $this->t0();
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->clearCache($c);
-        self::assertSame(20, $c->biasForScope(1, $t + 120_000));
+        self::assertSame(10, $c->biasForScope(1, $t + 60_000));
     }
 
     public function testScopesAreIndependent(): void
     {
         $c = $this->calibrator();
-        $this->record($c, 1000, false, 5, RiskAction::Sha20, 1);
-        $this->record($c, 1000, true, 5, RiskAction::Sha20, 2);
+        $this->record($c, 1000, false, 1, RiskAction::Sha20, 1);
+        $this->record($c, 1000, true, 9, RiskAction::Sha20, 2);
         $t = $this->t0();
         self::assertSame(0, $c->biasForScope(1, $t));
         self::assertSame(0, $c->biasForScope(2, $t));
@@ -165,48 +188,63 @@ final class CalibrationTest extends TestCase
         self::assertSame('1000', (string) $this->client->hget("{kiwi:{$ns}}:cal:1:{$hour}", 'b5asha20:abuse'));
         self::assertNull($this->client->hget("{kiwi:{$ns}}:cal:1:" . ($hour - 25), 'b5asha20:abuse'));
 
-        // 1000 abuse in-window -> bias +150 after the proportional ramp;
-        // the 25-hours-old bucket is outside the 24-hour window and
+        // 1000 abuse in-window @ band 5 -> raw 100 (fn = 500000 →
+        // 1000000/10000), reached after the proportional ramp; the
+        // 25-hours-old bucket is outside the 24-hour window and
         // contributes nothing.
         $t = $this->t0();
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->clearCache($c);
-        self::assertSame(150, $c->biasForScope(1, $t + 900_000));
+        self::assertSame(100, $c->biasForScope(1, $t + 900_000));
     }
 
     public function testBelowMinSamplesIsZero(): void
     {
         $c = $this->calibrator();
-        $this->record($c, 999, false, 5, RiskAction::Sha20, 1);
+        $this->record($c, 999, false, 1, RiskAction::Sha20, 1);
         $t = $this->t0();
         self::assertSame(0, $c->biasForScope(1, $t), 'no nonzero bias below minSamples');
 
         // At the threshold the bias appears, rate-limited from the seeded
         // 0 (fresh scope): 150 points need 15 minutes at
         // maxChangePerMinute 10.
-        $this->record($c, 1000, false, 5, RiskAction::Sha20, 2);
+        $this->record($c, 1000, false, 1, RiskAction::Sha20, 2);
         $this->clearCache($c);
         self::assertSame(0, $c->biasForScope(2, $t));
         $this->clearCache($c);
         self::assertSame(150, $c->biasForScope(2, $t + 900_000));
     }
 
-    public function testBelowThresholdLeavesBiasStateUntouched(): void
+    public function testBelowThresholdMovesTowardZeroAtAllowedRate(): void
     {
+        // Below min_samples the TARGET is 0, but the stored bias moves
+        // toward 0 THROUGH the proportional rate limiter — a sample count
+        // that dips below the threshold can never snap +150 → 0 instantly.
         $c = $this->calibrator();
-        $this->record($c, 999, false, 5, RiskAction::Sha20, 3);
+        $ns = $c->namespace();
+        $this->record($c, 999, false, 1, RiskAction::Sha20, 3);
         $t = $this->t0();
-        self::assertSame(0, $c->biasForScope(3, $t));
-        $this->clearCache($c);
-        self::assertSame(0, $c->biasForScope(3, $t + 900_000), 'below threshold: still 0, ts refreshed');
 
-        // Crossing the threshold at t+16 min: the allowance counts from
-        // the LAST below-threshold call (ts is refreshed every call, so a
-        // long below-threshold period cannot accumulate allowance) — only
-        // 10 points, never the full 150.
-        $this->record($c, 1, false, 5, RiskAction::Sha20, 3);
+        // Drive the stored bias to +150 (milli-points) and pin ts = t.
+        $this->client->hset("{kiwi:{$ns}}:cal:state:3", 'bias_mp', 150000);
+        $this->client->hset("{kiwi:{$ns}}:cal:state:3", 'ts', $t);
+
+        // 5 s later the target is 0 but only ~mpm/12 points may move:
+        // allowed = 10×1000×5000/60000 = 833 milli-points -> 149, never 0.
         $this->clearCache($c);
-        self::assertSame(10, $c->biasForScope(3, $t + 960_000));
+        self::assertSame(149, $c->biasForScope(3, $t + 5_000));
+
+        // 1 minute later: allowed = 10 points -> 139.
+        $this->clearCache($c);
+        self::assertSame(139, $c->biasForScope(3, $t + 65_000));
+
+        // Crossing the threshold again (1000 samples): the target jumps to
+        // +150, but the movement allowance counts from the LAST call's ts
+        // (refreshed on every call, below threshold too) — only ~0.17
+        // points are allowed, so the bias stays put, never an instant 150.
+        $this->record($c, 1, false, 1, RiskAction::Sha20, 3);
+        $this->clearCache($c);
+        self::assertSame(139, $c->biasForScope(3, $t + 66_000));
     }
 
     public function testConstructorKnobs(): void
@@ -218,11 +256,11 @@ final class CalibrationTest extends TestCase
             maxAdjustment: 25,
             maxChangePerMinute: 5,
         );
-        $this->record($c, 9, false, 5, RiskAction::Sha20, 1);
+        $this->record($c, 9, false, 1, RiskAction::Sha20, 1);
         $t = $this->t0();
         self::assertSame(0, $c->biasForScope(1, $t));
-        $this->record($c, 10, false, 5, RiskAction::Sha20, 2);
-        // raw 200 -> clamped to the custom maxAdjustment 25; the
+        $this->record($c, 10, false, 1, RiskAction::Sha20, 2);
+        // raw 180 -> clamped to the custom maxAdjustment 25; the
         // proportional ramp allows 5 points per minute.
         $this->clearCache($c);
         self::assertSame(0, $c->biasForScope(2, $t));
@@ -247,7 +285,7 @@ final class CalibrationTest extends TestCase
             maxAdjustment: 150,
             maxChangePerMinute: 120,
         );
-        $this->record($c, 1000, false, 5, RiskAction::Sha20, 3);
+        $this->record($c, 1000, false, 1, RiskAction::Sha20, 3);
         $t = $this->t0();
 
         // First call ever seeds bias_mp = 0 / ts = now before the
@@ -267,10 +305,11 @@ final class CalibrationTest extends TestCase
         $this->clearCache($c);
         self::assertSame(150, $c->biasForScope(3, $t + 90_000));
 
-        // The window is now balanced: raw would be 0, but the bias may
-        // only move DOWN by the proportional allowance (120 points over
-        // the elapsed minute) — never jump straight to 0.
-        $this->record($c, 1000, true, 5, RiskAction::Sha20, 3);
+        // The window is now balanced (1000 legit @ band 9 offsets the
+        // abuse @ band 1: fn = fp = 900000): raw would be 0, but the bias
+        // may only move DOWN by the proportional allowance (120 points
+        // over the elapsed minute) — never jump straight to 0.
+        $this->record($c, 1000, true, 9, RiskAction::Sha20, 3);
         $this->clearCache($c);
         self::assertSame(30, $c->biasForScope(3, $t + 150_000));
     }

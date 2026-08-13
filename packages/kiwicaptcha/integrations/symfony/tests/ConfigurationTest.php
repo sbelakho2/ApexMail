@@ -158,4 +158,31 @@ final class ConfigurationTest extends TestCase
         $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
         $this->process(['risk' => ['calibration' => ['receipt_ttl_secs' => 86401]]]);
     }
+
+    public function testHardLimitsUseSinglePerProcessCap(): void
+    {
+        $hardLimits = $this->process()['risk']['hard_limits'];
+
+        self::assertArrayHasKey('process_per_second', $hardLimits, 'the hard limit is the single per-process cap');
+        self::assertSame(10000, $hardLimits['process_per_second'], 'process_per_second defaults to 10000');
+        self::assertArrayNotHasKey('source_per_second', $hardLimits, 'the old two-window source cap is gone');
+        self::assertArrayNotHasKey('global_per_second', $hardLimits, 'the old two-window global cap is gone');
+
+        self::assertSame(1, $this->process(['risk' => ['hard_limits' => ['process_per_second' => 1]]])['risk']['hard_limits']['process_per_second']);
+        self::assertSame(250, $this->process(['risk' => ['hard_limits' => ['process_per_second' => 250]]])['risk']['hard_limits']['process_per_second']);
+    }
+
+    public function testHardLimitBelowOneIsRejected(): void
+    {
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['risk' => ['hard_limits' => ['process_per_second' => 0]]]);
+    }
+
+    public function testUnknownScopeDefaultsToMinimum(): void
+    {
+        self::assertSame('minimum', $this->process()['risk']['unknown_scope']['mode'], 'unknown_scope.mode defaults to minimum (synthetic sha20 policy for scope typos)');
+
+        self::assertSame('reject', $this->process(['risk' => ['unknown_scope' => ['mode' => 'reject']]])['risk']['unknown_scope']['mode']);
+        self::assertSame('baseline', $this->process(['risk' => ['unknown_scope' => ['mode' => 'baseline']]])['risk']['unknown_scope']['mode']);
+    }
 }

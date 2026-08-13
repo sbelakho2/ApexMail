@@ -1,20 +1,23 @@
 //! HKDF-SHA256 identity keys, derived exactly per the risk-v1 contract:
 //!
 //! `Hkdf::<Sha256>::new(Some(b"kiwicaptcha-risk-v1"), master)` expanded to 32
-//! bytes with `info` in {source, subnet, session, principal}. The PHP side
-//! derives the same keys with `hash_hkdf('sha256', master, 32, info,
+//! bytes with `info` in {source, subnet, session, principal, event}. The PHP
+//! side derives the same keys with `hash_hkdf('sha256', master, 32, info,
 //! 'kiwicaptcha-risk-v1')`.
 
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-/// The four 32-byte identity keys derived from a master secret.
+/// The five 32-byte keys derived from a master secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskKeys {
     pub source: [u8; 32],
     pub subnet: [u8; 32],
     pub session: [u8; 32],
     pub principal: [u8; 32],
+    /// Dedupe-domain key: HMACs the idempotency normalization, keeping the
+    /// Redis dedupe suffix independent of the identity pseudonyms.
+    pub event: [u8; 32],
 }
 
 impl RiskKeys {
@@ -24,8 +27,9 @@ impl RiskKeys {
     pub const INFO_SUBNET: &'static [u8] = b"subnet";
     pub const INFO_SESSION: &'static [u8] = b"session";
     pub const INFO_PRINCIPAL: &'static [u8] = b"principal";
+    pub const INFO_EVENT: &'static [u8] = b"event";
 
-    /// Derives the four keys with HKDF-SHA256 (salt `kiwicaptcha-risk-v1`,
+    /// Derives the five keys with HKDF-SHA256 (salt `kiwicaptcha-risk-v1`,
     /// 32-byte output per info).
     pub fn from_master(master: &[u8]) -> RiskKeys {
         let hk = Hkdf::<Sha256>::new(Some(Self::SALT), master);
@@ -33,6 +37,7 @@ impl RiskKeys {
         let mut subnet = [0u8; 32];
         let mut session = [0u8; 32];
         let mut principal = [0u8; 32];
+        let mut event = [0u8; 32];
         hk.expand(Self::INFO_SOURCE, &mut source)
             .expect("32 bytes is a valid HKDF output length");
         hk.expand(Self::INFO_SUBNET, &mut subnet)
@@ -41,11 +46,14 @@ impl RiskKeys {
             .expect("32 bytes is a valid HKDF output length");
         hk.expand(Self::INFO_PRINCIPAL, &mut principal)
             .expect("32 bytes is a valid HKDF output length");
+        hk.expand(Self::INFO_EVENT, &mut event)
+            .expect("32 bytes is a valid HKDF output length");
         RiskKeys {
             source,
             subnet,
             session,
             principal,
+            event,
         }
     }
 }
@@ -81,6 +89,10 @@ mod tests {
             hex_of(&keys.principal),
             "40459f71b2d98dc45f78b2ebe6eea9d7e68b55c3006b5408762f2c6f10e95c48"
         );
+        assert_eq!(
+            hex_of(&keys.event),
+            "10def12a515d1fcaa2a0ca79916eb916197b99af76b98b8317081accd9fb3e1f"
+        );
     }
 
     #[test]
@@ -89,5 +101,7 @@ mod tests {
         assert_ne!(keys.source, keys.subnet);
         assert_ne!(keys.subnet, keys.session);
         assert_ne!(keys.session, keys.principal);
+        assert_ne!(keys.principal, keys.event);
+        assert_ne!(keys.event, keys.source);
     }
 }

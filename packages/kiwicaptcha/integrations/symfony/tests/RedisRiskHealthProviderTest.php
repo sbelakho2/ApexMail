@@ -85,7 +85,7 @@ final class RedisRiskHealthProviderTest extends TestCase
         $counter->record();
         $counter->record();
         self::assertSame(2, $client->counters[$key]);
-        self::assertSame(998, $provider()->snapshot()->issuanceCapacity, 'headroom = remaining fraction of global_per_second');
+        self::assertSame(998, $provider()->snapshot()->issuanceCapacity, 'headroom = remaining fraction of process_per_second');
 
         $client->counters[$key] = 1000;
         self::assertSame(0, $provider()->snapshot()->issuanceCapacity, 'rate at the global cap -> 0% remaining');

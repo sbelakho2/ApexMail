@@ -13,8 +13,10 @@ namespace KiwiCaptcha\Risk;
  * epoch, never the current-epoch pseudonym. sessionId/principalId are the
  * same 16-byte hex pseudonyms, or null when the request carries no
  * session/principal. eventId is either 16 random bytes in hex (no caller
- * idempotency key) or the 32-byte sha256 of the domain-prefixed caller
- * idempotency key (64 hex) and is the dedupe key (an identical event_id
+ * idempotency key) or the 64-hex HMAC-SHA256 of the event+scope domain-
+ * separated caller idempotency key (keyed by the master-derived event
+ * key; the raw key never appears in Redis and low-entropy keys are not
+ * dictionary-recoverable) and is the dedupe key (an identical event_id
  * never double-increments).
  */
 final class RiskObservation

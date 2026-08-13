@@ -34,14 +34,17 @@ use Symfony\Component\HttpFoundation\Response;
  * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
  *
  * Hardening order: same-origin check first (cheap, no state written), scope
- * read, then issuance rate limiting (per-client and deployment-global; a 429
- * here records RateLimitHit feedback), then — when the adaptive risk engine
- * is enabled — the PRE-ISSUE risk assessment (a Deny decision returns 429
- * RISK_DENIED before any challenge is minted, an escalated action raises the
+ * read, then issuance rate limiting (per-client and deployment-global; a
+ * per-client 429 records SourceRateLimitHit, a global 429 records
+ * GlobalCapacityHit — the deployment-wide refusal is identity-neutral and
+ * never contaminates the visitor's source reputation), then — when the
+ * adaptive risk engine is enabled — the PRE-ISSUE risk assessment (a Deny
+ * decision returns 429 RISK_DENIED before any challenge is minted; the
+ * denial already scored the evidence, so NO further rate-limit event is
+ * recorded — double-counting removed; an escalated action raises the
  * difficulty of the issued challenge, an unknown scope in 'reject' mode
- * returns 429 RISK_DENIED without issuing), then issuance. Every 429 path
- * records RateLimitHit against the risk engine BEFORE responding; every
- * minted challenge increments the atomic issuance-rate counter used by the
+ * returns 429 RISK_DENIED without issuing), then issuance. Every minted
+ * challenge increments the atomic issuance-rate counter used by the
  * resource-pressure provider.
  */
 final class ChallengeController
@@ -79,7 +82,22 @@ final class ChallengeController
         if ($this->rateLimiter !== null) {
             $rate = $this->rateLimiter->check($clientIp);
             if ($rate !== 1) {
-                $this->risk?->rateLimitHit($scope, $clientIp, $riskSession);
+                // Attribute the refusal: a per-client 429 records
+                // SourceRateLimitHit (bad on the source/session reputation);
+                // the deployment-global 429 records GlobalCapacityHit —
+                // identity-neutral, the global-only bad pressure never
+                // contaminates this visitor's source reputation. Unknown
+                // scopes (reject/baseline modes) are skipped silently: the
+                // engine declines to evaluate them, so there is no
+                // reputation to attribute to.
+                $scopeId = $this->riskScopeId($scope);
+                if ($scopeId !== null) {
+                    if ($rate === -1) {
+                        $this->risk?->globalCapacityHit($scopeId, $riskSession);
+                    } else {
+                        $this->risk?->sourceRateLimitHit($scopeId, $clientIp, $riskSession);
+                    }
+                }
 
                 $code = $rate === -1 ? 'GLOBAL_RATE_LIMITED' : 'RATE_LIMITED';
                 $message = $rate === -1
@@ -100,8 +118,9 @@ final class ChallengeController
         // misconfigured proxy) applies the scope's configured DEGRADED
         // decision — the default profile is only issued when the degraded
         // action allows it. An unknown scope depends on unknown_scope.mode:
-        // 'baseline' (default) issues the default profile, 'reject' returns
-        // the risk-denied 429 without issuing.
+        // 'minimum' (default) assesses it under the synthetic sha20 policy,
+        // 'baseline' issues the default profile, 'reject' returns the
+        // risk-denied 429 without issuing.
         $profile = null;
         $riskAssessed = false;
         if ($this->risk !== null) {
@@ -116,9 +135,10 @@ final class ChallengeController
             } catch (UnknownScopeException) {
                 if ($this->risk->unknownScopeMode() === 'reject') {
                     // TRUE rejection: no challenge, same response as a Deny
-                    // decision (429 RISK_DENIED), no baseline fallback.
-                    $this->risk->rateLimitHit($scope, $clientIp, $riskSession);
-
+                    // decision (429 RISK_DENIED), no baseline fallback. No
+                    // risk feedback is recorded: the engine declined to
+                    // evaluate the scope, so there is no evidence to
+                    // double-count and no reputation to attribute to.
                     return $this->privateJson(
                         ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']],
                         Response::HTTP_TOO_MANY_REQUESTS,
@@ -154,8 +174,9 @@ final class ChallengeController
                 }
 
                 if ($decision->action === RiskAction::Deny) {
-                    $this->risk->rateLimitHit($scope, $clientIp, $riskSession);
-
+                    // The denial already scored the evidence (the pre-issue
+                    // assessment + decision) — NO extra rate-limit event is
+                    // recorded, double-counting is removed.
                     $body = ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']];
                     if ($decision->retryAfterMs !== null) {
                         $body['error']['retry_after_ms'] = $decision->retryAfterMs;
@@ -214,6 +235,23 @@ final class ChallengeController
         $expected = rtrim($request->getScheme().'://'.$request->getHttpHost(), '/');
 
         return hash_equals($expected, rtrim($origin, '/'));
+    }
+
+    /**
+     * The risk-v1 int scope id for a scope string, or null when the scope
+     * is unknown in reject/baseline mode (the engine declines to evaluate —
+     * there is no reputation to attribute a refusal to).
+     */
+    private function riskScopeId(string $scope): ?int
+    {
+        if ($this->risk === null) {
+            return null;
+        }
+        try {
+            return $this->risk->scopeId($scope);
+        } catch (UnknownScopeException) {
+            return null;
+        }
     }
 
     /**

@@ -200,6 +200,26 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         self::assertSame(0, (new RedisAdmissionSemaphore($client, 0))->usage(), 'disabled cap reports 0 usage');
     }
 
+    public function testUsageIsAtomicLiveAndReapsExpiredLeases(): void
+    {
+        // usage() must be ATOMIC-LIVE: ONE Lua script (TIME -> prune ->
+        // ZCARD), so an expired-but-unreaped lease is counted exactly as the
+        // next acquire would count it — ZCARD alone would overcount while a
+        // crashed worker's lease sits un-reaped between acquires.
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 1, 'usage-live');
+
+        $token = $semaphore->acquire();
+        self::assertSame(1, $semaphore->usage());
+
+        // The lease expires (worker crashed, no release): usage() itself
+        // reaps it — the live count drops without any acquire.
+        $client->setTimeMs($client->timeMs() + self::LEASE_MS + 1);
+        self::assertSame(0, $semaphore->usage(), 'usage must prune expired leases atomically');
+        self::assertSame(0, $this->leases($client), 'the expired lease is gone from the set');
+        self::assertIsString($semaphore->acquire(), 'the freed slot admits again');
+    }
+
     public function testGateRejectsSaturatedVerificationWithoutBurningTheRecord(): void
     {
         $client = $this->requirePredis();

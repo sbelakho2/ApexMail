@@ -145,10 +145,11 @@ final class RiskIntegrationTest extends TestCase
         $body = json_decode((string) $response->getContent(), true);
         self::assertSame('RISK_DENIED', $body['error']['code']);
 
-        // The refusal is recorded as RateLimitHit feedback BEFORE the 429;
-        // no challenge is ever minted.
+        // The denial already scored the evidence (the PreIssue assessment +
+        // decision) — NO extra rate-limit event is recorded (double-counting
+        // removed); no challenge is ever minted.
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
-        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::RateLimitHit], $events, 'a denied request must never mint a challenge');
+        self::assertSame([RiskEventKind::PreIssue], $events, 'a denied request must never mint a challenge nor double-count the denial');
     }
 
     public function testEscalatedActionRaisesShaDifficulty(): void
@@ -352,8 +353,9 @@ final class RiskIntegrationTest extends TestCase
         self::assertNull($risk['master_secret']);
         self::assertTrue($risk['global_pressure']['enabled']);
         self::assertTrue($risk['argon_capacity']['enabled']);
-        self::assertSame(100, $risk['hard_limits']['source_per_second']);
-        self::assertSame(10000, $risk['hard_limits']['global_per_second']);
+        self::assertSame(10000, $risk['hard_limits']['process_per_second']);
+        self::assertArrayNotHasKey('source_per_second', $risk['hard_limits']);
+        self::assertArrayNotHasKey('global_per_second', $risk['hard_limits']);
         self::assertFalse($risk['calibration']['enabled']);
         self::assertSame(300, $risk['calibration']['receipt_ttl_secs'], 'the nonce->decision handle TTL follows the calibration receipt TTL (default 300)');
         self::assertNull($risk['network_classifier_file']);
@@ -361,12 +363,21 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(1800, $risk['continuity_cookie']['ttl_secs']);
         self::assertNull($risk['continuity_cookie']['secure']);
         self::assertNull($risk['network_classifier_file']);
-        self::assertSame('baseline', $risk['unknown_scope']['mode']);
+        self::assertSame('minimum', $risk['unknown_scope']['mode']);
         self::assertSame('strict', $risk['continuity_cookie']['samesite'], 'samesite is defined exactly once, default strict');
         self::assertTrue($risk['continuity_cookie']['http_only']);
     }
 
-    public function testUnknownScopeModeBaselineIsTheDefault(): void
+    public function testUnknownScopeModeMinimumIsTheDefault(): void
+    {
+        $processed = (new Processor())->processConfiguration(new Configuration(), [[
+            'secret_key' => str_repeat('a', 32),
+        ]]);
+
+        self::assertSame('minimum', $processed['risk']['unknown_scope']['mode']);
+    }
+
+    public function testUnknownScopeModeBaselineIsAccepted(): void
     {
         $processed = (new Processor())->processConfiguration(new Configuration(), [[
             'secret_key' => str_repeat('a', 32),
@@ -667,11 +678,10 @@ final class RiskIntegrationTest extends TestCase
         $store = new FakeRiskStateStore();
         $store->throwing = true;
 
-        // Saturate BOTH limiter windows: any live assess() would now be a
-        // HardRateLimit deny.
-        $limiter = new ProcessEmergencyCap(1, 1);
+        // Saturate the single limiter window: any live assess() would now be
+        // a HardRateLimit deny.
+        $limiter = new ProcessEmergencyCap(1);
         self::assertTrue($limiter->allow(), 'window consumed');
-        self::assertTrue($limiter->allowGlobal(), 'window consumed');
         $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys, limiter: $limiter);
         $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $policy);
 
@@ -692,21 +702,70 @@ final class RiskIntegrationTest extends TestCase
 
     /**
      * preIssue and postSolveDecision record their decision id on the
-     * request-local RiskDecisionContext.
+     * request-local decision context (RequestStack attribute).
      */
     public function testPreIssueAndPostSolvePopulateDecisionContext(): void
     {
         $stack = $this->stack(new FakeRiskStateStore());
-        $context = $stack['gateway']->decisionContext();
+        $gateway = $stack['gateway'];
 
-        self::assertNull($context->current(), 'no decision yet');
+        // No request in scope -> no decision context anywhere.
+        self::assertNull($gateway->currentDecisionId(), 'no decision yet');
 
-        $decision = $stack['gateway']->preIssue('login', '198.51.100.7', null);
-        self::assertSame($decision->decisionId, $context->current(), 'preIssue must set the context to its decision id');
+        $requests = new RequestStack();
+        $requests->push(Request::create('/challenge', 'POST'));
+        $decision = $gateway->preIssue('login', '198.51.100.7', null);
+        self::assertNull($gateway->currentDecisionId(), 'without a RequestStack the gateway cannot hold a request-local id');
+        self::assertNotNull($decision->decisionId);
 
-        $postSolve = $stack['gateway']->postSolveDecision('login', '198.51.100.7');
-        self::assertNotNull($postSolve);
-        self::assertSame($postSolve->decisionId, $context->current(), 'postSolveDecision must set the context to its decision id');
+        $gateway->setCurrentDecisionId('manual-id');
+        self::assertNull($gateway->currentDecisionId(), 'setCurrentDecisionId without a RequestStack is a no-op');
+    }
+
+    /**
+     * The decision context is REQUEST-LOCAL: a long-running worker serving
+     * two sequential requests must never leak request 1's decision id into
+     * request 2 (a fresh Request with empty attributes, the way the kernel
+     * pushes one per request, reads back null).
+     */
+    public function testDecisionContextIsIsolatedAcrossSequentialRequests(): void
+    {
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $stack = new RequestStack();
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], requestStack: $stack);
+
+        // Request 1: pre-issue decision id visible only on request 1.
+        $first = Request::create('/challenge', 'POST');
+        $stack->push($first);
+        $decision1 = $gateway->preIssue('login', '198.51.100.7', null);
+        self::assertSame($decision1->decisionId, $gateway->currentDecisionId(), 'request 1 sees its own decision id');
+
+        // The kernel swaps the main request: request 2 is a FRESH Request
+        // with empty attributes — request 1's id must be invisible.
+        $stack->pop();
+        $second = Request::create('/challenge', 'POST');
+        $stack->push($second);
+        self::assertNull($gateway->currentDecisionId(), 'request 2 must not see request 1\'s decision id');
+
+        $decision2 = $gateway->postSolveDecision('login', '198.51.100.7');
+        self::assertNotNull($decision2);
+        self::assertSame($decision2->decisionId, $gateway->currentDecisionId(), 'request 2 sees only its own decision id');
+        self::assertNotSame($decision1->decisionId, $decision2->decisionId);
+
+        // And request 1's Request still holds ITS id (immutable history),
+        // while request 2's Request holds only ITS OWN id.
+        self::assertSame($decision1->decisionId, $first->attributes->get('_kiwi_risk_decision_id'));
+        self::assertSame($decision2->decisionId, $second->attributes->get('_kiwi_risk_decision_id'), 'request 2 holds only its own decision id');
     }
 
     /**
@@ -776,6 +835,7 @@ final class RiskIntegrationTest extends TestCase
         ]);
         $store = new FakeRiskStateStore();
         $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $stack = new RequestStack();
         $gateway = new RiskGateway(
             $engine,
             $classifier,
@@ -787,21 +847,23 @@ final class RiskIntegrationTest extends TestCase
             'reject',
             null,
             null,
-            null,
+            $stack,
             $client,
             '{kiwi:t}:decision:',
             300,
         );
         $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
 
-        $response = $controller->challenge($this->challengeRequest());
+        $request = $this->challengeRequest();
+        $stack->push($request);
+        $response = $controller->challenge($request);
         self::assertSame(200, $response->getStatusCode());
         $data = json_decode((string) $response->getContent(), true);
 
         $key = '{kiwi:t}:decision:'.$data['nonce'];
         self::assertArrayHasKey($key, $client->strings, 'the controller must pair the minted nonce to the decision id');
         $mapped = json_decode($client->strings[$key], true);
-        self::assertSame($gateway->decisionContext()->current(), $mapped['decision_id'], 'the mapped id is the pre-issue decision id');
+        self::assertSame($gateway->currentDecisionId(), $mapped['decision_id'], 'the mapped id is the pre-issue decision id');
     }
 
     /**
@@ -1172,23 +1234,26 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame([], $store->observations, 'no feedback may reach the engine for an unknown scope');
     }
 
-    public function testRateLimitHitRecordedOnRiskDenied429(): void
+    public function testRiskDenied429DoesNotDoubleCount(): void
     {
-        // A Deny decision returns 429 RISK_DENIED and the refusal is
-        // recorded as RateLimitHit feedback BEFORE the response.
+        // A Deny decision returns 429 RISK_DENIED. The denial already scored
+        // the evidence (PreIssue assessment + decision), so NO further
+        // rate-limit event may be recorded — double-counting removed.
         $stack = $this->stack(new FakeRiskStateStore(SignalVector::fromArray(['replay' => 700])));
 
         $response = $stack['controller']->challenge($this->challengeRequest());
         self::assertSame(429, $response->getStatusCode());
 
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
-        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::RateLimitHit], $events);
+        self::assertSame([RiskEventKind::PreIssue], $events, 'the denial must not be double-counted with a rate-limit event');
     }
 
-    public function testRateLimitHitRecordedOnIssuerRateLimit429(): void
+    public function testSourceRateLimitHitRecordedOnIssuerRateLimit429(): void
     {
         // The issuer's hard rate limit (per-client) returns 429 and the
-        // refusal is recorded as RateLimitHit feedback BEFORE the response.
+        // refusal is recorded as SourceRateLimitHit feedback BEFORE the
+        // response (per-source attribution; the global 429 uses
+        // GlobalCapacityHit instead).
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
         $keys = RiskKeys::fromMaster(self::SECRET);
         $classifier = new CidrNetworkClassifier([]);
@@ -1214,14 +1279,52 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame('RATE_LIMITED', $body['error']['code']);
 
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
-        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ChallengeIssued, RiskEventKind::RateLimitHit], $events, 'the issuer rate-limit 429 must record RateLimitHit before responding');
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ChallengeIssued, RiskEventKind::SourceRateLimitHit], $events, 'the per-client rate-limit 429 must record SourceRateLimitHit before responding');
+    }
+
+    public function testGlobalCapacityHitRecordedOnGlobalRateLimit429(): void
+    {
+        // The deployment-global cap returns 429 GLOBAL_RATE_LIMITED and the
+        // refusal is recorded as GlobalCapacityHit — identity-neutral: the
+        // canonical risk-v1 Lua adds global-only bad pressure and never
+        // contaminates the visitor's source/session reputation.
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+        // Global cap 1: the second request is refused by the deployment-wide
+        // window, not the per-client one (Redis backend — the global cap is
+        // only enforced atomically against Redis).
+        $limiter = new IssuanceRateLimiter(100, 60, null, null, 'test-pepper', new FakePredisClient(), 1, 'test-ns', 0);
+        $controller = new ChallengeController($issuer, $limiter, true, $gateway, new ContinuityCookie());
+
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        self::assertSame(200, $controller->challenge($request)->getStatusCode());
+
+        $response = $controller->challenge($request);
+        self::assertSame(429, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('GLOBAL_RATE_LIMITED', $body['error']['code']);
+
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::ChallengeIssued, RiskEventKind::GlobalCapacityHit], $events, 'the global rate-limit 429 must record GlobalCapacityHit before responding');
     }
 
     public function testIssuanceCounterIncrementsOnEveryIssuedChallenge(): void
     {
         // Every minted challenge increments the atomic per-second issuance
-        // counter (INCR + EXPIRE 1) that the resource-pressure provider
-        // reads for issuanceCapacity.
+        // counter (one Lua script: INCR + EXPIRE 1 — the TTL can never be
+        // lost, so the signal always reflects the LIVE second) that the
+        // resource-pressure provider reads for issuanceCapacity.
         $client = new FakePredisClient();
         $counter = new IssuanceCounter($client, '{kiwi:test}:issuance:');
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
@@ -1232,12 +1335,267 @@ final class RiskIntegrationTest extends TestCase
         $controller->challenge($this->challengeRequest());
 
         $key = IssuanceCounter::rateKey('{kiwi:test}:issuance:');
-        $incr = array_filter($client->calls, static fn (array $call): bool => $call[0] === 'INCR' && $call[1][0] === $key);
-        self::assertCount(2, $incr, 'one INCR per issued challenge');
+        $evals = array_filter($client->calls, static fn (array $call): bool => $call[0] === 'EVAL' && ($call[1][1] ?? null) === 1 && $call[1][2] === $key);
+        self::assertCount(2, $evals, 'one atomic INCR+EXPIRE EVAL per issued challenge');
         self::assertSame(2, $client->counters[$key], 'the counter must reflect both issuances');
+        self::assertSame(1000, $client->expirations[$key], 'the atomic script must set EXPIRE 1 (1000 ms) so the signal reflects the live second');
+    }
 
-        $expire = array_filter($client->calls, static fn (array $call): bool => $call[0] === 'EXPIRE' && $call[1][0] === $key && $call[1][1] === 1);
-        self::assertCount(2, $expire, 'every INCR must be followed by EXPIRE 1 so the signal reflects the live second');
+    /**
+     * The gateway's rate-attribution methods record the exact new event
+     * kinds: SourceRateLimitHit (15) with the source, GlobalCapacityHit
+     * (16) identity-neutral (0.0.0.0 — the canonical Lua only raises the
+     * global pressure for it), RiskDenied (17) with the source. An
+     * unparseable IP skips the attributed source signals.
+     */
+    public function testRateAttributionGatewayMethodsRecordTheRightEvents(): void
+    {
+        $stack = $this->stack(new FakeRiskStateStore());
+        $gateway = $stack['gateway'];
+
+        $receipt = $gateway->sourceRateLimitHit(1, '198.51.100.7', 'sess-1');
+        self::assertInstanceOf(EventReceipt::class, $receipt);
+        $receipt = $gateway->globalCapacityHit(1, 'sess-1');
+        self::assertInstanceOf(EventReceipt::class, $receipt);
+        $receipt = $gateway->riskDenied(1, '198.51.100.7', 'sess-1');
+        self::assertInstanceOf(EventReceipt::class, $receipt);
+
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
+        self::assertSame([
+            RiskEventKind::SourceRateLimitHit,
+            RiskEventKind::GlobalCapacityHit,
+            RiskEventKind::RiskDenied,
+        ], $events);
+
+        // The GlobalCapacityHit observation is identity-neutral: its source
+        // pseudonym is derived from the unspecified-address sentinel (the
+        // canonical Lua mutates ONLY the global state for event 16).
+        $identityFactory = new RiskIdentityFactory(RiskKeys::fromMaster(self::SECRET));
+        self::assertSame(1, $stack['store']->observations[1]->scope);
+        self::assertSame($identityFactory->sessionId('sess-1'), $stack['store']->observations[1]->sessionId, 'the session signal is still carried');
+        $neutralSource = $identityFactory->sourceId('0.0.0.0', time());
+        self::assertSame($neutralSource, $stack['store']->observations[1]->sourceId, 'GlobalCapacityHit must not be attributed to a visitor source');
+
+        // The attributed signals carry the real source pseudonym + session.
+        $visitorSource = $identityFactory->sourceId('198.51.100.7', time());
+        self::assertSame($visitorSource, $stack['store']->observations[0]->sourceId);
+        self::assertSame($identityFactory->sessionId('sess-1'), $stack['store']->observations[0]->sessionId);
+        self::assertSame($visitorSource, $stack['store']->observations[2]->sourceId);
+
+        // Invalid client IP: nothing to attribute the source signals to.
+        $store2 = new FakeRiskStateStore();
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine($store2, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $bare = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+        self::assertNull($bare->sourceRateLimitHit(1, 'not-an-ip'));
+        self::assertNull($bare->riskDenied(1, 'not-an-ip'));
+        self::assertInstanceOf(EventReceipt::class, $bare->globalCapacityHit(1), 'global capacity needs no client IP');
+        self::assertSame([RiskEventKind::GlobalCapacityHit], array_map(static fn ($o): RiskEventKind => $o->event, $store2->observations));
+    }
+
+    /**
+     * NONCE -> DECISION CONSUMPTION (no post_solve_check): after a VALID
+     * solve the validator decodes the bounded solution token, CONSUMES the
+     * nonce -> decision handle (GETDEL), and sets the ORIGINAL pre-issue
+     * decision id as the request's current decision id — so the application
+     * can confirm this challenge's original decision.
+     */
+    public function testValidatorConsumesNonceMappingAndConfirmsPreIssueDecision(): void
+    {
+        $client = new FakePredisClient();
+        $store = new FakeRiskStateStore();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $verifier = new Verifier($storage);
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, new RiskScorer(), $policy, $keys);
+        $stack = new RequestStack();
+        $gateway = new RiskGateway(
+            $engine,
+            $classifier,
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8),
+            ['login' => 1],
+            requestStack: $stack,
+            decisionRedis: $client,
+            decisionKeyPrefix: '{kiwi:t}:decision:',
+        );
+
+        // The challenge request pairs the minted nonce to the pre-issue
+        // decision id (as the controller does).
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $preIssue = $gateway->preIssue('login', '198.51.100.7', null);
+        $gateway->attachDecisionForNonce($challenge->nonce, $preIssue->decisionId);
+
+        // The verification request is a FRESH request (empty attributes).
+        $request = Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']);
+        $stack->push($request);
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $meta = $engineValidator->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engineValidator->validate($dto);
+        self::assertCount(0, $violations);
+
+        self::assertSame($preIssue->decisionId, $gateway->currentDecisionId(), 'the ORIGINAL pre-issue decision becomes the request\'s current confirmation target');
+        self::assertArrayNotHasKey('{kiwi:t}:decision:'.$challenge->nonce, $client->strings, 'the nonce -> decision handle was consumed (GETDEL)');
+        self::assertNull($gateway->resolveDecisionForNonce($challenge->nonce), 'the handle is consumed once');
+    }
+
+    /**
+     * NONCE -> DECISION CONSUMPTION (post_solve_check scope): the old
+     * mapping is still consumed (cleanup — it can never confirm against a
+     * stale decision), and the fresh POST-SOLVE decision becomes the
+     * current confirmation target.
+     */
+    public function testValidatorPostSolveScopeConsumesOldMappingAndTargetsPostSolveDecision(): void
+    {
+        $client = new FakePredisClient();
+        $store = new FakeRiskStateStore();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $verifier = new Verifier($storage);
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, new RiskScorer(), $policy, $keys);
+        $stack = new RequestStack();
+        $gateway = new RiskGateway(
+            $engine,
+            $classifier,
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8),
+            ['login' => 1],
+            null,
+            null,
+            ['login' => true],
+            'reject',
+            null,
+            null,
+            $stack,
+            $client,
+            '{kiwi:t}:decision:',
+        );
+
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $preIssue = $gateway->preIssue('login', '198.51.100.7', null);
+        $gateway->attachDecisionForNonce($challenge->nonce, $preIssue->decisionId);
+        $gateway->setCurrentDecisionId('stale-target');
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $gateway);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engineValidator = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $meta = $engineValidator->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engineValidator->validate($dto);
+        self::assertCount(0, $violations);
+
+        // The old mapping was consumed for cleanup and discarded.
+        self::assertArrayNotHasKey('{kiwi:t}:decision:'.$challenge->nonce, $client->strings, 'the stale mapping must be consumed even on post_solve_check scopes');
+        // The fresh POST-SOLVE decision is the current confirmation target —
+        // never the stale pre-issue decision.
+        $confirmationTarget = $gateway->currentDecisionId();
+        self::assertNotNull($confirmationTarget, 'the post-solve decision must become the confirmation target');
+        self::assertNotSame($preIssue->decisionId, $confirmationTarget, 'the stale pre-issue decision must NOT be the confirmation target');
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::PreIssue, RiskEventKind::SolveSuccess], $events, 'the valid solve runs exactly one post-solve reassessment');
+    }
+
+    /**
+     * Real-Redis verification of the canonical risk-v1 Lua semantics for
+     * GlobalCapacityHit: the global-only bad pressure raises the global
+     * state and NEVER touches the visitor's source reputation.
+     */
+    public function testRealRedisGlobalCapacityHitIsIdentityNeutral(): void
+    {
+        $url = getenv('KC_REDIS_URL');
+        if ($url === false || $url === '') {
+            self::markTestSkipped('KC_REDIS_URL not set — real-Redis risk integration test skipped');
+        }
+        $client = RedisRiskStateStore::createClient($url);
+        try {
+            $client->ping();
+        } catch (\Throwable $e) {
+            self::markTestSkipped('Redis unreachable: '.$e->getMessage());
+        }
+        $client->flushdb();
+
+        $store = new RedisRiskStateStore(
+            $client,
+            'ci-risk-global-only',
+            900,
+            900,
+            1800,
+            principalTtlSecs: 86400,
+            sessionTtlSecs: 1800,
+            dedupeTtlSecs: 60,
+            hysteresisMs: 60000,
+        );
+        $stack = $this->stack($store);
+        $gateway = $stack['gateway'];
+
+        // Attribute a per-source refusal first (SourceRateLimitHit adds
+        // bad+3000 on the source)...
+        $gateway->sourceRateLimitHit(1, '198.51.100.7', null);
+        $identityFactory = new RiskIdentityFactory(RiskKeys::fromMaster(self::SECRET));
+        $nowSecs = time();
+        $epoch = intdiv($nowSecs, 900);
+        $sourceKey = sprintf('{kiwi:ci-risk-global-only}:risk:src:%d:%s', $epoch, $identityFactory->sourceId('198.51.100.7', $nowSecs));
+        $globalKey = '{kiwi:ci-risk-global-only}:risk:global';
+        $sourceBadBefore = (int) ($client->hget($sourceKey, 'bad') ?? 0);
+        $globalBadBefore = (int) ($client->hget($globalKey, 'bad') ?? 0);
+        self::assertGreaterThanOrEqual(3000, $sourceBadBefore, 'the per-source refusal must have raised the source bad pressure');
+
+        // ...then a deployment-capacity refusal (GlobalCapacityHit).
+        $gateway->globalCapacityHit(1, null);
+
+        $sourceBadAfter = (int) ($client->hget($sourceKey, 'bad') ?? 0);
+        $globalBadAfter = (int) ($client->hget($globalKey, 'bad') ?? 0);
+        self::assertSame($sourceBadBefore, $sourceBadAfter, 'GlobalCapacityHit must never contaminate the visitor\'s source reputation');
+        self::assertGreaterThan($globalBadBefore, $globalBadAfter, 'GlobalCapacityHit must raise the global attack/resource pressure');
+
+        // Cleanup the test namespace.
+        foreach ($client->keys('{kiwi:ci-risk-global-only}:*') ?: [] as $key) {
+            $client->del($key);
+        }
+        $client->disconnect();
     }
 
     /**

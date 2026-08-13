@@ -68,6 +68,23 @@ LUA;
 return redis.call('ZREM', KEYS[1], ARGV[1])
 LUA;
 
+    /**
+     * Atomic-live usage: ONE script — TIME -> now_ms ->
+     * ZREMRANGEBYSCORE '-inf' now -> ZCARD. Mirrors the acquire path's
+     * pruning, so the returned count is the LIVE lease count (expired
+     * leases are reaped exactly as the next acquire would reap them —
+     * ZCARD alone would overcount while leases sit un-reaped between
+     * acquires).
+     *
+     * KEYS[1] = lease set key
+     */
+    private const USAGE_SCRIPT = <<<'LUA'
+local time = redis.call('TIME')
+local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+return redis.call('ZCARD', KEYS[1])
+LUA;
+
     private readonly string $key;
 
     /**
@@ -120,9 +137,11 @@ LUA;
     }
 
     /**
-     * Live number of held leases (ZCARD of the lease set), or 0 when the
-     * cap is disabled or the backend is unreachable. Read-only telemetry
-     * for the resource-pressure provider — never breaks the caller.
+     * Live number of held leases (atomic TIME + prune + ZCARD in ONE Lua
+     * script, so the count is LIVE — expired leases are reaped exactly as
+     * the next acquire would reap them), or 0 when the cap is disabled or
+     * the backend is unreachable. Read-side telemetry for the
+     * resource-pressure provider — never breaks the caller.
      */
     public function usage(): int
     {
@@ -130,9 +149,7 @@ LUA;
             return 0;
         }
         try {
-            return $this->client instanceof \Redis
-                ? (int) $this->client->zCard($this->key)
-                : (int) $this->client->zcard($this->key);
+            return (int) $this->eval(self::USAGE_SCRIPT, [$this->key], []);
         } catch (\Throwable) {
             return 0;
         }

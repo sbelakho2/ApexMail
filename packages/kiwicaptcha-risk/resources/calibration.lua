@@ -1,24 +1,36 @@
--- Calibration aggregate + rate-limited bias (canonical, shared PHP/Rust).
+-- Calibration: score-sensitive bias + proportional rate limit
+-- (canonical, shared PHP/Rust).
 --
 -- KEYS[1..24]  hourly score buckets for one scope (hash; fields
 --              b<band>a<action>:legit | b<band>a<action>:abuse)
 -- KEYS[25]     rate-limit state (hash; fields bias_mp / ts)
 -- ARGV[1]      now (epoch ms)
--- ARGV[2]      min_samples       (bias stays 0 below this)
+-- ARGV[2]      min_samples       (below this the TARGET bias is 0)
 -- ARGV[3]      max_adjustment    (points, ±clamp on the raw bias)
 -- ARGV[4]      max_change_per_minute (points/minute, proportional allowance)
 --
--- Internal bias is stored in MILLI-POINTS (1 point = 1000 units) so the
--- per-minute movement allowance is proportional to the actual elapsed
--- time: allowed = max_change_per_minute * 1000 * elapsed_ms / 60000.
+-- TRUE score calibration, not prevalence adaptation: each confirmed
+-- observation is weighted by the ORIGINAL decision's risk band
+-- (predicted_risk = band * 100):
 --
--- State initialization: the first call ever seeds bias_mp = 0 and
--- ts = now BEFORE the sample threshold is evaluated, so the first nonzero
--- bias can never jump from nonexistent state straight to ±max_adjustment —
--- it is clamped against 0 by the proportional allowance.
+--   false_positive_pressure = Σ legit_count(band)  × predicted_risk
+--   false_negative_pressure = Σ abuse_count(band)  × (1000 - predicted_risk)
+--   calibration_error       = fn_pressure - fp_pressure
+--
+-- A perfectly separating classifier (legit @ band 0, abuse @ band 10)
+-- contributes ~zero pressure and stays near bias 0; abuse predicted at
+-- low risk pushes the bias up, legitimate traffic predicted at high risk
+-- pushes it down. raw = calibration_error * 2 / (total * 10) keeps the
+-- same ±~200 point scale as the old prevalence formula.
+--
+-- The rate limiter is PROPORTIONAL to elapsed time and applies to the
+-- PATH, not just the target: internal bias is stored in MILLI-POINTS
+-- (1 point = 1000 units) and allowed = max_change_per_minute * 1000 *
+-- elapsed_ms / 60000. Below min_samples the TARGET is 0, but the stored
+-- bias still moves toward zero through the SAME rate limiter — a sample
+-- count that dips below the threshold can never snap +150 → 0 instantly.
 -- The state timestamp is refreshed on EVERY call (below threshold too),
--- so a long below-threshold period cannot accumulate movement allowance.
--- Below the threshold the returned bias is 0 and bias_mp is untouched.
+-- so a long quiet period cannot accumulate movement allowance.
 
 local function trunc_div(n, d)
     local q = n / d
@@ -26,16 +38,26 @@ local function trunc_div(n, d)
     return math.ceil(q)
 end
 
-local legit_total = 0
-local abuse_total = 0
+local fn_pressure = 0
+local fp_pressure = 0
+local total = 0
 for i = 1, 24 do
     local b = redis.call('HGETALL', KEYS[i])
     for j = 1, #b, 2 do
+        local field = b[j]
         local count = tonumber(b[j + 1]) or 0
-        if string.sub(b[j], -6) == ':legit' then
-            legit_total = legit_total + count
-        else
-            abuse_total = abuse_total + count
+        if count > 0 then
+            local band = tonumber(string.match(field, '^b(%d+)a'))
+            if band then
+                local predicted = band * 100
+                if string.sub(field, -6) == ':legit' then
+                    fp_pressure = fp_pressure + count * predicted
+                    total = total + count
+                elseif string.sub(field, -6) == ':abuse' then
+                    fn_pressure = fn_pressure + count * (1000 - predicted)
+                    total = total + count
+                end
+            end
         end
     end
 end
@@ -53,18 +75,17 @@ if not prev_ts then
 end
 redis.call('HSET', KEYS[25], 'ts', now)
 
-local total = legit_total + abuse_total
-if total < tonumber(ARGV[2]) or total <= 0 then
-    return 0
+-- Target: score-sensitive calibration above the threshold, 0 below.
+local raw_mp = 0
+if total >= tonumber(ARGV[2]) and total > 0 then
+    local raw = trunc_div((fn_pressure - fp_pressure) * 2, total * 10)
+    local max_adj = tonumber(ARGV[3])
+    if raw > max_adj then raw = max_adj end
+    if raw < -max_adj then raw = -max_adj end
+    raw_mp = raw * 1000
 end
 
-local raw = trunc_div((abuse_total - legit_total) * 1000, total)
-raw = trunc_div(raw * 2, 10)
-local max_adj = tonumber(ARGV[3])
-if raw > max_adj then raw = max_adj end
-if raw < -max_adj then raw = -max_adj end
-
-local raw_mp = raw * 1000
+-- Proportional movement toward the target (never an instant jump).
 local elapsed = now - tonumber(prev_ts)
 if elapsed < 0 then elapsed = 0 end
 local allowed_mp = trunc_div(tonumber(ARGV[4]) * 1000 * elapsed, 60000)

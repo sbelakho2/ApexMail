@@ -1,13 +1,16 @@
 //! Risk event kinds, fixed by the cross-language risk-v1 contract.
 //!
-//! Values 1..14 are authoritative and MUST NOT be renumbered: they are the
+//! Values 1..17 are authoritative and MUST NOT be renumbered: they are the
 //! event identifiers passed into the canonical state script (`risk.lua`) and
 //! must be byte-identical across the PHP and Rust implementations.
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 use crate::RiskError;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// The fixed risk event kinds of the risk-v1 contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -28,11 +31,14 @@ pub enum RiskEventKind {
     ConfirmedLegitimate = 12,
     ConfirmedAbuse = 13,
     RateLimitHit = 14,
+    SourceRateLimitHit = 15,
+    GlobalCapacityHit = 16,
+    RiskDenied = 17,
 }
 
 impl RiskEventKind {
-    /// All fourteen kinds, in contract value order.
-    pub const ALL: [RiskEventKind; 14] = [
+    /// All seventeen kinds, in contract value order.
+    pub const ALL: [RiskEventKind; 17] = [
         RiskEventKind::PreIssue,
         RiskEventKind::ChallengeIssued,
         RiskEventKind::SolveSuccess,
@@ -47,14 +53,17 @@ impl RiskEventKind {
         RiskEventKind::ConfirmedLegitimate,
         RiskEventKind::ConfirmedAbuse,
         RiskEventKind::RateLimitHit,
+        RiskEventKind::SourceRateLimitHit,
+        RiskEventKind::GlobalCapacityHit,
+        RiskEventKind::RiskDenied,
     ];
 
-    /// The contract integer value (1..14), as passed to the Lua script.
+    /// The contract integer value (1..17), as passed to the Lua script.
     pub fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Inverse of [`RiskEventKind::as_u8`]; `None` for values outside 1..14.
+    /// Inverse of [`RiskEventKind::as_u8`]; `None` for values outside 1..17.
     pub fn from_u8(value: u8) -> Option<RiskEventKind> {
         match value {
             1 => Some(RiskEventKind::PreIssue),
@@ -71,6 +80,9 @@ impl RiskEventKind {
             12 => Some(RiskEventKind::ConfirmedLegitimate),
             13 => Some(RiskEventKind::ConfirmedAbuse),
             14 => Some(RiskEventKind::RateLimitHit),
+            15 => Some(RiskEventKind::SourceRateLimitHit),
+            16 => Some(RiskEventKind::GlobalCapacityHit),
+            17 => Some(RiskEventKind::RiskDenied),
             _ => None,
         }
     }
@@ -126,11 +138,6 @@ impl RiskObservation {
 /// Hard limit on caller-supplied idempotency keys (bytes), shared with PHP.
 pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
 
-/// Canonical idempotency-key prefix, shared with PHP. Every caller key is
-/// hashed with this prefix so a caller-controlled suffix can never collide
-/// with the engine's own random 32-hex event ids.
-const IDEMPOTENCY_PREFIX: &[u8] = b"kiwi-risk-event-v1\0";
-
 /// Normalizes a caller idempotency key into the canonical `event_id`
 /// representation BEFORE it becomes a Redis key suffix (byte-identical with
 /// PHP):
@@ -140,18 +147,30 @@ const IDEMPOTENCY_PREFIX: &[u8] = b"kiwi-risk-event-v1\0";
 /// - more than [`MAX_IDEMPOTENCY_KEY_BYTES`] bytes →
 ///   [`RiskError::InvalidIdempotencyKey`];
 /// - otherwise → lowercase hex of
-///   `sha256("kiwi-risk-event-v1\0" + key)` (64 hex chars).
-pub fn normalize_idempotency_key(key: Option<&str>) -> Result<String, RiskError> {
+///   `HMAC-SHA256(event_key, pack('N', scope) . chr(event) . key)` (64 hex
+///   chars; `pack('N', scope)` is the scope as a big-endian u32, `chr(event)`
+///   is the event value as ONE byte).
+///
+/// The scope + event domain separation means the same caller key produces a
+/// different `event_id` per scope AND per event kind, so a retry of one
+/// event can never collide with a different event reusing the same key.
+pub fn normalize_idempotency_key(
+    key: Option<&str>,
+    scope: u32,
+    event: RiskEventKind,
+    event_key: &[u8; 32],
+) -> Result<String, RiskError> {
     let Some(key) = key.filter(|k| !k.is_empty()) else {
         return Ok(RiskObservation::new_event_id());
     };
     if key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
         return Err(RiskError::InvalidIdempotencyKey(key.len()));
     }
-    let mut hasher = Sha256::new();
-    hasher.update(IDEMPOTENCY_PREFIX);
-    hasher.update(key.as_bytes());
-    Ok(hex::encode(hasher.finalize()))
+    let mut mac = HmacSha256::new_from_slice(event_key).expect("HMAC accepts any key length");
+    mac.update(&scope.to_be_bytes());
+    mac.update(&[event.as_u8()]);
+    mac.update(key.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 impl Default for RiskObservation {
@@ -179,6 +198,14 @@ impl Default for RiskObservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::RiskKeys;
+
+    /// The event key for the parity master (0x42 * 32), derived exactly like
+    /// PHP's `hash_hkdf('sha256', master, 32, 'event', 'kiwicaptcha-risk-v1')`
+    /// (see the parity anchors in `keys.rs`).
+    fn event_key() -> [u8; 32] {
+        RiskKeys::from_master(&[0x42; 32]).event
+    }
 
     #[test]
     fn contract_values_are_stable() {
@@ -197,6 +224,9 @@ mod tests {
             (12, "confirmed_legitimate"),
             (13, "confirmed_abuse"),
             (14, "rate_limit_hit"),
+            (15, "source_rate_limit_hit"),
+            (16, "global_capacity_hit"),
+            (17, "risk_denied"),
         ];
         for (i, (value, name)) in expected.iter().enumerate() {
             let kind = RiskEventKind::ALL[i];
@@ -205,7 +235,8 @@ mod tests {
             assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(name));
         }
         assert_eq!(RiskEventKind::from_u8(0), None);
-        assert_eq!(RiskEventKind::from_u8(15), None);
+        assert_eq!(RiskEventKind::from_u8(18), None);
+        assert_eq!(RiskEventKind::from_u8(255), None);
     }
 
     #[test]
@@ -230,28 +261,71 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_normalization_hashes_verbatim_keys() {
-        let normalized = normalize_idempotency_key(Some("verbatim-key")).unwrap();
-        assert_eq!(normalized.len(), 64, "sha256 hex of a verbatim key");
-        assert!(normalized.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(
-            normalized.chars().all(|c| !c.is_ascii_uppercase()),
-            "the hash is lowercase hex"
+    fn idempotency_normalization_hmacs_scope_event_and_key() {
+        let key = event_key();
+        // Anchored vectors computed with the PHP mirror:
+        //   hash_hmac('sha256', pack('N', scope) . chr(event) . $key, $eventKey)
+        // in lowercase hex.
+        assert_eq!(
+            normalize_idempotency_key(Some("deadbeef"), 1, RiskEventKind::PreIssue, &key).unwrap(),
+            "7008f1bb5b5c101905cf521c037660f105a85e759e67779eb4dcca211b70e0c8"
+        );
+        assert_eq!(
+            normalize_idempotency_key(
+                Some("verbatim-key"),
+                0x1234_5678,
+                RiskEventKind::RateLimitHit,
+                &key
+            )
+            .unwrap(),
+            "6430ec7bcc4289d3b8c5a3ead06056b191a647b6a30cd5f64d50aac7e54923b5"
         );
 
-        let mut hasher = Sha256::new();
-        hasher.update(b"kiwi-risk-event-v1\0");
-        hasher.update(b"verbatim-key");
-        assert_eq!(normalized, hex::encode(hasher.finalize()));
-
-        // Deterministic: the same key maps to the same id (dedupe works).
+        // The byte shape is `pack('N', scope) . chr(event) . key` under the
+        // event key: recompute the HMAC inline and compare.
+        let mut mac = HmacSha256::new_from_slice(&key).unwrap();
+        mac.update(&1u32.to_be_bytes());
+        mac.update(&[RiskEventKind::PreIssue.as_u8()]);
+        mac.update(b"deadbeef");
         assert_eq!(
-            normalize_idempotency_key(Some("verbatim-key")).unwrap(),
+            normalize_idempotency_key(Some("deadbeef"), 1, RiskEventKind::PreIssue, &key).unwrap(),
+            hex::encode(mac.finalize().into_bytes())
+        );
+
+        // Deterministic: the same key/scope/event maps to the same id.
+        let normalized =
+            normalize_idempotency_key(Some("deadbeef"), 1, RiskEventKind::PreIssue, &key).unwrap();
+        assert_eq!(
+            normalize_idempotency_key(Some("deadbeef"), 1, RiskEventKind::PreIssue, &key).unwrap(),
             normalized
         );
         // Different keys map to different ids.
         assert_ne!(
-            normalize_idempotency_key(Some("other-key")).unwrap(),
+            normalize_idempotency_key(Some("other-key"), 1, RiskEventKind::PreIssue, &key).unwrap(),
+            normalized
+        );
+        // DOMAIN SEPARATION: the same caller key must never collide across
+        // scopes or event kinds.
+        assert_ne!(
+            normalize_idempotency_key(Some("deadbeef"), 2, RiskEventKind::PreIssue, &key).unwrap(),
+            normalized,
+            "scope must separate the dedupe domain"
+        );
+        assert_ne!(
+            normalize_idempotency_key(Some("deadbeef"), 1, RiskEventKind::ChallengeIssued, &key)
+                .unwrap(),
+            normalized,
+            "event kind must separate the dedupe domain"
+        );
+        // The new events ride the same domain separation.
+        assert_ne!(
+            normalize_idempotency_key(Some("deadbeef"), 1, RiskEventKind::RiskDenied, &key)
+                .unwrap(),
+            normalized
+        );
+        assert_ne!(
+            normalize_idempotency_key(Some("deadbeef"), 1, RiskEventKind::SourceRateLimitHit, &key)
+                .unwrap(),
             normalized
         );
         // Keys with an embedded NUL still hash as-is.
@@ -259,30 +333,39 @@ mod tests {
         with_nul.push('\0');
         with_nul.push('b');
         assert_eq!(
-            normalize_idempotency_key(Some(&with_nul)).unwrap().len(),
+            normalize_idempotency_key(Some(&with_nul), 1, RiskEventKind::PreIssue, &key)
+                .unwrap()
+                .len(),
             64
         );
     }
 
     #[test]
     fn idempotency_normalization_rejects_keys_over_4096_bytes() {
+        let key = event_key();
         let long = "x".repeat(MAX_IDEMPOTENCY_KEY_BYTES + 1);
         assert_eq!(
-            normalize_idempotency_key(Some(&long)),
+            normalize_idempotency_key(Some(&long), 1, RiskEventKind::PreIssue, &key),
             Err(RiskError::InvalidIdempotencyKey(
                 MAX_IDEMPOTENCY_KEY_BYTES + 1
             ))
         );
         // Exactly the limit is accepted.
         let ok = "x".repeat(MAX_IDEMPOTENCY_KEY_BYTES);
-        assert_eq!(normalize_idempotency_key(Some(&ok)).unwrap().len(), 64);
+        assert_eq!(
+            normalize_idempotency_key(Some(&ok), 1, RiskEventKind::PreIssue, &key)
+                .unwrap()
+                .len(),
+            64
+        );
     }
 
     #[test]
     fn idempotency_normalization_none_or_empty_draws_random_ids() {
-        for key in [None, Some("")] {
-            let a = normalize_idempotency_key(key).unwrap();
-            let b = normalize_idempotency_key(key).unwrap();
+        let key = event_key();
+        for key_in in [None, Some("")] {
+            let a = normalize_idempotency_key(key_in, 1, RiskEventKind::PreIssue, &key).unwrap();
+            let b = normalize_idempotency_key(key_in, 1, RiskEventKind::PreIssue, &key).unwrap();
             assert_eq!(a.len(), 32, "null/empty keys draw a random 16-byte id");
             assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
             assert_ne!(a, b, "null/empty keys must never reuse an id");

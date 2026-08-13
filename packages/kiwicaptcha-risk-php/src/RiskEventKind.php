@@ -7,7 +7,7 @@ namespace KiwiCaptcha\Risk;
 /**
  * Risk event kinds, fixed by the cross-language risk-v1 contract.
  *
- * Values 1..14 are authoritative and MUST NOT be renumbered: they are the
+ * Values 1..17 are authoritative and MUST NOT be renumbered: they are the
  * event identifiers passed into the canonical state script (risk.lua) and
  * must be byte-identical across the PHP and Rust implementations.
  */
@@ -27,4 +27,7 @@ enum RiskEventKind: int
     case ConfirmedLegitimate = 12;
     case ConfirmedAbuse = 13;
     case RateLimitHit = 14;
+    case SourceRateLimitHit = 15;
+    case GlobalCapacityHit = 16;
+    case RiskDenied = 17;
 }

@@ -15,10 +15,10 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
 /**
  * Adaptive risk engine: assesses one request and returns a RiskDecision.
  *
- * Pipeline: emergency limiter (source window THEN global window, both
- * before any state backend) -> observation -> circuit breaker -> state
- * store (EVALSHA) -> scorer -> policy. Backend failure degrades instead of
- * failing the request.
+ * Pipeline: emergency limiter (single per-process window, before any state
+ * backend) -> observation -> circuit breaker -> state store (EVALSHA) ->
+ * scorer -> policy. Backend failure degrades instead of failing the
+ * request.
  *
  * assessPreIssue() is the PRE-ISSUE path (emergency limiter + request
  * velocity + decision); reassess() is the POST-SOLVE recheck (identical
@@ -27,10 +27,14 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
  * limiter, no decision — a plain EventReceipt). record() is a deprecated
  * alias of record_feedback, assess() a deprecated alias of assessPreIssue.
  *
- * Every entry point NORMALIZES the caller-supplied idempotency key with
- * sha256("kiwi-risk-event-v1\0" . $key) before it is used as the Redis
- * dedupe suffix (a null/empty key becomes a fresh random 32-hex id); the
- * store only ever receives the normalized value.
+ * Every entry point NORMALIZES the caller-supplied idempotency key before
+ * it is used as the Redis dedupe suffix: HMAC-SHA256 keyed by the
+ * master-derived EVENT key, domain-separated by the event kind and scope
+ * (a null/empty key becomes a fresh random 32-hex id). The store only ever
+ * receives the normalized 64-hex value — the caller's raw key never
+ * appears in Redis, and low-entropy keys are not dictionary-recoverable
+ * (the HMAC key is derived from the deployment master, not from the
+ * caller-supplied input).
  *
  * enableGlobalPressure=false zeroes the global-pressure signal, the global
  * level and the cooldown deadline after observe(), so the policy can never
@@ -93,22 +97,23 @@ final class AdaptiveRiskEngine
     }
 
     /**
-     * PRE-ISSUE assessment: emergency limiter (source window THEN global
-     * window) -> PreIssue observation -> store -> scorer -> policy.
+     * PRE-ISSUE assessment: emergency limiter (single per-process window)
+     * -> PreIssue observation -> store -> scorer -> policy.
      *
      * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
-     *                                    (sha256 with the kiwi-risk-event-v1
-     *                                    domain prefix) before use as the
-     *                                    dedupe suffix — retries with the
-     *                                    same key hash identically and are
-     *                                    deduped by the Lua; null/empty =
-     *                                    fresh random 16-byte hex
+     *                                    (HMAC-SHA256 keyed by the event key,
+     *                                    domain-separated by event+scope)
+     *                                    before use as the dedupe suffix —
+     *                                    retries with the same key hash
+     *                                    identically and are deduped by the
+     *                                    Lua; null/empty = fresh random
+     *                                    16-byte hex
      */
     public function assessPreIssue(RiskContext $c, ?string $idempotencyKey = null): RiskDecision
     {
         $nowMs = (int) floor(microtime(true) * 1000);
 
-        if (!$this->limiter->allow() || !$this->limiter->allowGlobal()) {
+        if (!$this->limiter->allow()) {
             $this->metrics->increment('denied:limiter');
             $decision = new RiskDecision(
                 score: 1000,
@@ -136,7 +141,8 @@ final class AdaptiveRiskEngine
      * solved.
      *
      * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
-     *                                    as in assessPreIssue
+     *                                    (HMAC-SHA256, event+scope domain
+     *                                    separated) as in assessPreIssue
      */
     public function reassess(RiskContext $c, ?string $idempotencyKey = null): RiskDecision
     {
@@ -225,9 +231,9 @@ final class AdaptiveRiskEngine
      * scope/band/action.
      *
      * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
-     *                                    (sha256, kiwi-risk-event-v1 prefix)
-     *                                    before use as the dedupe suffix;
-     *                                    null/empty = fresh random id
+     *                                    (HMAC-SHA256, event+scope domain
+     *                                    separated) before use as the dedupe
+     *                                    suffix; null/empty = fresh random id
      * @param string|null $decisionId     the RiskDecision::decisionId being
      *                                    confirmed (calibration pairing)
      */
@@ -304,6 +310,36 @@ final class AdaptiveRiskEngine
         return $this->record_feedback(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey, $decisionId);
     }
 
+    /**
+     * Per-source rate-limit feedback: the caller's distributed keyed
+     * limiter hit its per-source cap. Plain feedback path (event 15 —
+     * bad +3000 on source/session), never runs the emergency limiter.
+     */
+    public function sourceRateLimitHit(RiskContext $c, ?string $idempotencyKey = null): EventReceipt
+    {
+        return $this->record_feedback(RiskEventKind::SourceRateLimitHit, $c, $idempotencyKey);
+    }
+
+    /**
+     * Deployment-capacity feedback: the global capacity controller hit its
+     * cap. Plain feedback path (event 16 — global-only bad +3000, never
+     * identity states), never runs the emergency limiter.
+     */
+    public function globalCapacityHit(RiskContext $c, ?string $idempotencyKey = null): EventReceipt
+    {
+        return $this->record_feedback(RiskEventKind::GlobalCapacityHit, $c, $idempotencyKey);
+    }
+
+    /**
+     * Risk-decision feedback: a decision that already denied must not be
+     * double-counted. Plain feedback path (event 17 — deliberate no-op),
+     * never runs the emergency limiter.
+     */
+    public function riskDenied(RiskContext $c, ?string $idempotencyKey = null): EventReceipt
+    {
+        return $this->record_feedback(RiskEventKind::RiskDenied, $c, $idempotencyKey);
+    }
+
     private function buildObservation(RiskContext $c, int $nowMs, ?string $idempotencyKey = null, ?RiskEventKind $event = null): RiskObservation
     {
         $event ??= $c->event;
@@ -323,7 +359,7 @@ final class AdaptiveRiskEngine
             subnetIdNext: $this->identityFactory->subnetIdForEpoch($c, $netEpoch + 1),
             sessionId: $c->sessionId !== null ? $this->identityFactory->sessionId($c->sessionId) : null,
             principalId: $c->principalId !== null ? $this->identityFactory->principalId($c->principalId) : null,
-            eventId: self::normalizeEventId($idempotencyKey),
+            eventId: $this->normalizeEventId($event, $c->scope, $idempotencyKey),
             networkRisk: $c->networkFlags->networkRisk(),
             nowMs: $nowMs,
         );
@@ -331,12 +367,17 @@ final class AdaptiveRiskEngine
 
     /**
      * Normalizes a caller-supplied idempotency key before it is used as a
-     * Redis key suffix: the sha256 of the domain-prefixed key (64 hex),
-     * so keys never appear verbatim in Redis and retries hash identically.
-     * null/empty -> a fresh random 32-hex id; longer than 4096 bytes
-     * -> InvalidArgumentException. Rust mirrors this exactly.
+     * Redis key suffix: HMAC-SHA256 of the domain-separated message
+     * (pack('N', scope) . chr(event) . input), keyed by the master-derived
+     * EVENT key — 64 lowercase hex chars. Domain separation (event kind +
+     * scope) means the same raw key dedupes independently per event/scope,
+     * and the HMAC (not a bare sha256) means low-entropy keys are not
+     * dictionary-recoverable from the Redis dedupe keys; the caller's raw
+     * key never appears verbatim in Redis. null/empty -> a fresh random
+     * 32-hex id; longer than 4096 bytes -> InvalidArgumentException. Rust
+     * mirrors this exactly.
      */
-    private static function normalizeEventId(?string $input): string
+    private function normalizeEventId(RiskEventKind $event, int $scope, ?string $input): string
     {
         if ($input === null || $input === '') {
             return bin2hex(random_bytes(16));
@@ -344,7 +385,7 @@ final class AdaptiveRiskEngine
         if (strlen($input) > 4096) {
             throw new \InvalidArgumentException('idempotency key too long');
         }
-        return hash('sha256', "kiwi-risk-event-v1\0" . $input);
+        return hash_hmac('sha256', pack('N', $scope) . chr($event->value) . $input, $this->keys->event);
     }
 
     private function storeGlobalLevel(): int

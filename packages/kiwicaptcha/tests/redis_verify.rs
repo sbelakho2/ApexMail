@@ -318,6 +318,81 @@ fn tampered_record_signature_is_rejected() {
 }
 
 #[test]
+fn gate_rejection_does_not_consume_the_record() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("gate-noconsume");
+    let issued =
+        issue_challenge(&argon_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // Gate refuses capacity: CapacityExceeded, no derivation, NO consume.
+    let rejecting = verifier_for(&url, &prefix).with_argon_gate(|_| false);
+    rejecting.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&rejecting, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::CapacityExceeded)
+    );
+
+    // The record survives the gate rejection: a second verify with an
+    // accepting gate still derives and succeeds.
+    let accepting = verifier_for(&url, &prefix).with_argon_gate(|_| true);
+    assert_eq!(
+        verify_at(&accepting, &token, issued_at_ns),
+        VerifyOutcome::Valid,
+        "a gate rejection must not burn the record"
+    );
+}
+
+#[test]
+fn cheap_validation_failure_does_not_consume_the_record() {
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("cheap-noconsume");
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // Corrupt the stored record's embedded signature while keeping the
+    // structure consistent (prefix = challenge|salt|), so the cheap phase
+    // fails specifically at the HMAC re-check — the same corruption a PHP
+    // RedisStorage would serve back.
+    let mut tampered = issued.record.clone();
+    tampered.challenge.push_str("00");
+    tampered.prefix = format!("{}|{}|", tampered.challenge, tampered.salt);
+
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&tampered).unwrap();
+    let token = encode_token(&tampered.nonce, counter);
+    assert_eq!(
+        verify_at(&verifier, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature)
+    );
+
+    // The record must survive the cheap rejection: the key is still present
+    // and still fails the same way (never RecordNotFound).
+    assert!(
+        verifier.store().find(&tampered.nonce).unwrap().is_some(),
+        "a cheap-validation failure must not consume the record"
+    );
+    assert_eq!(
+        verify_at(&verifier, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature)
+    );
+
+    // And the pristine record under the same nonce still verifies.
+    verifier.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(
+            &verifier,
+            &encode_token(&issued.record.nonce, counter),
+            issued_at_ns
+        ),
+        VerifyOutcome::Valid
+    );
+}
+
+#[test]
 fn argon_gate_rejects_before_derivation_and_accepts_when_clear() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("argon-gate");

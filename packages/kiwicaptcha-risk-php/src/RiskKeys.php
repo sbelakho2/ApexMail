@@ -9,8 +9,8 @@ namespace KiwiCaptcha\Risk;
  *
  *   key = hash_hkdf('sha256', master, 32, info, 'kiwicaptcha-risk-v1')
  *
- * for info in {source, subnet, session, principal}. The Rust side derives
- * the same keys with Hkdf::<Sha256>::new(Some(b"kiwicaptcha-risk-v1"), master)
+ * for info in {source, subnet, session, principal, event}. The Rust side
+ * derives the same keys with Hkdf::<Sha256>::new(Some(b"kiwicaptcha-risk-v1"), master)
  * and expand(32).
  */
 final class RiskKeys
@@ -20,12 +20,14 @@ final class RiskKeys
     public const INFO_SUBNET = 'subnet';
     public const INFO_SESSION = 'session';
     public const INFO_PRINCIPAL = 'principal';
+    public const INFO_EVENT = 'event';
 
     public function __construct(
         public readonly string $source,
         public readonly string $subnet,
         public readonly string $session,
         public readonly string $principal,
+        public readonly string $event,
     ) {
         foreach (get_object_vars($this) as $value) {
             if (strlen($value) !== 32) {
@@ -41,6 +43,7 @@ final class RiskKeys
             subnet: hash_hkdf('sha256', $master, 32, self::INFO_SUBNET, self::SALT),
             session: hash_hkdf('sha256', $master, 32, self::INFO_SESSION, self::SALT),
             principal: hash_hkdf('sha256', $master, 32, self::INFO_PRINCIPAL, self::SALT),
+            event: hash_hkdf('sha256', $master, 32, self::INFO_EVENT, self::SALT),
         );
     }
 }

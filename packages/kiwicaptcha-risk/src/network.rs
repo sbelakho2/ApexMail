@@ -26,13 +26,25 @@ impl NetworkFlags {
         self.local_risk_bucket == 255
     }
 
-    /// Fixed-point network risk contribution: 1000 for reserved/hosting/
-    /// proxy/blocked sources, 600 for Tor exits, 0 otherwise.
+    /// Fixed-point network risk contribution, matching the PHP built-in
+    /// values: 1000 blocked, 950 reserved, 750 known proxy, 650 Tor exit,
+    /// 600 known hosting, 0 otherwise. When several flags are set the worst
+    /// category wins. The policy's `>= 900` hard deny fires for blocked
+    /// sources only.
     pub fn network_risk(self) -> u16 {
-        if self.reserved || self.known_hosting || self.known_proxy || self.blocked() {
+        if self.blocked() {
             return 1000;
         }
+        if self.reserved {
+            return 950;
+        }
+        if self.known_proxy {
+            return 750;
+        }
         if self.tor_exit {
+            return 650;
+        }
+        if self.known_hosting {
             return 600;
         }
         0
@@ -267,12 +279,12 @@ mod tests {
         let hosting: IpAddr = "203.0.113.27".parse().unwrap();
         let flags = classifier.classify(hosting);
         assert!(flags.known_hosting);
-        assert_eq!(flags.network_risk(), 1000);
+        assert_eq!(flags.network_risk(), 600);
 
         let tor: IpAddr = "198.51.100.9".parse().unwrap();
         let flags = classifier.classify(tor);
         assert!(flags.tor_exit);
-        assert_eq!(flags.network_risk(), 600);
+        assert_eq!(flags.network_risk(), 650);
 
         let blocked: IpAddr = "192.0.2.5".parse().unwrap();
         let flags = classifier.classify(blocked);
@@ -303,11 +315,54 @@ mod tests {
                 },
             ),
         ]);
-        assert!(classifier.classify("198.18.3.4".parse().unwrap()).reserved);
-        assert!(
-            classifier
-                .classify("100.64.1.1".parse().unwrap())
-                .known_proxy
+        let reserved = classifier.classify("198.18.3.4".parse().unwrap());
+        assert!(reserved.reserved);
+        assert_eq!(reserved.network_risk(), 950);
+        let proxy = classifier.classify("100.64.1.1".parse().unwrap());
+        assert!(proxy.known_proxy);
+        assert_eq!(proxy.network_risk(), 750);
+    }
+
+    #[test]
+    fn worst_category_wins_when_flags_combine() {
+        // Multiple categories on one source: the worst (highest) value wins
+        // and every combination is distinguishable.
+        let f = |flags: NetworkFlags| flags.network_risk();
+        assert_eq!(
+            f(NetworkFlags {
+                known_hosting: true,
+                tor_exit: true,
+                ..Default::default()
+            }),
+            650,
+            "tor outranks hosting"
+        );
+        assert_eq!(
+            f(NetworkFlags {
+                known_hosting: true,
+                known_proxy: true,
+                ..Default::default()
+            }),
+            750,
+            "proxy outranks hosting"
+        );
+        assert_eq!(
+            f(NetworkFlags {
+                reserved: true,
+                tor_exit: true,
+                ..Default::default()
+            }),
+            950,
+            "reserved outranks tor"
+        );
+        assert_eq!(
+            f(NetworkFlags {
+                local_risk_bucket: 255,
+                known_proxy: true,
+                ..Default::default()
+            }),
+            1000,
+            "blocked outranks proxy"
         );
     }
 
