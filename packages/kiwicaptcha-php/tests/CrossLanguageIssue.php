@@ -7,6 +7,11 @@ declare(strict_types=1);
  * language-neutral record JSON to KC_PHP_RECORD (env). The Rust job then
  * loads it, solves it, and verifies it with verify_solution.
  *
+ * The record JSON carries the full 18-key schema (including `region`,
+ * always present — null when unbound). KC_PHP_REGION optionally binds the
+ * issued records to a region so the cross-language region interop is
+ * exercised too.
+ *
  * Run: php tests/CrossLanguageIssue.php
  */
 
@@ -37,7 +42,8 @@ $config = $algo === 'argon2id'
     )
     : new Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8, ttlSecs: 120, minDurationMs: 0);
 $storage = new ArrayStorage();
-$issuer = new Issuer($config, $storage);
+$region = getenv('KC_PHP_REGION');
+$issuer = new Issuer($config, $storage, region: $region !== false && $region !== '' ? $region : null);
 $challenge = $issuer->issue('login', '198.51.100.7');
 $record = $storage->find($challenge->nonce);
 file_put_contents($target, json_encode($record->toArray(), JSON_UNESCAPED_SLASHES));

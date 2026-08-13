@@ -306,4 +306,101 @@ final class ConfigurationTest extends TestCase
         self::assertSame(2.5, $calibration['false_positive_cost']);
         self::assertSame(3.75, $calibration['false_negative_cost']);
     }
+
+    public function testArgon2MaxWaitersDefaultsAndBounds(): void
+    {
+        self::assertSame(64, $this->process()['argon2_max_waiters'], 'argon2_max_waiters defaults to 64 (bounded waiters guard of the Argon2 admission semaphore)');
+        self::assertSame(1, $this->process(['argon2_max_waiters' => 1])['argon2_max_waiters']);
+        self::assertSame(128, $this->process(['argon2_max_waiters' => 128])['argon2_max_waiters']);
+    }
+
+    public function testArgon2MaxWaitersBelowOneIsRejected(): void
+    {
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['argon2_max_waiters' => 0]);
+    }
+
+    public function testRiskRegionDefaultsToNullAndAcceptsArbitraryString(): void
+    {
+        self::assertNull($this->process()['risk']['region'], 'risk.region defaults to null (no region baked into challenges)');
+        self::assertSame('eu-central-1', $this->process(['risk' => ['region' => 'eu-central-1']])['risk']['region']);
+    }
+
+    public function testRiskRedisHardeningDefaults(): void
+    {
+        $redis = $this->process()['risk']['redis'];
+
+        self::assertSame(0, $redis['wait_replicas'], 'wait_replicas defaults to 0 (WAIT disabled)');
+        self::assertSame(100, $redis['wait_timeout_ms'], 'wait_timeout_ms defaults to 100');
+        self::assertSame(0, $redis['ttl_margin_secs'], 'ttl_margin_secs defaults to 0 (no extra retention)');
+
+        $redis = $this->process(['risk' => ['redis' => [
+            'wait_replicas' => 2,
+            'wait_timeout_ms' => 500,
+            'ttl_margin_secs' => 30,
+        ]]])['risk']['redis'];
+        self::assertSame(2, $redis['wait_replicas']);
+        self::assertSame(500, $redis['wait_timeout_ms']);
+        self::assertSame(30, $redis['ttl_margin_secs']);
+    }
+
+    public function testRiskRedisBoundsAreValidated(): void
+    {
+        $invalid = [
+            ['risk' => ['redis' => ['wait_replicas' => -1]]],
+            ['risk' => ['redis' => ['wait_timeout_ms' => 0]]],
+            ['risk' => ['redis' => ['ttl_margin_secs' => -1]]],
+        ];
+        foreach ($invalid as $config) {
+            try {
+                $this->process($config);
+                self::fail('out-of-range risk.redis knob must be rejected by the tree: '.json_encode($config));
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
+    public function testOutstandingChallengeCapsDefaultsAndBounds(): void
+    {
+        $risk = $this->process()['risk'];
+        self::assertSame(20, $risk['max_outstanding_challenges'], 'max_outstanding_challenges defaults to 20 (anti-stockpiling per source)');
+        self::assertSame(100000, $risk['max_outstanding_challenges_global'], 'max_outstanding_challenges_global defaults to 100000 (deployment-wide)');
+
+        $risk = $this->process(['risk' => [
+            'max_outstanding_challenges' => 5,
+            'max_outstanding_challenges_global' => 999,
+        ]])['risk'];
+        self::assertSame(5, $risk['max_outstanding_challenges']);
+        self::assertSame(999, $risk['max_outstanding_challenges_global']);
+    }
+
+    public function testOutstandingChallengeCapsBelowOneAreRejected(): void
+    {
+        foreach ([
+            ['risk' => ['max_outstanding_challenges' => 0]],
+            ['risk' => ['max_outstanding_challenges_global' => 0]],
+        ] as $config) {
+            try {
+                $this->process($config);
+                self::fail('outstanding cap below 1 must be rejected: '.json_encode($config));
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
+    public function testOriginAllowlistDefaultsToEmptyAndAcceptsOrigins(): void
+    {
+        self::assertSame([], $this->process()['risk']['challenge_origin_allowlist'], 'challenge_origin_allowlist defaults to [] (origin laundering defense off)');
+
+        $allowlist = $this->process(['risk' => ['challenge_origin_allowlist' => ['https://app.example.com', 'https://cdn.example.com']]])['risk']['challenge_origin_allowlist'];
+        self::assertSame(['https://app.example.com', 'https://cdn.example.com'], $allowlist);
+    }
+
+    public function testEnforceFetchMetadataDefaultsToFalse(): void
+    {
+        self::assertFalse($this->process()['risk']['enforce_fetch_metadata'], 'enforce_fetch_metadata defaults to false (defense-in-depth only)');
+        self::assertTrue($this->process(['risk' => ['enforce_fetch_metadata' => true]])['risk']['enforce_fetch_metadata']);
+    }
 }

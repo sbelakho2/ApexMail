@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
+use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
+use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Verifier;
@@ -190,5 +192,62 @@ final class RealRedisIntegrationTest extends TestCase
         $replay = $verifier->verify($token, $secret, 'login', '198.51.100.7', $nowNs);
         self::assertFalse($replay->isOk(), 'replay must be rejected');
         self::assertSame(\KiwiCaptcha\VerifyError::RecordNotFound->value, $replay->code());
+    }
+
+    public function testOutstandingCountersCapAndDecrementAgainstRealRedis(): void
+    {
+        $secret = '0123456789abcdef0123456789abcdef';
+        $outstanding = new OutstandingChallenges($this->client, '{kiwi:ci}:outstanding:', RiskKeys::fromMaster($secret), 3, 100, 5);
+
+        // Three issuances admitted (EXPIRE = ttl + margin), the 4th refused.
+        self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
+        self::assertSame(0, $outstanding->issue('198.51.100.7', 60), 'the 4th outstanding challenge of one source must be refused');
+
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        self::assertSame('3', (string) $this->client->get($sourceKey));
+        self::assertSame('3', (string) $this->client->get('{kiwi:ci}:outstanding:global'));
+        $ttl = $this->client->ttl($sourceKey);
+        self::assertGreaterThanOrEqual(60, $ttl, 'the counter TTL = challenge lifetime (60) + ttl margin (5)');
+        self::assertLessThanOrEqual(65, $ttl);
+
+        // A valid solve decrements the per-source counter (floored at 0).
+        $outstanding->solved('198.51.100.7');
+        self::assertSame('2', (string) $this->client->get($sourceKey));
+        $outstanding->solved('198.51.100.7');
+        $outstanding->solved('198.51.100.7');
+        $outstanding->solved('198.51.100.7');
+        self::assertSame('0', (string) $this->client->get($sourceKey), 'the decrement must never drive the counter negative');
+
+        // The GLOBAL counter is never decremented by solves (expires only).
+        self::assertSame('3', (string) $this->client->get('{kiwi:ci}:outstanding:global'));
+
+        // The cap frees when the counter drops: a new issuance is admitted.
+        self::assertSame(1, $outstanding->issue('198.51.100.7', 60));
+    }
+
+    public function testSemaphoreWaitersGuardAgainstRealRedis(): void
+    {
+        $sem = new RedisAdmissionSemaphore($this->client, 1, 'ci-waiters', 45_000, 2);
+        $waitersKey = '{kiwicaptcha:argon2:leases:ci-waiters}:sem:waiters';
+
+        $token = $sem->acquire();
+        self::assertNotNull($token, 'the only lease is granted');
+
+        // Saturated acquires: counted up to maxWaiters (2), refused beyond
+        // WITHOUT queueing (the overflow entry is removed in the same Lua),
+        // so the waiters counter is bounded.
+        for ($i = 0; $i < 10; $i++) {
+            self::assertNull($sem->acquire());
+        }
+        self::assertSame('2', (string) $this->client->get($waitersKey), 'the waiters counter must never exceed maxWaiters');
+
+        // A freed slot serves one waiter: the grant decrements the counter.
+        $sem->release($token);
+        $next = $sem->acquire();
+        self::assertNotNull($next);
+        self::assertSame('1', (string) $this->client->get($waitersKey), 'a granted caller was a served waiter — the counter decrements');
+        $sem->release($next);
     }
 }

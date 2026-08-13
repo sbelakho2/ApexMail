@@ -101,6 +101,64 @@ final class RedisStorageTest extends TestCase
         self::assertSame('EX', $setCalls[0][1][2] ?? null, 'store must set the key expiration');
     }
 
+    public function testStoreTtlIncludesTheMargin(): void
+    {
+        // Audit #22/#23: ttlMarginSecs extends the record's retention beyond
+        // token validity — TTL = expires_at - now + margin. The margin must
+        // exceed max clock skew + failover margin so a replayed token can
+        // never land on an already-expired state that re-accepted it.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, ttlMarginSecs: 30);
+        $record = $this->makeRecord();
+        $record = new ChallengeRecord(
+            nonce: $record->nonce,
+            scope: $record->scope,
+            bindingTag: $record->ipHash(),
+            issuedAt: $record->issuedAt,
+            expiresAt: time() + 60,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $record->prefix,
+            challenge: $record->challenge,
+            minDurationMs: $record->minDurationMs,
+            issuedAtNs: $record->issuedAtNs,
+        );
+
+        $storage->store($record);
+
+        self::assertSame(90, $client->expirations['kiwicaptcha:redis-nonce-1'], 'TTL must be expires_at - now + ttlMarginSecs');
+    }
+
+    public function testStoreIssuesWaitWhenConfigured(): void
+    {
+        // Audit #22/#23: with waitReplicas > 0 the record must be
+        // acknowledged by replicas (WAIT) before the challenge is handed to
+        // the client. A replica-less server reports 0 acknowledged replicas
+        // WITHOUT erroring — the assertion is that WAIT was issued with the
+        // configured numreplicas/timeout and returned >= 0.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 2, waitTimeoutMs: 100);
+        $storage->store($this->makeRecord());
+
+        $waits = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
+        self::assertNotEmpty($waits, 'store must issue WAIT after SET when waitReplicas > 0');
+        self::assertSame([2, 100], $waits[0][1], 'WAIT must carry the configured numreplicas and timeout');
+    }
+
+    public function testStoreSkipsWaitWhenDisabled(): void
+    {
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+
+        $waits = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
+        self::assertSame([], $waits, 'WAIT must not be issued when waitReplicas is 0');
+    }
+
     public function testStoreWritesLanguageNeutralJson(): void
     {
         $client = $this->requirePredis();
@@ -125,7 +183,7 @@ final class RedisStorageTest extends TestCase
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
-            'attempts_used',
+            'attempts_used', 'region',
         ], array_keys($data));
         self::assertSame('redis-nonce-1', $data['nonce']);
         self::assertSame('sha256', $data['algorithm']);
@@ -134,6 +192,8 @@ final class RedisStorageTest extends TestCase
         self::assertSame('abc123', $data['binding_tag']);
         self::assertArrayNotHasKey('ip_hash', $data, 'legacy ip_hash key must NOT be emitted alongside binding_tag');
         self::assertSame(2, $data['protocol_version']);
+        self::assertArrayHasKey('region', $data, 'region is part of the 18-key cross-language schema');
+        self::assertNull($data['region'], 'an unbound record carries region: null (byte parity with Rust serde)');
     }
 
     public function testReadsRecordsWrittenWithoutAttemptsUsed(): void
@@ -238,6 +298,44 @@ final class RedisStorageTest extends TestCase
         $storage = new RedisStorage($client);
 
         self::assertNull($storage->find('legacy'));
+    }
+
+    public function testRealRedisStoreFindConsumeWithWaitReturnsNonNegative(): void
+    {
+        // Audit #22/#23 against a REAL Redis: store() with waitReplicas > 0
+        // issues WAIT and a replica-less server reports 0 acknowledged
+        // replicas (>= 0, no error). Skipped when the local test Redis
+        // (127.0.0.1:6399, no password) is unreachable.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        try {
+            $client = new \Predis\Client('tcp://127.0.0.1:6399', [
+                'timeout' => 1.0,
+                'read_write_timeout' => 1.0,
+            ]);
+            $client->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the real-Redis tests');
+        }
+        $nonce = base64_encode(random_bytes(32));
+        $record = $this->makeRecord($nonce);
+        $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100, ttlMarginSecs: 5);
+        try {
+            $storage->store($record);
+
+            $stored = $storage->find($nonce);
+            self::assertNotNull($stored);
+            self::assertSame($nonce, $stored->nonce);
+            self::assertGreaterThanOrEqual(0, $client->executeRaw(['WAIT', 1, 100]), 'WAIT must return the acknowledged-replica count (>= 0)');
+
+            $consumed = $storage->consume($nonce);
+            self::assertNotNull($consumed);
+            self::assertSame($nonce, $consumed->nonce);
+            self::assertNull($storage->consume($nonce), 'GETDEL must make the record single-use');
+        } finally {
+            $client->del('kiwicaptcha:'.$nonce);
+        }
     }
 
     public function testOneShotVerifyRemovesRecordEvenWithWrongCounter(): void

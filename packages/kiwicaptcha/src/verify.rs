@@ -15,8 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::challenge::{
     binding_tag, hash_ip, payload_from_record, verify_signature, verify_signature_v2,
-    ChallengeRecord, PoWAlgorithm, SOLVER_MAX_ARGON2_M_KIB, SOLVER_MAX_ARGON2_TARGET_BITS,
-    SOLVER_MAX_TARGET_BITS,
+    ChallengeRecord, PoWAlgorithm, SOLVER_MAX_ARGON2_TARGET_BITS, SOLVER_MAX_TARGET_BITS,
 };
 
 /// Clock-skew tolerance (microseconds) for the server-side minimum-duration
@@ -41,11 +40,11 @@ pub(crate) fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8;
     match record.algorithm {
         PoWAlgorithm::Argon2id => {
             // Reject implausible parameters up front: the verifier must never
-            // run a memory-hard computation with impossible parameters, and
-            // the minimum (m_kib >= 8 * p) is enforced at issuance too.
-            if record.m_kib < 8 * record.p
-                || record.m_kib > crate::challenge::SOLVER_MAX_ARGON2_M_KIB
-            {
+            // run a memory-hard computation with impossible parameters — the
+            // hard ceilings (audit #32) plus the Argon2 minimum
+            // `m_kib >= 8 * p`. The minimum (m_kib >= 8 * p) is enforced at
+            // issuance too.
+            if record.m_kib < 8 * record.p || check_argon2_ceilings(record).is_err() {
                 return Err(VerifyError::MalformedRecord);
             }
             // Protocol unit: m_kib is KIBIBYTES (65536 = 64 MiB); the
@@ -124,6 +123,12 @@ pub struct VerifyContext<'a> {
     /// Expected auth scope. If [`Some`], the solution is rejected if the
     /// challenge was issued for a different scope (prevents cross-scope replay).
     pub expected_scope: Option<&'a str>,
+    /// Expected region. If [`Some`], the solution is rejected with
+    /// [`VerifyError::WrongRegion`] when the stored record was issued for a
+    /// different region — or for no region at all (a region-expecting
+    /// deployment fails closed on region-unbound challenges). When `None`,
+    /// the record's region is not checked.
+    pub expected_region: Option<&'a str>,
     /// The current client's IP address. When [`Some`], the challenge is
     /// rejected if the stored `ip_hash` does not match
     /// `hash_ip(client_ip, secret_key)` — enforcing the IP binding that was
@@ -160,9 +165,27 @@ pub struct VerifyContext<'a> {
 pub enum VerifyOutcome {
     /// The solution is valid. The challenge must now be consumed
     /// (atomically, e.g. Redis GETDEL) so it can never be used twice.
-    Valid,
+    /// Carries the consumed challenge's canonical nonce (the jti — the
+    /// single-use token identifier), so callers can correlate the outcome
+    /// with the storage key and any downstream result token without
+    /// re-decoding the solution.
+    Valid {
+        /// The consumed challenge's canonical base64 nonce.
+        nonce: String,
+    },
     /// The solution is invalid; the reason explains why.
     Invalid(VerifyError),
+}
+
+impl VerifyOutcome {
+    /// The consumed canonical nonce (jti) when the outcome is valid, else
+    /// `None`.
+    pub fn nonce(&self) -> Option<&str> {
+        match self {
+            VerifyOutcome::Valid { nonce } => Some(nonce),
+            VerifyOutcome::Invalid(_) => None,
+        }
+    }
 }
 
 /// Reasons a solution can be rejected.
@@ -182,6 +205,8 @@ pub enum VerifyError {
     CounterTooLarge,
     #[error("challenge was issued for a different scope")]
     WrongScope,
+    #[error("challenge was issued for a different region")]
+    WrongRegion,
     #[error("too many verification attempts against this challenge")]
     TooManyAttempts,
     #[error("proof-of-work hash does not meet the difficulty target")]
@@ -226,8 +251,9 @@ pub enum VerifyError {
 /// - `expires_at > issued_at` and `expires_at - issued_at <= MAX_TTL_SECS`;
 /// - `prefix` is exactly `challenge|salt|`;
 /// - SHA-256: `target_bits` 1..=SOLVER_MAX_TARGET_BITS;
-/// - Argon2id: `target_bits` 1..=SOLVER_MAX_ARGON2_TARGET_BITS, `p == 1`,
-///   `t` 3..=MAX_ARGON_T, `m_kib` 8..=SOLVER_MAX_ARGON2_M_KIB.
+/// - Argon2id: `target_bits` 1..=SOLVER_MAX_ARGON2_TARGET_BITS and the hard
+///   parameter ceilings (audit #32): `m_kib` 8..=65536, `t` 3..=16,
+///   `p` 1..=4.
 ///
 /// Returns [`VerifyError::MalformedRecord`] on any violation.
 pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
@@ -267,15 +293,39 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
             if record.target_bits == 0 || record.target_bits > SOLVER_MAX_ARGON2_TARGET_BITS {
                 return Err(VerifyError::MalformedRecord);
             }
-            if record.p != 1
-                || record.t < 3
-                || record.t > crate::challenge::MAX_ARGON_T
-                || record.m_kib < 8
-                || record.m_kib > SOLVER_MAX_ARGON2_M_KIB
-            {
-                return Err(VerifyError::MalformedRecord);
-            }
+            check_argon2_ceilings(record)?;
         }
+    }
+    Ok(())
+}
+
+/// Validate the hard Argon2id parameter ceilings (audit #32).
+///
+/// Checks `m_kib`/`t`/`p` against [`crate::challenge::MIN_ARGON_MEMORY_KIB`],
+/// [`crate::challenge::MAX_ARGON_MEMORY_KIB`], [`crate::challenge::MIN_ARGON_TIME`],
+/// [`crate::challenge::MAX_ARGON_TIME`], [`crate::challenge::MIN_PARALLELISM`],
+/// [`crate::challenge::MAX_PARALLELISM`] — the verifier must never run (or
+/// allocate for) a memory-hard computation with parameters outside these
+/// bounds, even when the record is properly signed.
+///
+/// Returns [`VerifyError::MalformedRecord`] when any parameter is out of
+/// range. Called by [`validate_record`] (the cheap pre-signature gate) AND
+/// explicitly AFTER signature authentication in [`verify_solution`] and the
+/// production verifier, so a signed record is validated against the ceilings
+/// again immediately before any allocation happens.
+pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), VerifyError> {
+    use crate::challenge::{
+        MAX_ARGON_MEMORY_KIB, MAX_ARGON_TIME, MAX_PARALLELISM, MIN_ARGON_MEMORY_KIB,
+        MIN_ARGON_TIME, MIN_PARALLELISM,
+    };
+    if record.m_kib < MIN_ARGON_MEMORY_KIB
+        || record.m_kib > MAX_ARGON_MEMORY_KIB
+        || record.t < MIN_ARGON_TIME
+        || record.t > MAX_ARGON_TIME
+        || record.p < MIN_PARALLELISM
+        || record.p > MAX_PARALLELISM
+    {
+        return Err(VerifyError::MalformedRecord);
     }
     Ok(())
 }
@@ -291,24 +341,30 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
 ///    runs BEFORE any hash is derived, so malformed or attacker-crafted
 ///    records can never drive expensive verification work.
 /// 3. Re-verify the HMAC signature over the protocol-appropriate canonical
-///    input (v1 for `protocol_version == 1` records, v2 otherwise).
-/// 4. Check the TTL (defends against stale challenges).
-/// 5. Check the scope (prevents cross-scope replay) →
+///    input (v1 for `protocol_version == 1` records, v2 otherwise; v2
+///    signatures use the HKDF-derived challenge key, audit #21).
+/// 4. Hard Argon2id parameter ceilings (audit #32) — after signature
+///    authentication, before any `Params::new`/allocation.
+/// 5. Check the TTL (defends against stale challenges).
+/// 6. Check the scope (prevents cross-scope replay) →
 ///    [`VerifyError::WrongScope`].
-/// 6. Check the IP binding: for v2 records, recompute the nonce-bound
+/// 7. Check the region (when `expected_region` is set) →
+///    [`VerifyError::WrongRegion`].
+/// 8. Check the IP binding: for v2 records, recompute the nonce-bound
 ///    `binding_tag` from `client_ip` + record nonce + secret and compare in
 ///    constant time; for v1 records, compare the legacy `hash_ip`. An empty
 ///    `binding_tag` skips the check. A `None` `client_ip` with a NON-EMPTY
 ///    tag fails closed with [`VerifyError::MissingClientIp`] — only records
 ///    issued with `BindingMode::None` (empty tag) verify without an IP.
-/// 7. Check the minimum duration with the SERVER clock (see
+/// 9. Check the minimum duration with the SERVER clock (see
 ///    [`SKEW_TOLERANCE_US`] for the clock-skew policy). The client-reported
 ///    duration is forgeable and is never trusted for this check. Records
 ///    without `issued_at_ns` are malformed (the legacy client-duration
 ///    fallback was removed).
-/// 8. Optional telemetry scoring (when `enforce_telemetry` is set).
-/// 9. Re-derive the SHA-256/Argon2id hash and check leading zero bits (the
-///    actual PoW).
+/// 10. Optional telemetry scoring (when `enforce_telemetry` is set).
+/// 11. Re-derive the SHA-256/Argon2id hash and check leading zero bits (the
+///     actual PoW). The valid outcome's `nonce` field carries the consumed
+///     canonical nonce (jti — audit #37).
 pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 0. Attempt accounting — counted on EVERY verification call, correct or
     //    not, so a wrong-candidate loop cannot burn unbounded server-side
@@ -355,6 +411,16 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         Err(_) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
     }
 
+    // 1c. Hard Argon2id parameter ceilings (audit #32) — validated AFTER the
+    //     signature has been authenticated and BEFORE any Params::new or
+    //     memory allocation: even a properly signed record must never drive
+    //     an out-of-bounds memory-hard computation.
+    if ctx.record.algorithm == PoWAlgorithm::Argon2id {
+        if let Err(e) = check_argon2_ceilings(ctx.record) {
+            return VerifyOutcome::Invalid(e);
+        }
+    }
+
     // 2. TTL.
     if ctx.now_unix >= ctx.record.expires_at {
         return VerifyOutcome::Invalid(VerifyError::Expired);
@@ -365,6 +431,15 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     if let Some(expected) = ctx.expected_scope {
         if ctx.record.scope != expected {
             return VerifyOutcome::Invalid(VerifyError::WrongScope);
+        }
+    }
+
+    // 2c. Region validation (audit #22): a deployment that expects a region
+    //     rejects challenges issued for a different region — or for no region
+    //     at all (fail closed).
+    if let Some(expected) = ctx.expected_region {
+        if ctx.record.region.as_deref() != Some(expected) {
+            return VerifyOutcome::Invalid(VerifyError::WrongRegion);
         }
     }
 
@@ -461,7 +536,11 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     };
 
     if leading_zero_bits(&hash) >= ctx.record.target_bits {
-        VerifyOutcome::Valid
+        // The outcome carries the consumed canonical nonce (jti) so callers
+        // can correlate the result without re-decoding the solution.
+        VerifyOutcome::Valid {
+            nonce: ctx.record.nonce.clone(),
+        }
     } else {
         VerifyOutcome::Invalid(VerifyError::InsufficientWork)
     }
@@ -675,6 +754,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
         issued.record
@@ -695,6 +775,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
         issued.record
@@ -710,6 +791,7 @@ mod tests {
             now_ns: NOW_NS + 5_000_000, // 5 s after issuance
             min_duration_ms: 0,
             expected_scope: None,
+            expected_region: None,
             client_ip: Some("1.2.3.4"),
             telemetry: None,
             enforce_telemetry: false,
@@ -719,18 +801,58 @@ mod tests {
         verify_solution(&mut ctx)
     }
 
+    /// Re-sign a mutated Argon2id record so its parameters are covered by a
+    /// VALID v2 signature — the ceiling checks (audit #32) must fire on
+    /// properly signed records, not on signature failures.
+    fn resign_v2(record: &mut ChallengeRecord, secret: &str) {
+        use hmac::Mac;
+        let canonical = format!(
+            "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            record.nonce,
+            record.scope,
+            record.binding_tag,
+            record.issued_at,
+            record.expires_at,
+            record.algorithm.as_str(),
+            record.m_kib,
+            record.t,
+            record.p,
+            record.target_bits,
+            record.salt,
+            record.min_duration_ms
+        );
+        let derived = crate::keys::DerivedKeys::from_master(secret, None);
+        let key = derived.challenge_key();
+        let mut mac = hmac::Hmac::<Sha256>::new_from_slice(key).expect("key fits");
+        mac.update(canonical.as_bytes());
+        let sig = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        record.challenge = format!("{}.{}", B64.encode(&canonical), sig);
+        record.prefix = format!("{}|{}|", record.challenge, record.salt);
+    }
+
     #[test]
     fn valid_solution_is_accepted() {
         let mut record = make_record(8); // 8 bits — fast solve
         let counter = solve_for_test(&record).expect("solver finds a counter");
-        assert_eq!(verify(&mut record, counter, 5000), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify(&mut record, counter, 5000),
+            VerifyOutcome::Valid { .. }
+        ));
     }
 
     #[test]
     fn argon2_solution_is_accepted() {
         let mut record = make_argon2_record(4, 128); // low bits, small memory for tests
         let counter = solve_for_test(&record).expect("solver finds an argon2 counter");
-        assert_eq!(verify(&mut record, counter, 5000), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify(&mut record, counter, 5000),
+            VerifyOutcome::Valid { .. }
+        ));
     }
 
     #[test]
@@ -750,6 +872,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err());
     }
@@ -773,6 +896,7 @@ mod tests {
                 auto_tune_min_bits: 8,
                 auto_tune_max_bits: 24,
                 binding_mode: BindingMode::Bound,
+                region: None,
             };
             assert!(
                 issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
@@ -800,6 +924,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         for ms in [10_000u64, 20_000, 100_000] {
             let mut cfg = base.clone();
@@ -833,6 +958,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         for ttl in [0u64, 301, 60_000] {
             let mut cfg = base.clone();
@@ -865,6 +991,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         assert!(
             issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err(),
@@ -888,6 +1015,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         assert!(issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_err());
     }
@@ -910,6 +1038,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         assert!(
             matches!(
@@ -946,6 +1075,7 @@ mod tests {
                 auto_tune_min_bits: 8,
                 auto_tune_max_bits: 24,
                 binding_mode: BindingMode::Bound,
+                region: None,
             };
             assert!(
                 matches!(
@@ -970,6 +1100,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         assert!(issue_challenge(&max_bits, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).is_ok());
     }
@@ -1014,6 +1145,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1044,6 +1176,7 @@ mod tests {
             min_duration_ms: 60_000,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1074,6 +1207,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1112,6 +1246,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1140,6 +1275,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1168,6 +1304,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1196,6 +1333,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: None,
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1223,6 +1361,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::None,
+            region: None,
         };
         let issued = issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0).unwrap();
         let mut unbound = issued.record;
@@ -1236,13 +1375,18 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
-            client_ip: None,
+            client_ip: Some("1.2.3.4"),
+
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
-        assert_eq!(verify_solution(&mut ctx2), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify_solution(&mut ctx2),
+            VerifyOutcome::Valid { .. }
+        ));
     }
 
     #[test]
@@ -1261,6 +1405,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
@@ -1281,6 +1426,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
@@ -1309,6 +1455,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
@@ -1327,12 +1474,16 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
             accept_legacy_v1: false,
         };
-        assert_eq!(verify_solution(&mut ctx2), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify_solution(&mut ctx2),
+            VerifyOutcome::Valid { .. }
+        ));
         assert_eq!(record.attempts_used, 2);
     }
 
@@ -1353,6 +1504,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1380,6 +1532,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1410,6 +1563,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: Some(&json!({})),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1431,6 +1585,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: Some(&json!([])),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1458,6 +1613,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: Some(&json!(null)),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -1486,6 +1642,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: Some(&json!({
                 "wd": false, "hc": 8, "dm": 8, "me": 5, "ke": 2, "et": []
             })),
@@ -1493,7 +1650,10 @@ mod tests {
             max_attempts: 0,
             accept_legacy_v1: false,
         };
-        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Valid { .. }
+        ));
     }
 
     #[test]
@@ -1511,12 +1671,16 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
-        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Valid { .. }
+        ));
     }
 
     #[test]
@@ -1538,6 +1702,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1567,12 +1732,16 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
-        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Valid { .. }
+        ));
     }
 
     #[test]
@@ -1591,6 +1760,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1824,6 +1994,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: Some("signup"),
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1850,6 +2021,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1876,12 +2048,16 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
-        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Valid { .. }
+        ));
     }
 
     #[test]
@@ -1966,12 +2142,16 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
-        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Valid { .. }
+        ));
         let mut ctx_fast = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
@@ -1982,6 +2162,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2006,9 +2187,8 @@ mod tests {
             match solve_for_test(&record) {
                 Some(counter) => {
                     let outcome = verify(&mut record, counter, 5000);
-                    assert_eq!(
-                        outcome,
-                        VerifyOutcome::Valid,
+                    assert!(
+                        matches!(outcome, VerifyOutcome::Valid { .. }),
                         "difficulty {bits} bits must verify"
                     );
                 }
@@ -2075,7 +2255,7 @@ mod tests {
         );
 
         let mut argon_bad_t = make_argon2_record(4, 128);
-        argon_bad_t.t = 7; // above MAX_ARGON_T
+        argon_bad_t.t = 32; // above MAX_ARGON_TIME (16)
         assert_eq!(
             validate_record(&argon_bad_t),
             Err(VerifyError::MalformedRecord)
@@ -2088,8 +2268,22 @@ mod tests {
             Err(VerifyError::MalformedRecord)
         );
 
+        let mut argon_low_m = make_argon2_record(4, 128);
+        argon_low_m.m_kib = 1; // below the 8 KiB hard floor
+        assert_eq!(
+            validate_record(&argon_low_m),
+            Err(VerifyError::MalformedRecord)
+        );
+
+        let mut argon_low_t = make_argon2_record(4, 128);
+        argon_low_t.t = 2; // below MIN_ARGON_TIME (3)
+        assert_eq!(
+            validate_record(&argon_low_t),
+            Err(VerifyError::MalformedRecord)
+        );
+
         let mut argon_bad_p = make_argon2_record(4, 128);
-        argon_bad_p.p = 2; // only p == 1 is libsodium-representable
+        argon_bad_p.p = 5; // above MAX_PARALLELISM (4)
         assert_eq!(
             validate_record(&argon_bad_p),
             Err(VerifyError::MalformedRecord)
@@ -2116,6 +2310,7 @@ mod tests {
             auto_tune_min_bits: 8,
             auto_tune_max_bits: 20,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         assert!(
             matches!(
@@ -2185,6 +2380,7 @@ mod tests {
                 auto_tune_min_bits: 8,
                 auto_tune_max_bits: 20,
                 binding_mode: BindingMode::None,
+                region: None,
             },
             "login",
             "1.2.3.4",
@@ -2204,13 +2400,17 @@ mod tests {
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: None,
-            client_ip: Some("9.9.9.9"), // different IP — must still pass
+            client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
-        assert_eq!(verify_solution(&mut ctx), VerifyOutcome::Valid);
+        assert!(matches!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Valid { .. }
+        ));
     }
 
     #[test]
@@ -2227,6 +2427,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2236,6 +2437,206 @@ mod tests {
             verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::IpMismatch)
         );
+    }
+
+    // ── Round-8 audit: region binding, argon ceilings, jti exposure ─────
+
+    #[test]
+    fn region_mismatch_is_rejected_with_wrong_region() {
+        // The record's region is deployment metadata carried on the JSON
+        // record (never signed — the record itself is server-side
+        // authoritative). A verifier configured with an expected region
+        // rejects challenges issued for another region.
+        let mut record = make_record(8);
+        record.region = Some("eu".into());
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: Some("us"),
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::WrongRegion)
+        );
+    }
+
+    #[test]
+    fn region_expected_but_record_unbound_fails_closed() {
+        // A deployment that expects a region fails closed on region-unbound
+        // challenges (record.region == None).
+        let mut record = make_record(8);
+        assert_eq!(record.region, None);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: Some("us"),
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::WrongRegion)
+        );
+    }
+
+    #[test]
+    fn matching_region_verifies_and_unmatched_expectation_never_fires() {
+        let mut record = make_record(8);
+        record.region = Some("us".into());
+        let counter = solve_for_test(&record).unwrap();
+
+        let mut ctx_match = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: Some("us"),
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx_match),
+            VerifyOutcome::Valid { .. }
+        ));
+
+        // No expected region → the record's region is ignored entirely.
+        let mut ctx_none = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            counter,
+            duration_ms: 5000,
+            now_unix: NOW_UNIX + 1,
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_region: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(matches!(
+            verify_solution(&mut ctx_none),
+            VerifyOutcome::Valid { .. }
+        ));
+    }
+
+    #[test]
+    fn valid_outcome_exposes_the_consumed_nonce_jti() {
+        // Audit #37: the VerifyOutcome must carry the canonical nonce so
+        // callers can correlate the result without re-decoding the token.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let expected_nonce = record.nonce.clone();
+        let outcome = verify(&mut record, counter, 5000);
+        assert_eq!(outcome.nonce(), Some(expected_nonce.as_str()));
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Valid {
+                nonce: expected_nonce
+            }
+        );
+        let invalid = VerifyOutcome::Invalid(VerifyError::Expired);
+        assert_eq!(invalid.nonce(), None);
+    }
+
+    #[test]
+    fn signed_argon2_records_outside_hard_ceilings_are_rejected() {
+        // Audit #32: signed records (valid v2 signatures over the mutated
+        // parameters) with out-of-range m_kib/t must be rejected with
+        // MalformedRecord before any Params::new/allocation.
+        use crate::challenge::{MAX_ARGON_MEMORY_KIB, MAX_ARGON_TIME};
+        for (field, value) in [
+            ("m_kib", 1u32),                     // below MIN_ARGON_MEMORY_KIB
+            ("m_kib", MAX_ARGON_MEMORY_KIB + 1), // 131072, above the ceiling
+            ("t", 1u32),                         // below MIN_ARGON_TIME
+            ("t", MAX_ARGON_TIME + 1),           // 32, above the ceiling
+        ] {
+            let mut record = make_argon2_record(4, 128);
+            match field {
+                "m_kib" => record.m_kib = value,
+                "t" => record.t = value,
+                _ => unreachable!(),
+            }
+            resign_v2(&mut record, "test-key-16-bytes!");
+            assert_eq!(
+                verify(&mut record, 0, 5000),
+                VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+                "{field}={value} must be rejected by the hard ceilings"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_argon2_record_at_max_parallelism_verifies() {
+        // Audit #32 ceiling outcome for p: MAX_PARALLELISM = 4 is WITHIN the
+        // hard range, so a properly signed record with p=4 (and m_kib >= 8*p,
+        // t >= 3) must verify.
+        let mut record = make_argon2_record(4, 64);
+        record.p = 4;
+        record.m_kib = 64; // >= 8 * 4
+        resign_v2(&mut record, "test-key-16-bytes!");
+        assert!(record.p <= crate::challenge::MAX_PARALLELISM);
+        let counter = solve_for_test(&record).expect("p=4 argon solve finds a counter");
+        assert!(
+            matches!(
+                verify(&mut record, counter, 5000),
+                VerifyOutcome::Valid { .. }
+            ),
+            "p=4 (at the parallelism ceiling) must verify"
+        );
+    }
+
+    #[test]
+    fn signed_argon2_record_above_max_parallelism_is_rejected() {
+        let mut record = make_argon2_record(4, 128);
+        record.p = 5; // above MAX_PARALLELISM
+        resign_v2(&mut record, "test-key-16-bytes!");
+        assert_eq!(
+            verify(&mut record, 0, 5000),
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+    }
+
+    #[test]
+    fn validate_record_accepts_parameters_within_the_hard_ceilings() {
+        // t=7..=16 and p=2..=4 are within the verifier's hard ceilings even
+        // though issuance never mints them (issuance stays stricter).
+        let mut record = make_argon2_record(4, 128);
+        record.t = 16;
+        record.p = 4;
+        record.m_kib = 64;
+        assert_eq!(validate_record(&record), Ok(()));
     }
 
     // ── Shared fixture vectors (byte-exact; PHP mirrors these) ─────────
@@ -2249,9 +2650,9 @@ mod tests {
     const FIXTURE_NONCE: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=";
     const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
     const FIXTURE_BINDING_TAG: &str =
-        "d3759cd94aaec2361adb37171aeb4a487efcb0350113e8cb68e572c5508e3331";
-    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|d3759cd94aaec2361adb37171aeb4a487efcb0350113e8cb68e572c5508e3331|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0";
-    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58ZDM3NTljZDk0YWFlYzIzNjFhZGIzNzE3MWFlYjRhNDg3ZWZjYjAzNTAxMTNlOGNiNjhlNTcyYzU1MDhlMzMzMXwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDA=.c5f24556c2c41e31ffad9bab3f6b5f53501b77731313ab406a9907bae1f205fc";
+        "5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f";
+    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0";
+    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWIxMDU0MjRmZTNhNWNmYTNhZmRjY2RhOTVmNzM0YzllNjZlZTcwM2U4YjhkNDI2YTA3Y2ZlMWNiOWM4OTU0ZnwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDA=.37bee30d7320977fbd902205f313b77187b85c29831f20e59d775b878fdb2c63";
     const FIXTURE_LEGACY_IP_HASH: &str =
         "5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf";
     const FIXTURE_CANONICAL_V1: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf|1700000000";
@@ -2289,6 +2690,7 @@ mod tests {
             issued_at_ns: FIXTURE_NOW_NS,
             attempts_used: 0,
             protocol_version,
+            region: None,
         }
     }
 
@@ -2304,6 +2706,7 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("192.168.1.5"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2333,9 +2736,11 @@ mod tests {
         // The challenge's base64 half is byte-exactly the v2 canonical.
         let b64 = FIXTURE_CHALLENGE_V2.split('.').next().unwrap();
         assert_eq!(B64.decode(b64).unwrap(), FIXTURE_CANONICAL_V2.as_bytes());
-        assert_eq!(
-            verify_fixture(&mut record, false),
-            VerifyOutcome::Valid,
+        assert!(
+            matches!(
+                verify_fixture(&mut record, false),
+                VerifyOutcome::Valid { .. }
+            ),
             "v2 shared fixture vector must verify with client_ip 192.168.1.5"
         );
     }
@@ -2361,9 +2766,11 @@ mod tests {
         assert_eq!(record.challenge, FIXTURE_CHALLENGE_V1);
         let b64 = FIXTURE_CHALLENGE_V1.split('.').next().unwrap();
         assert_eq!(B64.decode(b64).unwrap(), FIXTURE_CANONICAL_V1.as_bytes());
-        assert_eq!(
-            verify_fixture(&mut record, true),
-            VerifyOutcome::Valid,
+        assert!(
+            matches!(
+                verify_fixture(&mut record, true),
+                VerifyOutcome::Valid { .. }
+            ),
             "v1 shared fixture vector must verify with the migration flag"
         );
     }
@@ -2381,7 +2788,8 @@ mod tests {
             now_ns: FIXTURE_NOW_NS + 5_000_000,
             min_duration_ms: 0,
             expected_scope: Some("signup"),
-            client_ip: Some("192.168.1.5"),
+            client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2418,9 +2826,11 @@ mod tests {
         assert_eq!(decoded.binding_tag, FIXTURE_LEGACY_IP_HASH);
         assert_eq!(decoded.protocol_version, 1);
         assert_eq!(decoded.challenge, FIXTURE_CHALLENGE_V1);
-        assert_eq!(
-            verify_fixture(&mut decoded, true),
-            VerifyOutcome::Valid,
+        assert!(
+            matches!(
+                verify_fixture(&mut decoded, true),
+                VerifyOutcome::Valid { .. }
+            ),
             "v1 record read via the ip_hash alias must verify with the migration flag"
         );
     }

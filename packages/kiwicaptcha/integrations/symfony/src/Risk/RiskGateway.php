@@ -856,11 +856,15 @@ final class RiskGateway
     }
 
     /**
-     * Decision logging for operators. The decision id is deliberately NOT
-     * included (it is an internal handle that pairs calibration receipts —
-     * logging it would let log analysis correlate decisions across requests);
-     * decision ids are only ever carried in process memory or the
-     * short-lived server-side nonce mapping.
+     * Decision logging for operators (audit #35). The decision id is
+     * deliberately NOT included (it is an internal handle that pairs
+     * calibration receipts — logging it would let log analysis correlate
+     * decisions across requests); decision ids are only ever carried in
+     * process memory or the short-lived server-side nonce mapping. No
+     * bearer material is ever logged here or anywhere else in the bundle:
+     * no challenge token, solution, result token, HMAC pseudonym, client IP,
+     * cookie value or principal — the context is score/action/band/reasons
+     * only (bounded, low cardinality).
      */
     private function logDecision(string $scope, RiskDecision $decision): void
     {

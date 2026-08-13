@@ -29,16 +29,26 @@ namespace KiwiCaptcha;
  * Check order:
  *   1. Structural validation of the stored record: scope shape, nonce/salt
  *      sizes, TTL ceiling (MAX_TTL_SECS), prefix binding, and the
- *      per-algorithm parameter profile.
+ *      per-algorithm difficulty range.
  *   2. Re-check the challenge HMAC signature (constant-time compare) —
- *      protocol v1 payloads use the legacy canonical form, protocol v2 uses
- *      the full-parameter canonical payload.
+ *      protocol v1 payloads use the legacy canonical form signed with the
+ *      master key, protocol v2 uses the full-parameter canonical payload
+ *      signed with the HKDF-derived K_challenge.
+ *   2b. Absolute Argon2id process ceilings (audit #32): the SIGNED
+ *      parameters are checked against MIN/MAX_ARGON_* AFTER signature
+ *      authentication and BEFORE any allocation — out-of-range yields
+ *      UnsupportedArgon2Params.
  *   3. TTL: now < expires_at.
  *   4. Scope: challenge scope matches the expected flow.
- *   5. IP binding: v2 records recompute the nonce-bound binding tag; v1
- *      records compare the legacy IP hash. An empty binding tag disables
- *      the check; with a nonempty binding tag a missing client IP fails
- *      closed (MissingClientIp) — a null IP NEVER skips the binding.
+ *   5. IP binding: v2 records recompute the nonce-bound binding tag (keyed
+ *      by the HKDF-derived K_ip_bind); v1 records compare the legacy IP
+ *      hash. An empty binding tag disables the check; with a nonempty
+ *      binding tag a missing client IP fails closed (MissingClientIp) — a
+ *      null IP NEVER skips the binding.
+ *   5b. Region binding (audit #22, Option A): a verifier configured with an
+ *      expected region rejects any record whose region does not match
+ *      exactly (WrongRegion) — including unbound (NULL) records, which are
+ *      redeemable in every region.
  *   6. Minimum duration: measured SERVER-SIDE from the record's issued_at_ns
  *      (epoch microseconds) to the verification receipt time — the
  *      client-reported duration can no longer be forged to bypass the
@@ -80,11 +90,27 @@ final class Verifier
     private const MAX_TTL_SECS = Config::MAX_TTL_SECS;
 
     /**
-     * Ceiling for Argon2id time cost. The browser solver caps at 6; higher
-     * values would be unsolvable for legit clients, so foreign records
-     * outside the profile are malformed.
+     * Absolute process ceilings for Argon2id parameters (audit #32).
+     *
+     * After the challenge signature is authenticated, the signed parameters
+     * are validated against these hard bounds BEFORE any memory allocation
+     * or computation: out-of-range values yield UnsupportedArgon2Params.
+     * The issuance side never mints outside the browser-solvable profile
+     * (Config/ChallengeProfile), so a signed record violating a ceiling is
+     * foreign or corrupt. MAX_ARGON_TIME (16) is the process ceiling — the
+     * browser solver caps at 6 (Config::MAX_ARGON_T, issuance-side).
      */
-    private const MAX_ARGON_T = Config::MAX_ARGON_T;
+    public const MIN_ARGON_MEMORY_KIB = 8;
+
+    public const MAX_ARGON_MEMORY_KIB = 65536;
+
+    public const MIN_ARGON_TIME = 3;
+
+    public const MAX_ARGON_TIME = 16;
+
+    public const MIN_PARALLELISM = 1;
+
+    public const MAX_PARALLELISM = 4;
 
     /**
      * @var \Closure|null clock override for tests
@@ -104,6 +130,14 @@ final class Verifier
          * default. Set this ONLY during a coordinated migration window.
          */
         private readonly bool $acceptLegacyV1 = false,
+        /**
+         * Expected deployment region (e.g. "eu"). When non-null, a record
+         * whose `region` does not match EXACTLY — including a NULL
+         * (unbound) record region — is rejected with WrongRegion: a
+         * region-bound challenge is never redeemable elsewhere or on an
+         * unbound record. Null (default) disables the check entirely.
+         */
+        private readonly ?string $region = null,
     ) {
         // BC shim: pre-gate callers passed the clock override positionally
         // as the second argument. A Closure in that slot is $now, not an
@@ -196,6 +230,18 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::BadSignature);
         }
 
+        // 2b. Absolute Argon2id process ceilings (audit #32): the SIGNED
+        //     parameters are validated AFTER signature authentication and
+        //     BEFORE any allocation or computation. Out-of-range values are
+        //     authentic-but-unsupported — UnsupportedArgon2Params, not
+        //     MalformedRecord (the record really came from an issuer holding
+        //     the secret, it just violates the hard process limits).
+        if (!$this->argon2CeilingsOk($peek)) {
+            $this->bestEffortDelete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::UnsupportedArgon2Params);
+        }
+
         // 3. TTL.
         $now = $this->now !== null ? (int) ($this->now)() : time();
         if ($now >= $peek->expiresAt) {
@@ -231,6 +277,17 @@ final class Verifier
 
                 return VerifyOutcome::invalid(VerifyError::IpMismatch);
             }
+        }
+
+        // 5b. Region binding (audit #22, Option A): a verifier configured
+        //     with an expected region rejects any record whose region does
+        //     not match EXACTLY — an unbound (NULL) record region fails
+        //     closed, because a region-unbound record is redeemable in every
+        //     region and must not satisfy a region-bound verifier.
+        if ($this->region !== null && $peek->region !== $this->region) {
+            $this->bestEffortDelete($token->nonce);
+
+            return VerifyOutcome::invalid(VerifyError::WrongRegion);
         }
 
         // 6. Minimum duration, measured on the SERVER: elapsed_us is the gap
@@ -323,15 +380,29 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::MalformedRecord);
             }
 
+            // The allocation gate sits at the computation site too: the
+            // consumed instance's signed parameters must satisfy the hard
+            // ceilings before the memory-hard hash runs.
+            if (!$this->argon2CeilingsOk($record)) {
+                return VerifyOutcome::invalid(VerifyError::UnsupportedArgon2Params);
+            }
+
             $hash = $this->deriveHash($record, $token->counter);
             if ($hash === null) {
-                return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+                // An Argon2id record whose parameters are within the ceilings
+                // but cannot be represented by the libsodium-backed verifier
+                // (p != 1) is authentic-but-unsupported. A SHA-256 null can
+                // only be a salt-decode failure (already shape-validated) —
+                // malformed.
+                return VerifyOutcome::invalid($record->algorithm === PoWAlgorithm::Argon2id
+                    ? VerifyError::UnsupportedArgon2Params
+                    : VerifyError::MalformedRecord);
             }
             if (self::leadingZeroBits($hash) < $record->targetBits) {
                 return VerifyOutcome::invalid(VerifyError::InsufficientWork);
             }
 
-            return VerifyOutcome::valid();
+            return VerifyOutcome::valid($token->nonce);
         } finally {
             if ($lease !== null) {
                 try {
@@ -348,8 +419,15 @@ final class Verifier
     /**
      * Structural validation of a stored record BEFORE any crypto or timing
      * work: scope shape, nonce/salt sizes, TTL ceiling, the prefix binding,
-     * and the per-algorithm parameter profile. A record failing any check
-     * is malformed — it cannot have come from a KiwiCaptcha issuer.
+     * and the per-algorithm difficulty range. A record failing any check is
+     * malformed — it cannot have come from a KiwiCaptcha issuer.
+     *
+     * Argon2id memory/time/parallelism are NOT bounded here anymore: the
+     * absolute process ceilings (audit #32) apply to the SIGNED parameters
+     * AFTER signature authentication ({@see self::argon2CeilingsOk()}),
+     * so a validly-signed out-of-range record is reported as
+     * UnsupportedArgon2Params rather than MalformedRecord, while unsigned
+     * foreign records fail the signature check.
      */
     private function validateRecord(ChallengeRecord $record): bool
     {
@@ -381,20 +459,32 @@ final class Verifier
             if ($record->targetBits < 1 || $record->targetBits > 10) {
                 return false;
             }
-            if ($record->p !== 1) {
-                return false;
-            }
-            if ($record->t < 3 || $record->t > self::MAX_ARGON_T) {
-                return false;
-            }
-            if ($record->mKib < 8 || $record->mKib > 65536) {
-                return false;
-            }
         } elseif ($record->targetBits < 1 || $record->targetBits > 20) {
             return false;
         }
 
         return true;
+    }
+
+    /**
+     * Absolute process ceilings for Argon2id parameters (audit #32) — the
+     * SIGNED record's memory/time/parallelism must sit within
+     * [MIN..MAX]_ARGON_* before any allocation or computation. Runs after
+     * signature authentication (cheap phase) and again at the computation
+     * site (proof phase). Returns true for SHA-256 records.
+     */
+    private function argon2CeilingsOk(ChallengeRecord $record): bool
+    {
+        if ($record->algorithm !== PoWAlgorithm::Argon2id) {
+            return true;
+        }
+
+        return $record->mKib >= self::MIN_ARGON_MEMORY_KIB
+            && $record->mKib <= self::MAX_ARGON_MEMORY_KIB
+            && $record->t >= self::MIN_ARGON_TIME
+            && $record->t <= self::MAX_ARGON_TIME
+            && $record->p >= self::MIN_PARALLELISM
+            && $record->p <= self::MAX_PARALLELISM;
     }
 
     /**
@@ -483,7 +573,7 @@ final class Verifier
                 $record->ipHash(),
                 $record->issuedAt,
             ), $secretKey)
-            : Issuer::signPayload(Issuer::canonicalPayload(
+            : Issuer::signPayloadV2(Issuer::canonicalPayload(
                 $record->nonce,
                 $record->scope,
                 $record->bindingTag,

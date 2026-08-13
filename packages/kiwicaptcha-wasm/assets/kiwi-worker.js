@@ -152,6 +152,7 @@
   }
 
   function post(m) {
+    m.v = 1;
     self.postMessage(m);
   }
 
@@ -262,9 +263,19 @@
     post({ type: "failed", reason: "exhausted" });
   }
 
+  // Messages arrive ONLY from the driver that created this worker (a Blob
+  // URL built from local code, or the configured same-origin asset URL) —
+  // no cross-origin listener exists, so no rate-limit window is needed.
+  // The guard is defense-in-depth: ignore anything that is not a versioned
+  // v1 solve request carrying the full field set.
   self.onmessage = function (ev) {
-    var m = ev.data || {};
-    if (m.type !== "solve") return;
+    var m = ev.data;
+    if (!m || typeof m !== "object" || m.v !== 1 || m.type !== "solve") return;
+    if (typeof m.prefix !== "string" || typeof m.salt !== "string") return;
+    if (typeof m.prefixLen !== "number" || typeof m.saltLen !== "number") return;
+    if (typeof m.targetBits !== "number" || typeof m.mKib !== "number") return;
+    if (typeof m.t !== "number" || typeof m.p !== "number") return;
+    if (typeof m.startCounter !== "number" || typeof m.maxHashes !== "number") return;
     try {
       solveMessage(m);
     } catch (e) {

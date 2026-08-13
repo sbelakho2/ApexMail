@@ -273,8 +273,9 @@ final class ConfigTest extends TestCase
 
     public function testArgonTimeCostAboveProtocolCeilingIsRejected(): void
     {
-        // The verifier declares t > MAX_ARGON_T (6) malformed — issuance
-        // must refuse to mint such challenges in the first place.
+        // Issuance caps t at Config::MAX_ARGON_T (6) — the browser solver
+        // ceiling; the verifier's absolute process ceiling (MAX_ARGON_TIME
+        // 16, audit #32) is a separate, wider bound for signed records.
         $this->expectException(\InvalidArgumentException::class);
         new \KiwiCaptcha\Config(
             secretKey: '0123456789abcdef0123456789abcdef',

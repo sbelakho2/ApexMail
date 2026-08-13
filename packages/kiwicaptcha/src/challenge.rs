@@ -20,6 +20,7 @@ use rand::{thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::keys::DerivedKeys;
 use crate::profile::{ChallengeProfile, ProfileError};
 use crate::token::IssuedChallenge;
 
@@ -102,9 +103,10 @@ pub enum BindingMode {
 /// `ChallengeRecord::toArray()` emits identical keys (nonce, scope,
 /// binding_tag, issued_at, expires_at, algorithm 'sha256'|'argon2id', m_kib,
 /// t, p, target_bits, salt, prefix, challenge, min_duration_ms, issued_at_ns,
-/// attempts_used optional, protocol_version). PoWAlgorithm already serializes
-/// lowercase — keep it. Both languages write and read this exact shape, so a
-/// record persisted by PHP can be verified by Rust and vice versa.
+/// attempts_used optional, protocol_version, region). PoWAlgorithm already
+/// serializes lowercase — keep it. Both languages write and read this exact
+/// shape, so a record persisted by PHP can be verified by Rust and vice
+/// versa.
 ///
 /// # Protocol versions
 ///
@@ -176,6 +178,13 @@ pub struct ChallengeRecord {
     /// pre-v2 records keep verifying during the migration window (max TTL).
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u8,
+    /// Region the challenge was issued for (server-side deployment metadata,
+    /// like `issued_at_ns` — never signed, never sent to the client). The
+    /// JSON key is ALWAYS present for v2 records — `null` when the challenge
+    /// is region-unbound — for byte parity with the PHP `toArray()` key set
+    /// (18 keys). Absent in legacy stored records: `#[serde(default)]`.
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 fn default_protocol_version() -> u8 {
@@ -230,6 +239,12 @@ pub struct ChallengeConfig {
     /// ([`BindingMode::Bound`]) or not ([`BindingMode::None`], which stores an
     /// empty `binding_tag` and skips the binding check at verification).
     pub binding_mode: BindingMode,
+    /// Region the issued challenge is bound to (e.g. "eu", "us-east-1").
+    /// Carried on the record's `region` key (always present in the record
+    /// JSON, `null` when `None`) and enforced by a verifier configured with
+    /// an expected region ([`VerifyError::WrongRegion`]). Deployment
+    /// metadata, never signed and never sent to the client.
+    pub region: Option<String>,
 }
 
 impl ChallengeConfig {
@@ -308,11 +323,13 @@ pub fn hash_ip(ip: &str, salt: &str) -> String {
 
 /// Compute the nonce-bound IP binding tag for a challenge.
 ///
-/// `tag = hex(HMAC-SHA256(secret, "kiwicaptcha/ip-bind/v2\\0" || nonce ||
+/// `tag = hex(HMAC-SHA256(K_ip_bind, "kiwicaptcha/ip-bind/v2\\0" || nonce ||
 /// "\\0" || family || canonical_ip_bytes))` where `family` is a single byte
-/// `0x04` (IPv4) or `0x06` (IPv6), and `canonical_ip_bytes` is the inet_pton
+/// `0x04` (IPv4) or `0x06` (IPv6), `canonical_ip_bytes` is the inet_pton
 /// byte sequence with IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) normalized
-/// to 4-byte IPv4.
+/// to 4-byte IPv4, and `K_ip_bind` is the HKDF-derived IP-binding purpose key
+/// (audit #21 — see [`crate::keys::DerivedKeys`]; never the master secret
+/// itself).
 ///
 /// The tag is **nonce-bound**: the same IP produces a different tag for every
 /// challenge, so the record creates no stable IP-derived identifier. An
@@ -329,8 +346,9 @@ pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignEr
             None => (0x06u8, v6.octets().to_vec()),
         },
     };
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
+    let derived = DerivedKeys::from_master(secret, None);
+    let key = derived.ip_bind_key();
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| SignError::KeyTooShort)?;
     mac.update(b"kiwicaptcha/ip-bind/v2");
     mac.update(&[0]);
     mac.update(nonce.as_bytes());
@@ -389,7 +407,10 @@ fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
     )
 }
 
-/// Sign a canonical input with the secret key, returning a hex HMAC tag.
+/// Sign a canonical input with the secret key, returning a hex HMAC tag
+/// (protocol v1 legacy path — the master key is used directly, exactly like
+/// the historical format; v2 records use the HKDF-derived challenge key via
+/// [`sign_canonical_v2`]).
 ///
 /// The secret key must be at least 16 bytes (the same minimum the PHP
 /// implementation enforces); 32 random bytes is the recommended size. Shorter
@@ -400,6 +421,20 @@ fn sign_canonical(canonical: &str, secret_key: &str) -> Result<String, SignError
     }
     let mut mac =
         HmacSha256::new_from_slice(secret_key.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
+    mac.update(canonical.as_bytes());
+    Ok(hex::encode(&mac.finalize().into_bytes()))
+}
+
+/// Sign a canonical input with the HKDF-derived challenge-signing purpose key
+/// (`K_challenge`, audit #21 — protocol v2). The master secret is never used
+/// directly as the signing key.
+fn sign_canonical_v2(canonical: &str, secret_key: &str) -> Result<String, SignError> {
+    if secret_key.len() < 16 {
+        return Err(SignError::KeyTooShort);
+    }
+    let derived = DerivedKeys::from_master(secret_key, None);
+    let key = derived.challenge_key();
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| SignError::KeyTooShort)?;
     mac.update(canonical.as_bytes());
     Ok(hex::encode(&mac.finalize().into_bytes()))
 }
@@ -432,13 +467,15 @@ pub fn verify_signature(
 
 /// Verify a signature over the protocol v2 canonical input of a record.
 ///
-/// Same constant-time guarantee as [`verify_signature`].
+/// Same constant-time guarantee as [`verify_signature`]. The signature is
+/// checked against the HKDF-derived challenge-signing key (`K_challenge`,
+/// audit #21), never the master secret directly.
 pub fn verify_signature_v2(
     record: &ChallengeRecord,
     signature: &str,
     secret_key: &str,
 ) -> Result<bool, SignError> {
-    verify_canonical(&canonical_signing_input_v2(record), signature, secret_key)
+    verify_canonical_v2(&canonical_signing_input_v2(record), signature, secret_key)
 }
 
 fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Result<bool, SignError> {
@@ -451,6 +488,27 @@ fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Resul
     };
     let mut mac =
         HmacSha256::new_from_slice(secret_key.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
+    mac.update(canonical.as_bytes());
+    Ok(mac.verify_slice(&signature_bytes).is_ok())
+}
+
+/// Verify a canonical input against the HKDF-derived challenge key (protocol
+/// v2). Same constant-time guarantee as [`verify_canonical`].
+fn verify_canonical_v2(
+    canonical: &str,
+    signature: &str,
+    secret_key: &str,
+) -> Result<bool, SignError> {
+    if secret_key.len() < 16 {
+        return Err(SignError::KeyTooShort);
+    }
+    let signature_bytes = match hex::decode(signature) {
+        Some(bytes) => bytes,
+        None => return Ok(false), // malformed signature can never match
+    };
+    let derived = DerivedKeys::from_master(secret_key, None);
+    let key = derived.challenge_key();
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| SignError::KeyTooShort)?;
     mac.update(canonical.as_bytes());
     Ok(mac.verify_slice(&signature_bytes).is_ok())
 }
@@ -514,6 +572,30 @@ pub const SOLVER_MAX_ARGON2_TARGET_BITS: u32 = 10;
 /// memory) within reason while still being memory-hard against specialized
 /// hardware.
 pub const SOLVER_MAX_ARGON2_M_KIB: u32 = 65536;
+
+/// Hard floor on the Argon2id memory cost (KiB) the VERIFIER accepts in a
+/// signed record (audit #32). Below this the record is malformed —
+/// verification never runs a memory-hard computation with implausible
+/// parameters. Shared with the PHP core.
+pub const MIN_ARGON_MEMORY_KIB: u32 = 8;
+/// Hard ceiling on the Argon2id memory cost (KiB) the VERIFIER accepts in a
+/// signed record (audit #32). Matches [`SOLVER_MAX_ARGON2_M_KIB`]; above it
+/// the record is malformed before any allocation. Shared with the PHP core.
+pub const MAX_ARGON_MEMORY_KIB: u32 = SOLVER_MAX_ARGON2_M_KIB;
+/// Hard floor on the Argon2id time cost the VERIFIER accepts in a signed
+/// record (audit #32): `t < 3` is not libsodium-representable. Shared with
+/// the PHP core.
+pub const MIN_ARGON_TIME: u32 = 3;
+/// Hard ceiling on the Argon2id time cost the VERIFIER accepts in a signed
+/// record (audit #32): above 16 the memory-hard computation is unbounded.
+/// Shared with the PHP core.
+pub const MAX_ARGON_TIME: u32 = 16;
+/// Hard floor on the Argon2id parallelism the VERIFIER accepts in a signed
+/// record (audit #32).
+pub const MIN_PARALLELISM: u32 = 1;
+/// Hard ceiling on the Argon2id parallelism the VERIFIER accepts in a signed
+/// record (audit #32).
+pub const MAX_PARALLELISM: u32 = 4;
 
 /// Expected hashes a browser solver can attempt per second (SHA-256, WASM).
 /// Used to derive the per-challenge minimum solve duration.
@@ -732,7 +814,9 @@ pub fn issue_challenge(
     // Protocol v2: sign the full-parameter canonical input so no issuance
     // parameter (algorithm, difficulty, TTL, salt, …) can be tampered with
     // without breaking the signature. The challenge string is
-    // `base64(canonical).hex_tag` — same structure as v1.
+    // `base64(canonical).hex_tag` — same structure as v1. The signature is
+    // computed with the HKDF-derived challenge key (audit #21), never the
+    // master secret directly.
     let mut record = ChallengeRecord {
         nonce: nonce.clone(),
         scope: scope.to_string(),
@@ -751,9 +835,10 @@ pub fn issue_challenge(
         issued_at_ns: now_ns,
         attempts_used: 0,
         protocol_version: 2,
+        region: config.region.clone(),
     };
     let canonical = canonical_signing_input_v2(&record);
-    let signature = sign_canonical(&canonical, &config.secret_key)?;
+    let signature = sign_canonical_v2(&canonical, &config.secret_key)?;
     let challenge = format!("{}.{}", B64.encode(&canonical), signature);
     record.challenge = challenge.clone();
     // The prefix binds the client's counter input to this exact challenge.
@@ -921,6 +1006,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         let issued = issue_challenge(
             &config,
@@ -1044,6 +1130,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         // Empty scope and 129-byte scope must be rejected…
         assert!(
@@ -1100,6 +1187,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         let a = issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
         let b = issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
@@ -1122,6 +1210,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         // Idle — should be at min.
         let idle =
@@ -1154,6 +1243,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         assert!(
             issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).is_err(),
@@ -1180,6 +1270,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 20,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         assert_eq!(config.tuned_target_bits(0), 8);
         // The solver ceiling still applies when disabled.
@@ -1208,6 +1299,7 @@ mod tests {
                 auto_tune_min_bits: 10,
                 auto_tune_max_bits: 24,
                 binding_mode: BindingMode::Bound,
+                region: None,
             },
             "login",
             "1.1.1.1",
@@ -1245,6 +1337,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         let issued =
             issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
@@ -1274,6 +1367,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         let issued =
             issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
@@ -1300,6 +1394,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         };
         let issued =
             issue_challenge(&config, "login", "1.1.1.1", 1, 1_700_000_000_000_000, 0).unwrap();
@@ -1323,6 +1418,7 @@ mod tests {
             auto_tune_min_bits: 10,
             auto_tune_max_bits: 24,
             binding_mode: BindingMode::Bound,
+            region: None,
         }
     }
 
@@ -1376,14 +1472,17 @@ mod tests {
                 min_duration_ms: 0,
                 expected_scope: None,
                 client_ip: Some("1.2.3.4"),
+                expected_region: None,
                 telemetry: None,
                 enforce_telemetry: false,
                 max_attempts: 0,
                 accept_legacy_v1: false,
             };
-            assert_eq!(
-                crate::verify::verify_solution(&mut ctx),
-                crate::verify::VerifyOutcome::Valid,
+            assert!(
+                matches!(
+                    crate::verify::verify_solution(&mut ctx),
+                    crate::verify::VerifyOutcome::Valid { .. }
+                ),
                 "sha({bits}) profile must verify"
             );
         }
@@ -1420,15 +1519,107 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             client_ip: Some("1.2.3.4"),
+            expected_region: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
-        assert_eq!(
+        assert!(matches!(
             crate::verify::verify_solution(&mut ctx),
-            crate::verify::VerifyOutcome::Valid
-        );
+            crate::verify::VerifyOutcome::Valid { .. }
+        ));
+    }
+
+    #[test]
+    fn issue_carries_region_on_the_record() {
+        let base = profile_base_config();
+        let with_region = ChallengeConfig {
+            region: Some("eu-west-1".into()),
+            ..base.clone()
+        };
+        let issued = issue_challenge(
+            &with_region,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+        )
+        .unwrap();
+        assert_eq!(issued.record.region.as_deref(), Some("eu-west-1"));
+
+        let unbound = issue_challenge(
+            &base,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+        )
+        .unwrap();
+        assert_eq!(unbound.record.region, None);
+        // The JSON key is ALWAYS present (null when unbound) — PHP toArray()
+        // parity, 18 keys.
+        let value = serde_json::to_value(&issued.record).unwrap();
+        assert_eq!(value["region"], "eu-west-1");
+        let unbound_value = serde_json::to_value(&unbound.record).unwrap();
+        assert_eq!(unbound_value["region"], serde_json::Value::Null);
+        assert!(unbound_value.as_object().unwrap().contains_key("region"));
+    }
+
+    #[test]
+    fn issue_with_profile_rejects_floor_violating_argon_profiles() {
+        // Audit #25: the issuer refuses profiles with m_kib below 8, t below
+        // 3, or p != 1 — a profile must never mint a challenge the verifier
+        // would reject.
+        let config = profile_base_config();
+        for profile in [
+            ChallengeProfile {
+                algorithm: PoWAlgorithm::Argon2id,
+                target_bits: 1,
+                m_kib: 1, // below MIN_ARGON_MEMORY_KIB
+                t: 3,
+                p: 1,
+            },
+            ChallengeProfile {
+                algorithm: PoWAlgorithm::Argon2id,
+                target_bits: 1,
+                m_kib: 16 * 1024,
+                t: 2, // below MIN_ARGON_TIME (3)
+                p: 1,
+            },
+            ChallengeProfile {
+                algorithm: PoWAlgorithm::Argon2id,
+                target_bits: 1,
+                m_kib: 65_536 + 1, // above the 64 MiB ceiling
+                t: 3,
+                p: 1,
+            },
+            ChallengeProfile {
+                algorithm: PoWAlgorithm::Argon2id,
+                target_bits: 1,
+                m_kib: 16 * 1024,
+                t: 3,
+                p: 2, // != 1
+            },
+        ] {
+            assert!(
+                matches!(
+                    issue_challenge_with_profile(
+                        &config,
+                        "login",
+                        "1.2.3.4",
+                        1_000_000,
+                        1_700_000_000_000_000,
+                        0,
+                        &profile,
+                    ),
+                    Err(SignError::InvalidArgon2Params)
+                ),
+                "profile {profile:?} must be refused at issuance"
+            );
+        }
     }
 
     #[test]

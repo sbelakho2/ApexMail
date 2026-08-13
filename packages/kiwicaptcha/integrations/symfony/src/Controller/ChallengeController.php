@@ -9,8 +9,10 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\UnknownScopeException;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
+use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\StorageInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -33,19 +35,23 @@ use Symfony\Component\HttpFoundation\Response;
  * X-Content-Type-Options nosniff — challenge bytes and client identity must
  * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
  *
- * Hardening order: same-origin check first (cheap, no state written), scope
- * read, then issuance rate limiting (per-client and deployment-global; a
- * per-client 429 records SourceRateLimitHit, a global 429 records
- * GlobalCapacityHit — the deployment-wide refusal is identity-neutral and
- * never contaminates the visitor's source reputation), then — when the
- * adaptive risk engine is enabled — the PRE-ISSUE risk assessment (a Deny
- * decision returns 429 RISK_DENIED before any challenge is minted; the
- * denial already scored the evidence, so NO further rate-limit event is
- * recorded — double-counting removed; an escalated action raises the
- * difficulty of the issued challenge, an unknown scope in 'reject' mode
- * returns 429 RISK_DENIED without issuing), then issuance. Every minted
- * challenge increments the atomic issuance-rate counter used by the
- * resource-pressure provider.
+ * Hardening order: same-origin check first (cheap, no state written), then
+ * the optional origin allowlist (origin_rejected 403) and Fetch Metadata
+ * check (CROSS_SITE_REJECTED 403) — the origin-laundering defenses, also
+ * before any state is written — then scope read, then issuance rate
+ * limiting (per-client and deployment-global; a per-client 429 records
+ * SourceRateLimitHit, a global 429 records GlobalCapacityHit — the
+ * deployment-wide refusal is identity-neutral and never contaminates the
+ * visitor's source reputation), then — when the adaptive risk engine is
+ * enabled — the PRE-ISSUE risk assessment (a Deny decision returns 429
+ * RISK_DENIED before any challenge is minted; the denial already scored the
+ * evidence, so NO further rate-limit event is recorded — double-counting
+ * removed; an escalated action raises the difficulty of the issued
+ * challenge, an unknown scope in 'reject' mode returns 429 RISK_DENIED
+ * without issuing), then issuance (every minted challenge increments the
+ * atomic issuance-rate counter used by the resource-pressure provider and
+ * is admitted into the bounded outstanding-challenge counters — a cap
+ * refusal discards the minted record and returns the risk-denied 429).
  */
 final class ChallengeController
 {
@@ -56,6 +62,10 @@ final class ChallengeController
         private readonly ?RiskGateway $risk = null,
         private readonly ?ContinuityCookie $continuityCookie = null,
         private readonly ?IssuanceCounter $issuanceCounter = null,
+        private readonly ?OutstandingChallenges $outstanding = null,
+        private readonly array $challengeOriginAllowlist = [],
+        private readonly bool $enforceFetchMetadata = false,
+        private readonly ?StorageInterface $storage = null,
     ) {
     }
 
@@ -66,6 +76,36 @@ final class ChallengeController
                 ['error' => ['code' => 'CROSS_ORIGIN_DENIED', 'message' => 'Cross-origin challenge requests are not allowed.']],
                 Response::HTTP_FORBIDDEN,
             );
+        }
+
+        // Origin laundering defense (audit #27): when an origin allowlist is
+        // configured, the challenge POST MUST be attributable to one of the
+        // allowlisted origins (Origin header, or the Referer origin as
+        // fallback — the exact scheme/host/port must match). A launderer
+        // framing a victim's browser into fetching this endpoint has no way
+        // to control the Origin of a cross-site request; raw HTTP bots that
+        // never send the header cannot be matched and are rejected too.
+        // Refused BEFORE any state is written, rate-limit budget or CAPTCHA
+        // issuance.
+        if ($this->challengeOriginAllowlist !== [] && !$this->originIsAllowlisted($request)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'origin_rejected', 'message' => 'The challenge request origin is not allowlisted.']],
+                Response::HTTP_FORBIDDEN,
+            );
+        }
+
+        // Fetch Metadata signal (defense-in-depth only): a browser
+        // laundering a victim into a cross-site challenge request sends
+        // Sec-Fetch-Site: cross-site. Raw HTTP bots lack the header entirely
+        // and are unaffected. Rejected before any state is written.
+        if ($this->enforceFetchMetadata) {
+            $fetchSite = $request->headers->get('Sec-Fetch-Site');
+            if ($fetchSite !== null && $fetchSite !== '' && strtolower($fetchSite) === 'cross-site') {
+                return $this->privateJson(
+                    ['error' => ['code' => 'CROSS_SITE_REJECTED', 'message' => 'Cross-site challenge requests are not allowed.']],
+                    Response::HTTP_FORBIDDEN,
+                );
+            }
         }
 
         $clientIp = (string) ($request->getClientIp() ?? '');
@@ -202,6 +242,37 @@ final class ChallengeController
             );
         }
 
+        // Anti-stockpiling (audit #26): admit the minted challenge into the
+        // bounded outstanding counters — ONE atomic Lua checks BOTH caps
+        // before incrementing (per-source + global, EXPIRE = remaining
+        // challenge lifetime + ttl margin). A refusal here is a RACE the
+        // pre-issuance checks did not see (concurrent issuances): the minted
+        // record is discarded best-effort and the request gets the same 429
+        // risk-denied response — a challenge is NEVER handed out when its
+        // stockpile admission failed. A Redis failure propagates (fail
+        // closed: no challenge without a checked stockpile bound).
+        if ($this->outstanding !== null) {
+            // The issued Challenge carries its lifetime (ttlSecs — the
+            // record's expiresAt - issuedAt at mint time); the counter TTL
+            // is that lifetime + the configured ttl margin.
+            $admitted = $this->outstanding->issue($clientIp, max(1, $challenge->ttlSecs));
+            if ($admitted !== 1) {
+                try {
+                    $this->storage?->delete($challenge->nonce);
+                } catch (\Throwable) {
+                    // Best-effort discard; the record expires on its own TTL.
+                }
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied: outstanding challenge limit reached. Try again later.']],
+                    Response::HTTP_TOO_MANY_REQUESTS,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+        }
+
         // A challenge was actually minted: feed the atomic issuance-rate
         // signal (resource-pressure headroom), the risk issue-debt signal,
         // and pair the challenge nonce to the decision id so a later solve
@@ -235,6 +306,78 @@ final class ChallengeController
         $expected = rtrim($request->getScheme().'://'.$request->getHttpHost(), '/');
 
         return hash_equals($expected, rtrim($origin, '/'));
+    }
+
+    /**
+     * Origin laundering defense: the request must carry an Origin header
+     * (or a Referer whose URL yields an origin) whose scheme+host+port
+     * EXACTLY matches one allowlisted origin. Comparison is component-wise
+     * (scheme lowercase, host lowercase — DNS is case-insensitive; an absent
+     * port defaults to the scheme's default), so "https://app.example.com"
+     * matches Origin "https://app.example.com" and "https://APP.EXAMPLE.COM"
+     * but never "https://app.example.com:8443" or "http://app.example.com".
+     */
+    private function originIsAllowlisted(Request $request): bool
+    {
+        $origin = $request->headers->get('Origin');
+        if ($origin === null || $origin === '') {
+            // Referer-origin fallback: the scheme+host+port of the Referer
+            // URL (no path, no query).
+            $referer = $request->headers->get('Referer');
+            if ($referer === null || $referer === '') {
+                return false;
+            }
+            $parts = parse_url($referer);
+            if (!\is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
+                return false;
+            }
+            $origin = $parts['scheme'].'://'.$parts['host'].(isset($parts['port']) ? ':'.$parts['port'] : '');
+        }
+
+        $candidate = self::originComponents($origin);
+        if ($candidate === null) {
+            return false;
+        }
+
+        foreach ($this->challengeOriginAllowlist as $allowlisted) {
+            $allowed = self::originComponents((string) $allowlisted);
+            if ($allowed === null) {
+                continue;
+            }
+            if ($candidate['scheme'] === $allowed['scheme']
+                && $candidate['host'] === $allowed['host']
+                && $candidate['port'] === $allowed['port']
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Parse an origin string into its exact comparison components:
+     * ['scheme', 'host', 'port'] with the host lowercased and an absent
+     * port defaulted per scheme (https 443, http 80 — "exact scheme/host/
+     * port" comparison treats an explicit default port as equal).
+     *
+     * @return array{scheme: string, host: string, port: int}|null
+     */
+    private static function originComponents(string $origin): ?array
+    {
+        $parts = parse_url($origin);
+        if (!\is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
+            return null;
+        }
+        $scheme = strtolower((string) $parts['scheme']);
+        $port = isset($parts['port'])
+            ? (int) $parts['port']
+            : ($scheme === 'https' ? 443 : ($scheme === 'http' ? 80 : -1));
+        if ($port < 1) {
+            return null;
+        }
+
+        return ['scheme' => $scheme, 'host' => strtolower((string) $parts['host']), 'port' => $port];
     }
 
     /**

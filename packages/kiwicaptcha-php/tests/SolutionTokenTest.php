@@ -176,4 +176,78 @@ final class SolutionTokenTest extends TestCase
         $this->expectException(DecodeError::class);
         SolutionToken::decode(base64_encode('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-.1.100.{}'));
     }
+
+    public function testRejectsBase64UrlVariant(): void
+    {
+        // Audit #29: the same semantic token encoded with the base64url
+        // alphabet (- _) must be rejected — exactly one canonical byte
+        // representation is accepted. The telemetry '?' bytes (0x3F) are
+        // positioned (duration=1000) so the token's base64 contains '/'
+        // (0x3F & 0x3F = 63), guaranteeing the url-safe variant differs.
+        $nonce = base64_encode(random_bytes(32));
+        $raw = SolutionToken::create($nonce, 1, 1000, ['q' => '?>~?'])->encode();
+        self::assertTrue(
+            str_contains($raw, '+') || str_contains($raw, '/'),
+            'precondition: the token base64 must contain a standard-only char',
+        );
+        $urlSafe = strtr($raw, '+/', '-_');
+        self::assertNotSame($raw, $urlSafe, 'precondition: the url-safe variant must differ');
+
+        $this->expectException(DecodeError::class);
+        SolutionToken::decode($urlSafe);
+    }
+
+    public function testRejectsUnpaddedBase64(): void
+    {
+        // Audit #29: stripping the canonical padding decodes to the same
+        // bytes in PHP but is NOT the canonical byte representation — the
+        // canonical re-encode check rejects it.
+        $nonce = base64_encode(str_repeat("\xff", 32));
+        $raw = SolutionToken::create($nonce, 1, 100, [])->encode();
+        self::assertSame('=', substr($raw, -1), 'precondition: canonical token is padded');
+        $unpadded = rtrim($raw, '=');
+        self::assertNotSame($raw, $unpadded, 'precondition: unpadded form differs');
+
+        $this->expectException(DecodeError::class);
+        SolutionToken::decode($unpadded);
+    }
+
+    public function testRejectsWhitespacePaddedBase64(): void
+    {
+        // Audit #29: the historical trim() leniency is gone — embedded or
+        // surrounding whitespace is outside the canonical representation.
+        $raw = SolutionToken::create(self::NONCE, 1, 100, [])->encode();
+        foreach ([$raw."\n", ' '.$raw, str_replace('=', "=\n", $raw)] as $variant) {
+            try {
+                SolutionToken::decode($variant);
+                self::fail('whitespace-padded token must be rejected');
+            } catch (DecodeError) {
+                // expected
+            }
+        }
+        self::assertTrue(true);
+    }
+
+    public function testRejectsNonCanonicalPaddingTrailingBits(): void
+    {
+        // Audit #29: a valid-length base64 whose final group carries
+        // non-zero trailing bits ('A' instead of '=' for a 1-byte remainder)
+        // is not canonical even though strict decode may accept it.
+        $plain = self::NONCE.'.1.100.{}';
+        $raw = base64_encode($plain);
+        // Rewrite the final '=' to a letter: decodes to the same bytes but
+        // re-encodes differently.
+        $altered = substr($raw, 0, -1).'A';
+        try {
+            $decoded = base64_decode($altered, true);
+            if ($decoded !== false && base64_encode($decoded) === $altered) {
+                self::markTestSkipped('PHP decoded the altered group canonically');
+            }
+        } catch (\Throwable) {
+            // fall through — rejection either way
+        }
+
+        $this->expectException(DecodeError::class);
+        SolutionToken::decode($altered);
+    }
 }

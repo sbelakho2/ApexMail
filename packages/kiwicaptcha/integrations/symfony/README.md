@@ -240,6 +240,38 @@ kiwi_captcha:
         # dedupe_ttl_secs: 60               # identical event_id applied once
         # hysteresis_ms: 60000              # global-level hysteresis window
         # network_classifier_file: null     # optional "cidr,flag" file
+        # region: eu-central-1              # OPTIONAL deployment region baked
+        #                                   # into every issued challenge and
+        #                                   # enforced at verification (a
+        #                                   # result token issued in one
+        #                                   # region is never redeemable
+        #                                   # elsewhere — failover-replay
+        #                                   # Option A)
+        # redis:                            # challenge-storage hardening
+        #     wait_replicas: 1              # WAIT for N replicas after storing
+        #                                   # a challenge (async-replication
+        #                                   # failover can otherwise lose the
+        #                                   # record and replay a consumed
+        #                                   # token against a "fresh" record)
+        #     wait_timeout_ms: 100          # WAIT timeout for the replicas
+        #     ttl_margin_secs: 60           # extra retention on challenge /
+        #                                   # replay-security state BEYOND
+        #                                   # token validity (must exceed max
+        #                                   # clock skew + failover margin;
+        #                                   # pair with a noeviction policy
+        #                                   # on the security Redis)
+        # max_outstanding_challenges: 20    # anti-stockpiling: unsolved
+        #                                   # challenges per source
+        # max_outstanding_challenges_global: 100000  # deployment-wide cap
+        # challenge_origin_allowlist:       # origin-laundering defense: when
+        #     - https://app.example.com     # non-empty, challenge POSTs must
+        #                                   # carry an allowlisted Origin (or
+        #                                   # Referer origin); everything else
+        #                                   # gets 403 origin_rejected
+        # enforce_fetch_metadata: false     # reject Sec-Fetch-Site:
+        #                                   # cross-site challenge requests
+        #                                   # (browser-laundering signal;
+        #                                   # defense-in-depth only)
         policy_version: 1
         # weights: { ... }                  # 13 risk-v1 weights (defaults = contract)
         # global_floors:                    # minimum action per global level
@@ -379,7 +411,109 @@ counters (`sampledTotal` / `sampledResolved` / `resolutionRatio` /
 returns aggregate decision counters, global level, store latency — no
 identity labels. Decisions are logged through the app's `logger` (info for
 decisions, warning for denials) with scope/action/score/reasons only —
-never an IP or cookie value.
+never an IP or cookie value, never a decision id or nonce, and the metric
+keys are bounded (algorithm/result/reason/profile tuples — no
+challenge_id/ip/user_agent labels), so log/metrics cardinality can never be
+driven by identity material.
+
+### Region binding (failover-replay mitigation — Option A)
+
+`risk.region` (optional deployment region string, e.g. `eu-central-1`) is
+baked into every issued challenge record by the core `Issuer` and enforced
+by the core `Verifier`: a result token issued in one region is never
+redeemable elsewhere. This is the *Option A* mitigation for the
+failover-replay attack (a challenge record replicated to a DR region whose
+verifier accepts tokens minted by the failed-over primary would let a
+captured token be replayed after failback). Set the SAME region on every
+node of one logical deployment and a DIFFERENT region on every failover
+target. When unset, no region is recorded and no region check applies.
+
+### Replay-safety Redis hardening (WAIT replicas + TTL margin)
+
+`risk.redis` hardens the CHALLENGE storage when it is a
+`KiwiCaptcha\Storage\RedisStorage` definition (the knobs are applied to the
+storage service automatically):
+
+- `wait_replicas` (default 0 = disabled): `store()` issues a Redis `WAIT`
+  after writing a challenge, blocking until at least this many replicas
+  acknowledged the record. Without it, an async-replication failover can
+  lose the primary's un-replicated records — and after failback, a captured
+  token replays against a "fresh" record the new primary never knew was
+  consumed. `wait_timeout_ms` (default 100) bounds the WAIT.
+- `ttl_margin_secs` (default 0): extra retention on challenge/replay-security
+  state BEYOND the token validity window. The consumed-state guards (the
+  GETDEL single-use gate, the replayed-token checks) and the challenge
+  records themselves must outlive token validity + max clock skew + failover
+  margin, or a replayed/expired token can land on state that already expired
+  and re-accepted it.
+
+**Operational guidance for the security Redis (mandatory for replay
+safety):** the Redis holding challenge/replay-security state (the storage
+keyspace plus the outstanding counters, `{kiwi:<ns>}:outstanding:*`) MUST
+run with `maxmemory-policy noeviction` and memory alarms (e.g. `used_memory`
+> 70% of `maxmemory` paged, plus `evicted_keys` > 0 as a CRITICAL alert).
+KiwiCaptcha state is **never a cache with opportunistic eviction**: a
+challenge record or consumed-state guard evicted early silently re-enables
+replay/stockpiling windows. Size `maxmemory` for the worst case:
+`max_outstanding_challenges_global` outstanding records × (record size +
+counter overhead), plus the concurrent verification lease sets, plus the
+risk-v1 state, with headroom. If eviction is ever observed, treat it as a
+security incident, not a capacity event.
+
+### Outstanding-challenge anti-stockpiling
+
+`risk.max_outstanding_challenges` (default 20) and
+`risk.max_outstanding_challenges_global` (default 100000) bound the number
+of UNSOLVED challenges a single source — and the whole deployment — may
+hold at once:
+
+- On issuance, one atomic Lua script checks BOTH counters and refuses
+  BEFORE anything is written: the source counter
+  `{kiwi:<ns>}:outstanding:<hex>` and the global counter
+  `{kiwi:<ns>}:outstanding:global` are incremented with EXPIRE =
+  challenge lifetime + `risk.redis.ttl_margin_secs`. The source identity is
+  `hex(hmac_sha256(canonical-ip-bytes, RiskKeys::event))` — the raw IP
+  never appears in Redis, and the same canonical-IP normalization as the
+  challenge binding tag is used.
+- Exhaustion returns the standard 429 `RISK_DENIED` response (never a
+  CAPTCHA issuance; a minted-but-refused record is discarded server-side).
+- A VALID verification decrements the per-source counter (best-effort,
+  floored at 0). The GLOBAL counter is deployment-wide and identity-neutral:
+  it decays only by EXPIRE.
+
+Bounded memory: an attacker can never stockpile an unbounded number of live
+challenges for one source or one deployment — the counters cap the aggregate
+outstanding verification work an attacker can hoard.
+
+### Origin laundering defense
+
+- `risk.challenge_origin_allowlist` (default `[]`): when NON-EMPTY, the
+  challenge POST must carry an `Origin` header (or a `Referer`-origin
+  fallback) whose scheme+host+port EXACTLY matches one allowlisted origin —
+  otherwise HTTP 403 `{"error":{"code":"origin_rejected"}}` **before any
+  CAPTCHA is issued** (no state written, no rate-limit budget consumed).
+  Requests with neither header cannot be matched and are rejected. Exact
+  scheme/host/port comparison (host case-insensitive, default ports
+  normalized). A launderer framing a victim browser cannot control the
+  Origin of a cross-site request; raw HTTP bots without the header are
+  rejected too.
+- `risk.enforce_fetch_metadata` (default `false`): when true, challenge
+  requests whose `Sec-Fetch-Site` header is present and equals `cross-site`
+  are rejected with HTTP 403 `{"error":{"code":"CROSS_SITE_REJECTED"}}` — a
+  browser-laundering signal. Raw HTTP bots lack the header and are
+  unaffected, so this is defense-in-depth only, never the security boundary.
+
+### Argon2 admission wait-queue bound
+
+`argon2_max_waiters` (default 64) bounds the Redis semaphore's waiters
+counter (`{..}:sem:waiters`, hash-tagged with the lease set): when the
+concurrency cap is saturated, contenders are counted with the lease
+lifetime's TTL; once the waiter count EXCEEDS `argon2_max_waiters`,
+`acquire()` returns null IMMEDIATELY (CapacityExceeded → the captcha
+violation / 429) instead of queueing behind the saturated gate. A waiter is
+removed when a lease is granted or the acquire returns null (best-effort,
+same Lua). During an Argon2id saturation storm the waiters counter can never
+grow unboundedly.
 
 ## Usage
 
@@ -407,6 +541,39 @@ endpoint follows the configured prefix like the standalone widget does — and
 stays overridable per form with the `endpoint` option. The telemetry mode is
 rendered as `data-kiwi-telemetry` on the widget container (default `off`);
 invalid values are rejected by the options resolver.
+
+### Verified-token jti and the (jti, action) idempotency contract
+
+A successful verification exposes the **canonical jti** of the consumed
+challenge — `VerifyOutcome::nonce()`, the challenge nonce of the record that
+was verified — to the application:
+
+```php
+use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
+use Symfony\Component\HttpFoundation\Request;
+
+// After the form validates (valid captcha):
+/** @var Request $request */
+$jti = $request->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE);
+```
+
+The same value is available via the validator service's `verifiedJti()`
+(non-web contexts). The jti is set ONLY on a successful verification, on the
+request's attribute bag — request-scoped and race-free.
+
+**Idempotency contract (audit #37):** the application MUST key its protected
+business operation on **(jti, action)** and make it idempotent — a retry
+carrying the same jti must never create a second operation. KiwiCaptcha
+guarantees each jti verifies at most once (single-use consumption), but the
+HTTP request itself can be retried (network retries, double-submits, a
+client that received the response but the app crashed before the DB write):
+the same token, already consumed, must not be re-solvable — but a retried
+request carrying the SAME token/jti reaches the application again. Persist
+`(jti, action)` as the idempotency key of the business operation (e.g. a
+UNIQUE constraint on the order/password-reset row), and return the stored
+result on a duplicate instead of executing the operation twice. The jti is
+high-entropy (256-bit random challenge nonce), unguessable, and never reused
+across challenges — it is safe to expose in application tables and logs.
 
 ### In a Template
 
@@ -507,6 +674,20 @@ without an `Origin` header (same-origin navigation, curl, non-browser
 clients) are allowed. The check happens before rate limiting, so an
 attacker's cross-origin traffic never pollutes the per-client window.
 
+**Origin laundering + Fetch Metadata (optional).** With a non-empty
+`risk.challenge_origin_allowlist` the POST must additionally be attributable
+to an allowlisted origin (Origin header or Referer-origin fallback; exact
+scheme/host/port) — otherwise HTTP 403 `{"error":{"code":"origin_rejected"}}`
+and no CAPTCHA is ever issued. With `risk.enforce_fetch_metadata: true`,
+`Sec-Fetch-Site: cross-site` requests are rejected with
+`{"error":{"code":"CROSS_SITE_REJECTED"}}` (defense-in-depth; bots without
+the header are unaffected). Both checks run before any state is written.
+
+**Outstanding-challenge cap.** `risk.max_outstanding_challenges` /
+`risk.max_outstanding_challenges_global` bound the unsolved challenges a
+source (or the deployment) may hold; exhaustion returns the standard 429
+`{"error":{"code":"RISK_DENIED"}}` — see the anti-stockpiling section above.
+
 **Rate limiting.** Challenge issuance is rate-limited per client IP
 (`rate_limit` challenges per `rate_limit_window_secs` sliding window; HTTP
 429 with `{"error":{"code":"RATE_LIMITED"}}` when exceeded) and
@@ -551,6 +732,12 @@ and only after the cheap validation checks. Two gate backends:
   token. A stale release — releasing a lease that expired or was already
   released — can never remove a newer lease (ZREM of an absent member is a
   no-op). Expired leases (crashed workers) are reaped by the acquire script.
+  The acquire script additionally carries the bounded WAITERS guard
+  (`argon2_max_waiters`, default 64): saturated contenders are counted in a
+  `{..}:sem:waiters` counter (lease-lifetime TTL, hash-tagged with the lease
+  set) and refused immediately once the count exceeds the bound — the
+  wait-queue behind a saturated gate can never grow unboundedly (see the
+  risk section above).
   For the cap to be an absolute operational invariant, the maximum
   verification request runtime must stay BELOW the lease lifetime
   (`argon2_lease_ms`, default 45000 ms) — otherwise a lease can expire while

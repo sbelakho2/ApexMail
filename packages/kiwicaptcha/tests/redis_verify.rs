@@ -172,6 +172,7 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
         auto_tune_min_bits: 8,
         auto_tune_max_bits: 20,
         binding_mode: BindingMode::Bound,
+        region: None,
     }
 }
 
@@ -190,6 +191,7 @@ fn argon_config(target_bits: u32) -> ChallengeConfig {
         auto_tune_min_bits: 8,
         auto_tune_max_bits: 20,
         binding_mode: BindingMode::Bound,
+        region: None,
     }
 }
 
@@ -252,14 +254,14 @@ fn valid_solution_verifies_and_wire_format_is_language_neutral() {
     );
 
     let verifier = verifier_for(&url, &prefix);
-    assert_eq!(
+    assert!(matches!(
         verify_at(
             &verifier,
             &encode_token(&issued.record.nonce, counter),
             issued.record.issued_at_ns
         ),
-        VerifyOutcome::Valid
-    );
+        VerifyOutcome::Valid { .. }
+    ));
 }
 
 #[test]
@@ -293,7 +295,7 @@ fn two_concurrent_verifies_exactly_one_wins() {
     let mut not_found = 0;
     for handle in handles {
         match handle.join().unwrap() {
-            VerifyOutcome::Valid => valid += 1,
+            VerifyOutcome::Valid { .. } => valid += 1,
             VerifyOutcome::Invalid(VerifyError::RecordNotFound) => not_found += 1,
             other => panic!("unexpected concurrent outcome: {other:?}"),
         }
@@ -317,10 +319,10 @@ fn replay_after_valid_verify_is_record_not_found() {
     let verifier = verifier_for(&url, &prefix);
     verifier.store().store(&issued.record).unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         verify_at(&verifier, &token, issued_at_ns),
-        VerifyOutcome::Valid
-    );
+        VerifyOutcome::Valid { .. }
+    ));
     assert_eq!(
         verify_at(&verifier, &token, issued_at_ns),
         VerifyOutcome::Invalid(VerifyError::RecordNotFound),
@@ -442,9 +444,11 @@ fn gate_rejection_does_not_consume_the_record() {
     // The record survives the gate rejection: a second verify with an
     // accepting gate still derives and succeeds.
     let accepting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(true));
-    assert_eq!(
-        verify_at(&accepting, &token, issued_at_ns),
-        VerifyOutcome::Valid,
+    assert!(
+        matches!(
+            verify_at(&accepting, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
         "a gate rejection must not burn the record"
     );
 }
@@ -491,14 +495,14 @@ fn cheap_validation_failure_consumes_the_record() {
 
     // And a pristine record under the same nonce still verifies.
     verifier.store().store(&issued.record).unwrap();
-    assert_eq!(
+    assert!(matches!(
         verify_at(
             &verifier,
             &encode_token(&issued.record.nonce, counter),
             issued_at_ns
         ),
-        VerifyOutcome::Valid
-    );
+        VerifyOutcome::Valid { .. }
+    ));
 }
 
 #[test]
@@ -529,14 +533,14 @@ fn argon_gate_rejects_before_derivation_and_accepts_when_clear() {
     let issued_at_ns = issued.record.issued_at_ns;
     let accepting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(true));
     accepting.store().store(&issued.record).unwrap();
-    assert_eq!(
+    assert!(matches!(
         verify_at(
             &accepting,
             &encode_token(&issued.record.nonce, counter),
             issued_at_ns
         ),
-        VerifyOutcome::Valid
-    );
+        VerifyOutcome::Valid { .. }
+    ));
 }
 
 #[test]
@@ -582,9 +586,8 @@ fn argon_lease_is_held_during_verify_and_released_by_drop() {
         seen_in_flight,
         "the lease (count 1) must be held while verify() runs"
     );
-    assert_eq!(
-        handle.join().unwrap(),
-        VerifyOutcome::Valid,
+    assert!(
+        matches!(handle.join().unwrap(), VerifyOutcome::Valid { .. }),
         "a granted lease must let the verification succeed"
     );
     assert_eq!(acquired.load(Ordering::SeqCst), 1, "exactly one acquire");
@@ -631,9 +634,11 @@ fn gate_ok_none_is_capacity_exceeded_and_does_not_consume() {
 
     // The record survives: a second verify with a granting gate succeeds.
     let accepting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(true));
-    assert_eq!(
-        verify_at(&accepting, &token, issued_at_ns),
-        VerifyOutcome::Valid,
+    assert!(
+        matches!(
+            verify_at(&accepting, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
         "an Ok(None) rejection must not burn the record"
     );
 }
@@ -659,9 +664,11 @@ fn gate_error_is_admission_unavailable_and_does_not_consume() {
 
     // The record survives: a second verify with a healthy gate succeeds.
     let accepting = verifier_for(&url, &prefix).with_argon_gate(BoolGate(true));
-    assert_eq!(
-        verify_at(&accepting, &token, issued_at_ns),
-        VerifyOutcome::Valid,
+    assert!(
+        matches!(
+            verify_at(&accepting, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
         "an AdmissionUnavailable rejection must not burn the record"
     );
 }
@@ -679,9 +686,11 @@ fn sha256_records_are_never_gated() {
     // consult it (matching the PHP verifier), so the verify still succeeds.
     let verifier = verifier_for(&url, &prefix).with_argon_gate(UnavailableGate);
     verifier.store().store(&issued.record).unwrap();
-    assert_eq!(
-        verify_at(&verifier, &token, issued_at_ns),
-        VerifyOutcome::Valid,
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
         "SHA-256 records must skip the Argon admission gate"
     );
 }
@@ -719,10 +728,10 @@ fn connection_pool_reuses_connections_round_robin() {
     );
     for _ in 0..8 {
         verifier.store().store(&issued.record).unwrap();
-        assert_eq!(
+        assert!(matches!(
             verify_at(&verifier, &token, issued_at_ns),
-            VerifyOutcome::Valid
-        );
+            VerifyOutcome::Valid { .. }
+        ));
         verifier.store().consume(&issued.record.nonce).unwrap();
     }
 }
@@ -770,14 +779,14 @@ fn pool_reuses_the_same_slots_across_operations() {
     // One-shot semantics still hold end-to-end on the reused slots.
     store.store(&issued.record).unwrap();
     let verifier = ProductionVerifier::new(store, SECRET);
-    assert_eq!(
+    assert!(matches!(
         verify_at(
             &verifier,
             &encode_token(&issued.record.nonce, counter),
             issued_at_ns
         ),
-        VerifyOutcome::Valid
-    );
+        VerifyOutcome::Valid { .. }
+    ));
 }
 
 #[test]
@@ -862,10 +871,12 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
 
 #[test]
 fn record_json_keys_match_php_cross_language_format() {
-    // The 17 keys PHP ChallengeRecord::toArray() emits for v2 records — the
-    // exact key set a PHP RedisStorage writes and fromArray() reads. No
-    // Redis needed: pure language-neutral schema parity.
-    const PHP_KEYS: [&str; 17] = [
+    // The 18 keys PHP ChallengeRecord::toArray() emits for v2 records — the
+    // exact key set a PHP RedisStorage writes and fromArray() reads. The
+    // `region` key (audit #22) is ALWAYS present: null when the challenge is
+    // region-unbound, exactly like PHP. No Redis needed: pure language-
+    // neutral schema parity.
+    const PHP_KEYS: [&str; 18] = [
         "nonce",
         "scope",
         "binding_tag",
@@ -883,6 +894,7 @@ fn record_json_keys_match_php_cross_language_format() {
         "issued_at_ns",
         "attempts_used",
         "protocol_version",
+        "region",
     ];
 
     let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
@@ -899,10 +911,15 @@ fn record_json_keys_match_php_cross_language_format() {
         "Rust-serialized record must carry exactly the PHP toArray() keys"
     );
     assert_eq!(value["algorithm"], "sha256");
+    assert_eq!(
+        value["region"],
+        serde_json::Value::Null,
+        "the region key must be present (null when unbound) in the Rust wire format"
+    );
 
-    // Reverse direction: a PHP-toArray()-shaped object (same keys, including
-    // attempts_used and protocol_version) must deserialize into the Rust
-    // record — the shape RedisChallengeStore::consume parses.
+    // Reverse direction: a PHP toArray()-shaped object (same keys, including
+    // attempts_used, protocol_version and region) must deserialize into the
+    // Rust record — the shape RedisChallengeStore::consume parses.
     let php_written = serde_json::json!({
         "nonce": issued.record.nonce,
         "scope": issued.record.scope,
@@ -921,11 +938,221 @@ fn record_json_keys_match_php_cross_language_format() {
         "issued_at_ns": issued.record.issued_at_ns,
         "attempts_used": 0,
         "protocol_version": 2,
+        "region": null,
     });
-    let decoded: ChallengeRecord = serde_json::from_value(php_written).unwrap();
+    let decoded: ChallengeRecord = serde_json::from_value(php_written.clone()).unwrap();
     assert_eq!(decoded.nonce, issued.record.nonce);
     assert_eq!(decoded.binding_tag, issued.record.binding_tag);
     assert_eq!(decoded.algorithm, PoWAlgorithm::Sha256);
     assert_eq!(decoded.protocol_version, 2);
     assert_eq!(decoded.expires_at, issued.record.expires_at);
+    assert_eq!(decoded.region, None);
+    // A region-bound PHP record round-trips the region.
+    let mut region_written = php_written.clone();
+    region_written["region"] = serde_json::json!("eu");
+    let decoded: ChallengeRecord = serde_json::from_value(region_written).unwrap();
+    assert_eq!(decoded.region.as_deref(), Some("eu"));
+    // Old PHP records WITHOUT the region key still deserialize (serde default).
+    let mut legacy_written = php_written;
+    legacy_written.as_object_mut().unwrap().remove("region");
+    let decoded: ChallengeRecord = serde_json::from_value(legacy_written).unwrap();
+    assert_eq!(decoded.region, None);
+}
+
+// ── Round-8 audit: replica wait, TTL margin, region, jti, strict tokens ──
+
+#[test]
+fn replica_wait_store_succeeds_without_replicas() {
+    // Audit #22/#23: with_wait(1, 1000) issues WAIT after the SET. With no
+    // replicas configured, WAIT returns 0 (>= 0) immediately and the store
+    // still persists the record.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("wait");
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let store = store_for(&url, &prefix).with_wait(1, 1000);
+    assert_eq!(store.wait_config(), (1, 1000));
+    store.store(&issued.record).unwrap();
+    let peeked = store
+        .find(&issued.record.nonce)
+        .unwrap()
+        .expect("record must exist after the replica wait");
+    assert_eq!(peeked.challenge, issued.record.challenge);
+
+    // The default store has no wait configured.
+    assert_eq!(store_for(&url, &prefix).wait_config(), (0, 0));
+    // wait_replicas=0 disables the WAIT entirely.
+    store_for(&url, &prefix)
+        .with_wait(0, 5000)
+        .store(&issued.record)
+        .unwrap();
+}
+
+#[test]
+fn ttl_margin_extends_the_redis_ttl_only() {
+    // Audit #23: store() uses EX = max(1, expires_at - now + margin). The
+    // verifier's own TTL check still rejects at expires_at, so the margin
+    // never extends the challenge's real lifetime — it only keeps the record
+    // readable across replica lag / clock skew.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("margin");
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let store = store_for(&url, &prefix).with_ttl_margin(30);
+    assert_eq!(store.ttl_margin_secs(), 30);
+    store.store(&issued.record).unwrap();
+
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let ttl: i64 = redis::cmd("TTL").arg(&key).query(&mut conn).unwrap();
+    let now = now_unix();
+    let base = issued.record.expires_at as i64 - now as i64;
+    assert!(
+        ttl > base && ttl <= base + 30,
+        "TTL must be expires_at - now + margin, got {ttl} (base {base})"
+    );
+
+    // End-to-end: a record stored with a margin verifies normally, and a
+    // stale record (past expires_at but within the margin) is still REJECTED
+    // by the verifier's TTL check (the margin is storage-only).
+    let verifier = verifier_for(&url, &prefix);
+    let store_margin = store_for(&url, &prefix).with_ttl_margin(30);
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    store_margin.store(&issued.record).unwrap();
+    assert!(matches!(
+        verify_at(
+            &verifier,
+            &encode_token(&issued.record.nonce, counter),
+            issued.record.issued_at_ns
+        ),
+        VerifyOutcome::Valid { .. }
+    ));
+}
+
+#[test]
+fn verifier_expected_region_rejects_mismatched_and_unbound_records() {
+    // Audit #22: ProductionVerifier::with_expected_region enforces the
+    // region in the cheap phase. A record issued for a different region —
+    // or for no region — is rejected with WrongRegion BEFORE any consume.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("region");
+    let config = ChallengeConfig {
+        region: Some("eu".into()),
+        ..sha_config(4)
+    };
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // Mismatch: record region "eu", verifier expects "us".
+    let expecting_us = verifier_for(&url, &prefix).with_expected_region("us");
+    expecting_us.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&expecting_us, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::WrongRegion)
+    );
+    // The cheap failure consumed the record; re-store for the next check.
+    expecting_us.store().store(&issued.record).unwrap();
+
+    // Match: record region "eu", verifier expects "eu".
+    let expecting_eu = verifier_for(&url, &prefix).with_expected_region("eu");
+    assert!(matches!(
+        verify_at(&expecting_eu, &token, issued_at_ns),
+        VerifyOutcome::Valid { .. }
+    ));
+
+    // Unbound record + expecting region → fail closed.
+    let unbound =
+        issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter2 = solve_for_test(&unbound.record).expect("4-bit sha solves");
+    let token2 = encode_token(&unbound.record.nonce, counter2);
+    expecting_eu.store().store(&unbound.record).unwrap();
+    assert_eq!(
+        verify_at(&expecting_eu, &token2, unbound.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::WrongRegion)
+    );
+
+    // No expectation → the record's region is ignored.
+    let free = verifier_for(&url, &prefix);
+    free.store().store(&unbound.record).unwrap();
+    assert!(matches!(
+        verify_at(&free, &token2, unbound.record.issued_at_ns),
+        VerifyOutcome::Valid { .. }
+    ));
+    // without_expected_region clears the expectation.
+    let cleared = verifier_for(&url, &prefix)
+        .with_expected_region("us")
+        .without_expected_region();
+    assert_eq!(cleared.expected_region(), None);
+}
+
+#[test]
+fn valid_outcome_exposes_the_consumed_nonce() {
+    // Audit #37: the ProductionVerifier outcome carries the canonical nonce
+    // (jti) of the consumed record.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("jti");
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    match verify_at(
+        &verifier,
+        &encode_token(&issued.record.nonce, counter),
+        issued.record.issued_at_ns,
+    ) {
+        VerifyOutcome::Valid { nonce } => assert_eq!(nonce, issued.record.nonce),
+        other => panic!("expected Valid, got {other:?}"),
+    }
+}
+
+#[test]
+fn noncanonical_tokens_reach_the_verifier_as_malformed_token() {
+    // Audit #29 at the production boundary: url-safe variants and loose
+    // padding are rejected as MalformedToken by ProductionVerifier::verify
+    // (all decode errors map to MalformedToken).
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("strict-token");
+    let issued = issue_challenge(&sha_config(4), "login", IP, now_unix(), now_micros(), 0).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    // A token with a 5-digit counter yields a plain payload of 58 bytes
+    // (58 % 3 == 1), so the canonical outer encoding carries exactly two
+    // padding '=' characters — making the padding variants deterministic.
+    let good = encode_token(&issued.record.nonce, 99_999);
+    assert_eq!(good.len() % 4, 0);
+    assert!(good.ends_with('='));
+
+    let url_safe = format!("-{}", &good[1..]); // '-' is outside the standard alphabet
+    assert_ne!(url_safe, good);
+    assert_eq!(
+        verifier.verify(&url_safe, "login", IP, issued_at_ns + 1_000_000),
+        VerifyOutcome::Invalid(VerifyError::MalformedToken)
+    );
+    let unpadded = good.trim_end_matches('=');
+    assert_eq!(
+        verifier.verify(unpadded, "login", IP, issued_at_ns + 1_000_000),
+        VerifyOutcome::Invalid(VerifyError::MalformedToken)
+    );
+    let loose = format!("{good}=");
+    assert_eq!(
+        verifier.verify(&loose, "login", IP, issued_at_ns + 1_000_000),
+        VerifyOutcome::Invalid(VerifyError::MalformedToken)
+    );
+
+    // None of the rejected tokens consumed the record: the real solution
+    // still verifies.
+    assert!(matches!(
+        verify_at(
+            &verifier,
+            &encode_token(&issued.record.nonce, counter),
+            issued_at_ns
+        ),
+        VerifyOutcome::Valid { .. }
+    ));
 }

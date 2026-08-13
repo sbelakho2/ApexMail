@@ -307,6 +307,7 @@ dependencies = [
  "argon2",
  "base64",
  "hex",
+ "hkdf",
  "hmac",
  "rand",
  "serde",

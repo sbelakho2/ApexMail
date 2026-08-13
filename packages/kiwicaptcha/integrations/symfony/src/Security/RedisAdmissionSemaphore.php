@@ -38,22 +38,43 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
     private const DEFAULT_LEASE_MS = 45_000;
 
     /**
-     * Atomic acquire (exact audit semantics):
+     * Atomic acquire with the bounded WAITERS guard (audit #31):
      *   KEYS[1]  = lease set key
+     *   KEYS[2]  = waiters counter key
      *   ARGV[1]  = max concurrent leases (cap)
      *   ARGV[2]  = lease lifetime in ms (LEASE_MS)
      *   ARGV[3]  = unique lease token
-     * Returns 1 when the lease was granted, 0 when the cap is saturated
-     * (nothing is written on rejection).
+     *   ARGV[4]  = max waiters (argon2_max_waiters)
+     *
+     * Lease semantics are unchanged: expired leases are pruned, the lease is
+     * granted when a slot is free. A granted caller is a served waiter, so
+     * the waiters counter is decremented (floored at 0) in the same script.
+     * When the cap is saturated the caller WOULD block behind the gate: the
+     * waiters counter is incremented with the lease lifetime's TTL; once the
+     * waiter count EXCEEDS maxWaiters the acquire returns null IMMEDIATELY
+     * (the caller is refused without queueing — CapacityExceeded surfaces as
+     * the 429/violation) and its waiter entry is removed in the same script,
+     * so the counter can never grow unboundedly under a saturation storm.
+     * Returns 1 when the lease was granted, 0 when refused.
      */
     private const ACQUIRE_SCRIPT = <<<'LUA'
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
-if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
-redis.call('ZADD', KEYS[1], now + tonumber(ARGV[2]), ARGV[3])
-redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2])*2)
-return 1
+if redis.call('ZCARD', KEYS[1]) < tonumber(ARGV[1]) then
+    redis.call('ZADD', KEYS[1], now + tonumber(ARGV[2]), ARGV[3])
+    redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2])*2)
+    local waiters = tonumber(redis.call('GET', KEYS[2]) or '0')
+    if waiters > 0 then redis.call('DECR', KEYS[2]) end
+    return 1
+end
+local waiters = redis.call('INCR', KEYS[2])
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[2])*2)
+if waiters > tonumber(ARGV[4]) then
+    redis.call('DECR', KEYS[2])
+    return 0
+end
+return 0
 LUA;
 
     /**
@@ -87,6 +108,9 @@ LUA;
 
     private readonly string $key;
 
+    /** The waiters counter key — same hash tag as the lease set (Cluster safe). */
+    private readonly string $waitersKey;
+
     /**
      * @param \Redis|\Predis\Client $client       Redis client (phpredis or
      *                                            Predis — the same clients
@@ -97,18 +121,32 @@ LUA;
      * @param string                $namespace     per-deployment discriminator
      *                                             (sanitized to
      *                                             [A-Za-z0-9_.-])
+     * @param int                   $maxWaiters    bounded waiters guard
+     *                                             (argon2_max_waiters, >= 1):
+     *                                             when the cap is saturated and
+     *                                             the waiter count exceeds it,
+     *                                             acquire() refuses immediately
+     *                                             instead of queueing
      */
     public function __construct(
         private readonly \Redis|\Predis\Client $client,
         private readonly int $maxConcurrent,
         string $namespace = 'default',
         private readonly int $leaseMs = self::DEFAULT_LEASE_MS,
+        private readonly int $maxWaiters = 64,
     ) {
         if ($leaseMs < 1_000) {
             throw new \InvalidArgumentException('leaseMs must be >= 1000');
         }
+        if ($maxWaiters < 1) {
+            throw new \InvalidArgumentException('maxWaiters must be >= 1');
+        }
         $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'default';
         $this->key = 'kiwicaptcha:argon2:leases:'.$suffix;
+        // The waiters counter must live in the SAME hash slot as the lease
+        // set (one EVAL script touches both keys), so it is hash-tagged with
+        // the lease key's tag family.
+        $this->waitersKey = '{kiwicaptcha:argon2:leases:'.$suffix.'}:sem:waiters';
     }
 
     public function acquire(): ?string
@@ -117,7 +155,7 @@ LUA;
             return 'disabled';
         }
         $token = bin2hex(random_bytes(16));
-        $result = $this->eval(self::ACQUIRE_SCRIPT, [$this->key], [(string) $this->maxConcurrent, (string) $this->leaseMs, $token]);
+        $result = $this->eval(self::ACQUIRE_SCRIPT, [$this->key, $this->waitersKey], [(string) $this->maxConcurrent, (string) $this->leaseMs, $token, (string) $this->maxWaiters]);
 
         return $result === 1 ? $token : null;
     }

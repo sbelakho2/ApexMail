@@ -60,10 +60,25 @@ final class RedisSemaphoreWiringTest extends TestCase
         self::assertSame(RedisAdmissionSemaphore::class, $semaphore->getClass());
         self::assertEquals(new Reference('my.redis.client'), $semaphore->getArgument(0));
         self::assertSame('deployment-a', $semaphore->getArgument(2), 'the configured namespace must reach the semaphore');
+        self::assertSame(64, $semaphore->getArgument(4), 'argon2_max_waiters (default 64) must reach the semaphore\'s bounded waiters guard');
 
         $verifier = $container->getDefinition('kiwi_captcha.verifier');
         self::assertSame(Verifier::class, $verifier->getClass());
         self::assertEquals(new Reference('kiwi_captcha.argon2_redis_semaphore'), $verifier->getArgument(1));
+    }
+
+    public function testArgon2MaxWaitersFlowsToTheRedisSemaphore(): void
+    {
+        $container = $this->load(self::ARGON2 + [
+            'argon2_max_concurrent_verifications' => 2,
+            'argon2_max_waiters' => 12,
+            'redis_service' => 'my.redis.client',
+        ], static function (ContainerBuilder $c): void {
+            $c->register('my.redis.client', \Redis::class);
+        });
+
+        $semaphore = $container->getDefinition('kiwi_captcha.argon2_redis_semaphore');
+        self::assertSame(12, $semaphore->getArgument(4), 'the configured argon2_max_waiters must reach the semaphore');
     }
 
     public function testRedisStorageStorageWiresRedisSemaphoreFromItsClient(): void

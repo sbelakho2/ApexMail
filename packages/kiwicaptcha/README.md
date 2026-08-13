@@ -299,13 +299,13 @@ pure Rust — no Node.js, no wasm-pack: `build.sh` runs `cargo build`, the
 | Type | Purpose |
 |------|---------|
 | `PoWAlgorithm` | Explicit algorithm selection (`Sha256` / `Argon2id`) |
-| `ChallengeConfig` | Difficulty parameters, algorithm, and HMAC secret |
+| `ChallengeConfig` | Difficulty parameters, algorithm, HMAC master secret, and optional region |
 | `issue_challenge()` | Mint a new HMAC-signed, IP-bound challenge |
 | `Issued` / `IssuedChallenge` | The client-facing challenge (send as JSON) |
-| `ChallengeRecord` | Server-side state (store in Redis); `protocol_version` 1 (legacy) or 2 (full-parameter signing); `binding_tag` (nonce-bound) with `ip_hash` read-alias |
-| `SolutionToken` | Client-submitted solution (from `kiwi__token`); counters above `SOLVER_MAX_HASHES` (5M) are rejected at decode |
-| `VerifyContext` | Parameters for server-side verification (client IP, server-side timing, telemetry, attempt cap) |
-| `verify_solution()` | Validate the record (cheap phase, before any hash), re-verify the signature (v1/v2 canonical per `protocol_version`), enforce TTL, scope (`WrongScope`), nonce-bound IP binding, server-side minimum duration (with clock-skew policy), attempt cap, then re-derive the hash and check leading zero bits |
+| `ChallengeRecord` | Server-side state (store in Redis); `protocol_version` 1 (legacy) or 2 (full-parameter signing); `binding_tag` (nonce-bound) with `ip_hash` read-alias; `region` (always-present JSON key, `null` when unbound) |
+| `SolutionToken` | Client-submitted solution (from `kiwi__token`); counters above `SOLVER_MAX_HASHES` (5M) are rejected at decode; decode accepts exactly one canonical base64 encoding (strict, padded, standard alphabet) |
+| `VerifyContext` | Parameters for server-side verification (client IP, expected region, server-side timing, telemetry, attempt cap) |
+| `verify_solution()` | Validate the record (cheap phase, before any hash), re-verify the signature (v1/v2 canonical per `protocol_version`; v2 uses the HKDF-derived challenge key), enforce TTL, scope (`WrongScope`), region (`WrongRegion`), nonce-bound IP binding, hard Argon2id parameter ceilings (after signature auth, before allocation), server-side minimum duration (with clock-skew policy), attempt cap, then re-derive the hash and check leading zero bits; the `Valid` outcome carries the consumed nonce (jti) |
 | `score_telemetry()` | Supplementary headless/automated-client scoring (client-controlled input) |
 | `kiwi_widget_html()` | Inline HTML + JS widget with optional CSP nonce |
 ### Recommended CSP (Privacy Strict)

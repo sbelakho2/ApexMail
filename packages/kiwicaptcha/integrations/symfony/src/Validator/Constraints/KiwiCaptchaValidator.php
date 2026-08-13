@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Validator\Constraints;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\SolutionToken;
@@ -17,6 +18,18 @@ use Symfony\Component\Validator\Exception\UnexpectedTypeException;
 
 final class KiwiCaptchaValidator extends ConstraintValidator
 {
+    /**
+     * Request attribute holding the canonical jti of the LAST successfully
+     * verified challenge of this request (the core's VerifyOutcome::nonce()).
+     * Request-scoped: set on the RequestStack main request only on a valid
+     * verification, so the application can key its business operation
+     * idempotency on (jti, action) after the form validates.
+     */
+    public const VERIFIED_JTI_ATTRIBUTE = '_kiwi_captcha_verified_jti';
+
+    /** @var string|null the canonical jti of the last valid verification */
+    private ?string $lastVerifiedJti = null;
+
     /**
      * @param Verifier $verifier KiwiCaptcha\Verifier with the bundle's
      *                           configured Argon2id admission gate wired in
@@ -34,7 +47,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         private readonly bool $enforceTelemetry = false,
         private readonly ?RiskGateway $risk = null,
         private readonly ?ContinuityCookie $continuityCookie = null,
+        private readonly ?OutstandingChallenges $outstanding = null,
     ) {
+    }
+
+    /**
+     * The canonical jti (VerifyOutcome::nonce()) of the last successfully
+     * verified token, or null when no verification succeeded yet. Read from
+     * a WEB request via the request attribute instead:
+     * {@see self::VERIFIED_JTI_ATTRIBUTE} (request-scoped and race-free).
+     */
+    public function verifiedJti(): ?string
+    {
+        return $this->lastVerifiedJti;
     }
 
     public function validate(mixed $value, Constraint $constraint): void
@@ -141,6 +166,42 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             } else {
                 $this->risk->solveOutcome($constraint->scope, $ip, $session, $outcome->error);
             }
+        }
+
+        // JTI passthrough (audit #37): a VALID verification exposes the
+        // canonical jti — the core's VerifyOutcome::nonce(), the challenge
+        // nonce of the CONSUMED record — to the application, both via the
+        // request attribute (VERIFIED_JTI_ATTRIBUTE; request-scoped and
+        // race-free for web flows) and via {@see verifiedJti()}. The
+        // application keys its business operation idempotency on
+        // (jti, action): a retry carrying the same jti must never create a
+        // second operation (see README).
+        if ($outcome->isOk()) {
+            $jti = null;
+            if (\method_exists($outcome, 'nonce')) {
+                $jti = $outcome->nonce();
+            }
+            if (!\is_string($jti) || $jti === '') {
+                // Compat fallback (cores predating VerifyOutcome::nonce()):
+                // the canonical jti is the consumed record's nonce, which
+                // equals the solution token's nonce (verification just
+                // succeeded against that record).
+                try {
+                    $jti = SolutionToken::decode($value)->nonce;
+                } catch (DecodeError) {
+                    $jti = null;
+                }
+            }
+            if (\is_string($jti) && $jti !== '') {
+                $this->lastVerifiedJti = $jti;
+                $request?->attributes->set(self::VERIFIED_JTI_ATTRIBUTE, $jti);
+            }
+
+            // Anti-stockpiling (audit #26): the source's outstanding
+            // challenge counter is decremented (best-effort, floored at 0)
+            // when a challenge verifies successfully — a solved challenge is
+            // no longer outstanding. Never breaks the solve.
+            $this->outstanding?->solved((string) ($clientIp ?? ''));
         }
 
         if (!$outcome->isOk()) {

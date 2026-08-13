@@ -118,3 +118,161 @@ fn keys_for_maps_missing_ids_to_the_zero_placeholder() {
         "absent principal must use the contract zero placeholder"
     );
 }
+
+/// The hash tag ({...}) of a key.
+fn hash_tag(key: &str) -> Option<&str> {
+    let open = key.find('{')?;
+    let close = key[open + 1..].find('}')? + open + 1;
+    Some(&key[open + 1..close])
+}
+
+/// Server-authoritative slot via CLUSTER KEYSLOT when the instance serves
+/// it; otherwise (standalone Redis 7 refuses the CLUSTER command with
+/// "cluster support disabled") the canonical CRC-16/XMODEM slot
+/// computation — the exact algorithm Redis Cluster uses for hash tags
+/// (slot = crc16(tag) & 0x3FFF), pinned against the reference vectors
+/// above.
+fn slot_of(con: &mut redis::Connection, key: &str) -> i64 {
+    match redis::cmd("CLUSTER")
+        .arg("KEYSLOT")
+        .arg(key)
+        .query::<i64>(con)
+    {
+        Ok(slot) => slot,
+        Err(e) if e.to_string().contains("cluster support disabled") => {
+            let tag = hash_tag(key).expect("key must carry a hash tag");
+            (RedisRiskStateStore::crc16(tag.as_bytes()) & 0x3FFF) as i64
+        }
+        Err(e) => panic!("CLUSTER KEYSLOT for {key} failed: {e}"),
+    }
+}
+
+/// AUDIT #24 — every canonical script's key set must hash to ONE cluster
+/// slot (the {kiwi:<ns>} tag). Real Redis (skipped unless RISK_REDIS_URL):
+/// per script, the keys are built EXACTLY as the production code builds
+/// them and all slots must be equal.
+#[test]
+fn every_canonical_script_key_set_is_single_slot() {
+    let Some(url) = common::redis_url() else {
+        eprintln!("skipping keyslot test: RISK_REDIS_URL not set");
+        return;
+    };
+    let mut con = redis::Client::open(url)
+        .expect("url parses")
+        .get_connection()
+        .expect("connects");
+    let ns = common::unique_namespace("keyslot");
+    let tag = format!("{{kiwi:{ns}}}");
+    let tag_inner = format!("kiwi:{ns}");
+    let decision = "d".repeat(32);
+    let scope = 1u32;
+    let hour = 123_456i64;
+
+    // Script -> key set -> expected canonical key count.
+    let sets: Vec<(&str, Vec<String>, usize)> = {
+        let (src_epoch, src_prev, src_cur, src_next) = common::epoch_ids(0xAA, common::T0);
+        let (net_epoch, net_prev, net_cur, net_next) = common::epoch_ids(0xBB, common::T0);
+        let session = Some([0xCC; 16]);
+        let principal = Some([0xDD; 16]);
+        vec![
+            (
+                "risk-v1.lua",
+                RedisRiskStateStore::keys_for(
+                    &ns,
+                    src_epoch,
+                    &src_prev,
+                    &src_cur,
+                    &src_next,
+                    net_epoch,
+                    &net_prev,
+                    &net_cur,
+                    &net_next,
+                    session.as_ref().map(|v| v.as_slice()),
+                    principal.as_ref().map(|v| v.as_slice()),
+                    &common::event_id(0xEE),
+                ),
+                10,
+            ),
+            (
+                "calibration.lua",
+                {
+                    let mut keys: Vec<String> = (0..24)
+                        .map(|i| format!("{tag}:cal:{scope}:{}", hour - i))
+                        .collect();
+                    keys.push(format!("{tag}:cal:state:{scope}"));
+                    keys
+                },
+                25,
+            ),
+            (
+                "confirm.lua",
+                vec![
+                    format!("{tag}:cal:receipt:{decision}"),
+                    format!("{tag}:cal:{scope}:{hour}"),
+                    format!("{tag}:outcome:{decision}"),
+                ],
+                3,
+            ),
+            (
+                "correction.lua",
+                vec![
+                    format!("{tag}:cal:receipt:{decision}"),
+                    format!("{tag}:cal:{scope}:{hour}"),
+                ],
+                2,
+            ),
+            (
+                "register_decision.lua",
+                vec![
+                    format!("{tag}:cal:receipt:{decision}"),
+                    format!("{tag}:cal:{scope}:{hour}"),
+                    format!("{tag}:outcome:{decision}"),
+                ],
+                3,
+            ),
+            (
+                "outcome_confirm.lua",
+                vec![format!("{tag}:outcome:{decision}")],
+                1,
+            ),
+            (
+                "outcome_correct.lua",
+                vec![format!("{tag}:outcome:{decision}")],
+                1,
+            ),
+            (
+                "outcome_register.lua",
+                vec![format!("{tag}:outcome:{decision}")],
+                1,
+            ),
+            (
+                "sampling_metrics.lua",
+                (0..24)
+                    .map(|i| format!("{tag}:cal:{scope}:{}", hour - i))
+                    .collect(),
+                24,
+            ),
+        ]
+    };
+
+    for (script, keys, expected) in sets {
+        assert_eq!(
+            keys.len(),
+            expected,
+            "{script}: canonical key-set size must stay pinned at {expected}"
+        );
+        for key in &keys {
+            assert!(
+                hash_tag(key) == Some(tag_inner.as_str()),
+                "{script}: key {key} must carry the {{kiwi:{ns}}} hash tag"
+            );
+        }
+        let mut slots: Vec<i64> = keys.iter().map(|k| slot_of(&mut con, k)).collect();
+        slots.dedup();
+        assert_eq!(
+            slots.len(),
+            1,
+            "{script}: all keys must hash to the SAME cluster slot"
+        );
+    }
+}

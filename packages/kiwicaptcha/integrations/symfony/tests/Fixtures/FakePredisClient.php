@@ -19,8 +19,17 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
  *  - HINCRBYFLOAT: one hash field bump (the calibration score-bucket
  *    outcome counters).
  *  - EVAL: interprets the bundle's Lua scripts by their shape:
- *      - semaphore ACQUIRE (1 key, 3 args, TIME + prune + cap + ZADD),
+ *      - semaphore ACQUIRE (2 keys: lease set + waiters counter; TIME +
+ *        prune + cap + ZADD, bounded WAITERS guard: saturated acquires are
+ *        counted in the waiters counter with the lease TTL; once the waiter
+ *        count exceeds maxWaiters the caller is refused without queueing
+ *        and its waiter entry is removed in the same script; a granted
+ *        lease decrements the waiters counter),
  *      - semaphore RELEASE (ZREM of one member),
+ *      - outstanding-challenge ISSUE (2 keys: per-source + global counter;
+ *        GET both caps -> refuse 0/-1 before anything is written -> INCR
+ *        both + EXPIRE both),
+ *      - outstanding-challenge SOLVE (1 key: best-effort DECR floored at 0),
  *      - rate-limiter (2 keys, 4 args, TIME + prune both + caps + ZADD both),
  *      - calibration CONFIRM (4 keys: outcome ledger + receipt + bucket +
  *        resolved counter; ledger check -> validate -> flip the ledger ->
@@ -112,6 +121,7 @@ final class FakePredisClient extends \Predis\Client
             'DEL' => $this->fakeDel($arguments),
             'EVAL' => $this->fakeEval($arguments),
             'INCR' => $this->fakeIncr($arguments),
+            'DECR' => $this->fakeDecr($arguments),
             'GET' => $this->fakeGet($arguments),
             'GETDEL' => $this->fakeGetdel($arguments),
             'SET' => $this->fakeSet($arguments),
@@ -202,6 +212,15 @@ final class FakePredisClient extends \Predis\Client
     {
         $key = (string) $arguments[0];
         $this->counters[$key] = ($this->counters[$key] ?? 0) + 1;
+
+        return $this->counters[$key];
+    }
+
+    /** DECR: lower the plain counter (floored at 0) and return the new value. */
+    private function fakeDecr(array $arguments): int
+    {
+        $key = (string) $arguments[0];
+        $this->counters[$key] = max(0, ($this->counters[$key] ?? 0) - 1);
 
         return $this->counters[$key];
     }
@@ -304,6 +323,78 @@ final class FakePredisClient extends \Predis\Client
         $keysAndArgs = \array_slice($arguments, 2);
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $rest = \array_slice($keysAndArgs, $numKeys);
+
+        if (str_contains($script, 'Outstanding challenge issuance')) {
+            // OutstandingChallenges::issue: KEYS[1] per-source counter,
+            // KEYS[2] global counter; ARGV[1] source cap, ARGV[2] global
+            // cap, ARGV[3] TTL seconds. GET both caps -> refuse 0/-1
+            // BEFORE anything is written -> INCR both + EXPIRE both.
+            $source = (string) $keys[0];
+            $global = (string) $keys[1];
+            $sourceCap = (int) $rest[0];
+            $globalCap = (int) $rest[1];
+            $ttl = (int) $rest[2];
+            if (($this->counters[$source] ?? 0) >= $sourceCap) {
+                return 0;
+            }
+            if (($this->counters[$global] ?? 0) >= $globalCap) {
+                return -1;
+            }
+            $this->fakeIncr([$source]);
+            $this->fakeIncr([$global]);
+            $this->fakePexpire([$source, $ttl * 1000]);
+            $this->fakePexpire([$global, $ttl * 1000]);
+
+            return 1;
+        }
+
+        if (str_contains($script, 'Outstanding challenge solve')) {
+            // OutstandingChallenges::solved: KEYS[1] per-source counter;
+            // best-effort DECR floored at 0.
+            $key = (string) $keys[0];
+            $v = $this->counters[$key] ?? 0;
+            if ($v > 0) {
+                $this->fakeDecr([$key]);
+            }
+
+            return $v - 1;
+        }
+
+        if (str_contains($script, 'waiters')) {
+            // Acquire with the bounded WAITERS guard: KEYS[1] lease set,
+            // KEYS[2] waiters counter; ARGV[1] cap, ARGV[2] leaseMs,
+            // ARGV[3] token, ARGV[4] maxWaiters. Grant (and serve one
+            // waiter) when a slot is free; saturated acquires are counted
+            // with the lease TTL and refused-without-queueing (entry
+            // removed in the same script) once the count exceeds
+            // maxWaiters.
+            $key = (string) $keys[0];
+            $waitersKey = (string) $keys[1];
+            $cap = (int) $rest[0];
+            $leaseMs = (int) $rest[1];
+            $token = (string) $rest[2];
+            $maxWaiters = (int) $rest[3];
+            $now = $this->timeMs();
+            $this->fakeZremrangebyscore([$key, '-inf', (string) $now]);
+            if ($this->zcard($key) < $cap) {
+                $this->fakeZadd([$key, (string) ($now + $leaseMs), $token]);
+                $this->fakePexpire([$key, (string) ($leaseMs * 2)]);
+                if (($this->counters[$waitersKey] ?? 0) > 0) {
+                    $this->fakeDecr([$waitersKey]);
+                }
+
+                return 1;
+            }
+            $n = $this->fakeIncr([$waitersKey]);
+            $this->fakePexpire([$waitersKey, (string) ($leaseMs * 2)]);
+            if ($n > $maxWaiters) {
+                $this->fakeDecr([$waitersKey]);
+
+                return 0;
+            }
+
+            return 0;
+        }
 
         if (str_contains($script, 'return redis.call(\'ZCARD\', KEYS[1])')) {
             // Semaphore USAGE: TIME -> prune -> ZCARD in one script

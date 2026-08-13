@@ -48,7 +48,7 @@ final class ProtocolV2Test extends TestCase
         $expected = hash_hmac(
             'sha256',
             "kiwicaptcha/ip-bind/v2\0".self::NONCE."\0\x04".inet_pton($ip),
-            Vectors::SECRET,
+            \KiwiCaptcha\DerivedKeys::fromMaster(Vectors::SECRET)->ipBindKey(),
         );
 
         self::assertSame($expected, Issuer::bindingTag(self::NONCE, $ip, Vectors::SECRET));
@@ -60,7 +60,7 @@ final class ProtocolV2Test extends TestCase
         $expected = hash_hmac(
             'sha256',
             "kiwicaptcha/ip-bind/v2\0".self::NONCE."\0\x06".inet_pton($ip),
-            Vectors::SECRET,
+            \KiwiCaptcha\DerivedKeys::fromMaster(Vectors::SECRET)->ipBindKey(),
         );
 
         self::assertSame($expected, Issuer::bindingTag(self::NONCE, $ip, Vectors::SECRET));

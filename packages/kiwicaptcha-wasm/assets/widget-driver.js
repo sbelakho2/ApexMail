@@ -138,6 +138,7 @@
   }
 
   function post(m) {
+    m.v = 1;
     self.postMessage(m);
   }
 
@@ -248,9 +249,19 @@
     post({ type: "failed", reason: "exhausted" });
   }
 
+  // Messages arrive ONLY from the driver that created this worker (a Blob
+  // URL built from local code, or the configured same-origin asset URL) —
+  // no cross-origin listener exists, so no rate-limit window is needed.
+  // The guard is defense-in-depth: ignore anything that is not a versioned
+  // v1 solve request carrying the full field set.
   self.onmessage = function (ev) {
-    var m = ev.data || {};
-    if (m.type !== "solve") return;
+    var m = ev.data;
+    if (!m || typeof m !== "object" || m.v !== 1 || m.type !== "solve") return;
+    if (typeof m.prefix !== "string" || typeof m.salt !== "string") return;
+    if (typeof m.prefixLen !== "number" || typeof m.saltLen !== "number") return;
+    if (typeof m.targetBits !== "number" || typeof m.mKib !== "number") return;
+    if (typeof m.t !== "number" || typeof m.p !== "number") return;
+    if (typeof m.startCounter !== "number" || typeof m.maxHashes !== "number") return;
     try {
       solveMessage(m);
     } catch (e) {
@@ -458,6 +469,13 @@
   }
 
   // ── Same-origin Argon2id Web Worker ─────────────────────────────────
+  // postMessage BOUNDARY: this driver NEVER posts to the parent page — all
+  // postMessage usage is worker-internal (driver <-> worker solve traffic
+  // and the internal MessageChannel yield). There is no
+  // window.addEventListener("message") / parent.postMessage anywhere in
+  // this file, so no cross-origin target exists and no origin check or
+  // rate-limit window is required on a page-level listener (the browser
+  // test suite asserts this statically — see tests/browser/specs).
   // The memory-hard solver is moved off the main thread when possible: the
   // worker is constructed from a Blob URL built from local code (the
   // embedded KIWI_WORKER_SRC plus the inline wasm glue source), or from the
@@ -501,15 +519,27 @@
       var workerStart = performance.now();
       var expectedHashes = Math.pow(2, data.targetBits);
       var settled = false;
+      // The worker is CREATED BY THIS DRIVER (a Blob URL built from local
+      // code, or the explicitly configured same-origin asset URL), so no
+      // cross-origin postMessage target exists and no rate-limit window is
+      // needed here — admission rate limiting lives on the challenge
+      // endpoint, server-side. The shape guard below is defense-in-depth
+      // for the worker port: any message that is not a versioned
+      // progress/done/failed solution message with the expected payload is
+      // ignored outright, never acted on.
       worker.onmessage = function(ev) {
-        var msg = ev.data || {};
+        var msg = ev.data;
+        if (!msg || typeof msg !== "object" || msg.v !== 1) return;
         if (msg.type === "progress") {
+          if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
           onProgress(Math.min(95, (msg.counter * 100) / expectedHashes));
         } else if (msg.type === "done") {
+          if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
           settled = true;
           worker.terminate();
           resolve({ counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
         } else if (msg.type === "failed") {
+          if (typeof msg.reason !== "string") return;
           settled = true;
           worker.terminate();
           console.error("KiwiCaptcha worker failed:", msg.reason);
@@ -527,6 +557,7 @@
       var saltBytes = b64decode(data.salt);
       try {
         worker.postMessage({
+          v: 1,
           type: "solve",
           algorithm: "argon2id",
           prefix: data.prefix,
@@ -658,7 +689,7 @@
         var algorithm = W.getAttribute("data-kiwi-algorithm") || container.getAttribute("data-kiwi-algorithm") || "sha256";
         var reqBody = { scope: scope };
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
-        var resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody) });
+        var resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody) });
         if (!resp.ok) throw new Error("Challenge failed");
         var data = await resp.json();
         if (data.ttlSecs) startCountdown(data.ttlSecs);

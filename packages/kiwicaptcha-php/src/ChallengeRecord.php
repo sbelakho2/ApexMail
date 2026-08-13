@@ -13,7 +13,7 @@ namespace KiwiCaptcha;
  * (`nonce`, `scope`, `binding_tag`, `issued_at`, `expires_at`, `algorithm`
  * `'sha256'|'argon2id'`, `m_kib`, `t`, `p`, `target_bits`, `salt`,
  * `prefix`, `challenge`, `min_duration_ms`, `issued_at_ns`,
- * `protocol_version`).
+ * `protocol_version`, `attempts_used`, `region` — 18 keys).
  *
  * Protocol v2 migration: v2 records carry `binding_tag` (a nonce-bound
  * HMAC, never a stable IP-derived identifier — see
@@ -39,6 +39,14 @@ namespace KiwiCaptcha;
  * into the challenge payload and never sent to the client — the verifier
  * uses it to measure elapsed solve time on the server instead of trusting
  * the client-reported duration.
+ *
+ * `region` is server-side deployment metadata (like `issuedAtNs` — never
+ * signed, never sent to the client): the region the challenge was issued
+ * for, or null when unbound. The JSON key is ALWAYS present (null when
+ * unbound) for byte parity with the Rust serde schema (18 keys), which the
+ * Rust reader requires via `#[serde(default)]` for legacy records. A
+ * verifier configured with an expected region rejects records whose region
+ * does not match exactly ({@see \KiwiCaptcha\VerifyError::WrongRegion}).
  */
 final class ChallengeRecord
 {
@@ -59,6 +67,7 @@ final class ChallengeRecord
         public readonly int $minDurationMs,
         public readonly int $issuedAtNs = 0,
         public readonly int $protocolVersion = 2,
+        public readonly ?string $region = null,
     ) {
     }
 
@@ -106,6 +115,9 @@ final class ChallengeRecord
             // explicitly to keep PHP→Rust records complete. The one-shot
             // model never increments it.
             'attempts_used' => 0,
+            // Deployment metadata — ALWAYS present (null when the challenge
+            // is region-unbound) for byte parity with the Rust serde schema.
+            'region' => $this->region,
         ];
     }
 
@@ -149,6 +161,9 @@ final class ChallengeRecord
             minDurationMs: (int) ($data['min_duration_ms'] ?? 0),
             issuedAtNs: (int) ($data['issued_at_ns'] ?? 0),
             protocolVersion: $protocolVersion,
+            // Absent (legacy Rust records) or JSON-null decode as null; any
+            // present non-null value is cast like the other string fields.
+            region: isset($data['region']) ? (string) $data['region'] : null,
         );
     }
 }

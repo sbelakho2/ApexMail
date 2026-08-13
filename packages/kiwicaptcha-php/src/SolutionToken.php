@@ -74,11 +74,20 @@ final class SolutionToken
             throw DecodeError::malformed();
         }
 
-        $plain = base64_decode(trim($raw), true);
+        // Strict canonical base64 (audit #29): base64_decode in strict mode
+        // rejects every character outside the standard alphabet (including
+        // base64url '-'/'_' and whitespace) and the canonical re-encode
+        // check rejects any non-canonical padding (unpadded, over-padded, or
+        // non-zero trailing bits) — exactly one canonical byte representation
+        // of the plaintext can decode.
+        $plain = base64_decode($raw, true);
         if ($plain === false) {
             throw DecodeError::invalidBase64();
         }
         $plain = (string) $plain;
+        if (base64_encode($plain) !== $raw) {
+            throw DecodeError::invalidBase64();
+        }
         // PCRE is always available in PHP 8.1 (no undeclared mbstring
         // dependency): /u makes the match fail on invalid UTF-8.
         if (preg_match('//u', $plain) !== 1) {

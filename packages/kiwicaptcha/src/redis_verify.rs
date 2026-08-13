@@ -2,10 +2,11 @@
 //!
 //! [`RedisChallengeStore`] persists [`ChallengeRecord`]s as the language-
 //! neutral JSON schema shared with the PHP core (`packages/kiwicaptcha-php`)
-//! — the same 17 keys `ChallengeRecord::toArray()` emits — under the key
-//! `{prefix}{nonce}` with an EX TTL of `expires_at - now` (min 1 s, exactly
-//! like the PHP `RedisStorage`). A PHP service and a Rust service can read
-//! each other's records from the same Redis instance.
+//! — the same 18 keys `ChallengeRecord::toArray()` emits — under the key
+//! `{prefix}{nonce}` with an EX TTL of `expires_at - now + ttl_margin_secs`
+//! (min 1 s, exactly like the PHP `RedisStorage` plus the audit #22/#23 TTL
+//! margin). A PHP service and a Rust service can read each other's records
+//! from the same Redis instance.
 //!
 //! [`ProductionVerifier`] implements the PHP verifier's check order with
 //! atomic single-use enforced by Redis GETDEL:
@@ -223,6 +224,14 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 pub struct RedisChallengeStore {
     pool: r2d2::Pool<StoreConnectionManager>,
     prefix: String,
+    /// Number of replicas the SET must be acknowledged by (Redis WAIT)
+    /// before `store()` returns (audit #22/#23). 0 = fire-and-forget.
+    wait_replicas: u32,
+    /// Timeout (ms) for the Redis WAIT after the SET.
+    wait_timeout_ms: u64,
+    /// Extra seconds added to the EX TTL (`expires_at - now + margin`,
+    /// min 1 s) so a challenge survives replica lag / clock skew (audit #23).
+    ttl_margin_secs: i64,
 }
 
 impl RedisChallengeStore {
@@ -258,7 +267,43 @@ impl RedisChallengeStore {
         RedisChallengeStore {
             pool,
             prefix: prefix.into(),
+            wait_replicas: 0,
+            wait_timeout_ms: 0,
+            ttl_margin_secs: 0,
         }
+    }
+
+    /// Require the stored record to be acknowledged by `wait_replicas`
+    /// replicas before `store()` returns: after the SET, a Redis `WAIT
+    /// replicas timeout_ms` is issued (audit #22/#23 — replica durability
+    /// so a promotion cannot lose a freshly issued challenge). `0` disables
+    /// the wait. With no replicas configured, WAIT returns immediately with
+    /// 0 acknowledged replicas.
+    pub fn with_wait(mut self, wait_replicas: u32, timeout_ms: u64) -> Self {
+        self.wait_replicas = wait_replicas;
+        self.wait_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Add `ttl_margin_secs` seconds to the stored record's EX TTL:
+    /// `ttl = max(1, expires_at - now + margin)` (audit #23). A positive
+    /// margin keeps the record readable past `expires_at` by replica lag or
+    /// clock skew; the verifier's own TTL check still rejects it at
+    /// `expires_at`, so the margin never extends the challenge's real
+    /// lifetime. 0 = PHP `RedisStorage` parity.
+    pub fn with_ttl_margin(mut self, ttl_margin_secs: i64) -> Self {
+        self.ttl_margin_secs = ttl_margin_secs;
+        self
+    }
+
+    /// The configured replica-wait requirement `(replicas, timeout_ms)`.
+    pub fn wait_config(&self) -> (u32, u64) {
+        (self.wait_replicas, self.wait_timeout_ms)
+    }
+
+    /// The configured TTL margin in seconds.
+    pub fn ttl_margin_secs(&self) -> i64 {
+        self.ttl_margin_secs
     }
 
     /// The configured connection pool size.
@@ -293,7 +338,7 @@ impl RedisChallengeStore {
     /// module docs' GETDEL no-retry rule), then propagates the error.
     fn run_command<T>(
         conn: &mut r2d2::PooledConnection<StoreConnectionManager>,
-        f: impl FnOnce(&mut dyn redis::ConnectionLike) -> redis::RedisResult<T>,
+        f: impl FnOnce(&mut ManagedConnection) -> redis::RedisResult<T>,
     ) -> redis::RedisResult<T> {
         match f(conn) {
             Ok(v) => Ok(v),
@@ -304,10 +349,23 @@ impl RedisChallengeStore {
         }
     }
 
-    /// Persist a record with `EX ttl = max(1, expires_at - now)` — the exact
-    /// TTL rule of the PHP `RedisStorage::store()`. An already-expired record
-    /// is stored with a 1-second lifetime (it will fail the verifier's TTL
-    /// check if fetched in time, and vanish otherwise).
+    /// Persist a record with `EX ttl = max(1, expires_at - now +
+    /// ttl_margin_secs)` — the PHP `RedisStorage::store()` rule plus the
+    /// audit #23 TTL margin. An already-expired record is stored with a
+    /// 1-second lifetime (it will fail the verifier's TTL check if fetched
+    /// in time, and vanish otherwise).
+    ///
+    /// When [`RedisChallengeStore::with_wait`] configured a replica wait,
+    /// a Redis `WAIT replicas timeout_ms` is issued AFTER the SET: the
+    /// record is only acknowledged once the requested replica count has it
+    /// (or the timeout elapsed), so a promotion cannot lose a freshly
+    /// issued challenge. WAIT blocks up to its timeout before replying
+    /// (with 0 replicas it blocks the full timeout and returns 0), so the
+    /// connection's read timeout is temporarily raised to
+    /// `timeout_ms + 500 ms` headroom around the WAIT and restored to
+    /// [`READ_TIMEOUT`] afterwards. An I/O failure propagates like any
+    /// other command error (the SET may already have landed — retrying the
+    /// store overwrites the record, which is safe).
     pub fn store(&self, record: &ChallengeRecord) -> redis::RedisResult<()> {
         let key = format!("{}{}", self.prefix, record.nonce);
         // Infallible for this struct: every field is a String or an integer
@@ -315,7 +373,12 @@ impl RedisChallengeStore {
         let value = serde_json::to_string(record)
             .expect("ChallengeRecord JSON serialization is infallible");
         let now_unix = now_epoch_micros() / 1_000_000;
-        let ttl = record.expires_at.saturating_sub(now_unix).max(1);
+        let ttl = (record.expires_at as i64)
+            .saturating_sub(now_unix as i64)
+            .saturating_add(self.ttl_margin_secs)
+            .max(1) as u64;
+        let wait_replicas = self.wait_replicas;
+        let wait_timeout_ms = self.wait_timeout_ms;
         let mut conn = self.checkout()?;
         Self::run_command(&mut conn, |c| {
             redis::cmd("SET")
@@ -323,7 +386,25 @@ impl RedisChallengeStore {
                 .arg(value)
                 .arg("EX")
                 .arg(ttl)
-                .query::<()>(c)
+                .query::<()>(c)?;
+            if wait_replicas > 0 {
+                // Replica wait (audit #22/#23): WAIT returns the number of
+                // replicas that acknowledged the write (>= 0; 0 when no
+                // replicas are configured). Headroom so the WAIT reply can
+                // never race the pool's read timeout.
+                c.inner.set_read_timeout(Some(Duration::from_millis(
+                    wait_timeout_ms.saturating_add(500),
+                )))?;
+                let wait = redis::cmd("WAIT")
+                    .arg(wait_replicas)
+                    .arg(wait_timeout_ms)
+                    .query::<i64>(c);
+                // Restore the bounded read timeout even when WAIT failed.
+                let restore = c.inner.set_read_timeout(Some(READ_TIMEOUT));
+                wait?;
+                restore?;
+            }
+            Ok(())
         })
     }
 
@@ -446,17 +527,19 @@ pub struct ProductionVerifier {
     secret_key: String,
     argon_gate: Option<Box<dyn ArgonAdmissionGate>>,
     accept_legacy_v1: bool,
+    expected_region: Option<String>,
 }
 
 impl ProductionVerifier {
-    /// Build a verifier with no Argon admission gate and no legacy-v1
-    /// acceptance (both mirror the PHP defaults).
+    /// Build a verifier with no Argon admission gate, no legacy-v1
+    /// acceptance, and no expected region (all mirror the PHP defaults).
     pub fn new(store: RedisChallengeStore, secret_key: impl Into<String>) -> Self {
         ProductionVerifier {
             store,
             secret_key: secret_key.into(),
             argon_gate: None,
             accept_legacy_v1: false,
+            expected_region: None,
         }
     }
 
@@ -480,6 +563,26 @@ impl ProductionVerifier {
     pub fn with_accept_legacy_v1(mut self, accept: bool) -> Self {
         self.accept_legacy_v1 = accept;
         self
+    }
+
+    /// Require every verified challenge to have been issued for this region
+    /// (audit #22): a record with a different region — or with no region at
+    /// all — is rejected with [`VerifyError::WrongRegion`]. Use
+    /// [`ProductionVerifier::without_expected_region`] to clear.
+    pub fn with_expected_region(mut self, region: impl Into<String>) -> Self {
+        self.expected_region = Some(region.into());
+        self
+    }
+
+    /// Disable the region expectation (the default).
+    pub fn without_expected_region(mut self) -> Self {
+        self.expected_region = None;
+        self
+    }
+
+    /// The configured expected region, if any.
+    pub fn expected_region(&self) -> Option<&str> {
+        self.expected_region.as_deref()
     }
 
     /// Verify a client-submitted solution token against the store.
@@ -605,7 +708,12 @@ impl ProductionVerifier {
             Err(e) => return VerifyOutcome::Invalid(e),
         };
         if leading_zero_bits(&hash) >= record.target_bits {
-            VerifyOutcome::Valid
+            // The outcome carries the consumed canonical nonce (jti — audit
+            // #37) so callers can correlate the result with the storage key
+            // and downstream result tokens.
+            VerifyOutcome::Valid {
+                nonce: record.nonce,
+            }
         } else {
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         }
@@ -644,6 +752,12 @@ impl ProductionVerifier {
             _ => return Err(VerifyError::BadSignature),
         }
 
+        // 3c2. Hard Argon2id parameter ceilings (audit #32) — AFTER the
+        //      signature is authenticated, BEFORE any Params::new/allocation.
+        if record.algorithm == PoWAlgorithm::Argon2id {
+            crate::verify::check_argon2_ceilings(record)?;
+        }
+
         // 3d. TTL (server clock, like the PHP `time()`).
         let now_unix = now_epoch_micros() / 1_000_000;
         if now_unix >= record.expires_at {
@@ -653,6 +767,15 @@ impl ProductionVerifier {
         // 3e. Scope: prevent cross-scope replay.
         if record.scope != scope {
             return Err(VerifyError::WrongScope);
+        }
+
+        // 3e2. Region (audit #22): a region-expecting deployment fails
+        //      closed on challenges issued for another region — or for no
+        //      region at all.
+        if let Some(expected) = self.expected_region.as_deref() {
+            if record.region.as_deref() != Some(expected) {
+                return Err(VerifyError::WrongRegion);
+            }
         }
 
         // 3f. IP binding. The stored record is authoritative: an EMPTY

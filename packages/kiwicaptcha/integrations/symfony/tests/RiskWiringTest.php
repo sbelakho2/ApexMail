@@ -10,9 +10,11 @@ use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisRiskHealthProvider;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
+use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Risk\Calibration\AggregateCalibrator;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
+use KiwiCaptcha\Storage\RedisStorage;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Reference;
@@ -34,11 +36,14 @@ final class RiskWiringTest extends TestCase
 {
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
-    private function load(array $risk, array $topLevel = []): ContainerBuilder
+    private function load(array $risk, array $topLevel = [], ?\Closure $register = null): ContainerBuilder
     {
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'test');
         $container->register('fake_redis', FakePredisClient::class);
+        if ($register !== null) {
+            $register($container);
+        }
         (new KiwiCaptchaExtension())->load([[
             'secret_key' => self::SECRET,
             'difficulty_bits' => 8,
@@ -240,5 +245,116 @@ final class RiskWiringTest extends TestCase
         $risk['unknown_scope'] = ['mode' => 'reject'];
         $container = $this->load($risk);
         self::assertSame('reject', $container->getDefinition(RiskGateway::class)->getArgument('$unknownScopeMode'));
+    }
+
+    public function testRegionFlowsToIssuerAndVerifierOnlyWhenConfigured(): void
+    {
+        // Default: region null — the optional core $region params must NOT
+        // be set at all (older cores stay untouched).
+        $container = $this->load($this->riskDefaults());
+        self::assertArrayNotHasKey('$region', $container->getDefinition('kiwi_captcha.issuer')->getArguments(), 'no region configured: the issuer definition must not carry a $region arg');
+        self::assertArrayNotHasKey('$region', $container->getDefinition('kiwi_captcha.verifier')->getArguments(), 'no region configured: the verifier definition must not carry a $region arg');
+
+        // Configured region: baked into issued challenges by the issuer and
+        // enforced at verification by the verifier (failover-replay Option A).
+        $risk = $this->riskDefaults();
+        $risk['region'] = 'eu-central-1';
+        $container = $this->load($risk);
+        self::assertSame('eu-central-1', $container->getDefinition('kiwi_captcha.issuer')->getArgument('$region'), 'risk.region must reach the core Issuer ($region)');
+        self::assertSame('eu-central-1', $container->getDefinition('kiwi_captcha.verifier')->getArgument('$region'), 'risk.region must reach the core Verifier ($region)');
+    }
+
+    public function testRedisStorageReceivesWaitAndTtlMarginParamsWhenOptedIn(): void
+    {
+        $registerRedisStorage = static function (ContainerBuilder $c): void {
+            $c->register('my.redis.storage', RedisStorage::class)
+                ->setArguments([new Reference('fake_redis'), 'kiwicaptcha:']);
+        };
+
+        // The risk.redis knobs target the CHALLENGE storage when it is a
+        // RedisStorage definition. Opting out (defaults) must leave the
+        // definition untouched (older cores stay compatible).
+        $container = $this->load($this->riskDefaults(), ['storage' => 'my.redis.storage'], $registerRedisStorage);
+        self::assertArrayNotHasKey('$waitReplicas', $container->getDefinition('my.redis.storage')->getArguments(), 'default wait_replicas=0/ttl_margin_secs=0: the storage definition must not be touched');
+
+        $risk = $this->riskDefaults();
+        $risk['redis'] = ['wait_replicas' => 2, 'wait_timeout_ms' => 500, 'ttl_margin_secs' => 30];
+        $container = $this->load($risk, ['storage' => 'my.redis.storage'], $registerRedisStorage);
+        $args = $container->getDefinition('my.redis.storage')->getArguments();
+        self::assertSame(2, $args['$waitReplicas'], 'wait_replicas must reach the RedisStorage definition ($waitReplicas)');
+        self::assertSame(500, $args['$waitTimeoutMs'], 'wait_timeout_ms must reach the RedisStorage definition ($waitTimeoutMs)');
+        self::assertSame(30, $args['$ttlMarginSecs'], 'ttl_margin_secs must reach the RedisStorage definition ($ttlMarginSecs)');
+
+        // ttl_margin alone also opts in (wait stays disabled).
+        $risk = $this->riskDefaults();
+        $risk['redis'] = ['ttl_margin_secs' => 60];
+        $container = $this->load($risk, ['storage' => 'my.redis.storage'], $registerRedisStorage);
+        $args = $container->getDefinition('my.redis.storage')->getArguments();
+        self::assertSame(0, $args['$waitReplicas']);
+        self::assertSame(100, $args['$waitTimeoutMs']);
+        self::assertSame(60, $args['$ttlMarginSecs']);
+
+        // A NON-RedisStorage storage definition is never touched.
+        $container = $this->load($this->riskDefaults(), ['storage' => 'my.pool.storage'], static function (ContainerBuilder $c): void {
+            $c->register('my.pool.storage', \KiwiCaptcha\Storage\ArrayStorage::class);
+        });
+        self::assertArrayNotHasKey('$waitReplicas', $container->getDefinition('my.pool.storage')->getArguments());
+    }
+
+    public function testOutstandingChallengesServiceWiredWithCapsAndMargin(): void
+    {
+        $risk = $this->riskDefaults();
+        $risk['max_outstanding_challenges'] = 7;
+        $risk['max_outstanding_challenges_global'] = 12345;
+        $risk['redis'] = ['ttl_margin_secs' => 45];
+        $container = $this->load($risk);
+
+        $definition = $container->getDefinition('kiwi_captcha.risk.outstanding');
+        self::assertSame(OutstandingChallenges::class, $definition->getClass());
+        $args = $definition->getArguments();
+        self::assertInstanceOf(Reference::class, $args[0], 'arg 0 = the risk Predis client (shared with the state store)');
+        self::assertSame('{kiwi:wiring-test}:outstanding:', $args[1], 'arg 1 = the hash-tagged outstanding key prefix');
+        self::assertSame('kiwi_captcha.risk.keys', (string) $args[2], 'arg 2 = the risk identity keys (the event key HMACs the canonical IP)');
+        self::assertSame(7, $args[3], 'arg 3 = risk.max_outstanding_challenges');
+        self::assertSame(12345, $args[4], 'arg 4 = risk.max_outstanding_challenges_global');
+        self::assertSame(45, $args[5], 'arg 5 = risk.redis.ttl_margin_secs');
+
+        // Without risk enabled the service must not exist.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        (new KiwiCaptchaExtension())->load([['secret_key' => self::SECRET, 'risk' => ['enabled' => false]]], $container);
+        self::assertFalse($container->hasDefinition('kiwi_captcha.risk.outstanding'), 'the outstanding service lives with the risk engine');
+    }
+
+    public function testControllerReceivesOutstandingAllowlistFetchMetadataAndStorage(): void
+    {
+        $risk = $this->riskDefaults();
+        $risk['challenge_origin_allowlist'] = ['https://app.example.com'];
+        $risk['enforce_fetch_metadata'] = true;
+        $container = $this->load($risk, ['storage' => 'my.redis.storage'], static function (ContainerBuilder $c): void {
+            $c->register('my.redis.storage', RedisStorage::class)
+                ->setArguments([new Reference('fake_redis'), 'kiwicaptcha:']);
+        });
+
+        $args = $container->getDefinition(ChallengeController::class)->getArguments();
+        self::assertSame('kiwi_captcha.risk.outstanding', (string) $args[6], 'the controller receives the outstanding-challenge counter');
+        self::assertSame(['https://app.example.com'], $args[7], 'the controller receives risk.challenge_origin_allowlist');
+        self::assertTrue($args[8], 'the controller receives risk.enforce_fetch_metadata');
+        self::assertSame('my.redis.storage', (string) $args[9], 'the controller receives the challenge storage (record discard on counter-race refusal)');
+    }
+
+    public function testControllerWiringWithoutRiskEngine(): void
+    {
+        // Outstanding/storage still reach the controller; allowlist and
+        // fetch-metadata follow the config defaults when risk is disabled.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->register('my.redis.storage', \KiwiCaptcha\Storage\ArrayStorage::class);
+        (new KiwiCaptchaExtension())->load([['secret_key' => self::SECRET, 'risk' => ['enabled' => false], 'storage' => 'my.redis.storage']], $container);
+        $args = $container->getDefinition(ChallengeController::class)->getArguments();
+        self::assertNull($args[6], 'no risk engine: no outstanding counter');
+        self::assertSame([], $args[7]);
+        self::assertFalse($args[8]);
+        self::assertSame('my.redis.storage', (string) $args[9]);
     }
 }

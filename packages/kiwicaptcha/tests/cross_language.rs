@@ -31,15 +31,15 @@ fn rust_verifies_php_issued_record() {
         now_ns,
         min_duration_ms: 0,
         expected_scope: Some("login"),
+        expected_region: None,
         client_ip: Some("198.51.100.7"),
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,
         accept_legacy_v1: false,
     };
-    assert_eq!(
-        verify_solution(&mut ctx),
-        VerifyOutcome::Valid,
+    assert!(
+        matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
         "Rust must accept a PHP-issued challenge"
     );
 
@@ -54,6 +54,7 @@ fn rust_verifies_php_issued_record() {
         now_ns,
         min_duration_ms: 0,
         expected_scope: Some("login"),
+        expected_region: None,
         client_ip: Some("9.9.9.9"),
         telemetry: None,
         enforce_telemetry: false,
@@ -110,6 +111,7 @@ fn rust_issues_record_for_php() {
         auto_tune_min_bits: 8,
         auto_tune_max_bits: 20,
         binding_mode: kiwicaptcha::challenge::BindingMode::Bound,
+        region: None,
     };
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -9,7 +9,8 @@
 //! Both structures are designed to be JSON-serializable so they can flow over
 //! HTTP between the inline widget script and the `/api/kcaptcha/*` routes.
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::challenge::PoWAlgorithm;
@@ -91,9 +92,17 @@ impl SolutionToken {
         if raw.len() > 32_768 {
             return Err(DecodeError::TooLarge);
         }
-        let plain = B64
-            .decode(raw.trim())
-            .map_err(|_| DecodeError::InvalidBase64)?;
+        // Strict canonical decode (audit #29): the input must be EXACTLY the
+        // canonical padded standard-base64 encoding of the decoded bytes.
+        // Any deviation — url-safe alphabet, missing/loose padding, trailing
+        // bits, surrounding whitespace — re-encodes to a different string, so
+        // the byte-exact re-encode comparison enforces the single accepted
+        // encoding (the legacy `.trim()` was removed: whitespace is not part
+        // of the wire language).
+        let plain = B64.decode(raw).map_err(|_| DecodeError::InvalidBase64)?;
+        if B64.encode(&plain) != raw {
+            return Err(DecodeError::InvalidBase64);
+        }
         let plain = String::from_utf8(plain).map_err(|_| DecodeError::InvalidUtf8)?;
 
         // The telemetry segment is JSON which may itself contain dots, so split
@@ -107,11 +116,14 @@ impl SolutionToken {
         // The nonce must be exactly the standard-base64 encoding of 32 bytes
         // (44 characters): a well-formed nonce is what the issuer mints, so
         // any deviation means the token did not come from a real challenge.
+        // The canonicality check below enforces the single accepted encoding
+        // (padded, standard alphabet) — a 43-char unpadded or url-safe
+        // variant is rejected.
         if nonce.len() != 44 {
             return Err(DecodeError::Malformed);
         }
         match B64.decode(nonce) {
-            Ok(bytes) if bytes.len() == 32 => {}
+            Ok(bytes) if bytes.len() == 32 && B64.encode(&bytes) == nonce => {}
             _ => return Err(DecodeError::Malformed),
         }
 
@@ -373,6 +385,139 @@ mod tests {
                 Err(DecodeError::Malformed)
             ),
             "nonce decoding to != 32 bytes must be rejected as Malformed"
+        );
+    }
+
+    // ── Round-8 audit #29: exactly one canonical encoding ──────────────
+
+    fn valid_token() -> SolutionToken {
+        // Nonce whose base64 contains both '+' and '/' (0xFF×3 → "////",
+        // 0xFB 0xEF 0xBE → "++++") so the url-safe substitution is
+        // meaningful.
+        let nonce_bytes: [u8; 32] = [
+            0xFF, 0xFF, 0xFF, 0xFB, 0xEF, 0xBE, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+            0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10, 0x0F, 0xF1, 0xE2, 0xD3, 0xC4, 0xB5,
+            0xA6, 0x97, 0x88, 0x69,
+        ];
+        SolutionToken {
+            nonce: B64.encode(nonce_bytes),
+            counter: 42,
+            duration_ms: 850,
+            telemetry: serde_json::json!({"wd": true}),
+        }
+    }
+
+    #[test]
+    fn decode_rejects_url_safe_base64_variants() {
+        let encoded = valid_token().encode();
+        // The chosen nonce guarantees the decoded payload itself contains
+        // both '+' and '/', and the OUTER token is standard base64: any
+        // '-'/'_' character is outside the standard alphabet, so swapping
+        // one in must break the decode.
+        let swapped = encoded.replacen(&encoded[0..1], "-", 1);
+        assert_ne!(swapped, encoded);
+        assert!(
+            matches!(
+                SolutionToken::decode(&swapped),
+                Err(DecodeError::InvalidBase64)
+            ),
+            "url-safe alphabet must be rejected"
+        );
+        // A '-' substituted into the middle of the token is equally invalid.
+        let mid = format!("{}{}{}", &encoded[..20], "-", &encoded[21..]);
+        assert!(
+            matches!(SolutionToken::decode(&mid), Err(DecodeError::InvalidBase64)),
+            "a url-safe character anywhere must be rejected"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_missing_padding() {
+        // Telemetry {"a":1} makes the plain payload 59 bytes (59 % 3 == 2),
+        // so the canonical outer encoding carries exactly one padding '='.
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 42,
+            duration_ms: 850,
+            telemetry: serde_json::json!({"a": 1}),
+        };
+        let encoded = token.encode();
+        assert_eq!(encoded.len() % 4, 0);
+        assert!(encoded.ends_with('='), "payload length forces one '=' pad");
+        let unpadded = encoded.trim_end_matches('=');
+        assert!(
+            matches!(
+                SolutionToken::decode(unpadded),
+                Err(DecodeError::InvalidBase64)
+            ),
+            "an unpadded token is not the canonical encoding"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_loose_padding() {
+        // One extra padding character beyond the canonical amount.
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 42,
+            duration_ms: 850,
+            telemetry: serde_json::json!({"a": 1}),
+        };
+        let encoded = token.encode();
+        assert!(encoded.ends_with('='));
+        let loose = format!("{encoded}=");
+        assert!(
+            matches!(
+                SolutionToken::decode(&loose),
+                Err(DecodeError::InvalidBase64)
+            ),
+            "extra padding must be rejected"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_surrounding_whitespace() {
+        let encoded = valid_token().encode();
+        for wrapped in [format!(" {encoded}"), format!("{encoded}\n")] {
+            assert!(
+                matches!(
+                    SolutionToken::decode(&wrapped),
+                    Err(DecodeError::InvalidBase64)
+                ),
+                "surrounding whitespace must be rejected (no trim)"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_rejects_noncanonical_nonce_inside_the_payload() {
+        // The inner nonce must itself be the canonical 44-char padded
+        // standard-base64 encoding of 32 bytes: an unpadded 43-char nonce is
+        // rejected even though the outer token is properly padded.
+        let token = valid_token();
+        let unpadded_nonce = token.nonce.trim_end_matches('=');
+        assert_eq!(unpadded_nonce.len(), 43);
+        let plain = format!(
+            "{unpadded_nonce}.{}.{}.{{}}",
+            token.counter, token.duration_ms
+        );
+        let wrapped = B64.encode(plain);
+        assert!(
+            matches!(SolutionToken::decode(&wrapped), Err(DecodeError::Malformed)),
+            "a non-canonical nonce segment must be rejected"
+        );
+
+        // Url-safe chars inside the nonce segment.
+        let url_nonce = token.nonce.replace('+', "-").replace('/', "_");
+        assert_ne!(url_nonce, token.nonce);
+        let plain2 = format!("{url_nonce}.{}.{}.{{}}", token.counter, token.duration_ms);
+        let wrapped2 = B64.encode(plain2);
+        assert!(
+            matches!(
+                SolutionToken::decode(&wrapped2),
+                Err(DecodeError::Malformed)
+            ),
+            "a url-safe nonce segment must be rejected"
         );
     }
 }

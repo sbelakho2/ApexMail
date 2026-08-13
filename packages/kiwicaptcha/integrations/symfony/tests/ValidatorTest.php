@@ -8,6 +8,8 @@ use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use KiwiCaptcha\BindingMode;
 use KiwiCaptcha\Config;
@@ -283,5 +285,102 @@ final class ValidatorTest extends TestCase
         } finally {
             \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate::resetForTests();
         }
+    }
+
+    public function testValidSolveExposesTheCanonicalJti(): void
+    {
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(0, $violations);
+
+        $jti = $stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE);
+        self::assertSame($challenge->nonce, $jti, 'the verified jti must be the canonical challenge nonce of the consumed record');
+        self::assertSame($challenge->nonce, $validator->verifiedJti(), 'verifiedJti() must expose the same canonical jti');
+    }
+
+    public function testFailedSolveNeverExposesAJti(): void
+    {
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        // Wrong scope: the token is structurally fine but must NOT verify —
+        // no jti may leak on a failed verification.
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'signup']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+
+        self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'a failed verification must never expose a jti');
+        self::assertNull($validator->verifiedJti());
+    }
+
+    public function testValidSolveDecrementsTheOutstandingCounter(): void
+    {
+        $client = new FakePredisClient();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:validator-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 3, 100, 0);
+
+        // Two outstanding challenges for the source (the 3rd would hit the cap).
+        self::assertSame(1, $outstanding->issue('198.51.100.7', 120));
+        self::assertSame(1, $outstanding->issue('198.51.100.7', 120));
+        $sourceKey = $outstanding->sourceKey('198.51.100.7');
+        self::assertSame(2, $client->counters[$sourceKey]);
+
+        // A VALID solve decrements the per-source counter (best-effort).
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, null, null, $outstanding);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        self::assertCount(0, $engine->validate($dto));
+        self::assertSame(1, $client->counters[$sourceKey], 'a valid solve must decrement the source\'s outstanding counter');
+
+        // A FAILED solve must NOT decrement (the challenge stays outstanding).
+        $challenge2 = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge2->minDurationMs + 10) * 1000);
+        $token2 = $this->solveToken($challenge2->prefix, $challenge2->salt, $challenge2->targetBits, $challenge2->nonce);
+        $dto2 = new class {
+            public ?string $captcha = null;
+        };
+        $dto2->captcha = $token2;
+        $meta2 = $engine->getMetadataFor($dto2::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'signup']));
+        self::assertCount(1, $engine->validate($dto2));
+        self::assertSame(1, $client->counters[$sourceKey], 'a failed verification must not decrement the outstanding counter');
     }
 }

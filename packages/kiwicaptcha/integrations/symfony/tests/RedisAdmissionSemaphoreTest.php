@@ -291,6 +291,82 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         self::assertSame(0, $this->leases($client), 'sha256 verification must never take an argon2 lease');
     }
 
+    /** The waiters counter key of a namespace (mirrors the semaphore's own derivation). */
+    private function waitersKey(string $namespace = 'default'): string
+    {
+        return '{kiwicaptcha:argon2:leases:'.$namespace.'}:sem:waiters';
+    }
+
+    public function testSaturatedAcquiresAreCountedAsWaitersWithTheLeaseTtl(): void
+    {
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 1);
+
+        $token = $semaphore->acquire();
+        self::assertIsString($token);
+        self::assertSame(0, $client->counters[$this->waitersKey()] ?? 0, 'a granted lease is not a waiter');
+
+        self::assertNull($semaphore->acquire(), 'cap saturated');
+        self::assertSame(1, $client->counters[$this->waitersKey()] ?? 0, 'a saturated acquire counts as one waiter');
+        self::assertSame(self::LEASE_MS * 2, $client->expirations[$this->waitersKey()] ?? 0, 'the waiters counter carries the lease lifetime TTL (self-clearing)');
+
+        // The counted waiter stays until a slot frees: the waiters counter
+        // is not decremented by further saturated acquires below the bound.
+        self::assertNull($semaphore->acquire());
+        self::assertSame(2, $client->counters[$this->waitersKey()] ?? 0, 'each saturated acquire below the bound is counted');
+    }
+
+    public function testWaiterCountNeverExceedsTheBoundAndOverflowIsRefusedWithoutQueueing(): void
+    {
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 1, 'waiters-bound', self::LEASE_MS, 3);
+
+        self::assertIsString($semaphore->acquire(), 'grant the only lease');
+        for ($i = 0; $i < 10; $i++) {
+            self::assertNull($semaphore->acquire(), 'saturated acquires always refuse (CapacityExceeded)');
+        }
+        self::assertLessThanOrEqual(3, $client->counters[$this->waitersKey('waiters-bound')] ?? 0, 'the waiters counter must never exceed maxWaiters: overflowing contenders are refused WITHOUT queueing (entry removed in the same Lua)');
+        self::assertSame(3, $client->counters[$this->waitersKey('waiters-bound')] ?? 0, 'after the bound, each overflow attempt increments then removes its own waiter (steady state = maxWaiters)');
+    }
+
+    public function testGrantedLeaseServesOneWaiter(): void
+    {
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 1);
+
+        $token = $semaphore->acquire();
+        self::assertNull($semaphore->acquire(), 'saturate');
+        self::assertSame(1, $client->counters[$this->waitersKey()] ?? 0);
+
+        $semaphore->release($token);
+        $next = $semaphore->acquire();
+        self::assertIsString($next, 'a freed slot admits the next contender');
+        self::assertSame(0, $client->counters[$this->waitersKey()] ?? 0, 'the granted caller was a served waiter — the waiters counter is decremented in the same Lua');
+        $semaphore->release($next);
+    }
+
+    public function testWaiterCountersDoNotCompeteAcrossNamespaces(): void
+    {
+        $client = $this->requirePredis();
+        $a = new RedisAdmissionSemaphore($client, 1, 'ns-a');
+        $b = new RedisAdmissionSemaphore($client, 1, 'ns-b');
+
+        self::assertIsString($a->acquire());
+        self::assertNull($a->acquire(), 'saturate ns-a');
+        self::assertSame(1, $client->counters[$this->waitersKey('ns-a')] ?? 0);
+
+        self::assertIsString($b->acquire(), 'independent namespace: a full lease set and its waiters must not block ns-b');
+        self::assertSame(0, $client->counters[$this->waitersKey('ns-b')] ?? 0, 'ns-b has its own waiters counter');
+        self::assertSame(1, $client->counters[$this->waitersKey('ns-a')] ?? 0, 'ns-a keeps its own waiter count');
+    }
+
+    public function testMaxWaitersBelowOneIsRejected(): void
+    {
+        $client = $this->requirePredis();
+        $this->expectException(\InvalidArgumentException::class);
+        new RedisAdmissionSemaphore($client, 1, 'default', self::LEASE_MS, 0);
+    }
+
     private function solveSha256(string $prefix, string $salt, int $targetBits, string $nonce): string
     {
         $counter = 0;

@@ -30,9 +30,26 @@ final class RedisStorage implements AtomicStorageInterface
 {
     private const GETDEL_SCRIPT = 'return redis.call("GETDEL", KEYS[1])';
 
+    /**
+     * @param int $waitReplicas   when > 0, store() issues a Redis WAIT after
+     *                            SET so the record has reached this many
+     *                            replicas before the challenge is handed to
+     *                            the client (async-replication failover can
+     *                            otherwise lose the record and replay it
+     *                            after failback)
+     * @param int $waitTimeoutMs  WAIT timeout in milliseconds (default 100)
+     * @param int $ttlMarginSecs  extra retention on the record beyond token
+     *                            validity: TTL = expires_at - now + margin
+     *                            (must exceed max clock skew + failover
+     *                            margin so a replayed token can never land on
+     *                            an already-expired state)
+     */
     public function __construct(
         private readonly \Redis|\Predis\Client $client,
         private readonly string $prefix = 'kiwicaptcha:',
+        private readonly int $waitReplicas = 0,
+        private readonly int $waitTimeoutMs = 100,
+        private readonly int $ttlMarginSecs = 0,
     ) {
     }
 
@@ -40,12 +57,16 @@ final class RedisStorage implements AtomicStorageInterface
     {
         $key = $this->prefix.$record->nonce;
         $value = json_encode($record->toArray(), JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-        $ttl = max(1, $record->expiresAt - time());
+        $ttl = max(1, $record->expiresAt - time() + $this->ttlMarginSecs);
 
         if ($this->client instanceof \Redis) {
             $this->client->set($key, $value, ['EX' => $ttl]);
         } else {
             $this->client->set($key, $value, 'EX', $ttl);
+        }
+
+        if ($this->waitReplicas > 0) {
+            $this->wait();
         }
     }
 
@@ -78,6 +99,26 @@ final class RedisStorage implements AtomicStorageInterface
     public function delete(string $nonce): void
     {
         $this->client->del($this->prefix.$nonce);
+    }
+
+    /**
+     * Block until at least waitReplicas replicas acknowledged the previous
+     * write (the SET above). A replica-less or unreachable replica set
+     * returns the number of acknowledged replicas (0) without error — WAIT
+     * only bounds the blocking time; propagation success is NOT asserted.
+     */
+    private function wait(): void
+    {
+        if ($this->client instanceof \Redis) {
+            // phpredis has no typed WAIT method; rawCommand mirrors the
+            // GETDEL path.
+            $this->client->rawCommand('WAIT', $this->waitReplicas, $this->waitTimeoutMs);
+        } else {
+            // Predis removed the typed wait() method from its command
+            // profile; executeRaw is the raw-command escape hatch (the same
+            // semantics as phpredis rawCommand).
+            $this->client->executeRaw(['WAIT', $this->waitReplicas, $this->waitTimeoutMs]);
+        }
     }
 
     /**

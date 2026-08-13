@@ -101,7 +101,7 @@ final class VerifierGateTest extends TestCase
             $salt,
             $minDurationMs,
         );
-        $challenge = base64_encode($canonical).'.'.Issuer::signPayload($canonical, Vectors::SECRET);
+        $challenge = base64_encode($canonical).'.'.Issuer::signPayloadV2($canonical, Vectors::SECRET);
 
         return new ChallengeRecord(
             nonce: $nonce,
@@ -152,7 +152,7 @@ final class VerifierGateTest extends TestCase
             $salt,
             0,
         );
-        $challenge = base64_encode($canonical).'.'.Issuer::signPayload($canonical, Vectors::SECRET);
+        $challenge = base64_encode($canonical).'.'.Issuer::signPayloadV2($canonical, Vectors::SECRET);
 
         return new ChallengeRecord(
             nonce: $nonce,
@@ -409,18 +409,21 @@ final class VerifierGateTest extends TestCase
         self::assertNull($storage->find($record->nonce));
     }
 
-    public function testArgonT7BurnsRecord(): void
+    public function testArgonTAboveProcessCeilingRejectsAsUnsupported(): void
     {
-        // t=7 exceeds MAX_ARGON_T (6): outside the browser-solvable profile.
-        $record = $this->argon2Record(t: 7);
+        // t=32 exceeds the absolute process ceiling (MAX_ARGON_TIME=16,
+        // audit #32): the record is SIGNED with the shared secret, so the
+        // failure is UnsupportedArgon2Params (not MalformedRecord) — the
+        // signature authenticates the parameters before the ceiling check.
+        $record = $this->argon2Record(t: 32);
         $storage = new ArrayStorage();
         $storage->store($record);
 
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
         $outcome = $verifier->verify($this->tokenFor($record->nonce, 0), Vectors::SECRET);
 
-        self::assertSame(VerifyError::MalformedRecord, $outcome->error);
-        self::assertNull($storage->find($record->nonce));
+        self::assertSame(VerifyError::UnsupportedArgon2Params, $outcome->error);
+        self::assertNull($storage->find($record->nonce), 'an unsupported record must be burned');
     }
 
     public function testReceiptOneSecondAheadOfIssuancePassesWithinSkewTolerance(): void
@@ -628,7 +631,7 @@ final class VerifierGateTest extends TestCase
             'canonicalPayload must produce the exact shared vector'
         );
 
-        $challenge = base64_encode($canonicalV2).'.'.hash_hmac('sha256', $canonicalV2, $secret);
+        $challenge = base64_encode($canonicalV2).'.'.Issuer::signPayloadV2($canonicalV2, $secret);
         $prefix = $challenge.'|'.$salt.'|';
         $record = new ChallengeRecord(
             nonce: $nonce,
@@ -756,5 +759,63 @@ final class VerifierGateTest extends TestCase
         $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
         $outcome = (new Verifier($storage))->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', $record->issuedAtNs + 1_000_000);
         self::assertSame(VerifyError::MalformedRecord->value, $outcome->code());
+    }
+
+    public function testValidOutcomeExposesTheDecodedNonce(): void
+    {
+        // Audit #37: the canonical replay id (jti) is the decoded token's
+        // nonce — a VALID outcome must expose it.
+        $record = $this->v2Sha256Record();
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->verify($this->tokenFor($record->nonce, $counter), Vectors::SECRET, 'login', self::CLIENT_IP);
+
+        self::assertTrue($outcome->isOk());
+        self::assertSame($record->nonce, $outcome->nonce());
+    }
+
+    public function testInvalidOutcomeNonceIsNull(): void
+    {
+        $record = $this->v2Sha256Record();
+        $storage = new ArrayStorage();
+        $storage->store($record);
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT + 1000);
+        $outcome = $verifier->verify($this->tokenFor($record->nonce, 0), Vectors::SECRET, 'login', self::CLIENT_IP);
+
+        self::assertSame(VerifyError::Expired, $outcome->error);
+        self::assertNull($outcome->nonce());
+    }
+
+    public function testMalformedTokenNonceIsNull(): void
+    {
+        // The url-safe variant of a well-formed token decodes to the same
+        // plaintext but is NOT canonical base64 (audit #29) — the verifier
+        // rejects it as MalformedToken and exposes no nonce. The telemetry
+        // '?' bytes (positioned via duration=1000) guarantee the token's
+        // base64 contains '/' so the variant genuinely differs.
+        $nonce = base64_encode(random_bytes(32));
+        $raw = SolutionToken::create($nonce, 1, 1000, ['q' => '?>~?'])->encode();
+        $urlSafe = strtr($raw, '+/', '-_');
+        self::assertNotSame($raw, $urlSafe, 'precondition: the url-safe variant must differ');
+        $verifier = new Verifier(new ArrayStorage());
+        $outcome = $verifier->verify($urlSafe, Vectors::SECRET);
+
+        self::assertSame(VerifyError::MalformedToken, $outcome->error);
+        self::assertNull($outcome->nonce());
+    }
+
+    public function testRecordNotFoundNonceIsNull(): void
+    {
+        $verifier = new Verifier(new ArrayStorage());
+        $token = SolutionToken::create($this->validNonce(), 1, 5000, [])->encode();
+
+        $outcome = $verifier->verify($token, Vectors::SECRET);
+
+        self::assertSame(VerifyError::RecordNotFound, $outcome->error);
+        self::assertNull($outcome->nonce());
     }
 }

@@ -15,6 +15,7 @@ use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
 use BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
+use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaExtension as TwigExtension;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
@@ -158,6 +159,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $storageRef = $this->resolveStorage($config['storage'], $this->environment($container), $container);
         $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
 
+        // Audit #22/#23: the risk.redis knobs (wait_replicas /
+        // wait_timeout_ms / ttl_margin_secs) harden the CHALLENGE storage
+        // when it is a KiwiCaptcha\Storage\RedisStorage definition: WAIT for
+        // replica acknowledgment after storing a challenge (async-replication
+        // failover can otherwise lose the record and let a re-solved token
+        // replay against a "fresh" record after failback), and extra
+        // retention on challenge/replay-security state beyond token validity.
+        // Applied ONLY when the knobs are non-default, so deployments on
+        // older cores (or without a RedisStorage definition) are untouched.
+        $this->applyRedisStorageHardening($storageRef, $config['risk']['redis'], $container);
+
         // ── Verified core (kiwicaptcha/kiwicaptcha-php): Config, Issuer, Verifier ──
         $configDef = (new Definition(Config::class, [
             $config['secret_key'],
@@ -185,6 +197,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $storageRef,
         ]))->setPublic(true));
 
+        // Audit #22 (failover-replay Option A): risk.region is baked into
+        // every issued challenge record and enforced at verification — a
+        // result token issued in one region is never redeemable elsewhere.
+        // Set ONLY when configured (the core's $region param is optional),
+        // so deployments on older cores are untouched.
+        if ($config['risk']['region'] !== null) {
+            $container->getDefinition('kiwi_captcha.issuer')
+                ->setArgument('$region', $config['risk']['region']);
+        }
+
         // Verifier: the core now takes the Argon2id admission gate natively
         // (VerificationAdmissionGate — consulted only when the STORED record
         // is Argon2id, only after the cheap checks). Admission is enforced
@@ -210,6 +232,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $config['argon2_max_concurrent_verifications'],
                         $config['argon2_semaphore_namespace'],
                         $config['argon2_lease_ms'],
+                        $config['argon2_max_waiters'],
                     ]))->setPublic(true),
                 );
                 $gateRef = new Reference('kiwi_captcha.argon2_redis_semaphore');
@@ -224,6 +247,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $storageRef,
             $gateRef,
         ]))->setPublic(true));
+        if ($config['risk']['region'] !== null) {
+            $container->getDefinition('kiwi_captcha.verifier')
+                ->setArgument('$region', $config['risk']['region']);
+        }
         $container->setAlias(StorageInterface::class, (string) $storageRef);
 
         // ── Challenge endpoint controller (+ issuance rate limiter) ──
@@ -262,6 +289,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $riskGatewayRef = null;
         $riskCookieRef = null;
         $issuanceCounterRef = null;
+        $outstandingRef = null;
         if ($riskConfig['enabled']) {
             [$policyConfig, $scopeIds, $postSolveScopes, $unknownScopeId] = $this->buildRiskPolicy($riskConfig);
             $riskRedis = $this->resolveRiskRedisClient($riskConfig, $redisRef, $container);
@@ -401,6 +429,25 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ]));
             $issuanceCounterRef = new Reference('kiwi_captcha.risk.issuance_counter');
 
+            // Anti-stockpiling (audit #26): bounded outstanding UNSOLVED
+            // challenges per source + deployment-wide. One atomic Lua checks
+            // BOTH caps before incrementing ({kiwi:<ns>}:outstanding:<hex>
+            // — the source identity is HMAC(canonical ip, RiskKeys::event),
+            // the raw IP never appears in Redis — and
+            // {kiwi:<ns>}:outstanding:global), EXPIRE = challenge lifetime +
+            // risk.redis.ttl_margin_secs. The controller refuses issuance
+            // with the 429 risk-denied response when a cap is reached; a
+            // valid verification decrements the per-source counter.
+            $container->setDefinition('kiwi_captcha.risk.outstanding', new Definition(OutstandingChallenges::class, [
+                $riskRedis,
+                sprintf('{kiwi:%s}:outstanding:', $namespace),
+                new Reference('kiwi_captcha.risk.keys'),
+                $riskConfig['max_outstanding_challenges'],
+                $riskConfig['max_outstanding_challenges_global'],
+                $riskConfig['redis']['ttl_margin_secs'],
+            ]));
+            $outstandingRef = new Reference('kiwi_captcha.risk.outstanding');
+
             // Live resource pressure: remaining Redis admission-semaphore
             // slots (argon_capacity.enabled gate) and real per-second
             // issuance headroom as the remaining FRACTION of the
@@ -469,6 +516,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $riskGatewayRef,
             $riskCookieRef,
             $issuanceCounterRef,
+            $outstandingRef,
+            $config['risk']['challenge_origin_allowlist'],
+            $config['risk']['enforce_fetch_metadata'],
+            $storageRef,
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──
@@ -495,6 +546,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['enforce_telemetry'],
             $riskGatewayRef,
             $riskCookieRef,
+            $outstandingRef,
         ]))->addTag('validator.constraint_validator'));
 
         // ── Twig widget runtime + twig function (embeds the shared widget assets) ──
@@ -580,6 +632,44 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return 'dev';
+    }
+
+    /**
+     * Apply the risk.redis hardening knobs (wait_replicas /
+     * wait_timeout_ms / ttl_margin_secs) to the challenge storage
+     * definition when it is a KiwiCaptcha\Storage\RedisStorage.
+     *
+     * The knobs are only set when they differ from the storage's built-in
+     * defaults (wait_replicas > 0 or ttl_margin_secs > 0): a deployment
+     * that never opts in keeps byte-identical behavior and stays compatible
+     * with cores predating the parameters.
+     *
+     * @param array{wait_replicas: int, wait_timeout_ms: int, ttl_margin_secs: int} $redisConfig
+     */
+    private function applyRedisStorageHardening(Reference $storageRef, array $redisConfig, ContainerBuilder $container): void
+    {
+        $waitReplicas = $redisConfig['wait_replicas'];
+        $ttlMarginSecs = $redisConfig['ttl_margin_secs'];
+        if ($waitReplicas <= 0 && $ttlMarginSecs <= 0) {
+            return;
+        }
+
+        $id = (string) $storageRef;
+        if ($container->hasAlias($id)) {
+            $id = (string) $container->getAlias($id);
+        }
+        if (!$container->hasDefinition($id)) {
+            return;
+        }
+        $definition = $container->getDefinition($id);
+        $class = $definition->getClass();
+        if ($class === null || !is_a($class, RedisStorage::class, true)) {
+            return;
+        }
+
+        $definition->setArgument('$waitReplicas', $waitReplicas);
+        $definition->setArgument('$waitTimeoutMs', $redisConfig['wait_timeout_ms']);
+        $definition->setArgument('$ttlMarginSecs', $ttlMarginSecs);
     }
 
     /**

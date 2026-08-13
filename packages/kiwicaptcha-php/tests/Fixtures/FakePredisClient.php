@@ -9,13 +9,16 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *
  * There is no real Redis in CI. Predis dispatches every command through
  * `__call`, so this fake intercepts exactly the commands RedisStorage sends
- * (get, set, del, eval, expire, exists) and emulates the Lua scripts'
+ * (get, set, del, eval, expire, exists, wait) and emulates the Lua scripts'
  * semantics:
  *
  *  - GETDEL script: return-and-delete (atomic single-use).
+ *  - WAIT: returns 0 (no replicas — a real replica-less Redis returns 0
+ *    without error; only the number of acknowledged replicas is reported).
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
- * assert on the Redis commands issued (Lua usage, EX expiration, etc.).
+ * assert on the Redis commands issued (Lua usage, EX expiration, WAIT
+ * arguments, etc.).
  */
 final class FakePredisClient extends \Predis\Client
 {
@@ -44,8 +47,27 @@ final class FakePredisClient extends \Predis\Client
             'EXPIRE' => 1,
             'EXISTS' => isset($this->store[(string) $arguments[0]]) ? 1 : 0,
             'EVAL' => $this->fakeEval($arguments),
+            // Replica-less fake: WAIT returns 0 acknowledged replicas (real
+            // Redis reports the actual count without erroring).
+            'WAIT' => 0,
             default => null,
         };
+    }
+
+    /**
+     * Predis removed the typed wait() method; RedisStorage's WAIT goes
+     * through executeRaw (the raw-command escape hatch). Record the call
+     * like any other so tests can assert on it, and emulate the replica-less
+     * response (0 acknowledged replicas).
+     *
+     * @param list<mixed> $arguments raw command: [commandID, ...args]
+     */
+    public function executeRaw(array $arguments, &$error = null): mixed
+    {
+        $id = strtoupper((string) ($arguments[0] ?? ''));
+        $this->calls[] = [$id, \array_slice($arguments, 1)];
+
+        return $id === 'WAIT' ? 0 : null;
     }
 
     /** @param list<mixed> $arguments */

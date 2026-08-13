@@ -256,7 +256,7 @@ final class ParityTest extends TestCase
             $challenge->minDurationMs,
         );
         self::assertSame($canonical, base64_decode($payloadB64, true));
-        self::assertSame(Issuer::signPayload($canonical, Vectors::SECRET), $signature);
+        self::assertSame(Issuer::signPayloadV2($canonical, Vectors::SECRET), $signature, 'v2 signatures use the HKDF-derived K_challenge');
 
         // Solve in pure PHP (8-bit difficulty — fast) and check the proof
         // against the stored record's prefix.
@@ -286,13 +286,13 @@ final class ParityTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('issue->solve->verify round trip must pass, got %s', $outcome->code()));
     }
 
-    public function testArgon2WithUnrepresentableParamsFailsClosed(): void
+    public function testArgon2WithBelowCeilingParamsRejectsAsUnsupported(): void
     {
-        // t=1 cannot be expressed by libsodium; the verifier must fail closed
-        // (MalformedRecord) instead of verifying wrong bytes.
-        // NOTE: Config now rejects Argon2id t<3 at construction, so this test
-        // builds the record directly to exercise the verifier's fail-closed
-        // path against a legacy/foreign record that slipped through.
+        // t=1 sits below the absolute process ceiling (MIN_ARGON_TIME=3,
+        // audit #32). The record is SIGNED with the shared secret, so the
+        // verifier authenticates the parameters first and reports
+        // UnsupportedArgon2Params (not MalformedRecord) — no Argon2
+        // computation is attempted.
         $config = new \KiwiCaptcha\Config(
             secretKey: Vectors::SECRET,
             algorithm: PoWAlgorithm::Sha256,
@@ -308,9 +308,9 @@ final class ParityTest extends TestCase
         $issuer = new Issuer($config, $storage, now: static fn (): int => Vectors::NOW);
         $challenge = $issuer->issue('login', '198.51.100.77');
 
-        // Swap in Argon2id t=1 parameters outside the verifier's protocol
-        // profile (validateRecord requires t 3..=6): the verifier must fail
-        // closed (MalformedRecord) instead of verifying wrong bytes.
+        // Swap in Argon2id t=1 parameters below the verifier's absolute
+        // ceiling: the signature is rebuilt consistently over the same v1
+        // payload so the record is authentic and the ceiling check fires.
         $ipHash = Issuer::hashIp('198.51.100.77', Vectors::SECRET);
         $v1Payload = sprintf('%s|%s|%s|%d', $challenge->nonce, 'login', $ipHash, Vectors::NOW);
         $v1Challenge = base64_encode($v1Payload).'.'.Issuer::signPayload($v1Payload, Vectors::SECRET);
@@ -327,7 +327,7 @@ final class ParityTest extends TestCase
             p: 1,
             targetBits: 4,
             salt: $challenge->salt,
-            prefix: $challenge->prefix,
+            prefix: $v1Challenge.'|'.$challenge->salt.'|',
             challenge: $v1Challenge,
             minDurationMs: 0,
             protocolVersion: 1,
@@ -336,11 +336,12 @@ final class ParityTest extends TestCase
         $storage->store($record);
         $verifier = new Verifier($storage, now: static fn (): int => Vectors::NOW, acceptLegacyV1: true);
 
-        // Solve in PHP with the sodium-representable path — impossible for t=1,
-        // so deriveHash must return null => MalformedRecord.
+        // The record is structurally consistent and SIGNED with the shared
+        // secret; the ceiling check (t=1 < MIN_ARGON_TIME=3) rejects it
+        // before any token counter can reach the proof phase.
         $token = \KiwiCaptcha\SolutionToken::create($challenge->nonce, 1, 5000, [])->encode();
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
-        self::assertSame(VerifyError::MalformedRecord, $outcome->error);
+        self::assertSame(VerifyError::UnsupportedArgon2Params, $outcome->error);
     }
 
     public function testLeadingZeroBits(): void
