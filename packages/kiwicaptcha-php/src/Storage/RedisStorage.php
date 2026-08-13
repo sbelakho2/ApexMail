@@ -50,31 +50,43 @@ final class RedisStorage implements AtomicStorageInterface
      */
     private const CONSUME_SCRIPT = <<<'LUA'
 -- kiwicaptcha consume transition (audit #74)
+--
+-- CRITICAL: the record is NEVER re-encoded through cjson — re-encoding
+-- rewrites large integers (issued_at_ns ~ 1.7e15) in scientific notation
+-- and breaks both strict parsers. The state field is spliced into the
+-- RAW stored JSON string (store() always writes the exact
+-- `"state":"pending"` marker).
 local v = redis.call("GET", KEYS[1])
 if not v then
   return nil
 end
-local ok, obj = pcall(cjson.decode, v)
-if not ok then
-  return nil
-end
-local state = obj["state"] or "pending"
 local consumedNow = 0
 local consumedBefore = 0
-if state == "consumed" then
+if string.find(v, '"state":"consumed"', 1, true) then
   consumedBefore = 1
 else
-  obj["state"] = "consumed"
   local ttl = redis.call("TTL", KEYS[1])
   if ttl < 1 then ttl = 1 end
-  redis.call("SET", KEYS[1], cjson.encode(obj), "EX", ttl)
+  local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)
+  if n ~= 1 then
+    return nil
+  end
+  redis.call("SET", KEYS[1], updated, "EX", ttl)
   consumedNow = 1
 end
-local res = obj["consumed_result"]
-if res == cjson.null then
-  res = nil
+local s, e = string.find(v, '"consumed_result":%s*{', 1)
+if s and e then
+  local depth = 1
+  local i = e + 1
+  while depth > 0 and i <= #v do
+    local c = string.sub(v, i, i)
+    if c == '{' then depth = depth + 1
+    elseif c == '}' then depth = depth - 1 end
+    i = i + 1
+  end
+  return {v, consumedNow, consumedBefore, string.sub(v, e, i - 1)}
 end
-return {v, consumedNow, consumedBefore, res ~= nil and cjson.encode(res) or ""}
+return {v, consumedNow, consumedBefore, 'null'}
 LUA;
 
     /**
@@ -85,29 +97,33 @@ LUA;
      */
     private const COMMIT_SCRIPT = <<<'LUA'
 -- kiwicaptcha commit result (audit #74)
+--
+-- Same raw-splice rule as CONSUME_SCRIPT: the stored JSON is never
+-- re-encoded through cjson (large integers would switch to scientific
+-- notation). The `"consumed_result":null` marker written by store() is
+-- replaced in place; the binding is embedded as a JSON string.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return 0
 end
-local ok, obj = pcall(cjson.decode, v)
-if not ok then
+if not string.find(v, '"state":"consumed"', 1, true) then
   return 0
 end
-if (obj["state"] or "pending") ~= "consumed" then
+if not string.find(v, '"consumed_result":null', 1, true) then
   return 0
 end
-local res = obj["consumed_result"]
-if res ~= nil and res ~= cjson.null then
-  return 0
-end
-local binding = ARGV[2]
+local binding = cjson.encode(ARGV[2])
 if ARGV[3] == "0" then
-  binding = cjson.null
+  binding = 'null'
 end
-obj["consumed_result"] = {valid = (ARGV[1] == "1"), binding = binding}
+local encoded = '{"valid":' .. ARGV[1] .. ',"binding":' .. binding .. '}'
+local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. encoded, 1)
+if n ~= 1 then
+  return 0
+end
 local ttl = redis.call("TTL", KEYS[1])
 if ttl < 1 then ttl = 1 end
-redis.call("SET", KEYS[1], cjson.encode(obj), "EX", ttl)
+redis.call("SET", KEYS[1], updated, "EX", ttl)
 return 1
 LUA;
 
@@ -177,12 +193,21 @@ LUA;
         if (\count($parts) < 4) {
             return null;
         }
-        [$json, $consumedNow, $consumedBefore, $resultJson] = $parts;
+        [$json, $consumedNow, $consumedBefore, $resultBinding] = $parts;
         $record = $this->decode((string) $json);
         if ($record === null) {
             return null;
         }
-        $result = ($resultJson === null || $resultJson === '') ? null : $this->decodeResult((string) $resultJson);
+        $result = null;
+        if ((string) $resultBinding !== 'null' && (string) $resultBinding !== '') {
+            $obj = json_decode((string) $resultBinding, true);
+            if (\is_array($obj)) {
+                $result = new ConsumedResult(
+                    (int) ($obj['valid'] ?? 0) === 1,
+                    \is_string($obj['binding'] ?? null) ? $obj['binding'] : null,
+                );
+            }
+        }
 
         return new ConsumedRecord($record, (bool) $consumedNow, (bool) $consumedBefore, $result);
     }

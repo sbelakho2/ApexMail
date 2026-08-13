@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Storage\RedisStorage;
@@ -496,4 +497,49 @@ final class RedisStorageTest extends TestCase
         $second = $verifier->verify($good, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertSame(VerifyError::InsufficientWork, $second->error, 'the wrong-counter verify must have consumed the record and committed the invalid outcome');
     }
+
+    public function testRealRedisConsumedStateReplayRoundTrip(): void
+    {
+        $url = getenv('RISK_REDIS_URL');
+        if ($url === false || $url === '') {
+            self::markTestSkipped('RISK_REDIS_URL not set; cannot test the real-Redis consumed-state replay');
+        }
+        $client = new \Predis\Client($url);
+        $storage = new RedisStorage($client, 'replay-test-'.bin2hex(random_bytes(4)).'-');
+        $issuer = new Issuer(new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7', 'txn-A');
+
+        $counter = 0;
+        $saltBytes = base64_decode($challenge->salt, true);
+        do {
+            $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+            ++$counter;
+        } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        --$counter;
+        $token = \KiwiCaptcha\SolutionToken::create($challenge->nonce, $counter, 5000, ['wd' => false])->encode();
+        usleep(($challenge->minDurationMs + 10) * 1000);
+
+        $preConsume = $storage->find($challenge->nonce);
+        self::assertNotNull($preConsume);
+        $expectedIssuedAtNs = $preConsume->issuedAtNs;
+
+        $verifier = new Verifier($storage);
+        $first = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7');
+        self::assertTrue($first->isOk(), 'the first verification must succeed (got '.$first->code().')');
+
+        // The consumed record persists with its exact integers intact (the
+        // Lua must NEVER re-encode the record — audit #74 regression: cjson
+        // rewrote issued_at_ns in scientific notation).
+        $stored = $storage->find($challenge->nonce);
+        self::assertNotNull($stored, 'the consumed record must persist until its TTL');
+        self::assertSame($expectedIssuedAtNs, $stored->issuedAtNs, 'issued_at_ns must survive the consume transition byte-exactly');
+
+        // Deterministic retry: same context returns the SAME stored result
+        // without re-deriving.
+        $replay = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7');
+        self::assertTrue($replay->isOk(), 'the replay must return the stored result (got '.$replay->code().')');
+        self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result');
+        self::assertSame('txn-A', $replay->requestBinding, 'the stored binding must be exposed');
+    }
+
 }
