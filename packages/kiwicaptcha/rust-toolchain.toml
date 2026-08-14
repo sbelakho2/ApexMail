@@ -4,3 +4,4 @@
 # Bump deliberately with each release.
 channel = "1.96.0"
 components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
