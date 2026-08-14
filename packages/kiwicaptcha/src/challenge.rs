@@ -169,12 +169,14 @@ pub struct ChallengeRecord {
     /// issuance timestamp — `SystemTime::now().duration_since(UNIX_EPOCH)
     /// .as_micros()`. This is used to enforce the minimum-duration check with
     /// a SERVER-measured elapsed time — the client-reported duration is
-    /// forgeable and is only used as telemetry. Never signed and never sent
-    /// to the client; 0 means the field is unavailable (legacy records fall
-    /// back to the client-duration check). The name keeps the historical
-    /// `_ns` suffix for backward compatibility with stored records; the UNIT
-    /// is microseconds and is shared with PHP (`ChallengeRecord` JSON
-    /// interchange).
+    /// forgeable and is only used as telemetry. It is server-side state only
+    /// (never signed into the canonical payload, never sent to the client);
+    /// a ZERO value is REJECTED as malformed (`MissingIssuedAtNs`) — there is
+    /// no fallback to the attacker-controlled client duration (audit round
+    /// 17: the legacy fallback wording was removed; the verifier is strict).
+    /// The name keeps the historical `_ns` suffix for backward compatibility
+    /// with stored records; the UNIT is microseconds and is shared with PHP
+    /// (`ChallengeRecord` JSON interchange).
     #[serde(default)]
     pub issued_at_ns: u64,
     /// Number of verification attempts already made against this challenge

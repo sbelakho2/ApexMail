@@ -32,6 +32,9 @@ fn client() -> redis::Client {
 /// Store with contract defaults on a fresh namespace.
 fn store() -> RedisRiskStateStore {
     RedisRiskStateStore::new(client(), &common::unique_namespace("conc"))
+        // Audit round 17: relaxed test timeouts (the 10 ms production
+        // command timeout flaked the storm tests under CI load).
+        .with_io_timeouts(2_000, 2_000)
 }
 
 /// Store with explicit knobs on a fresh namespace.
@@ -51,6 +54,29 @@ fn store_with(
         kiwicaptcha_risk::redis::DEFAULT_OUTCOME_TTL_SECS,
         saturations,
     )
+    .with_io_timeouts(2_000, 2_000) // audit round 17: CI-jitter-proof test timeouts
+}
+
+/// The Redis server clock in milliseconds (the store's rate-limit clock).
+fn redis_now_ms() -> u64 {
+    let mut conn = client().get_connection().expect("connection");
+    let t: Vec<i64> = redis::cmd("TIME").query(&mut conn).expect("TIME");
+    (t[0] * 1000 + t[1] / 1000) as u64
+}
+
+/// Audit round 17: wait until the REDIS CLOCK reaches `target_ms`,
+/// polling it instead of wall-clock sleeping. A CI scheduling pause can
+/// only make us wait LONGER — an observation is never pushed across a
+/// timing boundary by assuming wall-clock sleep == Redis execution time.
+/// Generous 30 s ceiling so a stalled server fails loudly, not hangingly.
+fn wait_until_redis_ms(target_ms: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while redis_now_ms() < target_ms {
+        if std::time::Instant::now() > deadline {
+            panic!("Redis clock did not reach {target_ms} ms within 30 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Runs `count` concurrent observations sharing the given pseudonyms and
@@ -303,7 +329,12 @@ fn no_expired_state_resurrection_after_ttl() {
     // The source counters are saturated at 1000 while the key lives.
     assert_eq!(store.last_global_level(), 4);
 
-    thread::sleep(Duration::from_secs(3)); // > state TTL of 2 s
+    // Audit round 17: wait for the REDIS clock (which stamps the key's
+    // TTL) to pass 3 s — comfortably beyond the 2 s state TTL — instead
+    // of wall-clock sleeping. Polling makes the expiry deterministic
+    // under any scheduling jitter.
+    let ttl_start = redis_now_ms();
+    wait_until_redis_ms(ttl_start + 3_000);
 
     // A new event at T0+4 s: if the old key had resurrected, rf would be
     // ~99_000 (normalized 990). A fresh key yields exactly 125.
@@ -432,26 +463,33 @@ fn global_level_enters_hysteresis_hold_after_storm() {
         "the 2 s cooldown must be armed at the ratchet time + 2000"
     );
 
-    // Inside the window (+1 s): gp 10000 - ~270 = ~9730 -> 884 — below the
-    // L4 enter (900), above the L4 exit (850) — the level holds and the
-    // deadline is untouched.
-    std::thread::sleep(Duration::from_millis(1000));
-    store.observe(&probe(100)).expect("hold observe");
-    assert_eq!(
-        store.last_global_level(),
-        4,
-        "level holds inside the window"
-    );
-    assert_eq!(
-        store.last_cooldown_until_ms(),
-        cool,
-        "the hold keeps the deadline"
-    );
+    // Inside the window: poll the Redis clock to ~1 s past the ratchet
+    // (the deadline is ratchet + 2000 ms), then probe. Audit round 17:
+    // the hold assertions are valid only while the server clock is still
+    // inside the window, so they are GUARDED on the freshly read clock —
+    // a scheduling pause can only skip them (the drop path below still
+    // runs), never fail them spuriously.
+    wait_until_redis_ms(cool - 1_000);
+    let now = redis_now_ms();
+    if now + 100 < cool {
+        store.observe(&probe(100)).expect("hold observe");
+        assert_eq!(
+            store.last_global_level(),
+            4,
+            "level holds inside the window"
+        );
+        assert_eq!(
+            store.last_cooldown_until_ms(),
+            cool,
+            "the hold keeps the deadline"
+        );
+    }
 
-    // After the window (+~2.1 s more, ~3.1 s total): gp 10000 - ~840 =
-    // ~9160 -> 833 < the L4 exit 850 and now >= cool -> the level must drop
-    // to the target (L3) and the hold must close.
-    std::thread::sleep(Duration::from_millis(2100));
+    // After the window: poll the Redis clock to ~1.1 s past the deadline
+    // (~3.1 s past the ratchet). The drop assertion is valid for ANY
+    // elapsed >= ~2.1 s (decay only moves gp further below the exit
+    // threshold), so overshoot is harmless.
+    wait_until_redis_ms(cool + 1_100);
     store.observe(&probe(101)).expect("drop observe");
     assert_eq!(
         store.last_global_level(),

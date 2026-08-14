@@ -297,7 +297,7 @@ pub enum VerifyError {
     /// the challenge may or may not have been consumed on the server. The
     /// consumer MUST NOT retry the consume automatically (the record may
     /// already be burned); treat the token as unknown instead of replaying
-    /// it. See the GETDEL no-retry rule in `redis_verify`.
+    /// it. See the consume no-retry rule in `redis_verify`.
     #[error("challenge consumption is indeterminate (storage I/O failure) — the challenge may or may not have been consumed; do not blindly retry this token")]
     ConsumeIndeterminate,
     #[error("verification capacity exceeded — try again shortly")]

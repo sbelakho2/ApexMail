@@ -76,6 +76,8 @@ pub struct RedisRiskStateStore {
     outcome_confirm_script: redis_crate::Script,
     outcome_correct_script: redis_crate::Script,
     pool: ConnectionPool,
+    connection_timeout_ms: u64,
+    command_timeout_ms: u64,
     last_global_level: AtomicU8,
     last_cooldown_until_ms: AtomicU64,
 }
@@ -84,13 +86,21 @@ pub struct RedisRiskStateStore {
 struct ConnectionPool {
     slots: Vec<Mutex<Option<redis_crate::Connection>>>,
     next: AtomicUsize,
+    connection_timeout_ms: u64,
+    command_timeout_ms: u64,
 }
 
 impl ConnectionPool {
-    fn new(pool_size: usize) -> ConnectionPool {
+    fn new(
+        pool_size: usize,
+        connection_timeout_ms: u64,
+        command_timeout_ms: u64,
+    ) -> ConnectionPool {
         assert!(pool_size >= 1, "pool_size must be >= 1");
         ConnectionPool {
             slots: (0..pool_size).map(|_| Mutex::new(None)).collect(),
+            connection_timeout_ms,
+            command_timeout_ms,
             next: AtomicUsize::new(0),
         }
     }
@@ -105,18 +115,12 @@ impl ConnectionPool {
         let mut guard = self.slots[idx].lock().unwrap_or_else(|p| p.into_inner());
         if guard.is_none() {
             let conn = client
-                .get_connection_with_timeout(Duration::from_millis(
-                    RedisRiskStateStore::CONNECTION_TIMEOUT_MS,
-                ))
+                .get_connection_with_timeout(Duration::from_millis(self.connection_timeout_ms))
                 .map_err(map_redis_error)?;
-            conn.set_read_timeout(Some(Duration::from_millis(
-                RedisRiskStateStore::COMMAND_TIMEOUT_MS,
-            )))
-            .map_err(map_redis_error)?;
-            conn.set_write_timeout(Some(Duration::from_millis(
-                RedisRiskStateStore::COMMAND_TIMEOUT_MS,
-            )))
-            .map_err(map_redis_error)?;
+            conn.set_read_timeout(Some(Duration::from_millis(self.command_timeout_ms)))
+                .map_err(map_redis_error)?;
+            conn.set_write_timeout(Some(Duration::from_millis(self.command_timeout_ms)))
+                .map_err(map_redis_error)?;
             *guard = Some(conn);
         }
         Ok(guard)
@@ -154,7 +158,13 @@ impl RedisRiskStateStore {
             outcome_register_script: redis_crate::Script::new(OUTCOME_REGISTER_LUA),
             outcome_confirm_script: redis_crate::Script::new(OUTCOME_CONFIRM_LUA),
             outcome_correct_script: redis_crate::Script::new(OUTCOME_CORRECT_LUA),
-            pool: ConnectionPool::new(DEFAULT_POOL_SIZE),
+            pool: ConnectionPool::new(
+                DEFAULT_POOL_SIZE,
+                Self::CONNECTION_TIMEOUT_MS,
+                Self::COMMAND_TIMEOUT_MS,
+            ),
+            connection_timeout_ms: Self::CONNECTION_TIMEOUT_MS,
+            command_timeout_ms: Self::COMMAND_TIMEOUT_MS,
             last_global_level: AtomicU8::new(0),
             last_cooldown_until_ms: AtomicU64::new(0),
         }
@@ -189,6 +199,23 @@ impl RedisRiskStateStore {
         store
     }
 
+    /// Override the connection/command timeouts (audit round 17): the
+    /// production fail-fast consts (5 ms / 10 ms) stay the defaults; tests
+    /// exercising LONG real-time sequences (storms, TTL expiry) use
+    /// generous timeouts so CI scheduling jitter can never produce a
+    /// spurious `Timeout` — the tight-timeout behavior is a production
+    /// tuning knob, not a test oracle.
+    pub fn with_io_timeouts(mut self, connection_timeout_ms: u64, command_timeout_ms: u64) -> Self {
+        self.connection_timeout_ms = connection_timeout_ms;
+        self.command_timeout_ms = command_timeout_ms;
+        self.pool = ConnectionPool::new(
+            self.pool.slots.len(),
+            connection_timeout_ms,
+            command_timeout_ms,
+        );
+        self
+    }
+
     /// Builds a store with an explicit connection pool size (>= 1).
     ///
     /// # Panics
@@ -201,7 +228,11 @@ impl RedisRiskStateStore {
         pool_size: usize,
     ) -> RedisRiskStateStore {
         let mut store = RedisRiskStateStore::new(client, namespace);
-        store.pool = ConnectionPool::new(pool_size);
+        store.pool = ConnectionPool::new(
+            pool_size,
+            store.connection_timeout_ms,
+            store.command_timeout_ms,
+        );
         store
     }
 
@@ -549,6 +580,11 @@ mod tests {
             DEFAULT_OUTCOME_TTL_SECS,
             DEFAULT_SATURATIONS,
         )
+        // Audit round 17: relaxed test timeouts — the production 10 ms
+        // command timeout is a fail-fast tuning knob, not a test oracle;
+        // under CI scheduling load it produced spurious Timeout flakes in
+        // the sequential-storm tests.
+        .with_io_timeouts(2_000, 2_000)
     }
 
     fn epoch_ids(source: &str) -> (i64, String, String, String) {

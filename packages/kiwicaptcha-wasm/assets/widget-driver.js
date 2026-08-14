@@ -32,6 +32,8 @@
   // escaped for template-literal semantics. The worker must not contain a
   // closing-script-tag sequence (the driver is inlined into pages by the
   // renderers); the generator rejects one.
+// KIWI_WORKER_SRC_BEGIN — generated section (tools/embed-worker): the whole span
+// from this marker to the KIWI_WORKER_SRC_END marker is machine-written.
   var KIWI_WORKER_SRC = `/* KiwiCaptcha worker solver — standalone same-origin asset.
  *
  * Served next to kiwicaptcha-wasm.js and imported via importScripts, OR
@@ -328,6 +330,8 @@
   post({ type: "ready", buildId: KIWI_SOLVER_BUILD_ID });
 })();
 `;
+// KIWI_WORKER_SRC_END — generated section (tools/embed-worker): the whole span
+// from the KIWI_WORKER_SRC_BEGIN marker to this marker is machine-written.
 
   // ── Optimized yielding ──────────────────────────────────────────────
   var channel = new MessageChannel();

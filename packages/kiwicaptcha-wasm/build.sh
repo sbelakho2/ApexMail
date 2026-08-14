@@ -109,18 +109,31 @@ verify_wasm_opt() {
       echo "wasm-opt executable SHA-256 mismatch (cached binary replaced or corrupted)" >&2
       return 1
     fi
-  elif [[ "$WASM_OPT_STRICT" == "1" && "$WASM_OPT_ENV_SUPPLIED" == "1" ]]; then
-    # Audit round 16: an externally supplied binary in STRICT mode must be
-    # authenticated by an explicit trusted SHA — version text alone can be
-    # spoofed by an altered executable.
-    if [[ -z "${WASM_OPT_BIN_SHA256:-}" ]]; then
-      echo "WASM_OPT_STRICT=1 with an env-supplied WASM_OPT_BIN requires WASM_OPT_BIN_SHA256 (the trusted executable SHA-256)" >&2
-      return 1
-    fi
-    local actual
-    actual="$(sha256_of "$bin")"
-    if [[ "$actual" != "$WASM_OPT_BIN_SHA256" ]]; then
-      echo "wasm-opt executable SHA-256 mismatch (expected \$WASM_OPT_BIN_SHA256)" >&2
+  elif [[ "${WASM_OPT_STRICT:-0}" == "1" ]]; then
+    # Audit rounds 16-17: in STRICT mode there is NO version-text-only
+    # exception — the trusted executable hash is mandatory for EVERY
+    # binary, whether env-supplied or cached.
+    if [[ "$WASM_OPT_ENV_SUPPLIED" == "1" ]]; then
+      # An externally supplied binary must be authenticated by an
+      # EXPLICIT trusted SHA (WASM_OPT_BIN_SHA256) — version text alone
+      # can be spoofed by an altered executable.
+      if [[ -z "${WASM_OPT_BIN_SHA256:-}" ]]; then
+        echo "WASM_OPT_STRICT=1 with an env-supplied WASM_OPT_BIN requires WASM_OPT_BIN_SHA256 (the trusted executable SHA-256)" >&2
+        return 1
+      fi
+      local actual
+      actual="$(sha256_of "$bin")"
+      if [[ "$actual" != "$WASM_OPT_BIN_SHA256" ]]; then
+        echo "wasm-opt executable SHA-256 mismatch (expected \$WASM_OPT_BIN_SHA256)" >&2
+        return 1
+      fi
+    else
+      # A cached/default binary without its trusted-hash record: delete it
+      # so the next run redownloads from the pinned verified archive (or
+      # fails) — an arbitrary replaced executable can never satisfy
+      # "strict".
+      echo "wasm-opt strict: cached executable lacks its trusted SHA-256 record — removing it for redownload" >&2
+      rm -f "$bin"
       return 1
     fi
   fi

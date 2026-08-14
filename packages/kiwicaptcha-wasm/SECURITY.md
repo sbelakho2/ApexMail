@@ -68,12 +68,15 @@ Notes:
 - Never publish a mutable `latest.js`/`latest.css` alias: a compromised or
   replaced "latest" file is indistinguishable from a release to SRI pinning
   that follows the URL.
-- Content-addressed naming is the strongest form: the solver wasm is
-  published as `argon-solver.<hash>.wasm` (e.g.
-  `argon-solver.8f3a...b1c.wasm`), where `<hash>` is a sha256 of the artifact.
-  A URL change then *proves* a content change, and SRI on top of it is
-  belt-and-braces. Apply the same `<name>.<hash>.<ext>` pattern to the
-  `kiwicaptcha-wasm.js` glue if your CDN supports it.
+- Content-addressed naming is the strongest form: the runtime wasm is
+  EMBEDDED inside `kiwicaptcha-wasm.js` (the release pipeline publishes
+  the immutable tag-bound JS/CSS artifacts + SHA256SUMS + SRI + provenance
+  — there is currently no standalone raw `.wasm` artifact on the release).
+  Integrators who need the raw wasm may extract it once and serve it under
+  a content-addressed name such as `argon-solver.<sha256>.wasm` at their
+  CDN layer, or apply the `<name>.<hash>.<ext>` pattern to the
+  `kiwicaptcha-wasm.js` glue directly — a URL change then *proves* a
+  content change, and SRI on top of it is belt-and-braces.
 - The stable asset names in this package (`assets/kiwicaptcha-wasm.js`,
   `assets/kiwi-worker.js`, `assets/widget-driver.js`) stay unchanged between
   builds; the bundle's own asset versioning content-addresses them. That is
