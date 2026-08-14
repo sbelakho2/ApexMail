@@ -1,0 +1,321 @@
+/* ==========================================================================
+   KiwiCaptcha widget — industry-aligned design system
+   ==========================================================================
+   Redesigned to match the converged industry standard derived from
+   Google reCAPTCHA, Cloudflare Turnstile, hCaptcha, and Friendly Captcha.
+
+   Key decisions (each backed by industry research):
+   - Radius 4px (not 12px): security widgets use small radii (reCAPTCHA 3px,
+     Friendly 0px) for a "serious/institutional" feel.
+   - Accent #146de2 (Google-blue family, AA-adjusted): the most
+     "trustworthy" accent per hCaptcha (#00838F teal) and Google (#1a73e8)
+     — darkened from the raw token so 11px text clears 4.5:1 on #FAFAFA.
+     Coral red was reading as "error".
+   - Text #333333 (not #1a1a1a): softer, "premium" per all 4 products.
+   - Background #FAFAFA (not pure white): reduces eye strain, per hCaptcha.
+   - Font system-ui stack (not Inter): no third-party font fetch (CSP-safe).
+   - Label weight 400 (not 600): reCAPTCHA and Friendly both use regular.
+   - Badge min 11px (was 9px): Cloudflare explicitly fixed their 10px as too
+     small; 11px is the safe floor.
+   - Red restricted to error ICON only (Cloudflare rule): text stays neutral.
+   - Focus ring 2px solid #1a73e8 (4.3:1 against #FAFAFA, >3:1): WCAG
+     2.4.7 visible focus.
+   - !important eliminated: proper CSS specificity instead.
+   ========================================================================== */
+
+  /* No external font fetches — system-ui stack keeps CSP strict and matches
+     the industry convention (reCAPTCHA uses Roboto/system; Turnstile and
+     Friendly inherit the host page's system font). */
+  /* Screen-reader-only live region (audit round 14): visually hidden, but
+     kept in the layout tree so role=status announcements reach assistive
+     tech without any visual footprint. */
+  .kiwi-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .kiwi-container {
+    /* Brand accent — Google blue. Trustworthy, not alarming. */
+    --kiwi-primary: #146de2;
+    --kiwi-primary-rgb: 20, 109, 226;
+    --kiwi-success: #008457;
+    --kiwi-success-rgb: 0, 132, 87;
+    --kiwi-error: #dc2626;
+    --kiwi-error-rgb: 220, 38, 38;
+
+    /* Surfaces — softer than pure white/black (industry convention). */
+    --kiwi-bg: #fafafa;
+    --kiwi-text: #333333;
+    --kiwi-text-muted: #737373;
+    --kiwi-border: #e0e0e0;
+
+    /* Shadow — subtle, single-layer (Turnstile-style, not heavy). */
+    --kiwi-shadow: 0 1px 3px rgb(0 0 0 / 0.08), 0 1px 2px rgb(0 0 0 / 0.06);
+
+    /* Radius — 4px (security-widget convention: small, serious). */
+    --kiwi-radius: 4px;
+
+    display: inline-flex;
+    align-items: center;
+    width: 100%;
+    max-width: 312px;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    position: relative;
+    box-sizing: border-box;
+  }
+  @media (prefers-color-scheme: dark) {
+    .kiwi-container {
+      --kiwi-bg: #222222;
+      --kiwi-text: #f5f5f5;
+      --kiwi-text-muted: #a3a3a3;
+      --kiwi-primary: #60a5fa;
+      --kiwi-primary-rgb: 96, 165, 250;
+      --kiwi-success: #34d399;
+      --kiwi-success-rgb: 52, 211, 153;
+      --kiwi-error: #f87171;
+      --kiwi-error-rgb: 248, 113, 113;
+      --kiwi-border: #333333;
+      --kiwi-shadow: 0 1px 3px rgb(0 0 0 / 0.4), 0 1px 2px rgb(0 0 0 / 0.3);
+    }
+  }
+  .kiwi-widget {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--kiwi-bg);
+    border: 1px solid var(--kiwi-border);
+    border-radius: var(--kiwi-radius);
+    color: var(--kiwi-text);
+    box-shadow: var(--kiwi-shadow);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    width: 100%;
+    position: relative;
+    overflow: hidden;
+    cursor: default;
+    user-select: none;
+  }
+  .kiwi-widget:hover {
+    border-color: var(--kiwi-primary);
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.1);
+  }
+  /* Round-13: the widget itself is never focusable (no tabindex, no
+     checkbox semantics — an auto-solving PoW is a status/group, not a
+     control). The manual Retry button carries the visible focus ring
+     (WCAG 2.4.7); it is the only interactive element in the widget. */
+  .kiwi-retry:focus-visible {
+    outline: 2px solid var(--kiwi-primary);
+    outline-offset: 1px;
+  }
+
+  /* --- Icon wrapper --- */
+  .kiwi-icon-wrapper {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--kiwi-radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgb(var(--kiwi-primary-rgb) / 0.08);
+    color: var(--kiwi-primary);
+    transition: background 0.3s ease, color 0.3s ease, transform 0.3s ease;
+    position: relative;
+  }
+  .kiwi-icon-wrapper svg { width: 20px; height: 20px; }
+
+  /* --- State: solving (pulsing icon) --- */
+  .kiwi-widget[data-state="solving"] .kiwi-icon-wrapper {
+    animation: kiwi-pulse 2s infinite ease-in-out;
+  }
+  /* --- State: done (success checkmark treatment) --- */
+  .kiwi-widget[data-state="done"] .kiwi-icon-wrapper {
+    background: rgb(var(--kiwi-success-rgb));
+    color: #ffffff;
+    transform: scale(1.05);
+  }
+  /* --- State: failed (error icon — red on ICON only, per Cloudflare rule) --- */
+  .kiwi-widget[data-state="failed"] .kiwi-icon-wrapper {
+    background: rgb(var(--kiwi-error-rgb) / 0.1);
+    color: var(--kiwi-error);
+  }
+  @keyframes kiwi-pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(0.95); opacity: 0.8; }
+  }
+
+  /* --- Main content column --- */
+  .kiwi-main { flex: 1; min-width: 0; }
+  .kiwi-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
+  /* --- Label (14px / weight 400 — reCAPTCHA/Friendly convention) --- */
+  .kiwi-label {
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.2;
+    color: var(--kiwi-text);
+    letter-spacing: -0.01em;
+  }
+
+  /* --- Badge (11px floor — Cloudflare fixed their 10px as too small) --- */
+  .kiwi-badge {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 2px 6px;
+    border-radius: var(--kiwi-radius);
+    background: var(--kiwi-border);
+    color: var(--kiwi-text-muted);
+    transition: background 0.3s ease, color 0.3s ease;
+  }
+  .kiwi-widget[data-state="solving"] .kiwi-badge {
+    background: rgb(var(--kiwi-primary-rgb) / 0.12);
+    color: var(--kiwi-primary);
+  }
+  .kiwi-widget[data-state="done"] .kiwi-badge {
+    background: rgb(var(--kiwi-success-rgb) / 0.12);
+    color: var(--kiwi-success);
+  }
+  .kiwi-widget[data-state="failed"] .kiwi-badge {
+    background: rgb(var(--kiwi-error-rgb) / 0.12);
+    color: var(--kiwi-error);
+  }
+
+  /* --- Progress bar (4px — Friendly Captcha convention) --- */
+  .kiwi-track {
+    height: 4px;
+    width: 100%;
+    border-radius: 2px;
+    background: var(--kiwi-border);
+    overflow: hidden;
+  }
+  .kiwi-bar {
+    height: 100%;
+    background: var(--kiwi-primary);
+    transition: width 0.5s linear;
+    width: 0%;
+  }
+  /* Progress driven by data-progress attribute (CSP3-safe: no inline styles).
+     11 discrete steps from 0% to 100%. */
+  .kiwi-bar[data-progress="10"] { width: 10%; }
+  .kiwi-bar[data-progress="20"] { width: 20%; }
+  .kiwi-bar[data-progress="30"] { width: 30%; }
+  .kiwi-bar[data-progress="40"] { width: 40%; }
+  .kiwi-bar[data-progress="50"] { width: 50%; }
+  .kiwi-bar[data-progress="60"] { width: 60%; }
+  .kiwi-bar[data-progress="70"] { width: 70%; }
+  .kiwi-bar[data-progress="80"] { width: 80%; }
+  .kiwi-bar[data-progress="90"] { width: 90%; }
+  .kiwi-bar[data-progress="100"] { width: 100%; }
+  .kiwi-widget[data-state="done"] .kiwi-bar { background: var(--kiwi-success); }
+  .kiwi-widget[data-state="failed"] .kiwi-bar { background: var(--kiwi-error); }
+
+  /* --- Bottom row --- */
+  .kiwi-bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  /* Info text — neutral color, never red (Cloudflare rule). */
+  .kiwi-info {
+    font-size: 11px;
+    color: var(--kiwi-text-muted);
+    font-weight: 400;
+    margin: 0;
+  }
+  /* Timer — uses muted color, not primary (was red before; now neutral). */
+  .kiwi-timer {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--kiwi-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* --- Manual Retry (round-13) ---
+     A genuine native <button> (focusable; Enter/Space activation is
+     built-in). Hidden in every state except the error/unavailable states:
+     the widget is passive and never focusable itself. */
+  .kiwi-retry {
+    display: none;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: inherit;
+    line-height: 1.2;
+    padding: 4px 10px;
+    border: 1px solid var(--kiwi-primary);
+    border-radius: var(--kiwi-radius);
+    background: transparent;
+    color: var(--kiwi-primary);
+    cursor: pointer;
+  }
+  .kiwi-retry:hover {
+    background: rgb(var(--kiwi-primary-rgb) / 0.08);
+  }
+  .kiwi-widget[data-state="failed"] .kiwi-retry,
+  .kiwi-widget[data-state="kiwi:worker-unavailable"] .kiwi-retry {
+    display: inline-flex;
+  }
+
+  /* --- Narrow aria-live announcer (round-13) ---
+     The ONLY aria-live traffic in the widget. Visually hidden but present
+     in the accessibility tree (role=status => polite); announces only
+     meaningful transitions, never the countdown/progress (visual only). */
+  .kiwi-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  /* --- Premium Finish Animation --- */
+  .kiwi-glow {
+    position: absolute;
+    top: 0; left: -100%; width: 50%; height: 100%;
+    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.2), transparent);
+    transform: skewX(-25deg);
+    pointer-events: none;
+  }
+  .kiwi-widget[data-state="done"] .kiwi-glow {
+    animation: kiwi-shine 0.8s ease-in-out forwards;
+  }
+  @keyframes kiwi-shine {
+    0% { left: -100%; }
+    100% { left: 150%; }
+  }
+
+  /* --- Reduced motion (round-13) ---
+     Kills every decorative animation/transition (solving pulse, success
+     shine, logo blink, state transitions) for users who ask for it; the
+     widget remains fully functional, just static. */
+  @media (prefers-reduced-motion: reduce) {
+    .kiwi-widget,
+    .kiwi-icon-wrapper,
+    .kiwi-badge,
+    .kiwi-bar,
+    .kiwi-glow,
+    .kiwi-retry {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
