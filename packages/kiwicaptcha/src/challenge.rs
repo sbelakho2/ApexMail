@@ -188,11 +188,11 @@ pub struct ChallengeRecord {
     /// pre-v2 records keep verifying during the migration window (max TTL).
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u8,
-    /// Region the challenge was issued for (server-side deployment metadata,
-    /// like `issued_at_ns` — never signed into the canonical payload, and
-    /// recoverable from the client-visible challenge because the v2
-    /// canonical payload (which INCLUDES the region) is what the signature
-    /// covers). The
+    /// Region the challenge was issued for. It is an AUTHENTICATED field of
+    /// the v2 canonical payload (`...|min_duration_ms|region|policy_version|
+    /// ...` is the signed input), so it is recoverable from the
+    /// client-visible challenge (base64 of the canonical payload) — it is
+    /// simply not separately exposed as a top-level response property. The
     /// JSON key is ALWAYS present for v2 records — `null` when the challenge
     /// is region-unbound — for byte parity with the PHP `toArray()` key set
     /// (18 keys). Absent in legacy stored records: `#[serde(default)]`.
@@ -303,10 +303,10 @@ pub struct ChallengeConfig {
     /// Region the issued challenge is bound to (e.g. "eu", "us-east-1").
     /// Carried on the record's `region` key (always present in the record
     /// JSON, `null` when `None`) and enforced by a verifier configured with
-    /// an expected region ([`VerifyError::WrongRegion`]). Deployment
-    /// metadata — never sent to the client, but signed into the record as a
-    /// canonical v2 parameter (every immutable v2 field is authenticated;
-    /// region is one of them).
+    /// an expected region ([`VerifyError::WrongRegion`]). An authenticated
+    /// canonical v2 parameter: signed into the challenge and therefore
+    /// client-decodable from its canonical payload — but never separately
+    /// exposed as a top-level response property.
     pub region: Option<String>,
     /// Issuer identity stamped into every issued challenge (audit #67): a
     /// stable deployment string (e.g. "auth-gateway") signed as the v2

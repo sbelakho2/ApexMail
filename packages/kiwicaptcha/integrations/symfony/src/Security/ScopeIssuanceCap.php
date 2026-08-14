@@ -11,22 +11,23 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  * Key: `{kiwi:<ns>}:issuance:<scopeIdentity>:<minute>` — one independent
  * window per scope per minute.
  *
- * SCOPE IDENTITY (audit round 15 — the trust boundary): a security quota
- * must operate over a SERVER-OWNED identity, not an attacker-chosen
- * dimension. The preferred key component is the risk policy's canonical
- * server-side scope id (the configured `risk.scopes.<name>.id` — a stable
- * u32 that two scopes can never share, or the single shared synthetic id
- * the extension reserves for unknown scopes in 'minimum' mode). The
- * cardinality of the quota namespace is then bounded by the server-owned
- * configuration. For scopes that carry NO canonical id (risk disabled /
- * unresolvable), the key falls back to `hex(hmac_sha256(scope, K_scope))`
- * — 64 hex chars of keyed pseudonym. THAT FALLBACK ONLY KEEPS
- * ATTACKER-CONTROLLED BYTES OUT OF THE KEY NAME (audit #112); it does NOT
- * bound cardinality — every unique scope still mints a unique counter —
- * so in fallback mode the cap is per-name soft limiting, never an
- * independent security bound (the per-IP/global limits carry that role;
- * operators who need a hard per-scope bound configure `risk.allowed_scopes`
- * so the quota namespace is the server-owned allowlist).
+ * SCOPE IDENTITY (audit rounds 15–16 — the trust boundary): a security
+ * quota must operate over a SERVER-OWNED identity, not an attacker-chosen
+ * dimension. The key component is the risk policy's canonical server-side
+ * scope id: the configured `risk.scopes.<name>.id` (a stable u32 that two
+ * scopes can never share), the shared synthetic id the extension reserves
+ * for unknown scopes in 'minimum' mode, or — for ANY scope the server
+ * cannot resolve in ANY mode, including risk-disabled deployments —
+ * {@see self::UNKNOWN_QUOTA_ID}, one reserved bucket shared by every
+ * unresolved name. The cardinality of the quota namespace is therefore
+ * ALWAYS bounded by the server-owned configuration; an attacker can never
+ * mint fresh quota windows by inventing scope names. The raw scope string
+ * is never a Redis key component (audit #112): the controller always
+ * passes a server-owned id; the HMAC fallback in {@see self::scopeKey()}
+ * exists only for defensive/direct construction and only keeps
+ * attacker-controlled BYTES out of the key name — it does NOT bound
+ * cardinality (per-name soft limiting, never an independent security
+ * bound).
  *
  * The HMAC key K_scope is derived from the bundle's risk master
  * (master_secret, falling back to the captcha secret_key) with
@@ -54,6 +55,16 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  */
 final class ScopeIssuanceCap
 {
+    /**
+     * The RESERVED quota identity for scopes the server cannot resolve to
+     * a configured policy scope id (audit round 16): unknown scopes in ANY
+     * risk mode — including risk-disabled deployments — share this one
+     * bucket, so an attacker can never mint fresh per-scope quota windows
+     * by inventing scope names. Configured scope ids are 1..=4294967295
+     * (risk-v1), so 0 never collides with a real policy id.
+     */
+    public const UNKNOWN_QUOTA_ID = 0;
+
     /**
      * HKDF info for the scope-rate HMAC key (audit #112): the key is
      * derived from the bundle's risk master with this purpose tag, so the
@@ -130,17 +141,19 @@ LUA;
      * issuance it then performs). Never throws for a disabled cap (null
      * Redis or cap 0) — always allowed.
      *
-     * @param int|null $canonicalScopeId the risk policy's SERVER-OWNED scope
-     *                                   id (audit round 15): the configured
-     *                                   `risk.scopes.<name>.id`, or the
-     *                                   shared synthetic unknown-scope id.
-     *                                   When provided it is the quota key
-     *                                   component — the quota namespace is
-     *                                   bounded by the server-owned set. When
-     *                                   null, the key falls back to
-     *                                   hex(hmac_sha256(scope, K_scope)),
-     *                                   which hides the raw bytes but does
-     *                                   NOT bound cardinality (per-name soft
+     * @param int|null $canonicalScopeId the server-owned scope identity
+     *                                   (audit rounds 15–16): the configured
+     *                                   `risk.scopes.<name>.id`, the shared
+     *                                   synthetic unknown-scope id, or
+     *                                   {@see self::UNKNOWN_QUOTA_ID} for
+     *                                   every unresolved scope — the
+     *                                   controller ALWAYS passes one, so
+     *                                   the quota namespace is bounded by
+     *                                   the server-owned set. null (only
+     *                                   direct/defensive construction) falls
+     *                                   back to the keyed pseudonym, which
+     *                                   hides the raw bytes but does NOT
+     *                                   bound cardinality (per-name soft
      *                                   limiting only).
      *
      * @throws \Throwable when Redis fails (fail closed — the caller refuses

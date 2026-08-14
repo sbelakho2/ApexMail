@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Regenerates assets/kiwicaptcha-wasm.js (the widget's embedded WASM + glue).
+# Regenerates the browser assets: assets/kiwicaptcha-wasm.js (the widget's
+# embedded WASM + glue) and the KIWI_WORKER_SRC literal inside
+# assets/widget-driver.js (generated from assets/kiwi-worker.js by the
+# kiwicaptcha-embed-worker tool, audit round 16).
 # Requires: cargo, the wasm32-unknown-unknown target, and wasm-bindgen-cli
 # (a Rust binary; installed via `cargo install` if missing).
 # Pure Rust pipeline — no Node.js, no wasm-pack.
@@ -10,8 +13,8 @@ WASM_BINDGEN_VERSION="0.2.127"
 WASM_BINDGEN_BIN="${WASM_BINDGEN_BIN:-wasm-bindgen}"
 
 if ! command -v "$WASM_BINDGEN_BIN" >/dev/null 2>&1; then
-  echo "wasm-bindgen-cli not found; installing ${WASM_BINDGEN_VERSION} via cargo..." >&2
-  cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
+  echo "wasm-bindgen-cli not found; installing ${WASM_BINDGEN_VERSION} via cargo (--locked)..." >&2
+  cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
 fi
 
 # Version-lock (audit round 14): a DIFFERENT wasm-bindgen binary already on
@@ -30,6 +33,11 @@ if [ "$BINDGEN_VERSION_READ" != "$WASM_BINDGEN_VERSION" ]; then
   exit 1
 fi
 echo "wasm-bindgen ${WASM_BINDGEN_VERSION} verified"
+
+# Audit round 16: the embedded worker literal is regenerated from
+# assets/kiwi-worker.js on every build (the standalone file is the source
+# of truth; CI's --check step fails on any manual drift).
+cargo run --release --locked --manifest-path tools/embed-worker/Cargo.toml --
 
 cargo build --release --locked --target wasm32-unknown-unknown
 
@@ -64,6 +72,13 @@ sha256_of() {
   fi
 }
 WASM_OPT_BIN="${WASM_OPT_BIN:-}"
+# An env-supplied binary is NEVER downloaded/verified by us — in strict
+# mode it must be authenticated by an explicit trusted executable SHA-256
+# (WASM_OPT_BIN_SHA256) rather than its version text alone.
+WASM_OPT_ENV_SUPPLIED=0
+if [[ -n "$WASM_OPT_BIN" ]]; then
+  WASM_OPT_ENV_SUPPLIED=1
+fi
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/kiwicaptcha-wasm"
 if [[ -z "$WASM_OPT_BIN" ]]; then
   WASM_OPT_BIN="$CACHE_DIR/wasm-opt"
@@ -92,6 +107,20 @@ verify_wasm_opt() {
     actual="$(sha256_of "$bin")"
     if [[ "$actual" != "$expected" ]]; then
       echo "wasm-opt executable SHA-256 mismatch (cached binary replaced or corrupted)" >&2
+      return 1
+    fi
+  elif [[ "$WASM_OPT_STRICT" == "1" && "$WASM_OPT_ENV_SUPPLIED" == "1" ]]; then
+    # Audit round 16: an externally supplied binary in STRICT mode must be
+    # authenticated by an explicit trusted SHA — version text alone can be
+    # spoofed by an altered executable.
+    if [[ -z "${WASM_OPT_BIN_SHA256:-}" ]]; then
+      echo "WASM_OPT_STRICT=1 with an env-supplied WASM_OPT_BIN requires WASM_OPT_BIN_SHA256 (the trusted executable SHA-256)" >&2
+      return 1
+    fi
+    local actual
+    actual="$(sha256_of "$bin")"
+    if [[ "$actual" != "$WASM_OPT_BIN_SHA256" ]]; then
+      echo "wasm-opt executable SHA-256 mismatch (expected \$WASM_OPT_BIN_SHA256)" >&2
       return 1
     fi
   fi

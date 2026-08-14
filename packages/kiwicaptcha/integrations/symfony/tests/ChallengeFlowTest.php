@@ -1220,6 +1220,39 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
+     * Audit round 16: EVERY unresolvable scope — risk disabled, or unknown
+     * in baseline/reject mode — maps to the single reserved
+     * UNKNOWN_QUOTA_ID bucket. An attacker can never mint fresh quota
+     * windows by inventing scope names, in ANY configuration (no HMAC
+     * fallback namespace in the controller path).
+     */
+    public function testUnresolvedScopesShareTheReservedQuotaBucket(): void
+    {
+        $client = new FakePredisClient();
+        $scopeCap = new ScopeIssuanceCap($client, '{kiwi:reserved}:issuance:', 1, ScopeIssuanceCap::deriveScopeHmacKey(self::SECRET), fn (): int => 1_800_000_000);
+
+        // Risk DISABLED (no RiskGateway): the cap still keys on the
+        // reserved server-owned id, not on per-name HMAC namespaces.
+        $controller = new ChallengeController($this->issuer(), scopeIssuanceCap: $scopeCap);
+        self::assertSame(200, $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"foo1"}'))->getStatusCode());
+        // Second invented scope in the same minute shares the reserved
+        // bucket -> the cap (1/min) refuses it.
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"foo2"}'));
+        self::assertSame(429, $response->getStatusCode());
+        self::assertSame('SCOPE_LIMITED', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        $expectedKey = '{kiwi:reserved}:issuance:'.ScopeIssuanceCap::UNKNOWN_QUOTA_ID.':'.intdiv(1_800_000_000, 60);
+        self::assertSame(2, $client->counters[$expectedKey] ?? null, 'both invented scopes hit the SAME reserved quota window');
+        foreach ($client->calls as $call) {
+            foreach ((array) $call[1] as $arg) {
+                if (\is_string($arg) && str_contains($arg, ':issuance:')) {
+                    self::assertStringNotContainsString('foo', $arg, 'the raw scope must never appear in a quota key');
+                }
+            }
+        }
+    }
+
+    /**
      * Audit round 15: when the Redis durability barrier cannot be met at
      * issuance (replica lag/failure), the challenge is NOT handed out — the
      * controller maps the expected operational failure to a private/

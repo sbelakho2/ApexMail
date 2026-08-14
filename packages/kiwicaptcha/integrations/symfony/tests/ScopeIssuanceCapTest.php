@@ -37,7 +37,7 @@ final class ScopeIssuanceCapTest extends TestCase
         return ScopeIssuanceCap::deriveScopeHmacKey(self::SECRET);
     }
 
-    /** The canonical audit #112 window key for a scope at the current minute. */
+    /** The defensive HMAC-fallback window key for a scope at the current minute. */
     private function windowKey(FakePredisClient $redis, string $scope): string
     {
         return '{kiwi:t}:issuance:'.hash_hmac('sha256', $scope, $this->hmacKey()).':'.intdiv($this->nowSecs, 60);
@@ -199,8 +199,11 @@ final class ScopeIssuanceCapTest extends TestCase
         return \count($prop->getValue($storage));
     }
 
-    public function testScopeCapDoesNotInterfereWithOtherScopes(): void
+    public function testUnresolvedScopesShareTheReservedWindow(): void
     {
+        // Audit round 16: without a risk gateway every scope resolves to
+        // the single reserved UNKNOWN_QUOTA_ID — invented names share one
+        // window instead of minting fresh per-name quotas.
         $storage = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
         $redis = new FakePredisClient();
@@ -209,7 +212,20 @@ final class ScopeIssuanceCapTest extends TestCase
 
         self::assertSame(200, $controller->challenge($this->challengeRequest('login'))->getStatusCode());
         self::assertSame(429, $controller->challenge($this->challengeRequest('login'))->getStatusCode(), 'login is capped at 1/min');
-        self::assertSame(200, $controller->challenge($this->challengeRequest('signup'))->getStatusCode(), 'signup has its own window');
+        self::assertSame(429, $controller->challenge($this->challengeRequest('signup'))->getStatusCode(), 'an unresolved scope shares the reserved quota window (never a fresh per-name window)');
+        self::assertSame(429, $controller->challenge($this->challengeRequest('anything'))->getStatusCode(), 'every invented scope hits the SAME reserved bucket');
+    }
+
+    public function testDistinctCanonicalScopeIdsHaveIndependentWindows(): void
+    {
+        // The per-scope independence property holds for SERVER-OWNED ids:
+        // two configured scopes (ids 1 and 2) never share a window.
+        $redis = new FakePredisClient();
+        $cap = new ScopeIssuanceCap($redis, '{kiwi:t}:issuance:', 1, $this->hmacKey(), fn (): int => $this->nowSecs);
+
+        self::assertTrue($cap->allow('login', 1));
+        self::assertFalse($cap->allow('login', 1), 'scope id 1 is capped at 1/min');
+        self::assertTrue($cap->allow('signup', 2), 'scope id 2 has its own independent window');
     }
 
     private function challengeRequest(string $scope): \Symfony\Component\HttpFoundation\Request

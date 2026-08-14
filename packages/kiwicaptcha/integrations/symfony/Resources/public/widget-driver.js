@@ -26,9 +26,10 @@
   // the page its source is prepended to the Blob, and the worker also tries
   // importScripts("kiwicaptcha-wasm.js") for file-based deployments
   // (data-kiwi-worker-src). This literal is GENERATED from
-  // assets/kiwi-worker.js by tools/embed-worker.mjs (audit round 15) — the
-  // standalone file is the source of truth; backticks and ${ are escaped
-  // for template-literal semantics. The worker must not contain a
+  // assets/kiwi-worker.js by the kiwicaptcha-embed-worker Rust tool
+  // (tools/embed-worker, run by build.sh; CI --check fails on drift) —
+  // the standalone file is the source of truth; backticks and ${ are
+  // escaped for template-literal semantics. The worker must not contain a
   // closing-script-tag sequence (the driver is inlined into pages by the
   // renderers); the generator rejects one.
   var KIWI_WORKER_SRC = `/* KiwiCaptcha worker solver — standalone same-origin asset.
@@ -772,10 +773,19 @@
     if (iconSvg) { iconSvg.setAttribute("aria-hidden", "true"); iconSvg.setAttribute("focusable", "false"); }
     // Audit round 15: the kiwi wink is an SVG SMIL <animate> element — CSS
     // animation:none cannot stop SMIL, so reduced-motion users get the
-    // animate element REMOVED (not merely paused) on init.
-    if (iconSvg && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      var smilWink = iconSvg.querySelector("animate");
-      if (smilWink) smilWink.remove();
+    // animate element REMOVED (not merely paused) on init. A matchMedia
+    // change listener also removes it when the OS setting flips while the
+    // page is open (the reverse transition is not applied: a removed wink
+    // stays removed for the session).
+    if (iconSvg && window.matchMedia) {
+      var reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+      function kiwiRemoveWink() {
+        var smilWink = iconSvg.querySelector("animate");
+        if (smilWink) smilWink.remove();
+        if (reducedMotionQuery.removeEventListener) reducedMotionQuery.removeEventListener("change", kiwiRemoveWink);
+      }
+      if (reducedMotionQuery.matches) kiwiRemoveWink();
+      else if (reducedMotionQuery.addEventListener) reducedMotionQuery.addEventListener("change", kiwiRemoveWink);
     }
     var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W);
     var telemetry = telemetrySession(container, W);

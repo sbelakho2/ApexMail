@@ -34,7 +34,9 @@ namespace KiwiCaptcha;
  * purpose key (never the master secret). The record additionally carries a
  * region (deployment metadata) that IS part of the v2 canonical payload —
  * it is signed into the record like every other immutable v2 parameter
- * (see {@see self::canonicalPayload()}) — and is never sent to the client.
+ * (see {@see self::canonicalPayload()}) — authenticated and therefore
+ * client-decodable from the challenge's canonical payload, but never
+ * separately exposed as a top-level response property.
  *
  * Legacy v1 issuance (`protocol_version` 1, payload
  * `"{nonce}|{scope}|{ip_hash}|{issued_at}"`) is not produced anymore, but

@@ -193,7 +193,7 @@ pub struct VerifyContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyOutcome {
     /// The solution is valid. The challenge must now be consumed
-    /// (atomically, e.g. Redis GETDEL) so it can never be used twice.
+    /// (atomically — the consumed-state transition) so it can never be used twice.
     /// Carries the consumed challenge's canonical nonce (the jti — the
     /// single-use token identifier), so callers can correlate the outcome
     /// with the storage key and any downstream result token without
@@ -292,9 +292,10 @@ pub enum VerifyError {
     /// [`VerifyError::RecordNotFound`].
     #[error("challenge store unavailable — the challenge is presumed intact and can be retried once the store recovers")]
     StorageUnavailable,
-    /// The atomic consume (GETDEL) failed with an uncertain I/O error —
+    /// The atomic consume (the pending→consumed transition) failed with
+    /// an uncertain I/O error —
     /// the challenge may or may not have been consumed on the server. The
-    /// consumer MUST NOT retry the GETDEL automatically (the record may
+    /// consumer MUST NOT retry the consume automatically (the record may
     /// already be burned); treat the token as unknown instead of replaying
     /// it. See the GETDEL no-retry rule in `redis_verify`.
     #[error("challenge consumption is indeterminate (storage I/O failure) — the challenge may or may not have been consumed; do not blindly retry this token")]

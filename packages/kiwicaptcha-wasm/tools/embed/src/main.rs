@@ -189,7 +189,9 @@ fn transform(glue_raw: &str) -> String {
 fn main() {
     let mut args = env::args().skip(1);
     let pkg_dir = args.next().unwrap_or_else(|| "pkg".to_string());
-    let out_file = args.next().unwrap_or_else(|| "assets/kiwicaptcha-wasm.js".to_string());
+    let out_file = args
+        .next()
+        .unwrap_or_else(|| "assets/kiwicaptcha-wasm.js".to_string());
 
     let glue_path = PathBuf::from(&pkg_dir).join("kiwicaptcha_wasm.js");
     let wasm_path = PathBuf::from(&pkg_dir).join("kiwicaptcha_wasm_bg.wasm");
@@ -218,8 +220,13 @@ fn main() {
         eprintln!("FATAL: transformed glue still contains ESM/import.meta");
         for (i, line) in glue.lines().enumerate() {
             let t = line.trim_start();
-            if t.starts_with("export ") || t.starts_with("import ") || line.contains("import.meta") {
-                eprintln!("  line {}: {}", i + 1, line.chars().take(120).collect::<String>());
+            if t.starts_with("export ") || t.starts_with("import ") || line.contains("import.meta")
+            {
+                eprintln!(
+                    "  line {}: {}",
+                    i + 1,
+                    line.chars().take(120).collect::<String>()
+                );
             }
         }
         std::process::exit(1);
@@ -238,5 +245,9 @@ fn main() {
         eprintln!("FATAL: cannot write {}: {err}", out_file);
         std::process::exit(1);
     });
-    println!("wrote {out_file} ({} bytes, wasm {} bytes)", output.len(), wasm.len());
+    println!(
+        "wrote {out_file} ({} bytes, wasm {} bytes)",
+        output.len(),
+        wasm.len()
+    );
 }

@@ -86,12 +86,15 @@ use Symfony\Component\HttpFoundation\Response;
  * recorded — double-counting removed; an escalated action raises the
  * difficulty of the issued challenge, an unknown scope in 'reject' mode
  * returns 429 RISK_DENIED without issuing), then the PER-SCOPE issuance cap
- * (audit #89/#112: when risk.max_challenges_per_scope_per_minute is set,
- * the atomic {kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, derived key))>:
- * <minute> fixed-window counter refuses 429 SCOPE_LIMITED beyond the cap —
- * the raw scope string is NEVER a Redis key component; the keyed form keeps
- * attacker-controlled cardinality out of the keyspace — a public site key +
- * claimed origin can no longer create unlimited billed work per scope),
+ * (audit #89/#112/#16: when risk.max_challenges_per_scope_per_minute is
+ * set, the atomic {kiwi:<ns>}:issuance:<scopeIdentity>:<minute> fixed-window
+ * counter refuses 429 SCOPE_LIMITED beyond the cap — the quota keys on the
+ * SERVER-OWNED scope identity (the configured risk.scopes id, the shared
+ * synthetic unknown-scope id, or the single reserved UNKNOWN_QUOTA_ID for
+ * every unresolvable scope in ANY risk mode), so the raw scope string is
+ * NEVER a Redis key component AND attacker-chosen scope names can never
+ * mint fresh quota windows — a public site key + claimed origin can no
+ * longer create unlimited billed work per scope),
  * then the ANTI-STOCKPILING admission (audit #26/#104: the bounded
  * outstanding counters are admitted BEFORE the challenge state is created
  * when the configured challenge TTL is wired — the challenge-issuance
@@ -667,15 +670,21 @@ final class ChallengeController
         // set (audit round 15: HMAC-only keying hides attacker-controlled
         // BYTES, it does not bound cardinality). A Redis failure propagates
         // (fail closed: no challenge without a checked scope bound).
-        $canonicalScopeId = null;
+        // The quota keys on the SERVER-OWNED scope identity ALWAYS (audit
+        // round 16): configured scopes use their stable id; every scope
+        // the risk policy cannot resolve — unknown scopes in ANY mode,
+        // including risk-disabled deployments — collapses into the single
+        // reserved UNKNOWN_QUOTA_ID bucket. An attacker can never mint a
+        // fresh quota window by inventing scope names, in any
+        // configuration. (The 'reject'/'baseline' risk assessment still
+        // runs BEFORE this check and answers first for unknown scopes.)
+        $canonicalScopeId = ScopeIssuanceCap::UNKNOWN_QUOTA_ID;
         if ($this->risk !== null) {
             try {
                 $canonicalScopeId = $this->risk->scopeId($scope);
             } catch (UnknownScopeException) {
-                // 'reject'/'baseline' modes decline unknown scopes — the
-                // risk assessment below already handles the response; the
-                // cap falls back to the keyed pseudonym for the window.
-                $canonicalScopeId = null;
+                // Unresolvable scope: shares the reserved unknown bucket —
+                // never a per-name HMAC namespace.
             }
         }
         if ($this->scopeIssuanceCap !== null && !$this->scopeIssuanceCap->allow($scope, $canonicalScopeId)) {

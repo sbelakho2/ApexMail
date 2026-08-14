@@ -1021,7 +1021,7 @@ impl ProductionVerifier {
     /// checkout failure rejects with [`VerifyError::StorageUnavailable`]
     /// (the challenge is presumed intact — retryable once the store
     /// recovers); a `consume()` failure rejects with
-    /// [`VerifyError::ConsumeIndeterminate`] and the GETDEL is NEVER
+    /// [`VerifyError::ConsumeIndeterminate`] and the consume is NEVER
     /// retried automatically (the challenge may or may not have been
     /// consumed). `Ok(None)` from either stays
     /// [`VerifyError::RecordNotFound`] — a genuinely absent key.
@@ -1054,8 +1054,8 @@ impl ProductionVerifier {
         //    PHP's one-shot cheap-failure semantics. NOT consumed:
         //    missing IP/context (Rust requires the IP), Argon capacity
         //    exhausted, admission backend unavailable, storage unavailable
-        //    (presumed intact) and ConsumeIndeterminate (GETDEL never
-        //    retried). The expensive proof itself is burned by the GETDEL.
+        //    (presumed intact) and ConsumeIndeterminate (consume never
+        //    retried). The expensive proof itself is burned by the transition.
         if let Err(e) = self.check_cheap(&peek, scope, client_ip, now_ns) {
             self.store.best_effort_delete(&token.nonce);
             return VerifyOutcome::Invalid(e);
@@ -1065,7 +1065,7 @@ impl ProductionVerifier {
         //    memory-hard hash. Only Argon2id records are gated, matching PHP.
         //    acquire() hands out an RAII LEASE: exactly one acquire
         //    corresponds to exactly one release (Drop). The lease binding
-        //    stays ALIVE through the atomic GETDEL, the TOCTOU re-check and
+        //    stays ALIVE through the atomic transition, the TOCTOU re-check and
         //    the single derivation below, and is released by Drop when
         //    `_lease` goes out of scope — mirroring the PHP
         //    acquire/hold/release-in-finally semantics. Both the `Ok(None)`
