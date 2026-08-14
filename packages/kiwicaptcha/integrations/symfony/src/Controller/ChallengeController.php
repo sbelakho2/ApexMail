@@ -687,14 +687,34 @@ final class ChallengeController
                 // never a per-name HMAC namespace.
             }
         }
-        if ($this->scopeIssuanceCap !== null && !$this->scopeIssuanceCap->allow($scope, $canonicalScopeId)) {
-            return $this->privateJson(
-                ['error' => ['code' => 'SCOPE_LIMITED', 'message' => 'Too many challenges issued for this scope. Try again later.']],
-                Response::HTTP_TOO_MANY_REQUESTS,
-                $request,
-                $riskSession,
-                $mintedCookie,
-            );
+        if ($this->scopeIssuanceCap !== null) {
+            try {
+                $allowed = $this->scopeIssuanceCap->allow($scope, $canonicalScopeId);
+            } catch (\Exception $e) {
+                // Audit round 19: the cap FAILS CLOSED when the Redis
+                // server clock is unavailable — no quota proof means no
+                // challenge issuance (503, private envelope; the detail
+                // goes to the server log only). Never silently fall back
+                // to per-host wall clocks around window boundaries.
+                error_log(sprintf('kiwicaptcha: scope issuance cap clock unavailable: %s', $e->getMessage()));
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+            if (!$allowed) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'SCOPE_LIMITED', 'message' => 'Too many challenges issued for this scope. Try again later.']],
+                    Response::HTTP_TOO_MANY_REQUESTS,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
         }
 
         // ANTI-STOCKPILING PRE-MINT ADMISSION (audit #26/#104): when the

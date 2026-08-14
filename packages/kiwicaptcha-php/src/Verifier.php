@@ -67,8 +67,10 @@ namespace KiwiCaptcha;
  *      null IP NEVER skips the binding.
  *   5b. Region binding (audit #22, Option A): a verifier configured with an
  *      expected region rejects any record whose region does not match
- *      exactly (WrongRegion) — including unbound (NULL) records, which are
- *      redeemable in every region.
+ *      exactly (WrongRegion) — including unbound (NULL) records, which
+ *      FAIL CLOSED (a region-unbound record satisfies no region-bound
+ *      verifier). When NO expected region is configured, region is not
+ *      enforced and unbound records verify.
  *   5c. Security-policy epoch (audit #42) and deployment issuer (audit
  *      #67): a verifier configured with an expected policy epoch / issuer
  *      rejects records issued under a different epoch / by a different
@@ -416,8 +418,8 @@ final class Verifier
         // 5b. Region binding (audit #22, Option A): a verifier configured
         //     with an expected region rejects any record whose region does
         //     not match EXACTLY — an unbound (NULL) record region fails
-        //     closed, because a region-unbound record is redeemable in every
-        //     region and must not satisfy a region-bound verifier.
+        //     closed (a region-unbound record satisfies no region-bound
+        //     verifier); with no expected region, region is unenforced.
         if ($this->region !== null && $peek->region !== $this->region) {
             $this->bestEffortDelete($token->nonce);
 

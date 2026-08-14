@@ -224,16 +224,19 @@ LUA;
         if ($this->now !== null) {
             return intdiv((int) ($this->now)(), 60);
         }
-        try {
-            $time = $this->redis->time();
-            if (\is_array($time) && isset($time[0])) {
-                return intdiv((int) $time[0], 60);
-            }
-        } catch (\Throwable) {
-            // Fall through to the local clock; the script still expires the
-            // key, so a drifted window is bounded by the EXPIRE.
+        // Audit round 19: the window minute comes from the REDIS SERVER
+        // clock (all application workers share one window) and the clock
+        // invariant FAILS CLOSED — a TIME failure raises instead of
+        // silently switching to each host's wall clock (which around
+        // minute boundaries would let skewed hosts use different window
+        // keys). Redis is the configured security backend here: no Redis
+        // TIME proof -> no quota proof -> no challenge issuance (the
+        // controller maps the exception to 503 SERVICE_UNAVAILABLE).
+        $time = $this->redis->time();
+        if (!\is_array($time) || !isset($time[0])) {
+            throw new \RuntimeException('Redis TIME returned an invalid response for the scope issuance cap');
         }
 
-        return intdiv(time(), 60);
+        return intdiv((int) $time[0], 60);
     }
 }

@@ -127,6 +127,31 @@ final class ScopeIssuanceCapTest extends TestCase
         self::assertTrue($cap->allow('login', 7), 'a different server-owned scope id has its own window');
     }
 
+    /**
+     * Audit round 19: the window minute comes from the Redis server clock
+     * and the cap FAILS CLOSED when that clock is unavailable — a TIME
+     * failure raises instead of silently switching to each host's wall
+     * clock (around minute boundaries, skewed hosts would use different
+     * window keys and defeat the shared-window invariant).
+     */
+    public function testMinuteFailsClosedWhenRedisTimeIsUnavailable(): void
+    {
+        $redis = new FakePredisClient();
+        $cap = new ScopeIssuanceCap($redis, '{kiwi:t}:issuance:', 1, $this->hmacKey());
+
+        $redis->timeUnavailable = true;
+        try {
+            $cap->allow('login', 42);
+            self::fail('the cap must fail closed when Redis TIME is unavailable');
+        } catch (\Exception) {
+            // expected: the clock error propagates (no host-clock fallback)
+        }
+        self::assertSame([], $redis->counters, 'a failed clock must never open a quota window');
+
+        $redis->timeUnavailable = false;
+        self::assertTrue($cap->allow('login', 42), 'a healthy Redis clock still admits');
+    }
+
     public function testDeriveScopeHmacKeyIsPurposeSeparated(): void
     {
         // The HKDF info tag 'kiwi/v2/scope-rate' must yield a key that

@@ -10,6 +10,7 @@
 
 mod common;
 
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
@@ -511,27 +512,43 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
         eprintln!("skipping redis concurrency test: RISK_REDIS_URL not set");
         return;
     };
-    let storm_store = store();
+    let storm_store = Arc::new(store());
     let duplicate_id = common::event_id(77);
 
-    // 100 threads race with the SAME event_id: the Lua's GET-then-SET dedupe
-    // is atomic, so exactly ONE call may increment; the rest are duplicate
-    // no-ops that return the CURRENT signals with is_duplicate=true.
+    // 100 REAL threads race the SAME event_id from a common barrier: the
+    // Lua's GET-then-SET dedupe is atomic, so exactly ONE call may
+    // increment; the rest are duplicate no-ops that return the CURRENT
+    // signals with is_duplicate=true. (Audit round 19: the previous
+    // version ran the loop sequentially and proved only sequential
+    // dedupe; the named concurrency property is now actually exercised.)
+    let barrier = Arc::new(Barrier::new(HUNDRED));
+    let results: Vec<_> = (0..HUNDRED)
+        .map(|_| {
+            let barrier = barrier.clone();
+            let store = storm_store.clone();
+            let id = duplicate_id.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store
+                    .observe(&common::observation(
+                        RiskEventKind::PreIssue,
+                        0,
+                        hex::encode([0xAA; 16]),
+                        hex::encode([0xBB; 16]),
+                        None,
+                        None,
+                        id,
+                        common::T0,
+                    ))
+                    .expect("duplicates never error")
+            })
+        })
+        .collect::<Vec<_>>();
+
     let mut winners = 0;
     let mut dups = 0;
-    for _ in 0..HUNDRED {
-        let observed = storm_store
-            .observe(&common::observation(
-                RiskEventKind::PreIssue,
-                0,
-                hex::encode([0xAA; 16]),
-                hex::encode([0xBB; 16]),
-                None,
-                None,
-                duplicate_id.clone(),
-                common::T0,
-            ))
-            .expect("duplicates never error");
+    for handle in results {
+        let observed = handle.join().expect("thread panicked");
         if observed.is_duplicate {
             dups += 1;
         } else {
@@ -552,7 +569,7 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
     }
     assert_eq!(
         winners, 1,
-        "exactly one increment for 100 identical event_ids"
+        "exactly one increment for 100 identical event_ids racing concurrently"
     );
     assert_eq!(dups, HUNDRED - 1);
 

@@ -84,12 +84,20 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /** Redis TIME emulation: [seconds, microseconds]. */
-    public function time(): array
+    public function time(): mixed
     {
+        if ($this->timeUnavailable) {
+            // A real Redis error (e.g. READONLY on a replica) — the cap
+            // must fail closed rather than fall back to host clocks.
+            throw new \Predis\Response\ServerException("READONLY You can't write against a read only replica");
+        }
         $secs = (int) floor($this->clockMs / 1000);
 
         return [$secs, (int) (($this->clockMs - $secs * 1000) * 1000)];
     }
+
+    /** When true, time() raises a server error (fail-closed clock tests). */
+    public bool $timeUnavailable = false;
 
     /** Number of live members (leases/hits) in a sorted set. */
     public function zcard(string $key): int
