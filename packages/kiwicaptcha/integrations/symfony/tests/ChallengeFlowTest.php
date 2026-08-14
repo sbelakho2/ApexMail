@@ -1220,6 +1220,97 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
+     * Audit round 15: when the Redis durability barrier cannot be met at
+     * issuance (replica lag/failure), the challenge is NOT handed out — the
+     * controller maps the expected operational failure to a private/
+     * no-store 503 SERVICE_UNAVAILABLE with an opaque client message (the
+     * replication detail is server-log only), never a generic 500.
+     */
+    public function testReplicaWaitFailureAtIssuanceReturns503(): void
+    {
+        $failingStorage = new class implements \KiwiCaptcha\StorageInterface {
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                throw new \KiwiCaptcha\Storage\ReplicaWaitException('Redis WAIT acknowledged 0 of 1 replicas after challenge issuance');
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return null;
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return false;
+            }
+
+            public function delete(string $nonce): void
+            {
+            }
+        };
+        $issuer = new Issuer(new Config(
+            secretKey: self::SECRET,
+            algorithm: PoWAlgorithm::Sha256,
+            targetBits: 8, // fast solve for tests
+            ttlSecs: 120,
+        ), $failingStorage);
+        $controller = new ChallengeController($issuer);
+
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(503, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('SERVICE_UNAVAILABLE', $body['error']['code']);
+        self::assertStringNotContainsString('replica', $body['error']['message'], 'the client message must stay opaque');
+        self::assertTrue($response->headers->getCacheControlDirective('no-store'), 'the 503 must carry the private no-store envelope');
+        self::assertTrue($response->headers->getCacheControlDirective('private'));
+    }
+
+    /**
+     * Audit round 15: with risk.allowed_scopes configured, the per-scope
+     * quota operates over a SERVER-OWNED namespace — a scope outside the
+     * allowlist is refused with 422 SCOPE_NOT_ALLOWED BEFORE the risk
+     * assessment and the quota checks (zero Redis operations), so an
+     * attacker can never mint fresh per-scope quota windows by inventing
+     * scope names.
+     */
+    public function testScopeOutsideServerAllowlistIsRefusedBeforeAnyQuota(): void
+    {
+        $client = new FakePredisClient();
+        $scopeCap = new ScopeIssuanceCap($client, '{kiwi:allowlist}:issuance:', 1, ScopeIssuanceCap::deriveScopeHmacKey(self::SECRET), fn (): int => 1_800_000_000);
+        $controller = new ChallengeController(
+            $this->issuer(),
+            scopeIssuanceCap: $scopeCap,
+            allowedScopes: ['login', 'signup'],
+        );
+
+        // An allowlisted scope issues normally.
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode());
+
+        // A disallowed scope is refused before ANY Redis access — no quota
+        // window is ever created for it (attacker-chosen scope names can
+        // never mint counters in the server-owned namespace).
+        $client->calls = [];
+        foreach (['foo1', 'foo2', 'admin_login' /* configured but not allowlisted */] as $scope) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['scope' => $scope])));
+            self::assertSame(422, $response->getStatusCode(), 'scope '.$scope.' must be refused by the allowlist');
+            self::assertSame('SCOPE_NOT_ALLOWED', json_decode((string) $response->getContent(), true)['error']['code']);
+            self::assertSame([], $client->calls, 'a disallowed scope must never touch Redis (no quota window, no limiter)');
+        }
+
+        // The allowlist is a security gate, not a permissive default: an
+        // empty allowlist keeps the legacy accept-any behavior.
+        $open = new ChallengeController($this->issuer(), allowedScopes: []);
+        $response = $open->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"anything"}'));
+        self::assertSame(200, $response->getStatusCode(), 'an empty allowlist keeps the accept-any behavior');
+    }
+
+    /**
      * Audit #104: the challenge-issuance sequence runs every quota check
      * BEFORE the challenge state is created — local cap, issuer limiter,
      * scope cap and outstanding counters all precede the storage write.

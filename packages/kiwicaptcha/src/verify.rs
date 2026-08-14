@@ -2826,9 +2826,12 @@ mod tests {
     #[test]
     fn region_mismatch_is_rejected_with_wrong_region() {
         // The record's region is deployment metadata carried on the JSON
-        // record (never signed — the record itself is server-side
-        // authoritative). A verifier configured with an expected region
-        // rejects challenges issued for another region.
+        // record. It IS signed into the v2 canonical payload (the line
+        // below re-signs it with the region set) — the record itself is
+        // server-side authoritative, and the client-visible challenge
+        // carries the region only inside the signed canonical payload. A
+        // verifier configured with an expected region rejects challenges
+        // issued for another region.
         let mut record = make_record(8);
         record.region = Some("eu".into());
         resign_v2(&mut record, "test-key-16-bytes!"); // region is signed (round 9)

@@ -564,12 +564,21 @@ storage service automatically):
   commit (`commitResult()`) — and the acknowledgement count is VERIFIED:
   fewer than the requested replicas acked raises
   `KiwiCaptcha\Storage\ReplicaWaitException` and the operation fails
-  closed (`ConsumeIndeterminate` in the verifier, issuance refused). A
+  closed (`ConsumeIndeterminate` in the verifier, issuance refused — the
+  challenge endpoint maps it to a private 503 SERVICE_UNAVAILABLE). A
   configured barrier on a replica-less server fails closed by design — the
   promise is unconditional. Without it, an async-replication failover can
   lose the primary's un-replicated records — and after failback, a captured
   token replays against a "fresh" record the new primary never knew was
   consumed. `wait_timeout_ms` (default 100) bounds the WAIT.
+  **Promotion invariant (audit round 15):** `WAIT N` proves that at least
+  N replicas acknowledged the write — it does not constrain WHICH
+  replicas your failover manager may promote. For replay-safe promotion,
+  set the threshold to cover EVERY eligible failover target during the
+  challenge lifetime, or configure the failover policy/topology so a
+  lagging replica can never be promoted. Without that deployment
+  invariant, a promotion can resurrect a consumed record from a stale
+  replica.
 - `ttl_margin_secs` (default 0): extra retention on challenge/replay-security
   state BEYOND the token validity window. The consumed-state guards (the
   GETDEL single-use gate, the replayed-token checks) and the challenge

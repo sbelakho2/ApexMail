@@ -648,7 +648,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             if ($scopeCapRedis === null) {
                 throw new \LogicException(
                     'kiwi_captcha.risk.max_challenges_per_scope_per_minute requires a Redis client for the atomic '.
-                    'fixed-window counter ({kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>). Configure '.
+                    'fixed-window counter ({kiwi:<ns>}:issuance:<scopeIdentity>:<minute>). Configure '.
                     'redis_service / risk.redis_service (or a RedisStorage client) or set the cap to 0 (unlimited).'
                 );
             }
@@ -690,6 +690,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Audit #89: the per-scope issuance cap (fixed-window Redis
             // counter; null when disabled).
             ->setArgument('$scopeIssuanceCap', $scopeCapRef)
+            // Audit round 15: the SERVER-OWNED scope allowlist — when
+            // non-empty, issuance outside it is refused (422
+            // SCOPE_NOT_ALLOWED) before risk/quota, making the per-scope
+            // quota namespace server-bounded.
+            ->setArgument('$allowedScopes', $riskConfig['allowed_scopes'])
             // Audit #108: the security-epoch monitor drives the issuance-side
             // max-stale fail-closed check — a stale central policy read
             // refuses issuance with 503 SERVICE_UNAVAILABLE.

@@ -31,7 +31,7 @@ if [ "$BINDGEN_VERSION_READ" != "$WASM_BINDGEN_VERSION" ]; then
 fi
 echo "wasm-bindgen ${WASM_BINDGEN_VERSION} verified"
 
-cargo build --release --target wasm32-unknown-unknown
+cargo build --release --locked --target wasm32-unknown-unknown
 
 # Optimize the wasm with binaryen (wasm-opt -O) if available. wasm-opt is a
 # C++ binary — NOT Node.js — and is optional: the pipeline works without it,
@@ -68,6 +68,35 @@ CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/kiwicaptcha-wasm"
 if [[ -z "$WASM_OPT_BIN" ]]; then
   WASM_OPT_BIN="$CACHE_DIR/wasm-opt"
 fi
+
+# Per-run verification (audit round 15): a PRE-EXISTING or CACHED wasm-opt
+# is authenticated on EVERY build — the version string must be exactly the
+# pinned binaryen (version_119), and a binary we downloaded ourselves must
+# still match the SHA-256 recorded at download time (a replaced or
+# corrupted cached executable fails closed instead of satisfying "strict").
+verify_wasm_opt() {
+  local bin="$1"
+  if [[ ! -x "$bin" ]]; then return 1; fi
+  local ver
+  ver="$("$bin" --version 2>/dev/null || true)"
+  case "$ver" in
+    "wasm-opt version 119 "*|*"version_119"*) ;;
+    *)
+      echo "wasm-opt version mismatch: '$ver' (pinned: version_119)" >&2
+      return 1
+      ;;
+  esac
+  if [[ -f "$CACHE_DIR/wasm-opt.bin.sha256" ]]; then
+    local expected actual
+    expected="$(cat "$CACHE_DIR/wasm-opt.bin.sha256")"
+    actual="$(sha256_of "$bin")"
+    if [[ "$actual" != "$expected" ]]; then
+      echo "wasm-opt executable SHA-256 mismatch (cached binary replaced or corrupted)" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
 if [[ ! -x "$WASM_OPT_BIN" ]]; then
   mkdir -p "$(dirname "$WASM_OPT_BIN")"
   OS="$(uname -s)"
@@ -99,7 +128,10 @@ if [[ ! -x "$WASM_OPT_BIN" ]]; then
         BIN_DIR="$(find "$CACHE_DIR" -path "*/bin/wasm-opt" -type f | head -1)"
         if [[ -n "$BIN_DIR" ]]; then
           WASM_OPT_BIN="$BIN_DIR"
-          echo "wasm-opt ready at $WASM_OPT_BIN (SHA-256 verified)"
+          # Record the EXECUTABLE's hash (not just the tarball's) so every
+          # later build can detect a replaced/corrupted cached binary.
+          sha256_of "$WASM_OPT_BIN" > "$CACHE_DIR/wasm-opt.bin.sha256"
+          echo "wasm-opt ready at $WASM_OPT_BIN (tarball + executable SHA-256 verified)"
         else
           echo "wasm-opt not found in binaryen archive — continuing without optimization" >&2
           WASM_OPT_BIN=""
@@ -110,6 +142,12 @@ if [[ ! -x "$WASM_OPT_BIN" ]]; then
       WASM_OPT_BIN=""
     fi
   fi
+fi
+# Every resolved binary (freshly downloaded, cached, or env-provided) is
+# authenticated per run before it may optimize a release artifact.
+if [[ -n "$WASM_OPT_BIN" ]] && ! verify_wasm_opt "$WASM_OPT_BIN"; then
+  echo "wasm-opt failed per-run verification — skipping optimization" >&2
+  WASM_OPT_BIN=""
 fi
 # Release-build determinism (audit round 14): with WASM_OPT_STRICT=1 the
 # pipeline FAILS instead of silently skipping optimization when wasm-opt is
@@ -129,5 +167,5 @@ if [[ -n "$WASM_OPT_BIN" && -x "$WASM_OPT_BIN" ]]; then
 fi
 
 "$WASM_BINDGEN_BIN" --target web --out-dir pkg target/wasm32-unknown-unknown/release/kiwicaptcha_wasm.wasm
-cargo run --release --manifest-path tools/embed/Cargo.toml -- pkg assets/kiwicaptcha-wasm.js
+cargo run --release --locked --manifest-path tools/embed/Cargo.toml -- pkg assets/kiwicaptcha-wasm.js
 echo "assets/kiwicaptcha-wasm.js regenerated"

@@ -243,10 +243,12 @@ let mut ctx = VerifyContext {
 };
 
 match verify_solution(&mut ctx) {
-    VerifyOutcome::Valid => {
+    VerifyOutcome::Valid { nonce, request_binding } => {
         // Consume the challenge atomically for strict single-use under
         // concurrency (e.g. the RedisChallengeStore Lua transition), then
-        // allow login.
+        // allow login. `nonce` is the consumed challenge's canonical id
+        // (jti); `request_binding` is the application transaction binding
+        // to correlate with the final protected POST.
     }
     VerifyOutcome::Invalid(reason) => { /* reject */ }
 }

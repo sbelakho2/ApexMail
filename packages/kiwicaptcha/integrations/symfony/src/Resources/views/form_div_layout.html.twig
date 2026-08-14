@@ -7,7 +7,7 @@
 <style{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_css|raw }}
 </style>
-<div class="kiwi-container" id="kiwicaptcha-root-{{ id }}" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}" data-kiwi-telemetry="{{ telemetry }}"{% if requestBinding %} data-kiwi-request-binding="{{ requestBinding }}"{% endif %}>
+<div class="kiwi-container" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}" data-kiwi-telemetry="{{ telemetry }}"{% if requestBinding %} data-kiwi-request-binding="{{ requestBinding }}"{% endif %}>
     <input type="hidden" name="{{ full_name }}" value="" data-kiwi-token />
     <div class="kiwi-widget" data-kiwi-widget data-state="idle"
          role="group" aria-label="KiwiCaptcha security check">

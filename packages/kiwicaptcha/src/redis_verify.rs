@@ -10,7 +10,7 @@
 //!
 //! # Consumed-state transition (audit #74)
 //!
-//! `consume()` is a Lua TRANSITION, not a GETDEL: the pending record is
+//! `consume()` is a Lua TRANSITION, not a GETDEL delete: the pending record is
 //! KEPT in the store with a storage-level runtime field `state =
 //! "consumed"` (plus the committed outcome `consumed_result`), so a
 //! concurrent loser — or a later replay — observes the consumed record and
@@ -139,13 +139,13 @@ pub const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(1);
 /// The r2d2 connection manager: opens a real `redis::Connection` per pooled
 /// slot with the crate's timeouts applied at connect time, and reports
 /// poisoned connections as broken so r2d2 evicts them instead of reusing
-/// them (see the module docs — GETDEL no-retry rule).
+/// them (see the module docs — no-retry rule).
 struct StoreConnectionManager {
     client: redis::Client,
 }
 
 /// A pooled Redis connection. `poisoned` is set on any command-level
-/// failure: the connection may be protocol-desynced (e.g. a GETDEL whose
+/// failure: the connection may be protocol-desynced (e.g. a consume whose
 /// reply timed out — the reply could still be in flight on the socket), so
 /// r2d2 must evict it on return.
 struct ManagedConnection {
@@ -515,7 +515,7 @@ impl RedisChallengeStore {
 
     /// Run one command on a checked-out connection. Any command-level error
     /// POISONS the connection (its protocol state may be desynced — see the
-    /// module docs' GETDEL no-retry rule), then propagates the error.
+    /// module docs' no-retry rule), then propagates the error.
     fn run_command<T>(
         conn: &mut r2d2::PooledConnection<StoreConnectionManager>,
         f: impl FnOnce(&mut ManagedConnection) -> redis::RedisResult<T>,
@@ -779,7 +779,7 @@ impl fmt::Debug for RedisChallengeStore {
 /// Mirrors the PHP `VerificationAdmissionGate` acquire/hold/release
 /// semantics: [`ArgonAdmissionGate::acquire`] hands out a [`ArgonLease`]
 /// that is released by `Drop` — exactly one `acquire` corresponds to
-/// exactly one release. The lease is held across the atomic GETDEL and
+/// exactly one release. The lease is held across the atomic consumed-state transition and
 /// the single hash derivation in [`ProductionVerifier::verify`], then
 /// released when it drops (PHP's acquire/hold/release-in-finally).
 ///
@@ -824,7 +824,7 @@ pub enum AdmissionError {
 /// [`RedisChallengeStore`] for distributed single-use.
 ///
 /// See the module docs for the check order, the one-shot semantics, the
-/// storage error semantics, and the GETDEL no-retry rule.
+/// storage error semantics, and the consume no-retry rule.
 pub struct ProductionVerifier {
     store: RedisChallengeStore,
     secret_key: String,
@@ -1006,14 +1006,14 @@ impl ProductionVerifier {
     ///   for the server-measured minimum-duration check.
     ///
     /// Flow: decode → PEEK (GET) → cheap validation → Argon admission gate
-    /// (acquire → RAII lease) → atomic CONSUME (GETDEL) → TOCTOU
+    /// (acquire → RAII lease) → atomic CONSUME (pending→consumed transition) → TOCTOU
     /// re-validation of the consumed record → single derive → leading-zero
     /// check → lease released by Drop. Terminal cheap failures (malformed
     /// record, unsupported protocol, bad signature, expired, wrong scope,
     /// IP mismatch, TooFast) CONSUME the record via a best-effort DEL,
     /// matching the PHP core's one-shot cheap-failure semantics; capacity /
     /// admission-backend / storage failures never consume. The expensive
-    /// proof is burned exactly once, at the GETDEL, so at most one hash
+    /// proof is burned exactly once, at the transition, so at most one hash
     /// derivation ever runs per nonce (concurrent losers see
     /// `RecordNotFound`).
     ///

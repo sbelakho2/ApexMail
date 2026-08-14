@@ -42,6 +42,23 @@ Notes:
   cross-origin script without `crossorigin` will be blocked.
 - Re-run the tool after every rebuild and update the tags; a hash mismatch
   means the bytes on the wire are not the bytes you pinned.
+- **Workers cannot use `integrity=` (audit round 15):** `new Worker(url)`
+  has no SRI parameter, so the standalone `kiwi-worker.js` served via
+  `data-kiwi-worker-src` must be protected differently:
+  - serve it from an **immutable, versioned, same-origin URL**
+    (e.g. `/kiwicaptcha/2026-08-r1/kiwi-worker.js`) — never a mutable
+    `latest.js` alias;
+  - publish the content-addressed release hash (`argon-solver.<sha256>`-
+    style naming, or the §4 release-hash list) and verify it in the
+    release pipeline;
+  - the worker's own build-id handshake (`ready`/`done` messages) makes
+    the DRIVER refuse a stale/mismatched worker — a cached old worker can
+    never contribute a solution.
+  If runtime integrity checking of the worker is required, the driver
+  would have to fetch the worker source with `integrity` checking itself
+  and instantiate a Blob worker from the verified bytes — the bundled
+  driver's default Blob-worker path already constructs the worker from
+  locally embedded source (no network fetch at all).
 
 ## 2. Immutable versioned URLs — never a mutable `latest.js`
 
@@ -72,10 +89,15 @@ Notes:
 - Pin exact build tool versions. `build.sh` pins `wasm-bindgen` 0.2.127 and
   verifies the binaryen (`wasm-opt`) tarball by SHA-256 before extracting it
   (see the `known_wasm_opt_sha256` table).
-- Commit lockfiles: `Cargo.lock` (this package and `tools/embed`) pins every
-  Rust dependency; the browser-test suite commits `package-lock.json`; the
-  PHP bundle commits `composer.lock`. A supply-chain change to any pinned
-  dependency then shows up as a lockfile diff in review.
+- Commit lockfiles: `Cargo.lock` (this package, `tools/embed`, the risk
+  crates) pins every Rust dependency; the browser-test suite commits
+  `package-lock.json`. The PHP core and Symfony bundle do NOT commit a
+  Composer lockfile (library convention: the lock is a per-application
+  artifact); CI installs the published dependency constraints and runs
+  `composer audit` on every push, and release CI runs clean-room installs
+  of the published packages. A supply-chain change to any committed pinned
+  dependency shows up as a lockfile diff in review; PHP changes surface in
+  the `composer audit`/clean-room jobs instead.
 - Rebuilds must be reproducible and reviewed: the only artifacts that are
   allowed to reach production are those produced by the pinned pipeline in
   `build.sh`.

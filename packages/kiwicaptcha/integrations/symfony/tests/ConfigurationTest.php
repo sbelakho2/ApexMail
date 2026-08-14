@@ -326,6 +326,24 @@ final class ConfigurationTest extends TestCase
         self::assertSame('eu-central-1', $this->process(['risk' => ['region' => 'eu-central-1']])['risk']['region']);
     }
 
+    public function testRiskAllowedScopesNode(): void
+    {
+        // Audit round 15: allowed_scopes defaults to [] (accept any scope)
+        // and accepts a list of identifier-alphabet names; hostile entries
+        // are rejected at config load.
+        self::assertSame([], $this->process()['risk']['allowed_scopes'], 'allowed_scopes defaults to empty (accept-any)');
+
+        $processed = $this->process(['risk' => ['allowed_scopes' => ['login', 'signup', 'financial_action']]])['risk']['allowed_scopes'];
+        self::assertSame(['login', 'signup', 'financial_action'], $processed);
+
+        try {
+            $this->process(['risk' => ['allowed_scopes' => ['bad scope!', 'x']]]);
+            self::fail('an allowlist entry outside the identifier alphabet must be rejected');
+        } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+            // expected
+        }
+    }
+
     public function testRiskRedisHardeningDefaults(): void
     {
         $redis = $this->process()['risk']['redis'];

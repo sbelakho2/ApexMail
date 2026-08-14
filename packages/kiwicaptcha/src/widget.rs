@@ -41,13 +41,12 @@ pub fn kiwi_widget_html(endpoint: &str, scope: &str, csp_nonce: Option<&str>) ->
         .unwrap_or_default();
     format!(
         "<style{nonce}>\n{css}\n</style>\n\
-        <div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"{endpoint}\" data-kiwi-scope=\"{scope}\">\n  \
+        <div class=\"kiwi-container\" data-kiwi-endpoint=\"{endpoint}\" data-kiwi-scope=\"{scope}\">\n  \
         <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />\n  \
         <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\"\n       \
-        role=\"checkbox\" aria-checked=\"false\" aria-live=\"polite\"\n       \
-        aria-label=\"KiwiCaptcha security check\" tabindex=\"0\">\n    \
-        <div class=\"kiwi-icon-wrapper\">\n      {svg}\n      <div class=\"kiwi-glow\"></div>\n    \
-        </div>\n    <div class=\"kiwi-main\">\n      <div class=\"kiwi-top\">\n        <span class=\"kiwi-label\" data-kiwi-label>Security Check</span>\n        <span class=\"kiwi-badge\" data-kiwi-badge>Idle</span>\n      </div>\n      <div class=\"kiwi-track\" role=\"progressbar\" aria-valuemin=\"0\" aria-valuemax=\"100\" aria-valuenow=\"0\">\n        <div class=\"kiwi-bar\" data-kiwi-bar></div>\n      </div>\n      <div class=\"kiwi-bottom\">\n        <p class=\"kiwi-info\" data-kiwi-info>Protected by KiwiCaptcha</p>\n        <span class=\"kiwi-timer\" data-kiwi-timer></span>\n      </div>\n    </div>\n  </div>\n\
+        role=\"group\" aria-label=\"KiwiCaptcha security check\">\n    \
+        <div class=\"kiwi-icon-wrapper\" aria-hidden=\"true\">\n      {svg}\n      <div class=\"kiwi-glow\"></div>\n    \
+        </div>\n    <div class=\"kiwi-main\">\n      <div class=\"kiwi-top\">\n        <span class=\"kiwi-label\" data-kiwi-label>Security Check</span>\n        <span class=\"kiwi-badge\" data-kiwi-badge>Idle</span>\n      </div>\n      <div class=\"kiwi-track\" role=\"progressbar\" aria-valuemin=\"0\" aria-valuemax=\"100\" aria-valuenow=\"0\">\n        <div class=\"kiwi-bar\" data-kiwi-bar></div>\n      </div>\n      <div class=\"kiwi-bottom\">\n        <p class=\"kiwi-info\" data-kiwi-info>Protected by KiwiCaptcha</p>\n        <span class=\"kiwi-timer\" data-kiwi-timer></span>\n      </div>\n    </div>\n    <span class=\"kiwi-sr-only\" data-kiwi-status role=\"status\" aria-live=\"polite\"></span>\n  </div>\n\
         </div>\n\
         <script{nonce}>\n{wasm}\n</script>\n\
         <script{nonce}>\n{driver}\n</script>",
@@ -148,5 +147,61 @@ mod tests {
         let html = kiwi_widget_html("/challenge", "login", Some("x\" onload=\"alert(1)"));
         assert!(html.contains("nonce=\"x&quot; onload=&quot;alert(1)\""));
         assert!(!html.contains("onload=\"alert(1)"));
+    }
+
+    #[test]
+    fn widget_renderer_contract_matches_the_driver_dom() {
+        // Audit round 15: the Rust-generated markup must stay in structural
+        // parity with the Symfony Twig widget — any divergence breaks
+        // accessibility and the driver's element contract. Pinned here so
+        // the accessibility structure cannot silently drift again.
+        let html = kiwi_widget_html_default();
+
+        // No root id: multiple widgets on one page must never collide, and
+        // the driver locates elements via data attributes/classes only.
+        assert!(
+            !html.contains("kiwi-container\" id="),
+            "the container must not carry an id (duplicate-id hazard)"
+        );
+
+        // Neutral group semantics: no checkbox role, no aria-checked, no
+        // whole-widget live region, no focus target (the Retry button is
+        // the focusable control).
+        assert!(
+            html.contains("role=\"group\""),
+            "the widget is a passive group, never a checkbox"
+        );
+        assert!(
+            !html.contains("role=\"checkbox\""),
+            "checkbox semantics were removed (round 13/15)"
+        );
+        assert!(!html.contains("aria-checked"), "no checkbox state");
+        assert_eq!(
+            html.matches("aria-live=\"polite\"").count(),
+            1,
+            "the ONLY aria-live region is the dedicated status announcer"
+        );
+        assert!(
+            !html.contains("tabindex=\"0\""),
+            "the widget itself is not focusable"
+        );
+        assert!(
+            html.contains("aria-label=\"KiwiCaptcha security check\""),
+            "explicit accessible name"
+        );
+
+        // The ONLY live region is the dedicated status announcer the driver
+        // queries ([data-kiwi-status]), inside the widget subtree so
+        // W.querySelector finds it.
+        assert!(
+            html.contains("data-kiwi-status role=\"status\" aria-live=\"polite\""),
+            "dedicated status announcer present"
+        );
+
+        // The decorative mascot is hidden from assistive technology.
+        assert!(
+            html.contains("kiwi-icon-wrapper\" aria-hidden=\"true\""),
+            "icon hidden from AT"
+        );
     }
 }

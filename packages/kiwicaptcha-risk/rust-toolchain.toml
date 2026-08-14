@@ -1,0 +1,6 @@
+[toolchain]
+# Release reproducibility (audit round 15): the Rust compiler is pinned for
+# every build — a moving "stable" can change codegen and release bytes.
+# Bump deliberately with each release.
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

@@ -25,17 +25,49 @@
   // construction); when the wasm glue is present as an inline script element in
   // the page its source is prepended to the Blob, and the worker also tries
   // importScripts("kiwicaptcha-wasm.js") for file-based deployments
-  // (data-kiwi-worker-src). Keep this literal EXACTLY in sync with
-  // assets/kiwi-worker.js (the standalone asset); it must not contain
-  // backticks, ${ or a closing-script-tag sequence (the driver is inlined
-  // into pages by the renderers).
-  var KIWI_WORKER_SRC = `(function () {
+  // (data-kiwi-worker-src). This literal is GENERATED from
+  // assets/kiwi-worker.js by tools/embed-worker.mjs (audit round 15) — the
+  // standalone file is the source of truth; backticks and ${ are escaped
+  // for template-literal semantics. The worker must not contain a
+  // closing-script-tag sequence (the driver is inlined into pages by the
+  // renderers); the generator rejects one.
+  var KIWI_WORKER_SRC = `/* KiwiCaptcha worker solver — standalone same-origin asset.
+ *
+ * Served next to kiwicaptcha-wasm.js and imported via importScripts, OR
+ * embedded: the widget driver (widget-driver.js) embeds the identical
+ * worker logic as the KIWI_WORKER_SRC string constant and builds a Blob URL
+ * worker from it (prepending the wasm glue source), so no network request
+ * is ever made for the worker or the wasm module.
+ *
+ * Message protocol (worker <-> driver):
+ *   in : { type: "solve", algorithm, prefix, prefixLen, salt, saltLen,
+ *          targetBits, mKib, t, p, startCounter, maxHashes }
+ *        prefix/salt are base64 strings (the driver passes the decoded byte
+ *        lengths alongside); the worker decodes them itself.
+ *   out: { type: "ready", buildId } on startup (build-id handshake, audit #53)
+ *        { type: "progress", counter } every 1000 hashes
+ *        { type: "done", counter, buildId }  |  { type: "failed", reason }
+ *
+ * SHA-256 is solved via the wasm exports (solve_sha256_chunk) with a
+ * pure-JS SHA-256 fallback; Argon2id is solved via solve_argon2_chunk (the
+ * same wasm the main thread uses — no pure-JS Argon2 exists).
+ */
+(function () {
   "use strict";
 
   // Solver build id (audit #53): MUST equal the widget driver's
   // KIWI_SOLVER_BUILD_ID constant. Reported in the ready/done handshake
   // messages so the driver can refuse a stale cached worker.
   var KIWI_SOLVER_BUILD_ID = "2026-08-r1";
+
+  // The wasm glue exposes itself as \`window.__kiwiCaptchaWasm\`, so the
+  // worker establishes the \`window\` alias (same prelude the widget driver
+  // prepends for its Blob worker) BEFORE importing the glue. Without it a
+  // standalone same-origin worker (data-kiwi-worker-src) could not load
+  // the glue and silently lost its off-main-thread Argon2 solver.
+  if (typeof self !== "undefined" && typeof window === "undefined") {
+    self.window = self;
+  }
 
   var loader = null;
   try { importScripts("kiwicaptcha-wasm.js"); } catch (e) {}
@@ -738,6 +770,13 @@
     // that omit the attributes are still covered.
     var iconSvg = W.querySelector(".kiwi-icon-wrapper svg");
     if (iconSvg) { iconSvg.setAttribute("aria-hidden", "true"); iconSvg.setAttribute("focusable", "false"); }
+    // Audit round 15: the kiwi wink is an SVG SMIL <animate> element — CSS
+    // animation:none cannot stop SMIL, so reduced-motion users get the
+    // animate element REMOVED (not merely paused) on init.
+    if (iconSvg && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      var smilWink = iconSvg.querySelector("animate");
+      if (smilWink) smilWink.remove();
+    }
     var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W);
     var telemetry = telemetrySession(container, W);
     var scope = W.getAttribute("data-kiwi-scope") || container.getAttribute("data-kiwi-scope");

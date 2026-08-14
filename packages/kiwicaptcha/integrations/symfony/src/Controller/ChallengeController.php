@@ -11,6 +11,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Risk\UnknownScopeException;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
+use KiwiCaptcha\Storage\ReplicaWaitException;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
@@ -171,6 +172,8 @@ final class ChallengeController
         private readonly ?ScopeIssuanceCap $scopeIssuanceCap = null,
         private readonly ?SecurityEpochMonitor $epochMonitor = null,
         private readonly ?int $challengeTtlSecs = null,
+        /** Audit round 15: server-owned scope allowlist ([] = accept any). */
+        private readonly array $allowedScopes = [],
     ) {
     }
 
@@ -244,14 +247,6 @@ final class ChallengeController
                 );
             }
         }
-        $requestBody = (string) $request->getContent();
-        if (\strlen($requestBody) > self::MAX_CHALLENGE_BODY_BYTES) {
-            return $this->privateJson(
-                ['error' => ['code' => 'BODY_TOO_LARGE', 'message' => 'The challenge request body must not exceed '.self::MAX_CHALLENGE_BODY_BYTES.' bytes.']],
-                Response::HTTP_REQUEST_ENTITY_TOO_LARGE,
-            );
-        }
-
         // DUPLICATE SECURITY-SINGULAR HEADERS (audit #100): Origin,
         // Forwarded, X-Forwarded-For and X-Real-IP are identity/trust
         // inputs — a duplicate occurrence is parser ambiguity (one
@@ -297,6 +292,21 @@ final class ChallengeController
             return $this->privateJson(
                 ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
                 Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
+            );
+        }
+
+        // BODY READ (audit round 15): the input is consumed as a STREAM
+        // with a hard cap — at most MAX+1 bytes are ever materialized, so
+        // a gigantic chunked request cannot force PHP/Symfony to buffer
+        // the full body before the 413. Every header-level check (framing,
+        // security-singular headers, Content-Encoding, Content-Type,
+        // declared Content-Length) ran BEFORE this read; the duplicate-key
+        // scan and the strict decode below operate on the capped string.
+        $requestBody = $this->readBoundedBody($request);
+        if (\strlen($requestBody) > self::MAX_CHALLENGE_BODY_BYTES) {
+            return $this->privateJson(
+                ['error' => ['code' => 'BODY_TOO_LARGE', 'message' => 'The challenge request body must not exceed '.self::MAX_CHALLENGE_BODY_BYTES.' bytes.']],
+                Response::HTTP_REQUEST_ENTITY_TOO_LARGE,
             );
         }
 
@@ -464,6 +474,20 @@ final class ChallengeController
             );
         }
 
+        // SERVER-OWNED SCOPE ALLOWLIST (audit round 15): when
+        // risk.allowed_scopes is configured, issuance is refused for any
+        // scope outside the server-defined set BEFORE the risk assessment
+        // and the quota checks. This is the trust boundary that makes the
+        // per-scope issuance cap an independent security bound: the quota
+        // namespace is the server-owned allowlist, never the unbounded
+        // attacker-chosen scope dimension.
+        if ($this->allowedScopes !== [] && !\in_array($scope, $this->allowedScopes, true)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'SCOPE_NOT_ALLOWED', 'message' => 'This scope is not enabled for challenge issuance.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+
         // Transaction binding (audit #41): the widget sends the
         // request_binding field it carries (data-kiwi-request-binding); when
         // absent, the configured static risk.request_binding applies. The
@@ -627,21 +651,34 @@ final class ChallengeController
             }
         }
 
-        // PER-SCOPE ISSUANCE CAP (audit #89/#112): when
+        // PER-SCOPE ISSUANCE CAP (audit #89/#112/#round-15): when
         // risk.max_challenges_per_scope_per_minute is configured, the
-        // atomic {kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, derived key))>:
-        // <minute> fixed-window counter (INCR + EXPIRE 60 in one Lua script)
-        // refuses 429 SCOPE_LIMITED beyond the cap — the public site key +
-        // claimed origin can no longer create unlimited billed verification
-        // work per scope. The check CONSUMES the slot it admits (a denial
-        // below is not double-counted). The raw scope string is NEVER a
-        // Redis key component: the scope is attacker-controlled (bounded
-        // alphabet, unbounded cardinality) and the keyed form
-        // hex(hmac_sha256(scope, HKDF('kiwi/v2/scope-rate'))) keeps
-        // attacker-controlled cardinality out of the keyspace (audit #112).
-        // A Redis failure propagates (fail closed: no challenge without a
-        // checked scope bound).
-        if ($this->scopeIssuanceCap !== null && !$this->scopeIssuanceCap->allow($scope)) {
+        // atomic {kiwi:<ns>}:issuance:<scopeIdentity>:<minute> fixed-window
+        // counter (INCR + EXPIRE 60 in one Lua script) refuses 429
+        // SCOPE_LIMITED beyond the cap — the public site key + claimed
+        // origin can no longer create unlimited billed verification work
+        // per scope. The check CONSUMES the slot it admits (a denial below
+        // is not double-counted). The quota keys on the SERVER-OWNED scope
+        // identity: the risk policy's canonical scope id (the configured
+        // risk.scopes.<name>.id, or the shared synthetic unknown-scope id
+        // in 'minimum' mode) — the raw scope string is NEVER a Redis key
+        // component (audit #112) and, when risk.allowed_scopes is
+        // configured, the quota namespace is bounded by the server-owned
+        // set (audit round 15: HMAC-only keying hides attacker-controlled
+        // BYTES, it does not bound cardinality). A Redis failure propagates
+        // (fail closed: no challenge without a checked scope bound).
+        $canonicalScopeId = null;
+        if ($this->risk !== null) {
+            try {
+                $canonicalScopeId = $this->risk->scopeId($scope);
+            } catch (UnknownScopeException) {
+                // 'reject'/'baseline' modes decline unknown scopes — the
+                // risk assessment below already handles the response; the
+                // cap falls back to the keyed pseudonym for the window.
+                $canonicalScopeId = null;
+            }
+        }
+        if ($this->scopeIssuanceCap !== null && !$this->scopeIssuanceCap->allow($scope, $canonicalScopeId)) {
             return $this->privateJson(
                 ['error' => ['code' => 'SCOPE_LIMITED', 'message' => 'Too many challenges issued for this scope. Try again later.']],
                 Response::HTTP_TOO_MANY_REQUESTS,
@@ -685,6 +722,23 @@ final class ChallengeController
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
+        } catch (ReplicaWaitException $e) {
+            // Durability barrier failure (audit round 14/15): the
+            // configured wait_replicas threshold could not be met, so the
+            // challenge was NOT handed out — fail closed. This is an
+            // OPERATIONAL condition (replica lag / topology), not a client
+            // fault: 503 SERVICE_UNAVAILABLE with the private/no-store
+            // envelope and an opaque message; the replication detail goes
+            // to the server log only.
+            error_log(sprintf('kiwicaptcha: challenge issuance failed the replica-wait barrier: %s', $e->getMessage()));
+
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
                 $request,
                 $riskSession,
                 $mintedCookie,
@@ -948,6 +1002,26 @@ final class ChallengeController
      * check runs before the decode, but a document the scanner refuses
      * without a duplicate is never refused by it).
      */
+    /**
+     * Read the challenge request body with a hard byte cap (audit round
+     * 15): the input stream is consumed for at most MAX+1 bytes, so an
+     * oversized chunked body is refused by the caller's length check
+     * WITHOUT ever being materialized in full — the bounded read is the
+     * authoritative protection (a declared Content-Length was already
+     * checked before the stream was touched, but chunked uploads can skip
+     * a truthful one). When Symfony hands back a buffered stream (tests,
+     * already-consumed input) the read is still bounded.
+     */
+    private function readBoundedBody(Request $request): string
+    {
+        $stream = $request->getContent(true);
+        if (\is_resource($stream)) {
+            return (string) stream_get_contents($stream, self::MAX_CHALLENGE_BODY_BYTES + 1);
+        }
+
+        return (string) $request->getContent();
+    }
+
     private function scanForDuplicateJsonKey(string $json): ?string
     {
         $offset = 0;

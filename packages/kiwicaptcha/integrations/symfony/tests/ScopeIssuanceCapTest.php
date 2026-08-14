@@ -94,6 +94,39 @@ final class ScopeIssuanceCapTest extends TestCase
         );
     }
 
+    /**
+     * Audit round 15: when the caller supplies the risk policy's canonical
+     * SERVER-OWNED scope id, the quota keys on THAT identity — the
+     * namespace is bounded by the server-owned set (two spellings of one
+     * scope share a window; the HMAC fallback is only for unscoped calls).
+     */
+    public function testCanonicalScopeIdIsTheQuotaIdentity(): void
+    {
+        $redis = new FakePredisClient();
+        $cap = new ScopeIssuanceCap($redis, '{kiwi:t}:issuance:', 2, $this->hmacKey(), fn (): int => $this->nowSecs);
+
+        // Two attacker-chosen names that resolve to ONE server-owned scope
+        // id share a single window — cardinality is bounded by the
+        // server-owned set, not by the client's scope strings.
+        self::assertTrue($cap->allow('login', 42));
+        self::assertTrue($cap->allow('signup', 42));
+        self::assertFalse($cap->allow('anything_else', 42), 'the canonical id collapses every alias into one window');
+
+        $key = '{kiwi:t}:issuance:42:'.intdiv($this->nowSecs, 60);
+        self::assertSame(3, $redis->counters[$key], 'the window key is the canonical scope id, not the scope bytes');
+        foreach ($redis->calls as $call) {
+            foreach ((array) $call[1] as $arg) {
+                if (\is_string($arg) && str_contains($arg, ':issuance:')) {
+                    self::assertStringNotContainsString('login', $arg, 'the raw scope must never appear in an issuance key');
+                    self::assertStringNotContainsString('signup', $arg, 'the raw scope must never appear in an issuance key');
+                }
+            }
+        }
+
+        // Distinct canonical ids still get independent windows.
+        self::assertTrue($cap->allow('login', 7), 'a different server-owned scope id has its own window');
+    }
+
     public function testDeriveScopeHmacKeyIsPurposeSeparated(): void
     {
         // The HKDF info tag 'kiwi/v2/scope-rate' must yield a key that

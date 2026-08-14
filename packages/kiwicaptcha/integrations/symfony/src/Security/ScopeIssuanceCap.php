@@ -8,13 +8,28 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  * PER-SCOPE issuance cap (audit #89): a Redis fixed-window counter bounding
  * how many challenges a scope may issue per minute.
  *
- * Key: `{kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, derived key))>:<minute>`
- * — one independent window per scope per minute. The RAW SCOPE STRING IS
- * NEVER A REDIS KEY COMPONENT (audit #112): the scope is attacker-controlled
- * (bounded alphabet, unbounded cardinality), so the key carries
- * `hex(hmac_sha256(scope, K_scope))` — 64 hex chars of keyed pseudonym. The
- * HMAC key K_scope is derived from the bundle's risk master (master_secret,
- * falling back to the captcha secret_key) with
+ * Key: `{kiwi:<ns>}:issuance:<scopeIdentity>:<minute>` — one independent
+ * window per scope per minute.
+ *
+ * SCOPE IDENTITY (audit round 15 — the trust boundary): a security quota
+ * must operate over a SERVER-OWNED identity, not an attacker-chosen
+ * dimension. The preferred key component is the risk policy's canonical
+ * server-side scope id (the configured `risk.scopes.<name>.id` — a stable
+ * u32 that two scopes can never share, or the single shared synthetic id
+ * the extension reserves for unknown scopes in 'minimum' mode). The
+ * cardinality of the quota namespace is then bounded by the server-owned
+ * configuration. For scopes that carry NO canonical id (risk disabled /
+ * unresolvable), the key falls back to `hex(hmac_sha256(scope, K_scope))`
+ * — 64 hex chars of keyed pseudonym. THAT FALLBACK ONLY KEEPS
+ * ATTACKER-CONTROLLED BYTES OUT OF THE KEY NAME (audit #112); it does NOT
+ * bound cardinality — every unique scope still mints a unique counter —
+ * so in fallback mode the cap is per-name soft limiting, never an
+ * independent security bound (the per-IP/global limits carry that role;
+ * operators who need a hard per-scope bound configure `risk.allowed_scopes`
+ * so the quota namespace is the server-owned allowlist).
+ *
+ * The HMAC key K_scope is derived from the bundle's risk master
+ * (master_secret, falling back to the captcha secret_key) with
  * `hash_hkdf('sha256', master, 32, 'kiwi/v2/scope-rate')` —
  * {@see self::deriveScopeHmacKey()} — purpose-separated from the risk
  * identity keys, so a scope pseudonym is never derivable from any other
@@ -48,7 +63,7 @@ final class ScopeIssuanceCap
 
     /**
      * Atomic increment + expiry + cap check:
-     *   KEYS[1] = {kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>
+     *   KEYS[1] = {kiwi:<ns>}:issuance:<scopeIdentity>:<minute>
      *   ARGV[1] = cap
      * Returns 1 when the window has room, 0 when the cap is exhausted.
      */
@@ -115,31 +130,52 @@ LUA;
      * issuance it then performs). Never throws for a disabled cap (null
      * Redis or cap 0) — always allowed.
      *
+     * @param int|null $canonicalScopeId the risk policy's SERVER-OWNED scope
+     *                                   id (audit round 15): the configured
+     *                                   `risk.scopes.<name>.id`, or the
+     *                                   shared synthetic unknown-scope id.
+     *                                   When provided it is the quota key
+     *                                   component — the quota namespace is
+     *                                   bounded by the server-owned set. When
+     *                                   null, the key falls back to
+     *                                   hex(hmac_sha256(scope, K_scope)),
+     *                                   which hides the raw bytes but does
+     *                                   NOT bound cardinality (per-name soft
+     *                                   limiting only).
+     *
      * @throws \Throwable when Redis fails (fail closed — the caller refuses
      *                    issuance rather than minting an unbilled challenge)
      */
-    public function allow(string $scope): bool
+    public function allow(string $scope, ?int $canonicalScopeId = null): bool
     {
         if ($this->redis === null || $this->cap <= 0) {
             return true;
         }
 
-        $result = $this->eval(self::CHECK_SCRIPT, [$this->windowKey($scope)], [(string) $this->cap]);
+        $result = $this->eval(self::CHECK_SCRIPT, [$this->windowKey($scope, $canonicalScopeId)], [(string) $this->cap]);
 
         return (int) $result === 1;
     }
 
     /**
      * The fixed-window key for a scope:
-     * `{kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>` —
-     * the RAW scope never appears in Redis (audit #112: attacker-controlled
-     * cardinality stays out of the keyspace). The minute comes from the
-     * Redis server clock (one TIME read shared with the script's EXPIRE) or
-     * the injected clock when Redis is unavailable.
+     * `{kiwi:<ns>}:issuance:<scopeIdentity>:<minute>` where scopeIdentity is
+     * the canonical server-owned scope id (decimal, when provided) or
+     * `hex(hmac_sha256(scope, K_scope))` otherwise — the RAW scope never
+     * appears in Redis. The canonical id is the security-quota identity
+     * (cardinality bounded by the server-owned set); the HMAC fallback only
+     * keeps attacker-controlled BYTES out of the key name (audit round 15 —
+     * it does not bound cardinality). The minute comes from the Redis
+     * server clock (one TIME read shared with the script's EXPIRE) or the
+     * injected clock when Redis is unavailable.
      */
-    public function windowKey(string $scope): string
+    public function windowKey(string $scope, ?int $canonicalScopeId = null): string
     {
-        return sprintf('%s%s:%d', $this->keyPrefix, $this->scopeKey($scope), $this->minute());
+        $identity = $canonicalScopeId !== null
+            ? (string) $canonicalScopeId
+            : $this->scopeKey($scope);
+
+        return sprintf('%s%s:%d', $this->keyPrefix, $identity, $this->minute());
     }
 
     /**
