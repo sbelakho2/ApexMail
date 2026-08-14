@@ -40,7 +40,7 @@ final class TwigRuntimeTest extends TestCase
         // the challenge POST and writes the hidden kiwi_request_binding form
         // field next to the token.
         self::assertStringContainsString('request_binding', $html, 'the driver must include the request_binding challenge field');
-        self::assertStringContainsString("input[name='kiwi_request_binding']", $html, 'the driver must create the hidden kiwi_request_binding form input');
+        self::assertStringContainsString('input[name="kiwi_request_binding"]', $html, 'the driver must create the hidden kiwi_request_binding form input');
         // No external requests: no <link>, no <script src>, no fetchable URLs
         // (the SVG xmlns is an XML namespace, not a network fetch).
         self::assertStringNotContainsString('<link ', $html);
@@ -192,6 +192,11 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('var requestBinding = W.getAttribute("data-kiwi-request-binding")', $driver, 'the binding variable is assigned ONLY from the container attribute');
         self::assertStringNotContainsString('randomUUID', $driver, 'the driver must never generate bindings with crypto.randomUUID');
         self::assertStringNotContainsString('getRandomValues', $driver, 'the driver must never generate bindings with crypto.getRandomValues');
-        self::assertStringNotContainsString('Math.random', $driver, 'the driver must never generate bindings with Math.random');
+        // Round-14: Math.random exists exactly once — the per-widget
+        // data-kiwi-instance debugging marker. It must NEVER appear in the
+        // binding path: the binding is assigned from the container
+        // attribute only (asserted above), and no other Math.random usage
+        // may appear in the driver.
+        self::assertSame(1, substr_count($driver, 'Math.random'), 'Math.random must be limited to the instance-id marker — bindings are never synthesized client-side');
     }
 }

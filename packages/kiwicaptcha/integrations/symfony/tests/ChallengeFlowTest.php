@@ -1386,4 +1386,107 @@ final class ChallengeFlowTest extends TestCase
             self::assertSame(200, $response->getStatusCode(), 'a clean document must keep issuing: '.$body);
         }
     }
+
+    /**
+     * Audit round 14: duplicate detection compares SEMANTIC keys — the
+     * escape-spelling bypass ({"scope":...,"\u0073cope":...}) must be a
+     * duplicate too: json_decode canonicalizes both spellings into one
+     * logical key, so the scanner has to as well (the raw-textual
+     * comparison was the P1 parser-ambiguity hole).
+     */
+    public function testDuplicateJsonKeysAcrossEscapeSpellingsAre422(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        $duplicates = [
+            '{"scope":"login","\\u0073cope":"signup"}' => 'literal vs \\uXXXX escape',
+            '{"\\u0073cope":"login","scope":"signup"}' => 'escaped first, literal second',
+            '{"s\\u0063ope":"login","scope":"signup"}' => 'mixed escaped/unescaped characters',
+            '{"c\\u0061t":"login","cat":"signup"}' => 'multi-char literal vs \\uXXXX of the same key',
+            '{"a\\u0021":"login","a!":"signup"}' => 'escaped punctuation vs literal',
+            '{"\\u00e9t\\u00e9":"a","\\u00e9t\\u00e9":"b"}' => 'identical escaped-accent key spelled twice',
+            '{"\\"quoted\\"":"a","\\"quoted\\"":"b"}' => 'escaped quotes decode to the same key',
+            '{"back\\\\slash":"a","back\\\\slash":"b"}' => 'escaped backslashes decode to the same key',
+            '{"😀":"a","\\uD83D\\uDE00":"b"}' => 'surrogate-pair spelling equals the literal emoji',
+            '{"scope":"login","nested":{"\\u0061":1,"a":2}}' => 'escaped duplicate in a nested object',
+            '{"scope":"login","arr":[{"\\u0078":1,"x":2}]}' => 'escaped duplicate inside an array element',
+        ];
+        foreach ($duplicates as $body => $why) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], $body));
+            self::assertSame(422, $response->getStatusCode(), $why.' must be 422');
+            self::assertSame('DUPLICATE_FIELD', json_decode((string) $response->getContent(), true)['error']['code'], $why);
+        }
+
+        // Escape-spelled CLEAN documents must keep issuing (the decode is
+        // not over-eager: distinct semantic keys are NOT duplicates).
+        foreach ([
+            '{"\\u0073cope":"login"}',
+            '{"scope":"login","\\u0072equest_binding":"txn-1"}',
+            '{"\\u0073cope":"login","\\u0072equest_binding":"txn-1"}',
+        ] as $body) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], $body));
+            self::assertSame(200, $response->getStatusCode(), 'an escape-spelled clean document must keep issuing: '.$body);
+        }
+
+        // Distinct semantic keys spelled with escapes are NOT duplicates —
+        // the endpoint proceeds past the scanner and then rejects the
+        // undocumented keys with UNKNOWN_FIELDS (proving the scanner did
+        // not false-positive on the escapes).
+        foreach ([
+            '{"a\\u0021":"login"}',
+            '{"\\u00e9":"a","e":"b"}',
+            '{"\\u00e9t\\u00e9":"a","\\u00e9te":"b"}',
+        ] as $body) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], $body));
+            self::assertSame(422, $response->getStatusCode(), 'distinct escaped keys must not be duplicates: '.$body);
+            self::assertSame('UNKNOWN_FIELDS', json_decode((string) $response->getContent(), true)['error']['code'], 'the scanner must not flag distinct escaped keys as duplicates: '.$body);
+        }
+    }
+
+    /**
+     * Audit round 14: the challenge body is capped at 8 KiB — a declared
+     * oversized Content-Length is refused before any body is read, and the
+     * actual read length is capped too (chunked uploads can skip a truthful
+     * Content-Length). Both paths return 413 BODY_TOO_LARGE, never reach
+     * the duplicate scan or the risk admission.
+     */
+    public function testOversizedChallengeBodyIs413(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        // Declared Content-Length over the cap: refused before body read.
+        $response = $controller->challenge(JsonRequest::create(
+            '/challenge',
+            'POST',
+            [],
+            [],
+            [],
+            ['REMOTE_ADDR' => '198.51.100.7', 'CONTENT_LENGTH' => '8193'],
+            '{"scope":"login"}',
+        ));
+        self::assertSame(413, $response->getStatusCode());
+        self::assertSame('BODY_TOO_LARGE', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        // Actual body over the cap (no truthful Content-Length — the
+        // chunked-upload equivalent).
+        $huge = '{"scope":"'.str_repeat('x', 8200).'"}';
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], $huge));
+        self::assertSame(413, $response->getStatusCode());
+        self::assertSame('BODY_TOO_LARGE', json_decode((string) $response->getContent(), true)['error']['code']);
+    }
+
+    /**
+     * Audit round 14: the duplicate scanner caps recursion at 32 levels —
+     * a pathological nesting depth (beyond what the strict json_decode
+     * accepts anyway) must not consume unbounded scanner stack.
+     */
+    public function testDeeplyNestedJsonDoesNotBlowTheScannerStack(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+
+        $body = str_repeat('[', 400).'1'.str_repeat(']', 400);
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], $body));
+        self::assertSame(422, $response->getStatusCode(), 'a non-object document at extreme depth is INVALID_JSON (never a crash)');
+        self::assertSame('INVALID_JSON', json_decode((string) $response->getContent(), true)['error']['code']);
+    }
 }

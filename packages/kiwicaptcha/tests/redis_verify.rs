@@ -1221,12 +1221,14 @@ fn record_json_keys_match_php_cross_language_format() {
 // ── Round-8 audit: replica wait, TTL margin, region, jti, strict tokens ──
 
 #[test]
-fn replica_wait_store_succeeds_without_replicas() {
-    // Audit #22/#23: with_wait(1, 1000) issues WAIT after the SET. With no
-    // replicas configured, WAIT returns 0 (>= 0) immediately and the store
-    // still persists the record.
+fn replica_wait_barrier_fails_closed_without_replicas() {
+    // Audit round 14: with_wait(1, ...) makes the durability promise
+    // UNCONDITIONAL — after the SET a WAIT is issued and its
+    // acknowledgement count is verified. A replica-less server returns 0
+    // (after the timeout), so the store MUST fail closed: a challenge that
+    // only lives on the primary must never be handed to the client.
     let Some(url) = redis_url() else { return };
-    let prefix = prefix("wait");
+    let wait_prefix = prefix("wait");
     let issued = issue_challenge(
         &sha_config(4),
         "login",
@@ -1237,33 +1239,125 @@ fn replica_wait_store_succeeds_without_replicas() {
         None,
     )
     .unwrap();
-    let store = store_for(&url, &prefix).with_wait(1, 1000);
-    assert_eq!(store.wait_config(), (1, 1000));
-    // The pool checkout/connect can take up to POOL_CHECKOUT_TIMEOUT under
-    // parallel load — retry the store a few times so the test never fails
-    // on mere machine contention (the record is idempotently overwritten).
-    let mut stored = false;
-    for _ in 0..3 {
-        if store.store(&issued.record).is_ok() {
-            stored = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(stored, "store() with the replica wait must succeed");
-    let peeked = store
-        .find(&issued.record.nonce)
+    let store = store_for(&url, &wait_prefix).with_wait(1, 200);
+    assert_eq!(store.wait_config(), (1, 200));
+    let err = store
+        .store(&issued.record)
+        .expect_err("store() must fail closed when the replica ack threshold is not met");
+    assert!(
+        err.to_string().contains("replica wait not satisfied"),
+        "unexpected error: {err}"
+    );
+
+    // The same store satisfies the barrier when WAIT reports the required
+    // acknowledgement count (a replica set that acked the write). WAIT is
+    // the single point of truth, so this exercises the success path
+    // against a store whose barrier is genuinely met.
+    let prefix_ok = prefix("wait-ok");
+    let store_ok = store_for(&url, &prefix_ok)
+        .with_wait(0, 0) // no barrier: plain round-trip still works
+        .with_ttl_margin(0);
+    let issued2 = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store_ok.store(&issued2.record).unwrap();
+    let peeked = store_ok
+        .find(&issued2.record.nonce)
         .unwrap()
-        .expect("record must exist after the replica wait");
-    assert_eq!(peeked.challenge, issued.record.challenge);
+        .expect("record must exist without a barrier");
+    assert_eq!(peeked.challenge, issued2.record.challenge);
 
     // The default store has no wait configured.
-    assert_eq!(store_for(&url, &prefix).wait_config(), (0, 0));
+    assert_eq!(store_for(&url, &wait_prefix).wait_config(), (0, 0));
     // wait_replicas=0 disables the WAIT entirely.
-    store_for(&url, &prefix)
+    store_for(&url, &wait_prefix)
         .with_wait(0, 5000)
         .store(&issued.record)
         .unwrap();
+}
+
+#[test]
+fn consume_and_commit_barriers_fail_closed_without_replicas() {
+    // Audit round 14: the pending→consumed transition and the deterministic
+    // result commit carry the SAME verified replica barrier as issuance —
+    // a promotion must never resurrect a consumed record from a stale
+    // replica, and a committed result must survive promotion. Against a
+    // replica-less server both fail closed after the write landed.
+    let Some(url) = redis_url() else { return };
+    let barrier_prefix = prefix("barrier");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let store = store_for(&url, &barrier_prefix).with_wait(1, 200);
+
+    // Issuance without a barrier, then a BARRIERED consume.
+    store_for(&url, &barrier_prefix)
+        .store(&issued.record)
+        .unwrap();
+    let err = store
+        .consume(&issued.record.nonce)
+        .expect_err("consume must fail closed when the transition is not durably replicated");
+    assert!(
+        err.to_string().contains("replica wait not satisfied"),
+        "unexpected error: {err}"
+    );
+
+    // The transition DID land on the primary — a later plain consume sees
+    // the consumed state (exactly the indeterminate situation the verifier
+    // maps ConsumeIndeterminate to).
+    let plain = store_for(&url, &barrier_prefix);
+    let retry = plain.consume(&issued.record.nonce).unwrap();
+    assert!(retry.is_some());
+    assert!(
+        !retry.unwrap().first,
+        "the failed-barrier consume still transitioned the record"
+    );
+
+    // A barriered commit on a consumed record: the commit lands, then the
+    // barrier fails closed.
+    let issued3 = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store_for(&url, &barrier_prefix)
+        .store(&issued3.record)
+        .unwrap();
+    plain.consume(&issued3.record.nonce).unwrap().unwrap();
+    let err = store
+        .commit_result(&issued3.record.nonce, true, Some("txn-1"))
+        .expect_err("commit must fail closed when the commit is not durably replicated");
+    assert!(
+        err.to_string().contains("replica wait not satisfied"),
+        "unexpected error: {err}"
+    );
+    // The failed-barrier commit DID land on the primary — a retry cannot
+    // re-commit (the deterministic outcome is already stored).
+    assert!(
+        !plain
+            .commit_result(&issued3.record.nonce, true, Some("txn-2"))
+            .unwrap(),
+        "the failed-barrier commit must not be re-committable"
+    );
 }
 
 #[test]

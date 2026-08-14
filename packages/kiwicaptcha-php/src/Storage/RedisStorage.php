@@ -128,12 +128,17 @@ return 1
 LUA;
 
     /**
-     * @param int $waitReplicas   when > 0, store() issues a Redis WAIT after
-     *                            SET so the record has reached this many
-     *                            replicas before the challenge is handed to
-     *                            the client (async-replication failover can
-     *                            otherwise lose the record and replay it
-     *                            after failback)
+     * @param int $waitReplicas   when > 0, every durability-critical write
+     *                            (issuance SET, the pending→consumed
+     *                            transition, the result commit) is followed
+     *                            by a Redis WAIT whose acknowledgement count
+     *                            is VERIFIED: fewer than waitReplicas acked
+     *                            replicas raises {@see ReplicaWaitException}
+     *                            (fail closed — the guarantee is
+     *                            unconditional, never silently downgraded).
+     *                            Async-replication failover can otherwise
+     *                            lose a write or resurrect a consumed
+     *                            record from a stale replica
      * @param int $waitTimeoutMs  WAIT timeout in milliseconds (default 100)
      * @param int $ttlMarginSecs  extra retention on the record beyond token
      *                            validity: TTL = expires_at - now + margin
@@ -166,7 +171,7 @@ LUA;
         }
 
         if ($this->waitReplicas > 0) {
-            $this->wait();
+            $this->waitAndVerify('challenge issuance');
         }
     }
 
@@ -186,6 +191,14 @@ LUA;
         $raw = $this->evalScript(self::CONSUME_SCRIPT, [$key], 1);
         if ($raw === false || $raw === null || !\is_array($raw)) {
             return null;
+        }
+
+        // Durability barrier (audit round 14): the pending→consumed
+        // transition must reach the configured replica count before the
+        // caller is allowed to treat the record as consumed — a promotion
+        // must never resurrect a consumed record from a stale replica.
+        if ($this->waitReplicas > 0) {
+            $this->waitAndVerify('the pending→consumed transition');
         }
 
         // Lua tables are 1-indexed; normalize before destructuring.
@@ -216,8 +229,19 @@ LUA;
     {
         $key = $this->prefix.$nonce;
         $raw = $this->evalScript(self::COMMIT_SCRIPT, [$key, $valid ? '1' : '0', $binding ?? '', $binding === null ? '0' : '1'], 1);
+        $committed = $raw === 1 || $raw === '1' || $raw === true;
 
-        return $raw === 1 || $raw === '1' || $raw === true;
+        // Durability barrier (audit round 14): a committed deterministic
+        // result that only lives on the primary would be lost on promotion,
+        // degrading a retry to ConsumeIndeterminate. The barrier keeps the
+        // commit's durability contract honest. Callers treat commit as
+        // best-effort, so a barrier failure cannot change the outcome — it
+        // only surfaces the (safe) degraded state on the next retry.
+        if ($committed && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the result commit');
+        }
+
+        return $committed;
     }
 
     public function delete(string $nonce): void
@@ -240,21 +264,42 @@ LUA;
 
     /**
      * Block until at least waitReplicas replicas acknowledged the previous
-     * write (the SET above). A replica-less or unreachable replica set
-     * returns the number of acknowledged replicas (0) without error — WAIT
-     * only bounds the blocking time; propagation success is NOT asserted.
+     * write, and FAIL CLOSED when they did not (audit round 14).
+     *
+     * Redis WAIT returns the number of replicas that processed the write
+     * (0 on a replica-less server). The barrier asserts that number against
+     * the configured threshold: with `waitReplicas > 0` the durability
+     * promise is unconditional, so a lagging/unreachable replica set raises
+     * {@see ReplicaWaitException} instead of silently downgrading the
+     * guarantee — exactly the failure the failover replay window relied on.
      */
-    private function wait(): void
+    private function waitAndVerify(string $what): void
     {
         if ($this->client instanceof \Redis) {
             // phpredis has no typed WAIT method; rawCommand mirrors the
             // GETDEL path.
-            $this->client->rawCommand('WAIT', $this->waitReplicas, $this->waitTimeoutMs);
+            $acked = $this->client->rawCommand('WAIT', $this->waitReplicas, $this->waitTimeoutMs);
         } else {
             // Predis removed the typed wait() method from its command
             // profile; executeRaw is the raw-command escape hatch (the same
             // semantics as phpredis rawCommand).
-            $this->client->executeRaw(['WAIT', $this->waitReplicas, $this->waitTimeoutMs]);
+            $acked = $this->client->executeRaw(['WAIT', $this->waitReplicas, $this->waitTimeoutMs]);
+        }
+        if ($acked === false || $acked === null) {
+            throw new ReplicaWaitException(sprintf(
+                'Redis WAIT failed after %s (waitReplicas=%d, timeout=%dms)',
+                $what,
+                $this->waitReplicas,
+                $this->waitTimeoutMs,
+            ));
+        }
+        if ((int) $acked < $this->waitReplicas) {
+            throw new ReplicaWaitException(sprintf(
+                'Redis WAIT acknowledged %d of %d requested replicas after %s',
+                (int) $acked,
+                $this->waitReplicas,
+                $what,
+            ));
         }
     }
 

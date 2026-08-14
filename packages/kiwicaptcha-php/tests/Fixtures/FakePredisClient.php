@@ -17,8 +17,10 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *    audit #74 one-shot transition, not a delete.
  *  - commit-result script: stores {valid, binding} on a consumed record
  *    without a result yet; returns 1/0.
- *  - WAIT: returns 0 (no replicas — a real replica-less Redis returns 0
- *    without error; only the number of acknowledged replicas is reported).
+ *  - WAIT: returns {@see FakePredisClient::$waitAck} (default 0 — a real
+ *    replica-less Redis reports 0 acknowledged replicas without error; only
+ *    the number of acknowledged replicas is returned). Tests set waitAck to
+ *    model a satisfied or violated durability barrier.
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
  * assert on the Redis commands issued (Lua usage, EX expiration, WAIT
@@ -31,6 +33,9 @@ final class FakePredisClient extends \Predis\Client
 
     /** @var array<string, int> */
     public array $expirations = [];
+
+    /** Number of replicas WAIT reports as acknowledging the last write. */
+    public int $waitAck = 0;
 
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
@@ -50,9 +55,7 @@ final class FakePredisClient extends \Predis\Client
             'DEL' => $this->fakeDel($arguments),
             'EXISTS' => isset($this->store[(string) $arguments[0]]) ? 1 : 0,
             'EVAL' => $this->fakeEval($arguments),
-            // Replica-less fake: WAIT returns 0 acknowledged replicas (real
-            // Redis reports the actual count without erroring).
-            'WAIT' => 0,
+            'WAIT' => $this->waitAck,
             default => null,
         };
     }
@@ -60,8 +63,8 @@ final class FakePredisClient extends \Predis\Client
     /**
      * Predis removed the typed wait() method; RedisStorage's WAIT goes
      * through executeRaw (the raw-command escape hatch). Record the call
-     * like any other so tests can assert on it, and emulate the replica-less
-     * response (0 acknowledged replicas).
+     * like any other so tests can assert on it; the acknowledged-replica
+     * count is {@see FakePredisClient::$waitAck}.
      *
      * @param list<mixed> $arguments raw command: [commandID, ...args]
      */
@@ -70,7 +73,7 @@ final class FakePredisClient extends \Predis\Client
         $id = strtoupper((string) ($arguments[0] ?? ''));
         $this->calls[] = [$id, \array_slice($arguments, 1)];
 
-        return $id === 'WAIT' ? 0 : null;
+        return $id === 'WAIT' ? $this->waitAck : null;
     }
 
     /** @param list<mixed> $arguments */

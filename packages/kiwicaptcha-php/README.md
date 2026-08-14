@@ -41,7 +41,8 @@ Byte-for-byte compatible with the reference implementation in
   hash per attempt), so it is ideal for high-traffic endpoints.
 - Argon2id mode: verify via libsodium (`opslimit == t_cost`,
   `memlimit == m_kib*1024`). Argon2id is **memory-hard, increasing the cost
-  of massively parallel and specialized solving** (ASIC/GPU resistance) at
+  of massively parallel and specialized solving** (reducing the parallelism
+  advantage of specialized hardware) at
   the price of more expensive server verification. KiwiCaptcha
   intentionally requires `t >= 3 && p == 1` for Argon2id mode (its
   supported protocol profile; `p == 1` reflects libsodium's raw Argon2id

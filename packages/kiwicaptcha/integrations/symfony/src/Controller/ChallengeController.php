@@ -140,6 +140,19 @@ final class ChallengeController
      */
     private const SECURITY_SINGULAR_HEADERS = ['origin', 'forwarded', 'x-forwarded-for', 'x-real-ip'];
 
+    /**
+     * Hard ceiling for the challenge request body (audit round 14): the
+     * challenge language is tiny (scope/algorithm/request_binding), so 8
+     * KiB is extremely generous — everything beyond it is refused before
+     * the duplicate scan / JSON decode / risk admission consume anything.
+     * Edge deployments should mirror this in the proxy (client_max_body_size
+     * etc.) so oversized bytes never reach PHP at all.
+     */
+    private const MAX_CHALLENGE_BODY_BYTES = 8192;
+
+    /** Recursion cap for the duplicate-key scanner (depth bombs). */
+    private const MAX_JSON_SCAN_DEPTH = 32;
+
     public function __construct(
         private readonly Issuer $issuer,
         private readonly ?IssuanceRateLimiter $rateLimiter = null,
@@ -210,6 +223,32 @@ final class ChallengeController
             return $this->privateJson(
                 ['error' => ['code' => 'FRAMING_REJECTED', 'message' => 'The request carries ambiguous HTTP framing (Content-Length and Transfer-Encoding together, or a duplicate Content-Length).']],
                 Response::HTTP_BAD_REQUEST,
+            );
+        }
+
+        // BODY CEILING (audit round 14): the challenge language is tiny —
+        // real requests are tens to a few hundred bytes — so a giant body
+        // is pure memory/CPU spend BEFORE the shared risk/Redis admission
+        // controls. An oversized DECLARED Content-Length is rejected before
+        // any body is read (413), and the ACTUAL read length is capped too:
+        // chunked uploads can avoid a truthful Content-Length, so the
+        // post-read check is the authoritative one (the README's edge
+        // guidance adds the matching limit in nginx/Apache/Envoy so the
+        // bytes never reach PHP at all).
+        $declaredLengths = $request->headers->all('content-length');
+        foreach ($declaredLengths as $declared) {
+            if (\is_string($declared) && (int) $declared > self::MAX_CHALLENGE_BODY_BYTES) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'BODY_TOO_LARGE', 'message' => 'The challenge request body must not exceed '.self::MAX_CHALLENGE_BODY_BYTES.' bytes.']],
+                    Response::HTTP_REQUEST_ENTITY_TOO_LARGE,
+                );
+            }
+        }
+        $requestBody = (string) $request->getContent();
+        if (\strlen($requestBody) > self::MAX_CHALLENGE_BODY_BYTES) {
+            return $this->privateJson(
+                ['error' => ['code' => 'BODY_TOO_LARGE', 'message' => 'The challenge request body must not exceed '.self::MAX_CHALLENGE_BODY_BYTES.' bytes.']],
+                Response::HTTP_REQUEST_ENTITY_TOO_LARGE,
             );
         }
 
@@ -367,7 +406,7 @@ final class ChallengeController
         // gets 422 DUPLICATE_FIELD. The scanner is defensive: on a document
         // it cannot walk it returns null and the strict json_decode below
         // handles the malformed document (422 INVALID_JSON).
-        $duplicateKey = $this->scanForDuplicateJsonKey((string) $request->getContent());
+        $duplicateKey = $this->scanForDuplicateJsonKey($requestBody);
         if ($duplicateKey !== null) {
             return $this->privateJson(
                 ['error' => ['code' => 'DUPLICATE_FIELD', 'message' => 'The challenge request carries a duplicate JSON key: '.$duplicateKey.'.']],
@@ -382,7 +421,7 @@ final class ChallengeController
         // and get 422 — the endpoint never silently ignores extra control
         // surface. A non-object document is refused too (an empty JSON
         // object {} is valid — the fields are optional).
-        $decoded = json_decode((string) $request->getContent(), false);
+        $decoded = json_decode($requestBody, false);
         if (!$decoded instanceof \stdClass) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request body must be a JSON object.']],
@@ -913,7 +952,7 @@ final class ChallengeController
     {
         $offset = 0;
         try {
-            $this->scanJsonValue($json, $offset);
+            $this->scanJsonValue($json, $offset, 0);
 
             return null;
         } catch (DuplicateJsonKeyException $e) {
@@ -933,8 +972,15 @@ final class ChallengeController
      *
      * @param int $offset position in the raw JSON string (by reference)
      */
-    private function scanJsonValue(string $json, int &$offset): void
+    private function scanJsonValue(string $json, int &$offset, int $depth): void
     {
+        if ($depth > self::MAX_JSON_SCAN_DEPTH) {
+            // Depth bomb (audit round 14): a pathological nesting cannot
+            // consume unbounded stack — beyond the cap the document is
+            // "not walkable" and the strict json_decode below (which has
+            // its own depth guard) rejects it.
+            throw new MalformedJsonWalkException();
+        }
         $length = \strlen($json);
         $this->skipJsonWhitespace($json, $offset);
         if ($offset >= $length) {
@@ -966,7 +1012,7 @@ final class ChallengeController
                     throw new MalformedJsonWalkException();
                 }
                 $offset++;
-                $this->scanJsonValue($json, $offset);
+                $this->scanJsonValue($json, $offset, $depth + 1);
                 $this->skipJsonWhitespace($json, $offset);
                 if ($offset >= $length) {
                     throw new MalformedJsonWalkException();
@@ -991,7 +1037,7 @@ final class ChallengeController
                 return;
             }
             while (true) {
-                $this->scanJsonValue($json, $offset);
+                $this->scanJsonValue($json, $offset, $depth + 1);
                 $this->skipJsonWhitespace($json, $offset);
                 if ($offset >= $length) {
                     throw new MalformedJsonWalkException();
@@ -1025,10 +1071,17 @@ final class ChallengeController
 
     /**
      * Consume one JSON string starting at $offset (which must point at the
-     * opening quote) and return its RAW content (escapes kept verbatim —
-     * the scan only needs EXACT identity for duplicate detection, and
-     * json_decode canonicalizes the escapes afterwards). null when the
-     * string cannot be walked.
+     * opening quote) and return its DECODED content — escape sequences
+     * resolved to the actual characters. Duplicate detection compares
+     * SEMANTIC keys (audit round 14): {"a":1,"\u0061":2} is ONE key
+     * spelled twice, exactly the parser-ambiguity the scan refuses
+     * (json_decode canonicalizes both spellings into the same key). The
+     * JSON string grammar is decoded with json_decode itself (the
+     * surrogate-safe canonical decoder): \uXXXX pairs, \" \\ \/ \b \f \n
+     * \r \t and every mixed form land on their real characters. null when
+     * the string cannot be walked or its content is not decodable (a
+     * malformed document — the strict json_decode check that follows
+     * returns 422 INVALID_JSON).
      *
      * @param int $offset position in the raw JSON string (by reference)
      */
@@ -1044,14 +1097,22 @@ final class ChallengeController
             $ch = $json[$offset];
             $offset++;
             if ($ch === '"') {
-                return substr($json, $start, $offset - $start - 1);
+                $raw = substr($json, $start, $offset - $start - 1);
+                try {
+                    $decoded = json_decode('"'.$raw.'"', true, 512, JSON_THROW_ON_ERROR);
+                } catch (\JsonException) {
+                    return null;
+                }
+
+                return \is_string($decoded) ? $decoded : null;
             }
             if ($ch === '\\') {
                 if ($offset >= $length) {
                     return null;
                 }
                 // Skip the escaped character (\" \\ \/ \b \f \n \r \t
-                // \uXXXX — a bare skip covers all of them).
+                // \uXXXX — a bare skip covers all of them; the exact
+                // decode above canonicalizes them).
                 $offset++;
             }
         }
@@ -1069,22 +1130,6 @@ final class ChallengeController
             }
             $offset++;
         }
-    }
-
-    /**
-     * The raw slice of the JSON string just consumed by the scanner: the
-     * key's content (unescaped characters are taken verbatim — the scan
-     * only needs an EXACT identity for duplicate detection, so escape
-     * sequences stay as written, which json_decode canonicalizes anyway;
-     * two spellings of one key ("a" vs "\u0061") are different RAW strings
-     * and are treated as distinct — matching the ambiguity being refused).
-     */
-    private function jsonKeySlice(string $json, int $cursor, int $start): string
-    {
-        $end = $cursor;
-        $raw = substr($json, $start + 1, $end - $start - 2);
-
-        return (string) $raw;
     }
 
     /**

@@ -32,7 +32,9 @@ namespace KiwiCaptcha;
  *
  * The nonce-bound binding tag is keyed by the HKDF-derived K_ip_bind
  * purpose key (never the master secret). The record additionally carries a
- * region (deployment metadata, never signed, never sent to the client).
+ * region (deployment metadata) that IS part of the v2 canonical payload —
+ * it is signed into the record like every other immutable v2 parameter
+ * (see {@see self::canonicalPayload()}) — and is never sent to the client.
  *
  * Legacy v1 issuance (`protocol_version` 1, payload
  * `"{nonce}|{scope}|{ip_hash}|{issued_at}"`) is not produced anymore, but

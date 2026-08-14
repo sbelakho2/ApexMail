@@ -196,7 +196,7 @@ minted**:
 
 - **Pre-issue assessment** — one `PreIssue` observation per request updates
   leaky fixed-point counters (per-source, per-/24 subnet, per-session, plus a
-  deployment-global pressure level, all in Redis via the canonical `risk.lua`
+  deployment-global pressure level, all in Redis via the canonical `risk-v1.lua`
   script) and returns a decision: `allow` (issue with the configured
   difficulty), `sha16/18/20` (raise SHA-256 difficulty), `argon16/32/64`
   (issue memory-hard Argon2id profiles), `step_up`, or **`deny`** (HTTP 429
@@ -558,9 +558,15 @@ target. When unset, no region is recorded and no region check applies.
 `KiwiCaptcha\Storage\RedisStorage` definition (the knobs are applied to the
 storage service automatically):
 
-- `wait_replicas` (default 0 = disabled): `store()` issues a Redis `WAIT`
-  after writing a challenge, blocking until at least this many replicas
-  acknowledged the record. Without it, an async-replication failover can
+- `wait_replicas` (default 0 = disabled): a Redis `WAIT` follows EVERY
+  durability-critical write — challenge issuance (`store()`), the
+  pending→consumed transition (`consume()`), and the deterministic-result
+  commit (`commitResult()`) — and the acknowledgement count is VERIFIED:
+  fewer than the requested replicas acked raises
+  `KiwiCaptcha\Storage\ReplicaWaitException` and the operation fails
+  closed (`ConsumeIndeterminate` in the verifier, issuance refused). A
+  configured barrier on a replica-less server fails closed by design — the
+  promise is unconditional. Without it, an async-replication failover can
   lose the primary's un-replicated records — and after failback, a captured
   token replays against a "fresh" record the new primary never knew was
   consumed. `wait_timeout_ms` (default 100) bounds the WAIT.
@@ -885,6 +891,24 @@ the wire level the PROXY STACK must reject the ambiguity first:
   requests whose duplicate `Content-Length` headers disagree; test your
   version. A WAF rule that matches a raw duplicate `Content-Length` is the
   portable fallback.)
+
+- **Body ceiling at the edge (audit round 14):** the controller refuses
+  challenge bodies over 8 KiB (413 `BODY_TOO_LARGE`; declared
+  Content-Length is rejected before any body is read, and the read length
+  is capped for chunked uploads). Mirror the same cap in the proxy so the
+  bytes never reach PHP at all:
+
+  ```nginx
+  location /kiwi-captcha/challenge {
+      client_max_body_size 8k;   # challenge bodies are tens of bytes
+      limit_except POST { deny all; }
+      ...
+  }
+  ```
+
+  For Apache: `LimitRequestBody 8192` on the location; for Envoy:
+  `max_request_bytes: 8192` in the HTTP connection manager; for
+  CloudFront/ALB: the request size limits / WAF `Body` size rule.
 - **AWS ALB / NLG** — ALB rejects requests with both `Content-Length` and
   `Transfer-Encoding` (400) and requests with conflicting duplicate
   `Content-Length` values; identical duplicates are tolerated by some

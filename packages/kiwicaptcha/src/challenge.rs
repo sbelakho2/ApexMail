@@ -301,7 +301,9 @@ pub struct ChallengeConfig {
     /// Carried on the record's `region` key (always present in the record
     /// JSON, `null` when `None`) and enforced by a verifier configured with
     /// an expected region ([`VerifyError::WrongRegion`]). Deployment
-    /// metadata, never signed and never sent to the client.
+    /// metadata — never sent to the client, but signed into the record as a
+    /// canonical v2 parameter (every immutable v2 field is authenticated;
+    /// region is one of them).
     pub region: Option<String>,
     /// Issuer identity stamped into every issued challenge (audit #67): a
     /// stable deployment string (e.g. "auth-gateway") signed as the v2

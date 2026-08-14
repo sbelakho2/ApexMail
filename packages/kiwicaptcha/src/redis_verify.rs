@@ -448,12 +448,17 @@ impl RedisChallengeStore {
         }
     }
 
-    /// Require the stored record to be acknowledged by `wait_replicas`
-    /// replicas before `store()` returns: after the SET, a Redis `WAIT
-    /// replicas timeout_ms` is issued (audit #22/#23 — replica durability
-    /// so a promotion cannot lose a freshly issued challenge). `0` disables
-    /// the wait. With no replicas configured, WAIT returns immediately with
-    /// 0 acknowledged replicas.
+    /// Require every durability-critical write to be acknowledged by
+    /// `wait_replicas` replicas before the call returns: after the issuance
+    /// SET, after the pending→consumed transition, and after the
+    /// deterministic-result commit, a Redis `WAIT replicas timeout_ms` is
+    /// issued and its acknowledgement count is VERIFIED (audit round 14).
+    /// Fewer than `wait_replicas` acknowledged replicas fail the call
+    /// closed with an error — the durability promise is unconditional, it
+    /// is never silently downgraded to "whatever the replica set managed".
+    /// With `0` (default) no wait is issued. On a replica-less server WAIT
+    /// returns 0 after the timeout, so a configured barrier correctly
+    /// fails closed.
     pub fn with_wait(mut self, wait_replicas: u32, timeout_ms: u64) -> Self {
         self.wait_replicas = wait_replicas;
         self.wait_timeout_ms = timeout_ms;
@@ -565,16 +570,18 @@ impl RedisChallengeStore {
     /// in time, and vanish otherwise).
     ///
     /// When [`RedisChallengeStore::with_wait`] configured a replica wait,
-    /// a Redis `WAIT replicas timeout_ms` is issued AFTER the SET: the
-    /// record is only acknowledged once the requested replica count has it
-    /// (or the timeout elapsed), so a promotion cannot lose a freshly
-    /// issued challenge. WAIT blocks up to its timeout before replying
-    /// (with 0 replicas it blocks the full timeout and returns 0), so the
-    /// connection's read timeout is temporarily raised to
-    /// `timeout_ms + 500 ms` headroom around the WAIT and restored to
-    /// [`READ_TIMEOUT`] afterwards. An I/O failure propagates like any
-    /// other command error (the SET may already have landed — retrying the
-    /// store overwrites the record, which is safe).
+    /// a Redis `WAIT replicas timeout_ms` is issued AFTER the SET and the
+    /// acknowledgement count is VERIFIED (audit round 14): fewer than
+    /// `wait_replicas` acked replicas is an `Err` — the challenge is only
+    /// handed to the client once the requested replica count has it, so a
+    /// promotion cannot lose a freshly issued challenge. WAIT blocks up to
+    /// its timeout before replying (with 0 replicas it blocks the full
+    /// timeout and returns 0 → fail closed), so the connection's read
+    /// timeout is temporarily raised to `timeout_ms + 500 ms` headroom
+    /// around the WAIT and restored to [`READ_TIMEOUT`] afterwards. An I/O
+    /// failure propagates like any other command error (the SET may
+    /// already have landed — retrying the store overwrites the record,
+    /// which is safe).
     pub fn store(&self, record: &ChallengeRecord) -> redis::RedisResult<()> {
         let key = format!("{}{}", self.prefix, record.nonce);
         // Infallible for this struct in practice — every field is a String
@@ -604,21 +611,7 @@ impl RedisChallengeStore {
                 .arg(ttl)
                 .query::<()>(c)?;
             if wait_replicas > 0 {
-                // Replica wait (audit #22/#23): WAIT returns the number of
-                // replicas that acknowledged the write (>= 0; 0 when no
-                // replicas are configured). Headroom so the WAIT reply can
-                // never race the pool's read timeout.
-                c.inner.set_read_timeout(Some(Duration::from_millis(
-                    wait_timeout_ms.saturating_add(500),
-                )))?;
-                let wait = redis::cmd("WAIT")
-                    .arg(wait_replicas)
-                    .arg(wait_timeout_ms)
-                    .query::<i64>(c);
-                // Restore the bounded read timeout even when WAIT failed.
-                let restore = c.inner.set_read_timeout(Some(READ_TIMEOUT));
-                wait?;
-                restore?;
+                Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
             }
             Ok(())
         })
@@ -666,14 +659,27 @@ impl RedisChallengeStore {
     /// no-retry rule.
     pub fn consume(&self, nonce: &str) -> redis::RedisResult<Option<ConsumeResult>> {
         let key = format!("{}{}", self.prefix, nonce);
+        let wait_replicas = self.wait_replicas;
+        let wait_timeout_ms = self.wait_timeout_ms;
         let mut conn = self.checkout()?;
         let value = Self::run_command(&mut conn, |c| {
-            Self::invoke_script::<redis::Value>(
+            let v = Self::invoke_script::<redis::Value>(
                 c,
                 &redis::Script::new(CONSUME_TRANSITION_LUA),
                 &key,
                 &[],
-            )
+            )?;
+            // Durability barrier (audit round 14): when the transition DID
+            // execute, the consumed state must reach the configured replica
+            // count before the caller may act on it — a promotion must
+            // never resurrect a consumed record from a stale replica. A
+            // barrier failure surfaces as an Err (ConsumeIndeterminate at
+            // the verifier), which is exactly right: the transition
+            // happened but its durability is unconfirmed.
+            if !matches!(v, redis::Value::Nil) && wait_replicas > 0 {
+                Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
+            }
+            Ok(v)
         })?;
         Ok(parse_consume(value))
     }
@@ -685,9 +691,12 @@ impl RedisChallengeStore {
     ///
     /// Returns `Ok(true)` when the result was stored, `Ok(false)` when a
     /// result already exists or the record is missing / not consumed,
-    /// `Err(_)` on a storage failure. CALLERS MUST IGNORE THE RESULT: the
-    /// commit is best-effort — a storage failure must never change the
-    /// verification outcome (the record expires via its TTL anyway).
+    /// `Err(_)` on a storage failure (including a violated replica-wait
+    /// barrier). CALLERS MUST IGNORE THE RESULT: the commit is best-effort
+    /// — a storage failure must never change the verification outcome (the
+    /// record expires via its TTL anyway). When the commit landed but the
+    /// barrier failed, the retry of a consumed record degrades to
+    /// ConsumeIndeterminate — strictly safer than re-deriving.
     pub fn commit_result(
         &self,
         nonce: &str,
@@ -695,12 +704,50 @@ impl RedisChallengeStore {
         binding: Option<&str>,
     ) -> redis::RedisResult<bool> {
         let key = format!("{}{}", self.prefix, nonce);
+        let wait_replicas = self.wait_replicas;
+        let wait_timeout_ms = self.wait_timeout_ms;
         let mut conn = self.checkout()?;
         let stored = Self::run_command(&mut conn, |c| {
             let args = [if valid { "1" } else { "0" }, binding.unwrap_or("")];
-            Self::invoke_script::<i64>(c, &redis::Script::new(COMMIT_RESULT_LUA), &key, &args)
+            let r =
+                Self::invoke_script::<i64>(c, &redis::Script::new(COMMIT_RESULT_LUA), &key, &args)?;
+            if r == 1 && wait_replicas > 0 {
+                Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
+            }
+            Ok(r)
         })?;
         Ok(stored == 1)
+    }
+
+    /// Issue `WAIT wait_replicas wait_timeout_ms` and FAIL CLOSED when the
+    /// acknowledged-replica count is below the configured threshold
+    /// (audit round 14). WAIT blocks up to its timeout before replying, so
+    /// the connection's read timeout is temporarily raised to
+    /// `timeout_ms + 500 ms` headroom and restored to [`READ_TIMEOUT`]
+    /// afterwards (even when the WAIT itself failed).
+    fn wait_verified(
+        c: &mut ManagedConnection,
+        wait_replicas: u32,
+        wait_timeout_ms: u64,
+    ) -> redis::RedisResult<()> {
+        c.inner.set_read_timeout(Some(Duration::from_millis(
+            wait_timeout_ms.saturating_add(500),
+        )))?;
+        let wait = redis::cmd("WAIT")
+            .arg(wait_replicas)
+            .arg(wait_timeout_ms)
+            .query::<i64>(c);
+        let restore = c.inner.set_read_timeout(Some(READ_TIMEOUT));
+        let acked = wait?;
+        restore?;
+        if acked < wait_replicas as i64 {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "replica wait not satisfied",
+                format!("{acked} of {wait_replicas} replicas acknowledged the write"),
+            )));
+        }
+        Ok(())
     }
 
     /// Best-effort cleanup of a terminal cheap-failure record. Deletion is

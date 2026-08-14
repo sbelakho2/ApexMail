@@ -22,7 +22,7 @@
   // must run off the main thread (each 64 MiB hash blocks the UI for tens of
   // ms). The worker source is embedded here as a string constant so the
   // driver can create the worker from a Blob URL (no network, same-origin by
-  // construction); when the wasm glue is present as an inline <script> in
+  // construction); when the wasm glue is present as an inline script element in
   // the page its source is prepended to the Blob, and the worker also tries
   // importScripts("kiwicaptcha-wasm.js") for file-based deployments
   // (data-kiwi-worker-src). Keep this literal EXACTLY in sync with
@@ -442,27 +442,11 @@
         }
         return true;
       }
-      if (algorithm === "argon2id") {
-        if (!w || !w.solve_argon2_chunk || !wasmAllocatorPresent() || m_kib < 8 * p) { resolve(null); return; }
-        var argMax = Math.min(MAX_SHA_HASHES, Math.max(1024, expectedHashes * 8));
-        // CHUNK = 1: each Argon2id hash is a single synchronous WASM call, so
-        // the main thread yields between every memory-hard hash — at the
-        // documented 64 MiB desktop profile, a batch of 16 would otherwise
-        // block the UI for a noticeable period (responsiveness fix).
-        // No pure-JS Argon2id fallback exists: an allocation failure means the
-        // challenge cannot be solved (wasm is disabled permanently).
-        if (!ensureBuffers()) { resolve(null); return; }
-        function argon2Chunk() {
-          try {
-            var res = w.solve_argon2_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, m_kib, t, p, counter, CHUNK);
-            if (res !== -1) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); resolve({ counter: res, duration: Math.round(performance.now() - solveStart) }); return; }
-          } catch (e) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); console.error("KiwiCaptcha: Argon2 solve failed", e); resolve(null); return; }
-          counter += CHUNK; if (counter >= argMax) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); resolve(null); return; }
-          onProgress(Math.min(95, (counter * 100) / expectedHashes));
-          fastYield(argon2Chunk);
-        }
-        fastYield(argon2Chunk); return;
-      }
+      // Round-13 invariant: this function ONLY ever solves SHA-256. Argon2id
+      // is memory-hard and must run in the same-origin worker; the main
+      // thread NEVER runs an Argon2 hash. The argon2id path in run() routes
+      // a missing/failed worker to the controlled kiwi:worker-unavailable
+      // state instead of ever calling solve() for a memory-hard challenge.
       var useWasm = wasmUsable();
       var CHUNK = useWasm ? 50000 : 8000;
       function chunk() {
@@ -501,16 +485,20 @@
   // this file, so no cross-origin target exists and no origin check or
   // rate-limit window is required on a page-level listener (the browser
   // test suite asserts this statically — see tests/browser/specs).
-  // The memory-hard solver is moved off the main thread when possible: the
-  // worker is constructed from a Blob URL built from local code (the
-  // embedded KIWI_WORKER_SRC plus the inline wasm glue source), or from the
-  // asset URL when data-kiwi-worker-src is set — never from a network URL.
-  // If the worker cannot be created (no Worker support, CSP blocks Blob
-  // workers) or the solve fails inside it, the driver falls back to the
-  // synchronous chunked path (CHUNK=1), so behavior is unchanged in
-  // restricted environments.
+  // The memory-hard solver ALWAYS runs off the main thread: the worker is
+  // constructed from a Blob URL built from local code (the embedded
+  // KIWI_WORKER_SRC plus the inline wasm glue source), or from the asset
+  // URL when data-kiwi-worker-src is set — never from a network URL.
+  // Round-13 invariant: if the worker cannot be created (no Worker
+  // support, CSP blocks Blob workers) or the solve fails inside it, the
+  // widget enters the controlled kiwi:worker-unavailable state. There is
+  // NO main-thread Argon2 fallback and no weaker-profile retry — the main
+  // thread never runs an Argon2 hash. A subsequent attempt (Retry button,
+  // click, re-init) retries the worker from scratch.
+  var kiwiActiveBlobUrl = null; // shared so reset/unavailable paths can revoke
+  var kiwiInstanceCounter = 0;
   function kiwiFindGlueSource() {
-    // The renderers embed the wasm glue inline as a <script> before this
+    // The renderers embed the wasm glue inline as a script element before this
     // driver; its source contains KIWI_WASM_B64 (unique marker). The glue is
     // a self-contained IIFE, so its text can run inside the worker with a
     // `var window = self` prelude to expose self.__kiwiCaptchaWasm.
@@ -527,8 +515,9 @@
   }
   function solveWithWorker(data, onProgress, container) {
     return new Promise(function(resolve) {
-      if (typeof Worker === "undefined") { resolve(null); return; }
+      if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
       var worker = null;
+      var blobUrl = null;
       try {
         var workerSrc = container.getAttribute("data-kiwi-worker-src");
         if (workerSrc) {
@@ -536,14 +525,29 @@
         } else {
           var glue = kiwiFindGlueSource();
           var blobSrc = (glue ? "var window = self;" + glue + "\n" : "") + KIWI_WORKER_SRC;
-          worker = new Worker(URL.createObjectURL(new Blob([blobSrc], { type: "application/javascript" })));
+          blobUrl = URL.createObjectURL(new Blob([blobSrc], { type: "application/javascript" }));
+          worker = new Worker(blobUrl);
         }
-      } catch (e) { resolve(null); return; }
-      if (!worker) { resolve(null); return; }
+      } catch (e) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
+      if (!worker) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
+      if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
+      kiwiActiveBlobUrl = blobUrl;
       window.__kiwiWorkerUsed = true;
       var workerStart = performance.now();
       var expectedHashes = Math.pow(2, data.targetBits);
       var settled = false;
+      // Blob-URL cleanup (round-13): the object URL is revoked exactly once
+      // on EVERY terminal path — done, failed, build-id mismatch, worker
+      // error, and postMessage failure. Revoking never kills the worker
+      // itself (terminate() does that); it only releases the URL, so a
+      // stale blob URL can never leak for the page's lifetime.
+      function teardown() {
+        if (blobUrl) {
+          URL.revokeObjectURL(blobUrl);
+          if (kiwiActiveBlobUrl === blobUrl) kiwiActiveBlobUrl = null;
+          blobUrl = null;
+        }
+      }
       // The worker is CREATED BY THIS DRIVER (a Blob URL built from local
       // code, or the explicitly configured same-origin asset URL), so no
       // cross-origin postMessage target exists and no rate-limit window is
@@ -559,9 +563,9 @@
           // Startup handshake (audit #53): the worker must report the SAME
           // solver build id as this driver. A stale cached worker is
           // refused — it never contributes a solution and there is no
-          // fallback (the main-thread solver is this driver's own build).
+          // fallback.
           if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_BUILD_ID) {
-            if (!settled) { settled = true; worker.terminate(); resolve({ mismatch: true }); }
+            if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ mismatch: true }); }
           }
           return;
         }
@@ -571,26 +575,29 @@
         } else if (msg.type === "done") {
           if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
           if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_BUILD_ID) {
-            if (!settled) { settled = true; worker.terminate(); resolve({ mismatch: true }); }
+            if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ mismatch: true }); }
             return;
           }
           settled = true;
           worker.terminate();
+          teardown();
           resolve({ counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
         } else if (msg.type === "failed") {
           if (typeof msg.reason !== "string") return;
           settled = true;
           worker.terminate();
+          teardown();
           console.error("KiwiCaptcha worker failed:", msg.reason);
-          resolve(null);
+          resolve({ unavailable: true, reason: "worker-failed-" + msg.reason });
         }
       };
       worker.onerror = function(ev) {
         if (settled) return;
         settled = true;
         worker.terminate();
+        teardown();
         console.error("KiwiCaptcha worker error:", ev && ev.message, ev && ev.filename, ev && ev.lineno);
-        resolve(null);
+        resolve({ unavailable: true, reason: "worker-error" });
       };
       var prefixBytes = encoder.encode(data.prefix);
       var saltBytes = b64decode(data.salt);
@@ -611,7 +618,7 @@
           maxHashes: MAX_SHA_HASHES,
         });
       } catch (e) {
-        if (!settled) { settled = true; worker.terminate(); resolve(null); }
+        if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ unavailable: true, reason: "post-failed" }); }
       }
     });
   }
@@ -678,24 +685,84 @@
     return url.href;
   }
 
+  // ── Round-13 a11y helpers ───────────────────────────────────────────
+  // The dedicated role="status" announcer (data-kiwi-status) is the ONLY
+  // aria-live traffic: the changing widget itself carries no aria-live and
+  // no checkbox semantics — an auto-solving proof-of-work is not a
+  // checkbox. The announcer reports ONLY meaningful transitions
+  // (Checking…, Verification complete, Verification failed, Worker
+  // unavailable); countdown/progress stay strictly visual.
+  function createAnnouncer(W) {
+    var s = document.createElement("span");
+    s.className = "kiwi-status";
+    s.setAttribute("data-kiwi-status", "");
+    s.setAttribute("role", "status");
+    s.setAttribute("aria-live", "polite");
+    var main = W.querySelector(".kiwi-main");
+    if (main) main.appendChild(s); else W.appendChild(s);
+    return s;
+  }
+  // Manual retry is a genuine native <button> (focusable, Enter/Space
+  // activation built in) rendered in the error/unavailable states. It
+  // triggers the SAME re-init path as the click/tap reacquire.
+  function createRetryButton(W) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "kiwi-retry";
+    b.setAttribute("data-kiwi-retry", "");
+    b.textContent = "Retry";
+    var bottom = W.querySelector(".kiwi-bottom");
+    if (bottom) bottom.appendChild(b);
+    else { var main = W.querySelector(".kiwi-main"); if (main) main.appendChild(b); else W.appendChild(b); }
+    return b;
+  }
+
   function initWidget(W) {
-    if (!W || W.dataset.kiwiStarted) return;
+    if (!W || W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return;
     W.dataset.kiwiStarted = "1";
+    // Round-13: no fixed DOM id. The driver locates elements by local
+    // traversal only (closest/querySelector), so the removed
+    // id="kiwicaptcha-root" has no dependencies; data-kiwi-instance is a
+    // unique per-widget debugging marker, not a hook.
+    if (!W.dataset.kiwiInstance) {
+      W.dataset.kiwiInstance = "kiwi-" + (++kiwiInstanceCounter) + "-" + Math.random().toString(36).slice(2, 8);
+    }
+    // Neutral role: the widget is a passive status/group, never a
+    // checkbox, and it is NOT focusable — the retry button is.
+    if (!W.getAttribute("role")) W.setAttribute("role", "group");
     var container = W.closest(".kiwi-container") || W;
-    var statusEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
+    var labelEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
+    var announcerEl = W.querySelector("[data-kiwi-status]") || createAnnouncer(W);
+    // The mascot is decorative next to the already-labelled widget: hide it
+    // from assistive technology (round-13). Set defensively so renderers
+    // that omit the attributes are still covered.
+    var iconSvg = W.querySelector(".kiwi-icon-wrapper svg");
+    if (iconSvg) { iconSvg.setAttribute("aria-hidden", "true"); iconSvg.setAttribute("focusable", "false"); }
+    var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W);
     var telemetry = telemetrySession(container, W);
+    var scope = W.getAttribute("data-kiwi-scope") || container.getAttribute("data-kiwi-scope");
+    if (!scope) {
+      scope = "login";
+      var p = window.location.pathname.toLowerCase();
+      if (p.indexOf("signup")>=0||p.indexOf("register")>=0) scope="signup";
+      else if (p.indexOf("forgot")>=0) scope="forgot-password";
+    }
+    // Lifecycle events (round-13): kiwi:ready | kiwi:verifying |
+    // kiwi:verified | kiwi:error | kiwi:worker-unavailable, dispatched on
+    // the widget element, bubbling, not cancelable, detail {scope, ...}.
+    function dispatch(name, detail) {
+      var ev = new CustomEvent("kiwi:" + name, {
+        bubbles: true,
+        cancelable: false,
+        detail: Object.assign({ scope: scope }, detail || {})
+      });
+      W.dispatchEvent(ev);
+    }
+    function announce(text) { if (announcerEl) announcerEl.textContent = text; }
     function setStatus(label, pillText, state) {
-      if (statusEl) statusEl.textContent = label;
+      if (labelEl) labelEl.textContent = label;
       if (pillEl) pillEl.textContent = pillText;
-      if (W) {
-        W.setAttribute("data-state", state);
-        /* Sync ARIA checkbox state for screen readers (industry standard). */
-        if (state === "done") { W.setAttribute("aria-checked", "true"); W.setAttribute("role", "checkbox"); }
-        else { W.setAttribute("aria-checked", "false"); }
-        /* Errors get assertive announcement (role=alert); everything else polite. */
-        if (state === "failed") { W.setAttribute("role", "alert"); W.setAttribute("aria-live", "assertive"); }
-        else { W.setAttribute("role", "checkbox"); W.setAttribute("aria-live", "polite"); }
-      }
+      if (W) W.setAttribute("data-state", state);
     }
     function setHint(text) { if (hintEl) hintEl.textContent = text; }
     function setProgress(pct) {
@@ -731,6 +798,9 @@
     function resetToIdle() {
       clearInterval(countdownTimer);
       telemetry.stop();
+      // Round-13 blob cleanup: a pending worker object URL is revoked on
+      // every reset/re-init path, not just on worker completion.
+      if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
@@ -741,9 +811,11 @@
     // Failure recovery (audit #55): an error never leaves the widget stuck
     // in "failed" — it resets to idle, retries a bounded number of times
     // with backoff, then settles idle and reacquires on the next
-    // interaction (click the widget, or the page re-inits it).
+    // interaction (click the widget, the Retry button, or a page re-init).
     function fail(msg) {
       resetToIdle();
+      announce("Verification failed");
+      dispatch("error", { error: msg });
       if (retryCount < RETRY_LIMIT) {
         retryCount++;
         setHint("Challenge failed (" + msg + ") \u2014 retrying\u2026");
@@ -767,6 +839,26 @@
       setHint("The solver worker is out of date \u2014 reload the page to load the current version.");
       setProgress(0);
     }
+    // Round-13 invariant: worker creation failure or a worker solve failure
+    // for a memory-hard challenge enters this controlled state. The token
+    // is cleared, nothing is solved on the main thread, and the profile is
+    // never downgraded. The widget stays reacquirable: a subsequent attempt
+    // (Retry button, click, re-init) retries the worker from scratch — or
+    // uses the explicitly configured data-kiwi-worker-src static worker.
+    function workerUnavailable(reason) {
+      clearInterval(countdownTimer);
+      telemetry.stop();
+      if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
+      if (tokenEl) tokenEl.value = "";
+      setBinding("");
+      if (countdownEl) countdownEl.textContent = "";
+      setStatus("Worker unavailable", "Unavailable", "kiwi:worker-unavailable");
+      setHint("Worker unavailable \u2014 Argon2id needs a Web Worker that this page's CSP blocks; retry, or configure data-kiwi-worker-src.");
+      setProgress(0);
+      announce("Worker unavailable");
+      dispatch("worker-unavailable", { reason: reason || "worker-creation-failed" });
+      delete W.dataset.kiwiStarted;
+    }
     // BFCache restore (audit #54): a persisted pageshow must NOT auto-solve —
     // it clears the solved state and leaves the widget idle, ready to
     // reacquire on the next interaction or page re-init.
@@ -775,18 +867,23 @@
       delete W.dataset.kiwiStarted;
     }
     kiwiResetHooks.push({ el: W, reset: reset });
+    // The Retry button re-inits exactly like the click/tap reacquire path.
+    if (retryEl && !retryEl.dataset.kiwiRetryBound) {
+      retryEl.dataset.kiwiRetryBound = "1";
+      kiwiAddListener(retryEl, "click", function () {
+        if (W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return;
+        delete W.dataset.kiwiStarted;
+        initWidget(W);
+      });
+    }
+    // destroy() teardown: idle the runtime state (countdown, telemetry,
+    // blob URL, token) exactly like resetToIdle does.
+    kiwiCleanups.set(W, function () { resetToIdle(); });
 
     async function run() {
       try {
         setStatus("Connecting\u2026", "Wait", "connecting");
         var endpoint = kiwiEndpoint(W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge");
-        var scope = W.getAttribute("data-kiwi-scope") || container.getAttribute("data-kiwi-scope");
-        if (!scope) {
-          scope = "login";
-          var p = window.location.pathname.toLowerCase();
-          if (p.indexOf("signup")>=0||p.indexOf("register")>=0) scope="signup";
-          else if (p.indexOf("forgot")>=0) scope="forgot-password";
-        }
         // Algorithm selection (audit #62): the client may only select among
         // the solver profiles the server offers (sha256 / argon2id). Any
         // other attribute value is normalized back to the default — the
@@ -820,13 +917,17 @@
         if (algorithm === "argon2id" && (data.algorithm || "sha256") !== "argon2id") throw new Error("Challenge downgraded");
         if (data.ttlSecs) startCountdown(data.ttlSecs);
         setStatus("Verifying\u2026", "Working", "solving");
+        announce("Checking\u2026");
+        dispatch("verifying");
         var result = null;
         if ((data.algorithm || "sha256") === "argon2id") {
-          // Memory-hard challenges run in a same-origin worker when
-          // available; the synchronous CHUNK=1 path is the fallback.
+          // Round-13 invariant: memory-hard challenges ALWAYS run in the
+          // same-origin worker. There is no synchronous CHUNK=1 fallback
+          // and no weaker-profile retry — a missing or failed worker enters
+          // the controlled kiwi:worker-unavailable state.
           result = await solveWithWorker(data, setProgress, container);
           if (result && result.mismatch) { solverMismatch(); return; }
-          if (!result) result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "argon2id", data.mKib||0, data.t||1, data.p||1, setProgress);
+          if (!result || result.unavailable) { workerUnavailable(result ? result.reason : "solve-failed"); return; }
         } else {
           result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress);
         }
@@ -835,9 +936,12 @@
         setBinding(requestBinding || "");
         retryCount = 0;
         setStatus("Verified", "Success", "done"); setHint("Proof-of-work verified locally."); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
+        announce("Verification complete");
+        dispatch("verified", { nonce: data.nonce });
         telemetry.stop();
       } catch (e) { fail(e.message); }
     }
+    dispatch("ready");
     run();
   }
 
@@ -847,6 +951,47 @@
   // token. Reset every live widget: clear the solved state and reacquire
   // on the next interaction instead of auto-solving on restore.
   var kiwiResetHooks = [];
+
+  // ── Per-widget lifecycle bookkeeping (round-14) ──────────────────────
+  // destroy(element|selector) needs to reverse EVERYTHING initWidget
+  // attached: listeners (registered in a per-element registry so they can
+  // be removed by reference), the countdown/telemetry/blob-URL runtime
+  // state (one cleanup closure per widget), and the BFCache hook. A
+  // destroyed widget is marked data-kiwi-destroyed and initWidget refuses
+  // to resurrect it — the SPA owns the DOM node from then on.
+  var kiwiCleanups = new WeakMap();
+  var kiwiListenerRegistry = new WeakMap();
+  function kiwiAddListener(el, type, fn, opts) {
+    var list = kiwiListenerRegistry.get(el) || [];
+    list.push({ type: type, fn: fn, opts: opts });
+    kiwiListenerRegistry.set(el, list);
+    el.addEventListener(type, fn, opts);
+  }
+  function kiwiRemoveListeners(el) {
+    var list = kiwiListenerRegistry.get(el) || [];
+    for (var i = 0; i < list.length; i++) {
+      try { el.removeEventListener(list[i].type, list[i].fn, list[i].opts); } catch (err) {}
+    }
+    kiwiListenerRegistry.set(el, []);
+  }
+  function kiwiDestroy(sel) {
+    var els = typeof sel === "string" ? (document.querySelectorAll(sel) ? Array.prototype.slice.call(document.querySelectorAll(sel)) : []) : (sel ? [sel] : []);
+    for (var i = 0; i < els.length; i++) {
+      var W = els[i];
+      if (!W || W.nodeType !== 1) continue;
+      W.dataset.kiwiDestroyed = "1";
+      kiwiResetHooks = kiwiResetHooks.filter(function (h) { return h.el !== W; });
+      var cleanup = kiwiCleanups.get(W);
+      if (cleanup) { try { cleanup(); } catch (err) {} kiwiCleanups.delete(W); }
+      kiwiRemoveListeners(W);
+      var retryEl = W.querySelector("[data-kiwi-retry]");
+      if (retryEl) kiwiRemoveListeners(retryEl);
+      delete W.dataset.kiwiStarted;
+      W.removeAttribute("data-state");
+      var tokenEl = W.querySelector("[data-kiwi-token]");
+      if (tokenEl) tokenEl.value = "";
+    }
+  }
   window.addEventListener("pageshow", function (e) {
     if (!e.persisted) return;
     for (var i = 0; i < kiwiResetHooks.length; i++) {
@@ -854,7 +999,40 @@
     }
   });
 
-  window.KiwiCaptcha = { init: initWidget, render: function(s) { document.querySelectorAll(s).forEach(initWidget); }, workerSource: KIWI_WORKER_SRC, buildId: KIWI_SOLVER_BUILD_ID };
+  // ── SPA lifecycle observer (round-13, OPT-IN) ───────────────────────
+  // Single-page apps that insert widgets dynamically call
+  // window.KiwiCaptcha.observe(document.body) (or any root) once; the
+  // MutationObserver auto-inits every [data-kiwi-widget] that appears
+  // later. Not started automatically — opt-in only, so a page that wants
+  // strict control over init timing never gets surprise challenges.
+  var kiwiObserver = null;
+  function kiwiScanNode(node) {
+    if (!node || node.nodeType !== 1) return;
+    var widgets = [];
+    if (node.matches && node.matches("[data-kiwi-widget]")) widgets.push(node);
+    if (node.querySelectorAll) {
+      var found = node.querySelectorAll("[data-kiwi-widget]");
+      for (var i = 0; i < found.length; i++) widgets.push(found[i]);
+    }
+    for (var j = 0; j < widgets.length; j++) {
+      if (!widgets[j].dataset.kiwiStarted) initWidget(widgets[j]);
+    }
+  }
+  function kiwiObserve(root) {
+    if (typeof MutationObserver === "undefined") return { disconnect: function() {} };
+    if (!kiwiObserver) {
+      kiwiObserver = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var added = mutations[i].addedNodes;
+          for (var j = 0; j < added.length; j++) kiwiScanNode(added[j]);
+        }
+      });
+    }
+    kiwiObserver.observe(root || document.body, { childList: true, subtree: true });
+    return { disconnect: function () { if (kiwiObserver) kiwiObserver.disconnect(); } };
+  }
+
+  window.KiwiCaptcha = { init: initWidget, render: function(s) { document.querySelectorAll(s).forEach(initWidget); }, workerSource: KIWI_WORKER_SRC, buildId: KIWI_SOLVER_BUILD_ID, observe: kiwiObserve, destroy: kiwiDestroy };
   var runInit = function() {
     document.querySelectorAll("[data-kiwi-widget]").forEach(function (W) {
       // Click-to-reacquire: after a reset or a settled failure the widget
@@ -862,7 +1040,7 @@
       // (audit #54/#55). Bound once per element.
       if (!W.dataset.kiwiRetryBound) {
         W.dataset.kiwiRetryBound = "1";
-        W.addEventListener("pointerdown", function () {
+        kiwiAddListener(W, "pointerdown", function () {
           if (!W.dataset.kiwiStarted) initWidget(W);
         });
       }

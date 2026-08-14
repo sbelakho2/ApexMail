@@ -139,20 +139,29 @@ final class RedisStorageTest extends TestCase
         self::assertSame(90, $client->expirations['kiwicaptcha:redis-nonce-1'], 'TTL must be expires_at - now + ttlMarginSecs');
     }
 
-    public function testStoreIssuesWaitWhenConfigured(): void
+    public function testStoreIssuesWaitAndVerifiesThresholdWhenConfigured(): void
     {
-        // Audit #22/#23: with waitReplicas > 0 the record must be
-        // acknowledged by replicas (WAIT) before the challenge is handed to
-        // the client. A replica-less server reports 0 acknowledged replicas
-        // WITHOUT erroring — the assertion is that WAIT was issued with the
-        // configured numreplicas/timeout and returned >= 0.
+        // Audit round 14: with waitReplicas > 0 the durability barrier is
+        // unconditional — store() issues WAIT after SET and FAILS CLOSED
+        // when the acknowledged replica count is below the threshold.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client, waitReplicas: 2, waitTimeoutMs: 100);
-        $storage->store($this->makeRecord());
 
+        $client->waitAck = 0;
+        try {
+            $storage->store($this->makeRecord());
+            self::fail('store must throw when fewer replicas acked than configured');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+            // expected: 0 of 2 replicas acknowledged
+        }
         $waits = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
         self::assertNotEmpty($waits, 'store must issue WAIT after SET when waitReplicas > 0');
         self::assertSame([2, 100], $waits[0][1], 'WAIT must carry the configured numreplicas and timeout');
+
+        // The same store satisfies the barrier when the replica set ACKs.
+        $client->waitAck = 2;
+        $storage->store($this->makeRecord('redis-nonce-2'));
+        self::assertCount(2, array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT')));
     }
 
     public function testStoreSkipsWaitWhenDisabled(): void
@@ -322,6 +331,56 @@ final class RedisStorageTest extends TestCase
         self::assertSame(['valid' => false, 'binding' => null], $data['consumed_result']);
     }
 
+    public function testConsumeIssuesWaitAndFailsClosedBelowThreshold(): void
+    {
+        // Audit round 14: the pending→consumed transition carries the same
+        // durability barrier as issuance — a promotion must never resurrect
+        // a consumed record from a stale replica. With the threshold unmet,
+        // consume() throws (the transition DID happen on the primary; the
+        // caller treats the state as indeterminate).
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
+        $client->waitAck = 1;
+        $storage->store($this->makeRecord());
+
+        $client->waitAck = 0;
+        try {
+            $storage->consume('redis-nonce-1');
+            self::fail('consume must fail closed when the transition is not durably replicated');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+            // expected
+        }
+        $waits = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
+        self::assertCount(2, $waits, 'store + consume must each issue WAIT');
+
+        $client->waitAck = 1;
+        $consumed = $storage->consume('redis-nonce-1');
+        self::assertNotNull($consumed);
+        self::assertTrue($consumed->consumedBefore, 'the first (failed-barrier) consume still transitioned the record');
+    }
+
+    public function testCommitResultIssuesWaitAndFailsClosedBelowThreshold(): void
+    {
+        // Audit round 14: the deterministic-result commit is also barriered
+        // (best-effort callers: a barrier failure cannot change the
+        // outcome, but it surfaces the safe degraded state on retry).
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
+        $client->waitAck = 1;
+        $storage->store($this->makeRecord());
+        $storage->consume('redis-nonce-1');
+
+        $client->waitAck = 0;
+        try {
+            $storage->commitResult('redis-nonce-1', true, 'txn-1');
+            self::fail('commitResult must fail closed when the commit is not durably replicated');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
+            // expected
+        }
+        $client->waitAck = 1;
+        self::assertFalse($storage->commitResult('redis-nonce-1', true, 'txn-1'), 'the failed-barrier commit DID land on the primary — a retry cannot re-commit');
+    }
+
     public function testCommitResultUsesLuaForPredis(): void
     {
         $client = $this->requirePredis();
@@ -409,12 +468,14 @@ final class RedisStorageTest extends TestCase
         self::assertNull($storage->find('legacy'));
     }
 
-    public function testRealRedisStoreFindConsumeWithWaitReturnsNonNegative(): void
+    public function testRealRedisStoreFindConsumeWithWaitBarrierFailsClosed(): void
     {
-        // Audit #22/#23 against a REAL Redis: store() with waitReplicas > 0
-        // issues WAIT and a replica-less server reports 0 acknowledged
-        // replicas (>= 0, no error). Skipped when the local test Redis
-        // (127.0.0.1:6399, no password) is unreachable.
+        // Audit round 14 against a REAL Redis: a replica-less server
+        // reports 0 acknowledged replicas, so a configured waitReplicas=1
+        // barrier must FAIL CLOSED — store() throws and the challenge is
+        // never handed to the client (the write is not durably replicated).
+        // Skipped when the local test Redis (127.0.0.1:6399, no password)
+        // is unreachable.
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');
         }
@@ -431,18 +492,25 @@ final class RedisStorageTest extends TestCase
         $record = $this->makeRecord($nonce);
         $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100, ttlMarginSecs: 5);
         try {
-            $storage->store($record);
+            try {
+                $storage->store($record);
+                self::fail('store() must fail closed when the replica ack threshold is not met');
+            } catch (\KiwiCaptcha\Storage\ReplicaWaitException $e) {
+                self::assertStringContainsString('0 of 1', $e->getMessage());
+            }
 
-            $stored = $storage->find($nonce);
+            // The no-barrier configuration on the same server round-trips.
+            $plain = new RedisStorage($client, ttlMarginSecs: 5);
+            $plain->store($record);
+            $stored = $plain->find($nonce);
             self::assertNotNull($stored);
             self::assertSame($nonce, $stored->nonce);
-            self::assertGreaterThanOrEqual(0, $client->executeRaw(['WAIT', 1, 100]), 'WAIT must return the acknowledged-replica count (>= 0)');
 
-            $consumed = $storage->consume($nonce);
+            $consumed = $plain->consume($nonce);
             self::assertNotNull($consumed);
             self::assertSame($nonce, $consumed->record->nonce);
             self::assertTrue($consumed->consumedNow);
-            $retry = $storage->consume($nonce);
+            $retry = $plain->consume($nonce);
             self::assertNotNull($retry, 'the transition keeps the record — replay protection is the consumed marker');
             self::assertTrue($retry->consumedBefore, 'the atomic transition must make exactly one caller the winner');
         } finally {

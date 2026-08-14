@@ -14,6 +14,23 @@ if ! command -v "$WASM_BINDGEN_BIN" >/dev/null 2>&1; then
   cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
 fi
 
+# Version-lock (audit round 14): a DIFFERENT wasm-bindgen binary already on
+# the machine must never be silently accepted — the emitted glue is
+# bindgen-version-specific, so a mismatched binary would produce release
+# bytes that differ from the pinned build. The installed version is read
+# from `wasm-bindgen --version` ("wasm-bindgen 0.2.127") and compared with
+# the pin exactly. Set WASM_BINDGEN_BIN to point at the pinned binary when
+# several are installed (e.g. ~/.cargo/bin/wasm-bindgen).
+BINDGEN_INSTALLED="$("$WASM_BINDGEN_BIN" --version 2>/dev/null || true)"
+BINDGEN_VERSION_READ="$(printf '%s' "$BINDGEN_INSTALLED" | sed -n 's/.*\(0\.2\.[0-9][0-9]*\).*/\1/p')"
+if [ "$BINDGEN_VERSION_READ" != "$WASM_BINDGEN_VERSION" ]; then
+  echo "wasm-bindgen version mismatch: found '$BINDGEN_INSTALLED', required ${WASM_BINDGEN_VERSION}" >&2
+  echo "install the pinned version: cargo install wasm-bindgen-cli --version ${WASM_BINDGEN_VERSION}" >&2
+  echo "or set WASM_BINDGEN_BIN to the pinned binary (release bytes are bindgen-version-specific)" >&2
+  exit 1
+fi
+echo "wasm-bindgen ${WASM_BINDGEN_VERSION} verified"
+
 cargo build --release --target wasm32-unknown-unknown
 
 # Optimize the wasm with binaryen (wasm-opt -O) if available. wasm-opt is a
@@ -25,17 +42,20 @@ cargo build --release --target wasm32-unknown-unknown
 # warning and SKIP optimization — the build never fails on it. Set
 # WASM_OPT_SHA256 to override the expected hash for any platform.
 # Known hashes (computed with `shasum -a 256` at pin time):
-#   Darwin-arm64 version_119: c12dffafb3e3274026268e90577bd86d98186f7be32457618672f8ca437d8d53
+#   Darwin-arm64  version_119: c12dffafb3e3274026268e90577bd86d98186f7be32457618672f8ca437d8d53
+#   Linux-x86_64  version_119: 716bcf9f5f36a6f466239fbb09a925eeaf54c46411ccefac979ec649e7c06d2d
 # Known hashes per platform (computed with `shasum -a 256` at pin time).
 # Note: macOS ships GNU bash 3.2, which has no associative arrays, so the
 # {"platform": "sha256"} map is expressed as a function (same semantics).
-#   Darwin-arm64 version_119: c12dffafb3e3274026268e90577bd86d98186f7be32457618672f8ca437d8d53
 known_wasm_opt_sha256() {
   case "${OS}-${ARCH}" in
     Darwin-arm64) echo "c12dffafb3e3274026268e90577bd86d98186f7be32457618672f8ca437d8d53" ;;
+    Linux-x86_64) echo "716bcf9f5f36a6f466239fbb09a925eeaf54c46411ccefac979ec649e7c06d2d" ;;
     *) echo "" ;;
   esac
 }
+
+
 sha256_of() {
   if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$1" | awk '{print $1}'
@@ -44,8 +64,8 @@ sha256_of() {
   fi
 }
 WASM_OPT_BIN="${WASM_OPT_BIN:-}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/kiwicaptcha-wasm"
 if [[ -z "$WASM_OPT_BIN" ]]; then
-  CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/kiwicaptcha-wasm"
   WASM_OPT_BIN="$CACHE_DIR/wasm-opt"
 fi
 if [[ ! -x "$WASM_OPT_BIN" ]]; then
@@ -90,6 +110,16 @@ if [[ ! -x "$WASM_OPT_BIN" ]]; then
       WASM_OPT_BIN=""
     fi
   fi
+fi
+# Release-build determinism (audit round 14): with WASM_OPT_STRICT=1 the
+# pipeline FAILS instead of silently skipping optimization when wasm-opt is
+# unavailable/unverifiable — a release build must either use the pinned
+# binaryen at the known SHA-256 or not exist. GitHub CI (ubuntu-latest,
+# x86_64-linux) now has a pinned hash, so a release job built there is
+# byte-deterministic end to end.
+if [[ "${WASM_OPT_STRICT:-0}" == "1" && ( -z "$WASM_OPT_BIN" || ! -x "$WASM_OPT_BIN" ) ]]; then
+  echo "WASM_OPT_STRICT=1: wasm-opt unavailable/unverifiable — refusing to build a non-deterministic release" >&2
+  exit 1
 fi
 if [[ -n "$WASM_OPT_BIN" && -x "$WASM_OPT_BIN" ]]; then
   "$WASM_OPT_BIN" -O target/wasm32-unknown-unknown/release/kiwicaptcha_wasm.wasm \

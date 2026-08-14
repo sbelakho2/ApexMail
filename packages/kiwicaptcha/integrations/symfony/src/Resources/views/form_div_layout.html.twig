@@ -10,9 +10,8 @@
 <div class="kiwi-container" id="kiwicaptcha-root-{{ id }}" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}" data-kiwi-telemetry="{{ telemetry }}"{% if requestBinding %} data-kiwi-request-binding="{{ requestBinding }}"{% endif %}>
     <input type="hidden" name="{{ full_name }}" value="" data-kiwi-token />
     <div class="kiwi-widget" data-kiwi-widget data-state="idle"
-         role="checkbox" aria-checked="false" aria-live="polite"
-         aria-label="KiwiCaptcha security check" tabindex="0">
-        <div class="kiwi-icon-wrapper">
+         role="group" aria-label="KiwiCaptcha security check">
+        <div class="kiwi-icon-wrapper" aria-hidden="true">
             <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M26 19c0 5.5-4 10-10 10S7 24.5 7 19c0-6 3-11 7-12 2-0.5 4-0.5 6 0 4 1 6 6 6 12z" fill="currentColor"/>
                 <path d="M12.5 8.5c-.8-1.5-1-3.5-.5-5.5.5-2 2-3.5 4-4 2-.5 4 .5 5 2.5.2 1 .5 2 .5 3.5" fill="currentColor"/>
@@ -40,6 +39,14 @@
             </div>
         </div>
     </div>
+    {# The dedicated live region (audit round 14): the ONLY aria-live
+       element on the widget. State changes land here via
+       data-kiwi-status (the driver's announcer); the countdown, label,
+       badge and hint stay OUTSIDE the live region so a ticking timer can
+       never spam the screen reader. Visually hidden, screen-reader only.
+       Actionable errors announce through the driver's role="alert"
+       element (also data-kiwi-status-driven), created on demand. #}
+    <span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span>
 </div>
 <script{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_wasm|raw }}
