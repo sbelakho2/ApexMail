@@ -197,7 +197,7 @@ pub struct ChallengeRecord {
     /// simply not separately exposed as a top-level response property. The
     /// JSON key is ALWAYS present for v2 records — `null` when the challenge
     /// is region-unbound — for byte parity with the PHP `toArray()` key set
-    /// (18 keys). Absent in legacy stored records: `#[serde(default)]`.
+    /// (22 keys). Absent in legacy stored records: `#[serde(default)]`.
     #[serde(default)]
     pub region: Option<String>,
     /// Security-policy epoch that authorized this challenge (signed). On

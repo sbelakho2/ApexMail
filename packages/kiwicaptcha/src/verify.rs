@@ -158,10 +158,12 @@ pub struct VerifyContext<'a> {
     /// [`VerifyError::WrongPolicyVersion`] — outstanding challenges die
     /// immediately on policy revocation.
     pub expected_policy_version: Option<u32>,
-    /// The current client's IP address. When [`Some`], the challenge is
-    /// rejected if the stored `ip_hash` does not match
-    /// `hash_ip(client_ip, secret_key)` — enforcing the IP binding that was
-    /// recorded at issuance (relay-attack mitigation). When `None` and the
+    /// The current client's IP address. In v2 the binding is the
+    /// NONCE-BOUND HMAC tag: verification recomputes the tag from the
+    /// challenge nonce + canonical client IP under the derived purpose key
+    /// and rejects a mismatch with [`VerifyError::IpMismatch`] (audit round
+    /// 18: the field comment previously described the legacy v1 `ip_hash`
+    /// — the nonce-bound tag is the current model). When `None` and the
     /// record's binding tag is NON-EMPTY, the solution is rejected with
     /// [`VerifyError::MissingClientIp`] — a bound challenge requires its IP.
     /// Only records with an empty binding tag (`BindingMode::None`) verify

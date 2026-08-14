@@ -2,7 +2,7 @@
 //!
 //! The script is the shared cross-language asset, embedded verbatim from
 //! this package's `resources/risk-v1.lua` (a copy of
-//! `<repo-root>/protocol/risk-v1/risk.lua`) and executed via
+//! `<repo-root>/protocol/risk-v1/risk-v1.lua`) and executed via
 //! `redis::Script` (EVALSHA with an automatic NOSCRIPT fallback inside
 //! `ScriptInvocation::invoke`, sha cached in the store's `Script`).
 //!
@@ -32,7 +32,7 @@ use ::redis as redis_crate;
 
 /// The canonical risk-v1 state script, embedded verbatim from this
 /// package's resources directory (kept in sync with the shared protocol
-/// asset `protocol/risk-v1/risk.lua`).
+/// asset `protocol/risk-v1/risk-v1.lua`).
 pub const SCRIPT: &str = include_str!("../resources/risk-v1.lua");
 
 /// The canonical outcome-ledger scripts (shared verbatim with PHP

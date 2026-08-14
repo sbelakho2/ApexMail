@@ -464,15 +464,20 @@ fn global_level_enters_hysteresis_hold_after_storm() {
     );
 
     // Inside the window: poll the Redis clock to ~1 s past the ratchet
-    // (the deadline is ratchet + 2000 ms), then probe. Audit round 17:
-    // the hold assertions are valid only while the server clock is still
-    // inside the window, so they are GUARDED on the freshly read clock —
-    // a scheduling pause can only skip them (the drop path below still
-    // runs), never fail them spuriously.
+    // (the deadline is ratchet + 2000 ms), then probe REPEATEDLY while the
+    // server clock stays inside the window (audit round 18: every
+    // iteration asserts the hold — a scheduling pause can only mean fewer
+    // iterations, never a skipped assertion, and each probe carries a
+    // unique event id so the dedupe never swallows one).
     wait_until_redis_ms(cool - 1_000);
-    let now = redis_now_ms();
-    if now + 100 < cool {
-        store.observe(&probe(100)).expect("hold observe");
+    let mut hold_probe_id = 100u64;
+    loop {
+        let now = redis_now_ms();
+        if now >= cool {
+            break;
+        }
+        store.observe(&probe(hold_probe_id)).expect("hold observe");
+        hold_probe_id += 2; // keep ids distinct from the drop probe below
         assert_eq!(
             store.last_global_level(),
             4,
@@ -483,6 +488,7 @@ fn global_level_enters_hysteresis_hold_after_storm() {
             cool,
             "the hold keeps the deadline"
         );
+        std::thread::sleep(Duration::from_millis(25));
     }
 
     // After the window: poll the Redis clock to ~1.1 s past the deadline
