@@ -207,8 +207,9 @@ local function apply_feedback(s, event, scope)
         s.mal = s.mal + 2500
     elseif event == 14 then       -- RateLimitHit
         s.bad = s.bad + 3000
-    elseif event == 15 then       -- SourceRateLimitHit: per-source limit
-        s.bad = s.bad + 3000
+    -- event 15 (SourceRateLimitHit): handled ONLY for source/session at
+    -- the call sites below — a per-source limit must never contaminate
+    -- subnet or global pressure (spec: source/session only).
     elseif event == 16 then       -- GlobalCapacityHit: identity-neutral
         -- deliberately nothing: the global state carries the pressure
     elseif event == 17 then       -- RiskDenied: already scored, no-op
@@ -277,6 +278,10 @@ local has_principal = tonumber(ARGV[20]) == 1
 local src = read_state(KEYS[1], now)
 if not is_duplicate then
     apply_event(src, event, scope)
+    if event == 15 then
+        -- SourceRateLimitHit: per-source limit — source/session ONLY.
+        src.bad = src.bad + 3000
+    end
     save(KEYS[1], src, state_ttl)
 end
 local src_prev = read_state(KEYS[2], now)
@@ -295,6 +300,10 @@ local net_next = read_state(KEYS[6], now)
 local sess = read_state(KEYS[7], now)
 if has_session and not is_duplicate then
     apply_session_event(sess, event, scope)
+    if event == 15 then
+        -- SourceRateLimitHit: session half of the source/session-only rule.
+        sess.bad = sess.bad + 3000
+    end
     save(KEYS[7], sess, tonumber(ARGV[21]))
 end
 local prin = read_state(KEYS[8], now)

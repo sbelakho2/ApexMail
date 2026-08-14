@@ -327,6 +327,59 @@ fn no_expired_state_resurrection_after_ttl() {
 }
 
 #[test]
+fn source_rate_limit_hit_is_source_session_only() {
+    let Some(_url) = common::redis_url() else {
+        eprintln!("skipping redis concurrency test: RISK_REDIS_URL not set");
+        return;
+    };
+    // Event 15 (SourceRateLimitHit) must add bad pressure to source/session
+    // ONLY — never subnet, global, or principal state (a per-source limit
+    // is not deployment overload and must not raise the global attack
+    // level for all visitors).
+    let store = store();
+
+    let feedback = store
+        .observe(&common::observation(
+            RiskEventKind::SourceRateLimitHit,
+            0,
+            hex::encode([0xAA; 16]),
+            hex::encode([0xBB; 16]),
+            Some([0x0F; 16]),
+            None,
+            common::event_id(0x7B1),
+            common::T0,
+        ))
+        .expect("observe event 15");
+    // src.bad + 3000 (sat 4000) and sess.bad + 3000 surface as bad_proof.
+    assert_eq!(
+        feedback.vector.bad_proof, 750,
+        "source/session bad pressure must surface"
+    );
+    // Feedback is NOT velocity: no rf/rs anywhere.
+    assert_eq!(feedback.vector.source_fast, 0);
+    assert_eq!(feedback.vector.source_slow, 0);
+    assert_eq!(feedback.vector.subnet_fast, 0);
+    // Global state must be untouched: no bad, no level.
+    assert_eq!(feedback.vector.global_pressure, 0);
+    assert_eq!(store.last_global_level(), 0);
+
+    // Control: a PreIssue DOES raise global pressure.
+    let preissue = store
+        .observe(&common::observation(
+            RiskEventKind::PreIssue,
+            0,
+            hex::encode([0xAA; 16]),
+            hex::encode([0xBB; 16]),
+            Some([0x0F; 16]),
+            None,
+            common::event_id(0x7B2),
+            common::T0,
+        ))
+        .expect("observe PreIssue");
+    assert!(preissue.vector.global_pressure > 0);
+}
+
+#[test]
 fn global_level_enters_hysteresis_hold_after_storm() {
     let Some(_url) = common::redis_url() else {
         eprintln!("skipping redis concurrency test: RISK_REDIS_URL not set");

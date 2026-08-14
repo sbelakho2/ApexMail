@@ -345,6 +345,34 @@ final class RedisRiskStateStoreTest extends TestCase
         self::assertSame(4, $store->lastGlobalLevel());
     }
 
+    public function testSourceRateLimitHitIsSourceSessionOnly(): void
+    {
+        // Event 15 (SourceRateLimitHit) must add bad pressure to
+        // source/session ONLY — never subnet, global, or principal state
+        // (a per-source limit is not deployment overload and must not
+        // raise the global attack level for all visitors).
+        $store = $this->store();
+
+        $feedback = $store->observe($this->observation(
+            str_repeat('1', 64),
+            event: RiskEventKind::SourceRateLimitHit,
+            sessionId: str_repeat('f', 32),
+        ));
+        // src.bad + 3000 (sat 4000) and sess.bad + 3000 surface as bad_proof.
+        self::assertSame(750, $feedback->badProof, 'source/session bad pressure must surface');
+        // Feedback is NOT velocity: no rf/rs anywhere.
+        self::assertSame(0, $feedback->sourceFast);
+        self::assertSame(0, $feedback->sourceSlow);
+        self::assertSame(0, $feedback->subnetFast);
+        // Global state must be untouched: no bad, no level.
+        self::assertSame(0, $feedback->globalPressure);
+        self::assertSame(0, $store->lastGlobalLevel());
+
+        // Control: a PreIssue DOES raise global pressure.
+        $preissue = $store->observe($this->observation(str_repeat('2', 64), event: RiskEventKind::PreIssue));
+        self::assertGreaterThan(0, $preissue->globalPressure);
+    }
+
     public function testGlobalHysteresis(): void
     {
         // Storm: each PreIssue adds 2000 raw (rf 1000 + rs 1000); 32 events

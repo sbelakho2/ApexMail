@@ -84,10 +84,12 @@ identical in:
 7. `RiskReason` — enum: SourceBurst, SourceSustained, NetworkBurst,
    ChallengeDebt, InvalidProofs, MalformedTraffic, ReplayTraffic,
    ActionFailures, ScopeHopping, GlobalAttack, LocalNetworkRisk,
-   CapacityPressure, HardRateLimit, Cooldown. Top 3–4 reasons returned
-   internally; never exposed to the client.
+   CapacityPressure, HardRateLimit, Cooldown. Top 3–4 reasons are
+   returned in the application-facing decision and operator logs only —
+   never exposed to the end-user client (the browser-facing APIs emit
+   opaque error codes, never reasons).
 
-7. Identity — HKDF-SHA256 (`hash_hkdf('sha256', master, 32, info,
+8. Identity — HKDF-SHA256 (`hash_hkdf('sha256', master, 32, info,
    'kiwicaptcha-risk-v1')` / `Hkdf::<Sha256>::new(Some(b"kiwicaptcha-risk-v1"),
    master)`) deriving four 32-byte keys: `source`, `subnet`, `session`,
    `principal`.
@@ -109,7 +111,7 @@ identical in:
    - principal: HMAC over the application principal ID bytes; context
      `b"prin"`; no epoch.
 
-8. State — leaky fixed-point counters (1000 = one unit) with the canonical
+9. State — leaky fixed-point counters (1000 = one unit) with the canonical
    Lua in `risk.lua` (embedded verbatim by both implementations, loaded via
    EVALSHA with NOSCRIPT fallback). Redis keys use the hash tag
    `{kiwi:<deployment>}`:
@@ -118,40 +120,45 @@ identical in:
    `...:session:<hex16>` · `...:principal:<hex16>` · `...:global` ·
    `...:dedupe:<event_id>`
 
-9. Global pressure levels 0..4 with hysteresis (enter at thresholds
-   3000/5500/7500/9000 raw pressure; leave only after the hysteresis
-   window; the Lua implements it).
+10. Global pressure levels 0..4 with hysteresis (enter at the NORMALIZED
+   thresholds 300/550/750/900, i.e. 30/55/75/90% of global saturation —
+   raw 21000/38500/52500/63000 against the default sat_global 70000
+   fixed-point; exit at 250/450/650/850 after the hysteresis window; the
+   Lua implements it).
 
-10. Golden fixtures — `fixtures.json` (22 vectors + weights + base 100).
+11. Golden fixtures — `fixtures.json` (22 vectors + weights + base 100).
     Both implementations MUST reproduce `expected_score` exactly.
 
 Files:
 - `fixtures.json` — golden scoring fixtures (authoritative).
 - `risk.lua` — canonical Redis state script (authoritative, embedded).
 
-8. Request vs feedback — ONLY `PreIssue` (1) counts as a REQUEST: it
+12. Request vs feedback — ONLY `PreIssue` (1) counts as a REQUEST: it
    increments `rf`/`rs` and the scope-switch channel. Feedback events
    (2..14) mutate only their own channels; they never inflate velocity
    or the emergency limiters. `assess()` (PreIssue) enforces the source
    AND global emergency windows; `record_feedback()` runs neither.
 
-9. Session and principal state — the Lua updates and saves the session
+13. Session and principal state — the Lua updates and saves the session
    state (when `has_session=1`) and principal state (when
    `has_principal=1`) with event-specific semantics: principal trust for
    AuthenticationSuccess / ProtectedActionSuccess / ConfirmedLegitimate,
    failure pressure for AuthenticationFailure / ProtectedActionFailure /
    ConfirmedAbuse. `principal_credit` in the SignalVector is REAL.
 
-10. Epoch pseudonym continuity — the observation carries prev/current/next
+14. Epoch pseudonym continuity — the observation carries prev/current/next
     pseudonyms, each HMAC'd with ITS OWN epoch
     (`source_id_for_epoch(ip, epoch-1/0/+1)`); the ±1 keys are
     observer-only until a later epoch writes them.
 
-11. Idempotency — a caller-supplied `idempotency_key` is used verbatim as
-    the event_id; a duplicate returns the CURRENT signals with
-    `is_duplicate=1` (state untouched) — identical in both languages.
+15. Idempotency — the caller-supplied `idempotency_key` is HMAC-SHA256'd
+    under the event key over `pack('N', scope) || event || key` (the 64-hex
+    digest is the event_id; raw keys are never written to Redis state, and
+    equal keys in different scopes/event kinds stay domain-separated); a
+    duplicate returns the CURRENT signals with `is_duplicate=1` (state
+    untouched) — identical in both languages.
 
-12. Calibration — bounded Redis aggregate buckets with EXACT scores.
+16. Calibration — bounded Redis aggregate buckets with EXACT scores.
     `{kiwi:<ns>}:cal:<scope>:<hour>` (fields `legit_count`,
     `legit_score_sum`, `abuse_count`, `abuse_score_sum`, 48 h TTL, at most
     24 keys per scope) with JSON-string decision receipts
@@ -160,12 +167,14 @@ Files:
     Confirmation is ATOMIC via the canonical `confirm.lua` (GET receipt →
     validate → DEL receipt → HINCRBYFLOAT bucket → EXPIRE → return scope);
     a confirmed outcome is either fully recorded or not consumed. Bias is
-    EXACT score calibration: FP = Σ legit_score_sum, FN = Σ
-    (abuse_count*1000 − abuse_score_sum), raw = (FN−FP)*2/(total*10),
-    clamped to ±max_adjustment, moved toward the target through the
-    proportional per-minute rate limiter (milli-points; below min_samples
-    the target is 0 but the path is still rate-limited). Applied to the
-    score BEFORE band mapping in both languages.
+    EXACT score calibration on class-normalized means: fp_mean =
+    legit_score_sum/legit_count, fn_mean = (abuse_count*1000 −
+    abuse_score_sum)/abuse_count, error = fn_mean·fn_cost − fp_mean·fp_cost,
+    raw = (error*2)/10, clamped to ±max_adjustment, moved toward the target
+    through the proportional per-minute rate limiter (milli-points, max
+    change per minute); below min_samples the target is 0 but the path is
+    still rate-limited. Applied to the score BEFORE band mapping in both
+    languages.
     SAMPLING CONTRACT: at assessment time the engine marks each receipt
     `sampled` (mode complete → always; random_sample →
     random < sampling_probability_ppm; weighted → always, the application
@@ -174,7 +183,7 @@ Files:
     confirm.lua — the label can never select itself into the calibration
     population.
 
-13. OUTCOME LEDGER (always on, independent of calibration):
+17. OUTCOME LEDGER (always on, independent of calibration):
     `{kiwi:<ns>}:outcome:<decision_id>` holds the decision's outcome state
     as JSON `{"o":"P|L|A","scope","hour","score","w"}` (PENDING /
     LEGITIMATE / ABUSE, exact decision score, recorded weight), EX =
@@ -206,12 +215,12 @@ Files:
     sampledTotal/sampledResolved/resolutionRatio/sampledExpired per
     scope.
 
-14. Degraded mode applies `strongest(scope.degraded, scope.minimum,
+18. Degraded mode applies `strongest(scope.degraded, scope.minimum,
     global_floors[min(last_known_level, 4)])` — the last known global
     attack floor survives backend failure.
 
-14. Argon capacity is checked LAST: `action = strongest(ladder, minimum,
+19. Argon capacity is checked LAST: `action = strongest(ladder, minimum,
     floor)` then, if the final action is Argon and argon capacity < 300 →
     StepUp. Floors can never reintroduce Argon.
 
-15. Scope ids are u32 (1..=4294967295; 0 rejected) in both languages.
+20. Scope ids are u32 (1..=4294967295; 0 rejected) in both languages.
