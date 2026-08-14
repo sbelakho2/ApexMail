@@ -211,3 +211,10 @@ fi
 "$WASM_BINDGEN_BIN" --target web --out-dir pkg target/wasm32-unknown-unknown/release/kiwicaptcha_wasm.wasm
 cargo run --release --locked --manifest-path tools/embed/Cargo.toml -- pkg assets/kiwicaptcha-wasm.js
 echo "assets/kiwicaptcha-wasm.js regenerated"
+
+# Audit round 18: the core crate embeds the assets from ITS OWN
+# resources/ directory (cargo package verification builds the tarball in
+# isolation and cannot reach outside the crate) — keep the copies
+# byte-identical; CI enforces it (widget-assets parity job).
+cp assets/widget-driver.js assets/widget.css assets/kiwicaptcha-wasm.js ../kiwicaptcha/resources/
+echo "kiwicaptcha core resources synced"
