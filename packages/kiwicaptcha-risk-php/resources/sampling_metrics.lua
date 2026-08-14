@@ -14,12 +14,20 @@
 --              are one cohort)
 -- ARGV[1]      now (epoch ms — informational; unused)
 --
+-- Output clamp (audit #109/#113): corrupted bucket values (e.g. a huge
+-- string like 9223372036854775807) must never reach the caller as an
+-- out-of-range number — both parsers cast the reply to an integer and a
+-- float beyond the platform int range is UB. The totals are clamped at
+-- MAX_SAMPLE_COUNTER (1e9 — 24 h of any plausible issuance volume),
+-- keeping every downstream cast safe and the ratio in [0, 1].
+--
 -- Sums the two sample counters across the 24-bucket window and returns
 -- {sample_total, sample_resolved}. sample_total includes decisions whose
 -- receipts are still in flight (registered but not yet resolved), so
 -- expired = max(0, sample_total - sample_resolved) counts in-flight and
 -- unresolvable receipts.
 
+local MAX_SAMPLE_COUNTER = 1000000000
 local sample_total = 0
 local sample_resolved = 0
 for i = 1, 24 do
@@ -35,4 +43,6 @@ for i = 1, 24 do
     end
 end
 
+if sample_total > MAX_SAMPLE_COUNTER then sample_total = MAX_SAMPLE_COUNTER end
+if sample_resolved > MAX_SAMPLE_COUNTER then sample_resolved = MAX_SAMPLE_COUNTER end
 return {sample_total, sample_resolved}

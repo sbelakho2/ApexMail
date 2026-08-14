@@ -2782,7 +2782,9 @@ mod tests {
             .query::<()>(&mut conn)
             .expect("hset extremes");
         let maxed = s.sampling_metrics(4, now()).unwrap();
-        assert_eq!(maxed.sampled_total, i64::MAX);
+        // The canonical script clamps corrupted totals at MAX_SAMPLE_COUNTER
+        // (1e9) — the reply must never carry an out-of-range i64.
+        assert_eq!(maxed.sampled_total, 1_000_000_000);
         assert_eq!(maxed.resolution_ratio, 1.0);
         assert!(
             maxed.resolution_ratio.is_finite(),

@@ -192,7 +192,9 @@ final class NonFiniteBiasTest extends TestCase
         $client->hset($key, 'sample_total', (string) PHP_INT_MAX);
         $client->hset($key, 'sample_resolved', (string) PHP_INT_MAX);
         $metrics = $c->samplingMetrics($scope, $this->nowMs());
-        self::assertSame(PHP_INT_MAX, $metrics['sampledTotal']);
+        // The canonical script clamps corrupted totals at MAX_SAMPLE_COUNTER
+        // (1e9) — the int cast of an out-of-range float is UB pre-PHP-8.5.
+        self::assertSame(1_000_000_000, $metrics['sampledTotal']);
         self::assertSame(1.0, $metrics['resolutionRatio']);
         self::assertTrue(is_finite($metrics['resolutionRatio']), 'the ratio must never be NaN/Inf');
 
