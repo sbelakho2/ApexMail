@@ -116,12 +116,11 @@ For each release:
    ```
 2. Publish the hash list in the release notes (SHA-256 for artifact
    verification, sha384 SRI form for script tags).
-3. Attest the artifacts with GitHub artifact attestations:
-   ```sh
-   gh attestation create assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js \
-     --repo <org>/<repo> --predicate-type https://slsa.dev/provenance/v1
-   ```
-   Verifiers check the signature chain back to the repository:
+3. Attest the artifacts with GitHub artifact attestations. The
+   PRODUCER is the release workflow — `actions/attest-build-provenance`
+   (SLSA provenance, tied to the OIDC identity of the repository/runner);
+   `gh attestation create` does NOT exist. The release pipeline already
+   attests all four assets on every `v*` tag; the CONSUMER side verifies:
    ```sh
    gh attestation verify assets/kiwicaptcha-wasm.js --repo <org>/<repo>
    ```
