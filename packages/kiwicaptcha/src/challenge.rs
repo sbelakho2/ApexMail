@@ -1810,8 +1810,29 @@ mod tests {
             )
             .unwrap();
             let mut record = issued.record.clone();
-            let counter =
-                crate::verify::solve_for_test(&record).expect("solver finds a profile counter");
+            // Retry on an unlucky solve that exceeds the solver cap (an
+            // issue that burned the PHP sha-20 profile test too): the
+            // counter is deterministic per challenge, so a fresh challenge
+            // resamples it.
+            let counter = loop {
+                match crate::verify::solve_for_test(&record) {
+                    Some(c) if c <= SOLVER_MAX_HASHES => break c,
+                    _ => {
+                        let reissued = crate::challenge::issue_challenge_with_profile(
+                            &config,
+                            "login",
+                            "1.2.3.4",
+                            1_000_001,
+                            1_700_000_000_000_000,
+                            0,
+                            &ChallengeProfile::sha(bits),
+                            None,
+                        )
+                        .unwrap();
+                        record = reissued.record;
+                    }
+                }
+            };
             let mut ctx = crate::verify::VerifyContext {
                 record: &mut record,
                 secret_key: "test-key-16-bytes!",
