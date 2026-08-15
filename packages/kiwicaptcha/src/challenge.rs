@@ -197,7 +197,7 @@ pub struct ChallengeRecord {
     /// simply not separately exposed as a top-level response property. The
     /// JSON key is ALWAYS present for v2 records — `null` when the challenge
     /// is region-unbound — for byte parity with the PHP `toArray()` key set
-    /// (22 keys). Absent in legacy stored records: `#[serde(default)]`.
+    /// (23 keys). Absent in legacy stored records: `#[serde(default)]`.
     #[serde(default)]
     pub region: Option<String>,
     /// Security-policy epoch that authorized this challenge (signed). On
@@ -220,10 +220,19 @@ pub struct ChallengeRecord {
     /// with an expected issuer rejects records whose issuer differs — or that
     /// carry no issuer at all (fail closed). The JSON key is ALWAYS present
     /// for v2 records — `null` when unset — for byte parity with the PHP
-    /// `toArray()` key set (22 keys). Absent in legacy stored records:
+    /// `toArray()` key set (23 keys). Absent in legacy stored records:
     /// `#[serde(default)]`.
     #[serde(default)]
     pub issuer: Option<String>,
+    /// Server-side issuance metadata (round 24): the Host the challenge was
+    /// issued for, when the issuing application provides it. Used by the
+    /// provider-compatible Siteverify response (`hostname` field); NEVER
+    /// signed into the canonical payload and never sent to the client. The
+    /// JSON key is ALWAYS present — `null` when unset — for byte parity
+    /// with the PHP `toArray()` key set (23 keys). Absent in legacy stored
+    /// records: `#[serde(default)]`.
+    #[serde(default)]
+    pub hostname: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with
     /// (audit #91). The FINAL v2 canonical field (`|<kid>` after the issuer);
     /// a verifier configured with a `secrets_by_kid` map selects the signing
@@ -977,6 +986,7 @@ pub fn issue_challenge(
         nonce: nonce.clone(),
         scope: scope.to_string(),
         binding_tag: binding.clone(),
+        hostname: None,
         issued_at: now_unix,
         expires_at,
         algorithm,
@@ -1949,7 +1959,7 @@ mod tests {
         .unwrap();
         assert_eq!(unbound.record.region, None);
         // The JSON key is ALWAYS present (null when unbound) — PHP toArray()
-        // parity, 22 keys.
+        // parity, 23 keys.
         let value = serde_json::to_value(&issued.record).unwrap();
         assert_eq!(value["region"], "eu-west-1");
         let unbound_value = serde_json::to_value(&unbound.record).unwrap();
@@ -1988,7 +1998,7 @@ mod tests {
         .unwrap();
         assert_eq!(unbound.record.issuer, None);
         // The JSON key is ALWAYS present (null when unbound) — PHP toArray()
-        // parity, 22 keys.
+        // parity, 23 keys.
         let value = serde_json::to_value(&issued.record).unwrap();
         assert_eq!(value["issuer"], "auth-gw-eu");
         let unbound_value = serde_json::to_value(&unbound.record).unwrap();
@@ -2223,7 +2233,7 @@ mod tests {
     #[test]
     fn issuance_stamps_and_signs_the_kid() {
         // Audit #91: config.kid is stamped on the record and signed as the
-        // FINAL canonical field — the record JSON carries it (22 keys) and
+        // FINAL canonical field — the record JSON carries it (23 keys) and
         // the signed challenge string embeds it byte-exactly.
         let base = profile_base_config();
         let with_kid = ChallengeConfig {

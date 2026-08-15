@@ -85,7 +85,7 @@ final class Issuer
      *                                   than 128 bytes or outside the same
      *                                   alphabet
      */
-    public function issue(string $scope, string $clientIp, ?string $requestBinding = null): Challenge
+    public function issue(string $scope, string $clientIp, ?string $requestBinding = null, ?string $hostname = null): Challenge
     {
         $scopeLen = \strlen($scope);
         if ($scopeLen < 1 || $scopeLen > 128) {
@@ -168,6 +168,7 @@ final class Issuer
             region: $this->region,
             policyVersion: $this->config->policyVersion,
             requestBinding: $requestBinding,
+            hostname: $hostname,
             issuer: $this->config->issuer,
             kid: $this->config->kid,
         );
@@ -212,6 +213,7 @@ final class Issuer
         ChallengeProfile $profile,
         ?int $now = null,
         ?string $requestBinding = null,
+        ?string $hostname = null,
     ): Challenge {
         $profile->validate();
 

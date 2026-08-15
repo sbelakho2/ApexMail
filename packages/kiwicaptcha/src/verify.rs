@@ -4051,6 +4051,7 @@ mod tests {
             request_binding: None,
             issuer: None,
             kid: 1,
+        hostname: None,
         }
     }
 

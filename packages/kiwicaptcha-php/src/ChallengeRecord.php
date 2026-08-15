@@ -107,7 +107,7 @@ final class ChallengeRecord
         'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
         'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
         'attempts_used', 'region', 'policy_version', 'request_binding',
-        'issuer', 'kid',
+        'issuer', 'kid', 'hostname',
     ];
 
     /**
@@ -144,6 +144,9 @@ final class ChallengeRecord
         public readonly ?string $requestBinding = null,
         public readonly ?string $issuer = null,
         public readonly ?int $kid = 1,
+        // Server-side issuance metadata (round 24): the Host the challenge
+        // was issued for (Siteverify `hostname`); never signed, never sent.
+        public readonly ?string $hostname = null,
     ) {
     }
 
@@ -208,6 +211,9 @@ final class ChallengeRecord
             // the default key id 1 so PHP-written records stay readable by
             // Rust (mirror of policy_version).
             'kid' => $this->kid ?? 1,
+            // Server-side issuance metadata (round 24) — ALWAYS present
+            // (null when unset) for byte parity with the Rust serde schema.
+            'hostname' => $this->hostname,
         ];
     }
 

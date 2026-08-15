@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Routing;
 
+use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
+use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use Symfony\Component\Config\Loader\Loader;
 use Symfony\Component\Routing\Route;
 use Symfony\Component\Routing\RouteCollection;
@@ -55,6 +57,26 @@ final class KiwiCaptchaRouteLoader extends Loader
 
         $prefix = rtrim($this->routePrefix, '/');
         $routes = new RouteCollection();
+        // Round 24: provider-compatible Siteverify + migration loader.
+        $routes->add('kiwicaptcha_siteverify', new Route(
+            $prefix.'/siteverify',
+            ['_controller' => [SiteVerifyController::class, 'siteverify']],
+            [],
+            [],
+            '',
+            [],
+            ['POST'],
+        ));
+        $routes->add('kiwicaptcha_api_js', new Route(
+            $prefix.'/api.js',
+            ['_controller' => [ApiJsController::class, 'apiJs']],
+            [],
+            [],
+            '',
+            [],
+            ['GET'],
+        ));
+
         $routes->add('kiwicaptcha_challenge', new Route(
             $prefix.'/challenge',
             ['_controller' => [ChallengeController::class, 'challenge']],

@@ -91,7 +91,7 @@ final class IssuerBindingTest extends TestCase
     {
         $keys = ChallengeRecord::WIRE_KEYS;
 
-        self::assertCount(22, $keys);
+        self::assertCount(23, $keys);
         self::assertSame('issuer', $keys[20], 'issuer is the penultimate wire key, appended after request_binding');
         self::assertSame('kid', $keys[21], 'kid is the final wire key (audit #91)');
         self::assertSame($keys, \array_keys($this->issue('prod')[1]->toArray()));

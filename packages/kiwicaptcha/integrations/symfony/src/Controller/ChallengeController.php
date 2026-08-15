@@ -177,6 +177,8 @@ final class ChallengeController
         private readonly ?int $challengeTtlSecs = null,
         /** Audit round 15: server-owned scope allowlist ([] = accept any). */
         private readonly array $allowedScopes = [],
+        /** Round 24: public sitekey -> scope alias map (migration compat). */
+        private readonly array $sitekeyAllowlist = [],
     ) {
     }
 
@@ -477,6 +479,17 @@ final class ChallengeController
             );
         }
 
+        // MIGRATION SITEKEY ALIAS (round 24): a public sitekey is optional
+        // legacy metadata, never a secret. When the client sends a
+        // configured sitekey (a server-maintained alias map), the scope is
+        // resolved from the SERVER-OWNED mapping — an attacker-supplied
+        // sitekey can never reduce a route's minimum security policy: an
+        // unknown sitekey simply stays a scope name subject to the
+        // allowed_scopes gate and the risk assessment below.
+        if (isset($this->sitekeyAllowlist[$scope])) {
+            $scope = $this->sitekeyAllowlist[$scope];
+        }
+
         // SERVER-OWNED SCOPE ALLOWLIST (audit round 15): when
         // risk.allowed_scopes is configured, issuance is refused for any
         // scope outside the server-defined set BEFORE the risk assessment
@@ -744,9 +757,12 @@ final class ChallengeController
         }
 
         try {
+            // Round 24: the record carries the issuance Host as server-side
+            // metadata (Siteverify `hostname`); never signed, never sent.
+            $hostname = $request->getHost();
             $challenge = $profile !== null
-                ? $this->issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding)
-                : $this->issuer->issue($scope, $clientIp, $requestBinding);
+                ? $this->issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
+                : $this->issuer->issue($scope, $clientIp, $requestBinding, $hostname);
         } catch (\InvalidArgumentException $e) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],

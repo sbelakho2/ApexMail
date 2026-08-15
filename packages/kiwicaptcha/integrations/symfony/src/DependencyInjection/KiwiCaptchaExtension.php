@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
+use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
+use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
@@ -695,6 +697,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // SCOPE_NOT_ALLOWED) before risk/quota, making the per-scope
             // quota namespace server-bounded.
             ->setArgument('$allowedScopes', $riskConfig['allowed_scopes'])
+            // Round 24: migration sitekey -> scope alias map (server-owned).
+            ->setArgument('$sitekeyAllowlist', $riskConfig['sitekey_allowlist'])
             // Audit #108: the security-epoch monitor drives the issuance-side
             // max-stale fail-closed check — a stale central policy read
             // refuses issuance with 503 SERVICE_UNAVAILABLE.
@@ -712,6 +716,26 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // risk.health.enabled (default true).
             $config['risk']['health']['enabled'],
         ]))->addTag('routing.loader'));
+
+        // ── Provider-compatible Siteverify (round 24) ──
+        // Disabled unless siteverify_secret is configured; calls the SAME
+        // atomic verifier service (kiwi_captcha.verifier). The storage is
+        // injected so the deterministic consumed-result's record metadata
+        // (issued_at, hostname) is available for the provider-shaped JSON.
+        $container->setDefinition(SiteVerifyController::class, (new Definition(SiteVerifyController::class, [
+            new Reference('kiwi_captcha.verifier'),
+            $config['secret_key'],
+            $riskConfig['siteverify_secret'],
+            new Reference(StorageInterface::class),
+        ]))->addTag('controller.service_arguments')->setPublic(true));
+
+        // ── Migration compatibility loader (round 24) ──
+        // GET {prefix}/api.js[?compat=...]: the canonical glue + driver as
+        // one same-origin immutable external script.
+        $assetsDir = \dirname(__DIR__, 2).'/Resources/public';
+        $container->setDefinition(ApiJsController::class, (new Definition(ApiJsController::class, [
+            $assetsDir,
+        ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Health endpoints (audit #51/#58) ──
         // /health/live: always 200 while the process runs. /health/ready:

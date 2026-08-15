@@ -205,7 +205,7 @@ final class RedisStorageTest extends TestCase
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
-            'issuer', 'kid', 'state', 'consumed_result',
+            'issuer', 'kid', 'hostname', 'state', 'consumed_result',
         ], array_keys($data));
         self::assertSame('redis-nonce-1', $data['nonce']);
         self::assertSame('sha256', $data['algorithm']);

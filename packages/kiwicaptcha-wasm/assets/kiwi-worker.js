@@ -23,13 +23,16 @@
   "use strict";
 
   // Solver PROTOCOL id (audit round 23 — renamed from the misleading
-  // "build id" semantics): a compatibility/ABI generation label. MUST
-  // equal the widget driver's KIWI_SOLVER_PROTOCOL_ID constant AND the
-  // wasm glue's exported solver_protocol_id() (verified below BEFORE
-  // ready). It proves driver+worker+wasm speak the same protocol
-  // generation — exact artifact identity is guaranteed by the release
-  // tag + SHA256SUMS + SRI + attestation, not by this string.
+  // "build id" semantics): a compatibility/ABI generation LABEL reported
+  // in the handshake for debugging. MUST equal the widget driver's
+  // KIWI_SOLVER_PROTOCOL_ID constant. The ENFORCED check is the numeric
+  // protocol version against the wasm glue's exported
+  // solver_protocol_version() (verified below BEFORE ready). Together
+  // they prove driver+worker+wasm speak the same protocol generation —
+  // exact artifact identity is guaranteed by the release tag +
+  // SHA256SUMS + SRI + attestation, not by these values.
   var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";
+  var KIWI_SOLVER_PROTOCOL_VERSION = 1;
 
   // The wasm glue exposes itself as `window.__kiwiCaptchaWasm`, so the
   // worker establishes the `window` alias (same prelude the widget driver
@@ -293,33 +296,29 @@
     }
   };
 
-  // Read the wasm glue's exported solver protocol id. The glue's load()
-  // resolves to the RAW wasm exports, where a string-returning Rust
-  // export yields the wasm-bindgen [ptr, len] tuple rather than the
-  // decoded string — decode it from the wasm memory (the wrapper
-  // functions live inside the glue's closure and are not reachable from
-  // the worker). Any failure returns null (fail closed).
-  function wasmProtocolId(w) {
-    if (!w || typeof w.solver_protocol_id !== "function") return null;
+  // Read the wasm glue's exported solver protocol VERSION. The glue's
+  // load() resolves to the RAW wasm exports, where an integer export is a
+  // plain number (audit round 24: the earlier String export surfaced as a
+  // [ptr, len] tuple and had to be decoded — an integer needs no decode).
+  // Any failure returns null (fail closed).
+  function wasmProtocolVersion(w) {
+    if (!w || typeof w.solver_protocol_version !== "function") return null;
     try {
-      var ret = w.solver_protocol_id();
-      if (!ret || typeof ret[0] !== "number" || typeof ret[1] !== "number") return null;
-      if (!w.memory || !w.memory.buffer) return null;
-      var bytes = new Uint8Array(w.memory.buffer, ret[0], ret[1]);
-      return new TextDecoder().decode(bytes);
+      var v = w.solver_protocol_version();
+      return typeof v === "number" ? v : null;
     } catch (e) {
       return null;
     }
   }
 
-  // Startup handshake (audit #53 / round 23): BEFORE any solve work,
-  // verify the loaded wasm's exported solver_protocol_id() against this
-  // constant (driver + worker + wasm must speak the same protocol
+  // Startup handshake (audit #53 / round 23-24): BEFORE any solve work,
+  // verify the loaded wasm's exported solver_protocol_version() against
+  // this constant (driver + worker + wasm must speak the same protocol
   // generation) and only then announce ready — a mismatched pair fails
   // closed instead of solving.
   initWasm().then(function (w) {
-    var wasmProtocol = wasmProtocolId(w);
-    if (typeof wasmProtocol !== "string" || wasmProtocol !== KIWI_SOLVER_PROTOCOL_ID) {
+    var wasmProtocol = wasmProtocolVersion(w);
+    if (typeof wasmProtocol !== "number" || wasmProtocol !== KIWI_SOLVER_PROTOCOL_VERSION) {
       post({ type: "failed", reason: "protocol-mismatch" });
       return;
     }

@@ -19,7 +19,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class StrictParserTest extends TestCase
 {
-    /** @return array<string, mixed> a fully valid 22-key record array */
+    /** @return array<string, mixed> a fully valid 23-key record array */
     private static function base(): array
     {
         return [
@@ -45,6 +45,7 @@ final class StrictParserTest extends TestCase
             'request_binding' => null,
             'issuer' => null,
             'kid' => 1,
+            'hostname' => null,
         ];
     }
 
@@ -77,7 +78,7 @@ final class StrictParserTest extends TestCase
         self::assertNull($record->requestBinding);
         self::assertNull($record->issuer);
         self::assertSame(1, $record->kid, 'kid defaults to 1 on the wire');
-        self::assertSame(22, \count(ChallengeRecord::WIRE_KEYS));
+        self::assertSame(23, \count(ChallengeRecord::WIRE_KEYS));
         self::assertSame(ChallengeRecord::WIRE_KEYS, \array_keys($record->toArray()));
         self::assertSame(1, $record->toArray()['kid'], 'the kid key is ALWAYS present (audit #91)');
     }
@@ -325,14 +326,14 @@ final class StrictParserTest extends TestCase
         self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
     }
 
-    public function testWireKeySetIsPinnedTo22(): void
+    public function testWireKeySetIsPinnedTo23(): void
     {
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
-            'issuer', 'kid',
+            'issuer', 'kid', 'hostname',
         ], ChallengeRecord::WIRE_KEYS);
     }
 

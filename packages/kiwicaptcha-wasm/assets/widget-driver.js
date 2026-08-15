@@ -64,13 +64,16 @@
   "use strict";
 
   // Solver PROTOCOL id (audit round 23 — renamed from the misleading
-  // "build id" semantics): a compatibility/ABI generation label. MUST
-  // equal the widget driver's KIWI_SOLVER_PROTOCOL_ID constant AND the
-  // wasm glue's exported solver_protocol_id() (verified below BEFORE
-  // ready). It proves driver+worker+wasm speak the same protocol
-  // generation — exact artifact identity is guaranteed by the release
-  // tag + SHA256SUMS + SRI + attestation, not by this string.
+  // "build id" semantics): a compatibility/ABI generation LABEL reported
+  // in the handshake for debugging. MUST equal the widget driver's
+  // KIWI_SOLVER_PROTOCOL_ID constant. The ENFORCED check is the numeric
+  // protocol version against the wasm glue's exported
+  // solver_protocol_version() (verified below BEFORE ready). Together
+  // they prove driver+worker+wasm speak the same protocol generation —
+  // exact artifact identity is guaranteed by the release tag +
+  // SHA256SUMS + SRI + attestation, not by these values.
   var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";
+  var KIWI_SOLVER_PROTOCOL_VERSION = 1;
 
   // The wasm glue exposes itself as \`window.__kiwiCaptchaWasm\`, so the
   // worker establishes the \`window\` alias (same prelude the widget driver
@@ -334,33 +337,29 @@
     }
   };
 
-  // Read the wasm glue's exported solver protocol id. The glue's load()
-  // resolves to the RAW wasm exports, where a string-returning Rust
-  // export yields the wasm-bindgen [ptr, len] tuple rather than the
-  // decoded string — decode it from the wasm memory (the wrapper
-  // functions live inside the glue's closure and are not reachable from
-  // the worker). Any failure returns null (fail closed).
-  function wasmProtocolId(w) {
-    if (!w || typeof w.solver_protocol_id !== "function") return null;
+  // Read the wasm glue's exported solver protocol VERSION. The glue's
+  // load() resolves to the RAW wasm exports, where an integer export is a
+  // plain number (audit round 24: the earlier String export surfaced as a
+  // [ptr, len] tuple and had to be decoded — an integer needs no decode).
+  // Any failure returns null (fail closed).
+  function wasmProtocolVersion(w) {
+    if (!w || typeof w.solver_protocol_version !== "function") return null;
     try {
-      var ret = w.solver_protocol_id();
-      if (!ret || typeof ret[0] !== "number" || typeof ret[1] !== "number") return null;
-      if (!w.memory || !w.memory.buffer) return null;
-      var bytes = new Uint8Array(w.memory.buffer, ret[0], ret[1]);
-      return new TextDecoder().decode(bytes);
+      var v = w.solver_protocol_version();
+      return typeof v === "number" ? v : null;
     } catch (e) {
       return null;
     }
   }
 
-  // Startup handshake (audit #53 / round 23): BEFORE any solve work,
-  // verify the loaded wasm's exported solver_protocol_id() against this
-  // constant (driver + worker + wasm must speak the same protocol
+  // Startup handshake (audit #53 / round 23-24): BEFORE any solve work,
+  // verify the loaded wasm's exported solver_protocol_version() against
+  // this constant (driver + worker + wasm must speak the same protocol
   // generation) and only then announce ready — a mismatched pair fails
   // closed instead of solving.
   initWasm().then(function (w) {
-    var wasmProtocol = wasmProtocolId(w);
-    if (typeof wasmProtocol !== "string" || wasmProtocol !== KIWI_SOLVER_PROTOCOL_ID) {
+    var wasmProtocol = wasmProtocolVersion(w);
+    if (typeof wasmProtocol !== "number" || wasmProtocol !== KIWI_SOLVER_PROTOCOL_VERSION) {
       post({ type: "failed", reason: "protocol-mismatch" });
       return;
     }
@@ -808,8 +807,10 @@
     return b;
   }
 
-  function initWidget(W) {
-    if (!W || W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return;
+  var kiwiWidgets = {}; // widgetId -> {W, options, state, token, expiryTimer}
+  function initWidget(W, options) {
+    if (!W || W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return null;
+    options = options || {};
     W.dataset.kiwiStarted = "1";
     // Round-13: no fixed DOM id. The driver locates elements by local
     // traversal only (closest/querySelector), so the removed
@@ -818,6 +819,9 @@
     if (!W.dataset.kiwiInstance) {
       W.dataset.kiwiInstance = "kiwi-" + (++kiwiInstanceCounter) + "-" + Math.random().toString(36).slice(2, 8);
     }
+    // Round 24: formal widget instances — widgetId == data-kiwi-instance.
+    var widgetId = W.dataset.kiwiInstance;
+    kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", expiryTimer: null };
     // Neutral role: the widget is a passive status/group, never a
     // checkbox, and it is NOT focusable — the retry button is.
     if (!W.getAttribute("role")) W.setAttribute("role", "group");
@@ -882,6 +886,48 @@
     var countdownTimer = null;
     var retryCount = 0;
     var RETRY_LIMIT = 2;
+    // Round 24: widget-instance state helpers (provider-facing lifecycle).
+    function kiwiRecordState(state, token) {
+      var r = kiwiWidgets[widgetId];
+      if (r) { r.state = state; r.token = token || ""; }
+    }
+    function writeResponseAlias(value) {
+      if (!options.responseField) return;
+      var host = tokenEl ? tokenEl.parentNode : null;
+      var input = host ? host.querySelector('input[name="' + options.responseField + '"]') : null;
+      if (!input && host) {
+        input = document.createElement("input");
+        input.type = "hidden";
+        input.name = options.responseField;
+        host.insertBefore(input, tokenEl.nextSibling);
+      }
+      if (input) input.value = value || "";
+    }
+    function clearExpiryTimer() {
+      var r = kiwiWidgets[widgetId];
+      if (r && r.expiryTimer) { clearTimeout(r.expiryTimer); r.expiryTimer = null; }
+    }
+    function expireWidget() {
+      var r = kiwiWidgets[widgetId];
+      if (!r || r.state !== "verified") return;
+      r.state = "expired";
+      r.token = "";
+      if (tokenEl) tokenEl.value = "";
+      setBinding("");
+      writeResponseAlias("");
+      if (W) W.setAttribute("data-state", "expired");
+      if (countdownEl) countdownEl.textContent = "expired";
+      dispatch("expired", {});
+      announce("Verification expired");
+      if (options.expiredCallback) { try { options.expiredCallback(); } catch (e) {} }
+    }
+    function scheduleExpiry(ttlSecs) {
+      clearExpiryTimer();
+      if (!ttlSecs || ttlSecs <= 0) return;
+      var r = kiwiWidgets[widgetId];
+      if (!r) return;
+      r.expiryTimer = setTimeout(expireWidget, ttlSecs * 1000);
+    }
     function startCountdown(ttlSecs) {
       var remaining = ttlSecs;
       var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : "expired"; };
@@ -904,6 +950,9 @@
     }
     function resetToIdle() {
       clearInterval(countdownTimer);
+      clearExpiryTimer();
+      writeResponseAlias("");
+      kiwiRecordState("idle", "");
       telemetry.stop();
       // Round-13 blob cleanup: a pending worker object URL is revoked on
       // every reset/re-init path, not just on worker completion.
@@ -1044,12 +1093,22 @@
         retryCount = 0;
         setStatus("Verified", "Success", "done"); setHint("Proof-of-work verified locally."); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
         announce("Verification complete");
-        dispatch("verified", { nonce: data.nonce });
+        var token = tokenEl.value;
+        kiwiRecordState("verified", token);
+        writeResponseAlias(token);
+        dispatch("verified", { nonce: data.nonce, token: token });
+        // Round 24: provider-style solved-token expiry lifecycle. The
+        // server remains authoritative (an expired record is rejected);
+        // this client timer is UX convenience only and mirrors the
+        // incumbent providers' token lifetime.
+        scheduleExpiry(data.ttlSecs || 0);
+        if (options.callback) { try { options.callback(token); } catch (e) {} }
         telemetry.stop();
       } catch (e) { fail(e.message); }
     }
     dispatch("ready");
     run();
+    return widgetId;
   }
 
   // ── BFCache restore (audit #54) ─────────────────────────────────────
@@ -1139,7 +1198,289 @@
     return { disconnect: function () { if (kiwiObserver) kiwiObserver.disconnect(); } };
   }
 
-  window.KiwiCaptcha = { init: initWidget, render: function(s) { document.querySelectorAll(s).forEach(initWidget); }, workerSource: KIWI_WORKER_SRC, buildId: KIWI_SOLVER_PROTOCOL_ID, observe: kiwiObserve, destroy: kiwiDestroy };
+  // ── Round-24 provider-style public API ──────────────────────────────
+  // Native KiwiCaptcha now exposes the incumbent lifecycle: render() ->
+  // stable widget id, reset/getResponse/execute/remove/isExpired/ready.
+  // The compatibility globals (grecaptcha/hcaptcha/turnstile) delegate to
+  // the SAME instances — one widget, one token, one lifecycle.
+  function kiwiResolveTarget(target) {
+    if (!target) return null;
+    if (typeof target === "string") {
+      var el = document.getElementById(target);
+      if (!el) {
+        var list = document.querySelectorAll(target);
+        return list.length ? list[0] : null;
+      }
+      return el;
+    }
+    return target.nodeType === 1 ? target : null;
+  }
+  function kiwiRender(target, options) {
+    var el = kiwiResolveTarget(target);
+    if (!el) return 0;
+    return initWidget(el, options) || 0;
+  }
+  function kiwiReset(id) {
+    var r = kiwiWidgets[id];
+    if (!r) return;
+    clearTimeout(r.expiryTimer); r.expiryTimer = null;
+    var W = r.W;
+    if (W) {
+      var t = W.querySelector("[data-kiwi-token]");
+      if (t) t.value = "";
+      if (r.options && r.options.responseField) {
+        var host = t ? t.parentNode : null;
+        var input = host ? host.querySelector('input[name="' + r.options.responseField + '"]') : null;
+        if (input) input.value = "";
+      }
+      delete W.dataset.kiwiStarted;
+      initWidget(W, r.options);
+    }
+  }
+  function kiwiGetResponse(id) {
+    var r = kiwiWidgets[id];
+    return (r && r.state === "verified") ? (r.token || "") : "";
+  }
+  function kiwiIsExpired(id) {
+    var r = kiwiWidgets[id];
+    return !!(r && r.state === "expired");
+  }
+  function kiwiExecute(id) {
+    var r = kiwiWidgets[id];
+    if (!r) return Promise.reject(new Error("kiwicaptcha: unknown widget id " + id));
+    if (r.state === "verified") return Promise.resolve(r.token || "");
+    if (r.W && !r.W.dataset.kiwiStarted) {
+      delete r.W.dataset.kiwiStarted;
+      initWidget(r.W, r.options);
+    }
+    return new Promise(function (resolve, reject) {
+      var W = r.W;
+      var onVerified = function () {
+        var cur = kiwiWidgets[id];
+        resolve(cur ? (cur.token || "") : "");
+      };
+      var onError = function (ev) {
+        reject(new Error((ev && ev.detail && ev.detail.reason) || "kiwicaptcha: solve failed"));
+      };
+      if (W) {
+        W.addEventListener("kiwi:verified", onVerified, { once: true });
+        W.addEventListener("kiwi:error", onError, { once: true });
+      }
+      var cur = kiwiWidgets[id];
+      if (cur && cur.state === "verified") onVerified();
+    });
+  }
+  function kiwiReady(id) {
+    var r = kiwiWidgets[id];
+    if (!r) return Promise.reject(new Error("kiwicaptcha: unknown widget id " + id));
+    return Promise.resolve();
+  }
+  function kiwiRemove(id) {
+    var r = kiwiWidgets[id];
+    if (!r) return;
+    if (r.expiryTimer) clearTimeout(r.expiryTimer);
+    if (r.W) {
+      kiwiDestroy(r.W);
+      // Provider parity (Turnstile remove()): the widget markup leaves the
+      // page.
+      var node = r.W;
+      var container = (node.closest ? node.closest(".kiwi-container") : null) || node;
+      var toRemove = container && container.parentNode ? container : node;
+      if (toRemove && toRemove.parentNode) toRemove.parentNode.removeChild(toRemove);
+    }
+    delete kiwiWidgets[id];
+  }
+  window.KiwiCaptcha = {
+    render: kiwiRender,
+    reset: kiwiReset,
+    getResponse: kiwiGetResponse,
+    execute: kiwiExecute,
+    remove: kiwiRemove,
+    isExpired: kiwiIsExpired,
+    ready: kiwiReady,
+    init: initWidget,
+    workerSource: KIWI_WORKER_SRC,
+    protocolId: KIWI_SOLVER_PROTOCOL_ID,
+    buildId: KIWI_SOLVER_PROTOCOL_ID,
+    observe: kiwiObserve,
+    destroy: kiwiDestroy
+  };
+  // ── Round-24 incumbent compatibility loader ─────────────────────────
+  // The driver doubles as the first-party compatibility loader: when the
+  // driver script itself is loaded as .../api.js?compat=recaptcha (or
+  // hcaptcha/turnstile), it auto-renders the incumbent containers
+  // (.g-recaptcha/.h-captcha/.cf-turnstile), installs the provider
+  // global, and keeps the provider-named response field in sync with the
+  // same underlying Kiwi solution token. An incumbent page changes only
+  // its provider script URL.
+  var compat = null;
+  var compatScriptUrl = null;
+  try {
+    var currentScript = document.currentScript;
+    if (!currentScript) {
+      var scripts = document.getElementsByTagName("script");
+      currentScript = scripts[scripts.length - 1];
+    }
+    compatScriptUrl = currentScript && currentScript.src ? currentScript.src : null;
+    var compatMatch = compatScriptUrl ? compatScriptUrl.match(/[?&]compat=(recaptcha|hcaptcha|turnstile)/) : null;
+    if (compatMatch) compat = compatMatch[1];
+  } catch (e) {}
+  if (compat) {
+    var COMPAT_FIELD = { recaptcha: "g-recaptcha-response", hcaptcha: "h-captcha-response", turnstile: "cf-turnstile-response" }[compat];
+    var COMPAT_SELECTOR = { recaptcha: ".g-recaptcha", hcaptcha: ".h-captcha", turnstile: ".cf-turnstile" }[compat];
+    var COMPAT_SVG = '<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M26 19c0 5.5-4 10-10 10S7 24.5 7 19c0-6 3-11 7-12 2-0.5 4-0.5 6 0 4 1 6 6 6 12z" fill="currentColor"/><path d="M12.5 8.5c-.8-1.5-1-3.5-.5-5.5.5-2 2-3.5 4-4 2-.5 4 .5 5 2.5.2 1 .5 2 .5 3.5" fill="currentColor"/><path d="M10 7c-4 1-8 3-8.5 3.5-.3.3-.3.8 0 1 1 0.5 8 2.5 9.5 2.5" fill="currentColor"/><path d="M14 29v2m6-2v2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="16.5" cy="4.5" r="1" fill="white"/><circle cx="17" cy="4" r="0.6" fill="currentColor"/><path d="M19 14c1.5 0 2.5 1 2.5 2s-1 2-2.5 2-2.5-1-2.5-2 1-2 2.5-2z" fill="white" opacity="0.2"/></svg>';
+    function compatInjectCss() {
+      if (!compatScriptUrl || document.querySelector('link[data-kiwi-css]')) return;
+      var link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.setAttribute("data-kiwi-css", "");
+      var base = compatScriptUrl.split("?")[0];
+      link.href = base.substring(0, base.lastIndexOf("/") + 1) + "widget.css";
+      document.head.appendChild(link);
+    }
+    function compatMarkup() {
+      return '<div class="kiwi-container"><input type="hidden" name="kiwi__token" data-kiwi-token value="">' +
+        '<div class="kiwi-widget" data-kiwi-widget data-kiwi-started="1" data-state="idle" role="group" aria-label="KiwiCaptcha security check">' +
+        '<div class="kiwi-icon-wrapper" aria-hidden="true">' + COMPAT_SVG + '<div class="kiwi-glow"></div></div>' +
+        '<div class="kiwi-main"><div class="kiwi-top"><span class="kiwi-label" data-kiwi-label>Security Check</span><span class="kiwi-badge" data-kiwi-badge>Idle</span></div>' +
+        '<div class="kiwi-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="kiwi-bar" data-kiwi-bar></div></div>' +
+        '<div class="kiwi-bottom"><p class="kiwi-info" data-kiwi-info>Protected by KiwiCaptcha</p><span class="kiwi-timer" data-kiwi-timer></span></div></div>' +
+        '<span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span></div></div>';
+    }
+    function compatReadCallbacks(el, params) {
+      var cb = function (name) {
+        var v = (params && (params[name] !== undefined)) ? params[name]
+          : (el.getAttribute("data-" + name.replace(/([A-Z])/g, "-$1").toLowerCase()) || "");
+        return typeof v === "function" ? v : (typeof v === "string" && v ? (window[v] || null) : null);
+      };
+      return {
+        callback: cb("callback"),
+        expiredCallback: cb("expired-callback"),
+        errorCallback: cb("error-callback")
+      };
+    }
+    function compatRender(el, params) {
+      if (!el || el.nodeType !== 1) return 0;
+      if (!el.querySelector("[data-kiwi-widget]")) {
+        if (el.tagName === "BUTTON" || el.tagName === "INPUT") {
+          // Invisible-style controls keep their label; the widget is
+          // appended (reCAPTCHA renders inside the control the same way).
+          el.insertAdjacentHTML("beforeend", compatMarkup());
+        } else {
+          el.innerHTML = compatMarkup();
+        }
+      }
+      // Pass through explicit Kiwi overrides (e.g.
+      // data-kiwi-endpoint="/challenge?ttl=2") from the incumbent
+      // container onto the rendered widget container; the endpoint
+      // defaults to the bundle's same-origin prefix so a migrated page
+      // needs NO endpoint configuration.
+      var inner = el.querySelector(".kiwi-container");
+      if (inner) {
+        ["data-kiwi-endpoint", "data-kiwi-scope", "data-kiwi-algorithm", "data-kiwi-worker-src"].forEach(function (attr) {
+          if (el.hasAttribute(attr) && !inner.hasAttribute(attr)) inner.setAttribute(attr, el.getAttribute(attr));
+        });
+        if (!inner.hasAttribute("data-kiwi-endpoint")) inner.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
+      }
+      var sitekey = (params && (params.sitekey || params["sitekey"])) || el.getAttribute("data-sitekey") || "";
+      var cbs = compatReadCallbacks(el, params);
+      var id = kiwiRender(el, {
+        scope: sitekey || "login",
+        callback: cbs.callback,
+        expiredCallback: cbs.expiredCallback,
+        errorCallback: cbs.errorCallback,
+        responseField: COMPAT_FIELD
+      });
+      return id || 0;
+    }
+    function compatExecute(arg, opts) {
+      var id = (typeof arg === "string" && kiwiWidgets[arg]) ? arg : null;
+      if (id) return kiwiExecute(id);
+      // v3-style execute(sitekey, {action}): map action -> Kiwi scope on a
+      // hidden widget. Honest v3 handling: no fabricated score is ever
+      // produced — the application migrates to Kiwi verification plus the
+      // optional adaptive-risk decision machinery.
+      var sitekey = typeof arg === "string" ? arg : "";
+      var action = (opts && opts.action) || sitekey || "login";
+      var holder = document.createElement("div");
+      holder.style.display = "none";
+      var inner = document.createElement("div");
+      inner.className = "kiwi-container";
+      inner.setAttribute("data-kiwi-scope", action);
+      inner.innerHTML = compatMarkup();
+      holder.appendChild(inner);
+      document.body.appendChild(holder);
+      var id2 = kiwiRender(inner, { scope: action, responseField: COMPAT_FIELD });
+      return kiwiExecute(id2);
+    }
+    var compatApi = {
+      render: compatRender,
+      reset: function (idOrEl) {
+        var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
+          : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+        if (id) kiwiReset(id);
+      },
+      getResponse: function (idOrEl) {
+        var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
+          : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+        return id ? kiwiGetResponse(id) : "";
+      },
+      execute: compatExecute,
+      remove: function (idOrEl) {
+        var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
+          : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+        if (id) kiwiRemove(id);
+      }
+    };
+    if (compat === "recaptcha") {
+      window.grecaptcha = window.grecaptcha || Object.assign({}, compatApi, {
+        ready: function (fn) { if (typeof fn === "function") { try { fn(); } catch (e) {} } },
+        enterprise: undefined
+      });
+    } else if (compat === "hcaptcha") {
+      window.hcaptcha = window.hcaptcha || Object.assign({}, compatApi, {
+        getRespKey: function (idOrEl) {
+          var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
+            : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+          return id ? kiwiGetResponse(id) : "";
+        }
+      });
+    } else {
+      window.turnstile = window.turnstile || compatApi;
+    }
+    compatInjectCss();
+    // Implicit render: every incumbent container on the page.
+    var compatContainers = document.querySelectorAll(COMPAT_SELECTOR);
+    for (var ci = 0; ci < compatContainers.length; ci++) {
+      var el = compatContainers[ci];
+      var wid = compatRender(el);
+      // Invisible-style controls (buttons / inputs / data-size="invisible"):
+      // clicking the control triggers execute() — the incumbent pattern.
+      if (wid && (el.tagName === "BUTTON" || el.tagName === "INPUT" || el.getAttribute("data-size") === "invisible")) {
+        (function (id, node) {
+          node.addEventListener("click", function (ev) {
+            ev.preventDefault();
+            kiwiExecute(id);
+          });
+        })(wid, el);
+      }
+    }
+    // Support grecaptcha.render(el, params) called LATER (dynamic widgets).
+    if (compat === "recaptcha" && typeof MutationObserver !== "undefined") {
+      new MutationObserver(function (mutations) {
+        for (var m = 0; m < mutations.length; m++) {
+          var nodes = mutations[m].addedNodes;
+          for (var n = 0; n < nodes.length; n++) {
+            var node = nodes[n];
+            if (node && node.nodeType === 1 && node.matches && node.matches(COMPAT_SELECTOR) && !node.querySelector("[data-kiwi-widget]")) {
+              compatRender(node);
+            }
+          }
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+    }
+  }
+
   var runInit = function() {
     document.querySelectorAll("[data-kiwi-widget]").forEach(function (W) {
       // Click-to-reacquire: after a reset or a settled failure the widget

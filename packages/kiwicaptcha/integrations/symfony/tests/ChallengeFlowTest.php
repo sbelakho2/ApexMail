@@ -1030,7 +1030,7 @@ final class ChallengeFlowTest extends TestCase
 
         $names = array_keys($routes->all());
         sort($names);
-        self::assertSame(['kiwicaptcha_challenge', 'kiwicaptcha_health_live', 'kiwicaptcha_health_ready'], $names, 'the bundle exposes ONLY the public challenge + health surface — no admin/control-plane routes');
+        self::assertSame(['kiwicaptcha_api_js', 'kiwicaptcha_challenge', 'kiwicaptcha_health_live', 'kiwicaptcha_health_ready', 'kiwicaptcha_siteverify'], $names, 'the bundle exposes ONLY the public surface (challenge, siteverify, api.js, health) — no admin/control-plane routes');
 
         foreach ($routes->all() as $route) {
             self::assertNotSame('admin', $route->getDefault('_controller')[1] ?? null);

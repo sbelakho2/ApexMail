@@ -75,4 +75,13 @@ final class VerifyOutcome
     {
         return $this->requestBinding;
     }
+
+    /**
+     * The failure reason when the outcome is invalid, else null (round 24 —
+     * used by the provider-compatible Siteverify error mapping).
+     */
+    public function error(): ?VerifyError
+    {
+        return $this->error;
+    }
 }
