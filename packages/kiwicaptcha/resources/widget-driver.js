@@ -640,6 +640,16 @@
           resolve({ counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
         } else if (msg.type === "failed") {
           if (typeof msg.reason !== "string") return;
+          // Round 23: the worker verifies the wasm glue's exported
+          // solver_protocol_id() BEFORE ready and reports
+          // protocol-mismatch when the wasm/worker generations differ —
+          // surface it as the controlled solver-mismatch state (a stale
+          // worker or a mixed-generation deployment; same UX as a worker
+          // reporting the wrong protocol id in its ready handshake).
+          if (msg.reason === "protocol-mismatch") {
+            if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ mismatch: true }); }
+            return;
+          }
           settled = true;
           worker.terminate();
           teardown();
