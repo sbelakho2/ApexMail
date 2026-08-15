@@ -1118,6 +1118,7 @@ fn record_json_keys_match_php_cross_language_format() {
         "request_binding",
         "issuer",
         "kid",
+        "hostname",
     ];
 
     let issued = issue_challenge(
