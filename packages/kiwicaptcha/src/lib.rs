@@ -34,12 +34,12 @@
 //! License: **MIT**
 
 pub mod challenge;
-pub mod siteverify;
 pub mod keys;
 pub mod logo;
 pub mod profile;
 #[cfg(feature = "redis")]
 pub mod redis_verify;
+pub mod siteverify;
 pub mod token;
 pub mod verify;
 pub mod widget;

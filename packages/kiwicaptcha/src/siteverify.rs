@@ -35,7 +35,10 @@ pub struct SiteverifyResponse {
 /// comes from the storage lookup by the outcome's nonce — the consumed
 /// record is RETAINED until TTL, so its `issued_at`/`hostname` are
 /// available after verification.
-pub fn siteverify_response(outcome: &VerifyOutcome, record: Option<&ChallengeRecord>) -> SiteverifyResponse {
+pub fn siteverify_response(
+    outcome: &VerifyOutcome,
+    record: Option<&ChallengeRecord>,
+) -> SiteverifyResponse {
     match outcome {
         VerifyOutcome::Valid { .. } => SiteverifyResponse {
             success: true,
@@ -77,7 +80,11 @@ fn format_unix_ts(secs: u64) -> String {
     let days = secs / 86_400;
     let secs_of_day = secs % 86_400;
     let (y, m, d) = civil_from_days(days);
-    let (hh, mm, ss) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+    let (hh, mm, ss) = (
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    );
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
@@ -109,8 +116,14 @@ mod tests {
     #[test]
     fn maps_core_reasons_to_provider_codes() {
         assert_eq!(map_error(&VerifyError::Expired), "timeout-or-duplicate");
-        assert_eq!(map_error(&VerifyError::ConsumeIndeterminate), "timeout-or-duplicate");
-        assert_eq!(map_error(&VerifyError::WrongScope), "invalid-input-response");
+        assert_eq!(
+            map_error(&VerifyError::ConsumeIndeterminate),
+            "timeout-or-duplicate"
+        );
+        assert_eq!(
+            map_error(&VerifyError::WrongScope),
+            "invalid-input-response"
+        );
         assert_eq!(map_error(&VerifyError::TooFast), "bad-request");
     }
 
@@ -142,7 +155,13 @@ mod tests {
             kid: 1,
         };
         let _ = &mut record;
-        let resp = siteverify_response(&VerifyOutcome::Valid { nonce: "n".into(), request_binding: None }, Some(&record));
+        let resp = siteverify_response(
+            &VerifyOutcome::Valid {
+                nonce: "n".into(),
+                request_binding: None,
+            },
+            Some(&record),
+        );
         assert!(resp.success);
         assert_eq!(resp.hostname.as_deref(), Some("login.example"));
         assert_eq!(resp.challenge_ts.as_deref(), Some("2025-07-16T02:20:00Z"));
