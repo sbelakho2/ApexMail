@@ -1,12 +1,13 @@
 # KiwiCaptcha WASM — Security & Supply-Chain Notes
 
-This package ships three browser assets (`assets/`):
+This package ships four browser assets (`assets/`):
 
 | Asset | Purpose |
 |---|---|
 | `kiwicaptcha-wasm.js` | wasm-bindgen glue with the Argon2id/SHA-256 solver wasm inlined as base64 |
 | `kiwi-worker.js` | standalone same-origin worker solver (`data-kiwi-worker-src`) |
 | `widget-driver.js` | the widget driver; embeds the worker source and the solver build id |
+| `widget.css` | the widget stylesheet (first-class release asset since round 18; SRI-capable via `<link>`) |
 
 Everything below is guidance for integrators who serve these assets (self-hosted
 or via a CDN). The exact release URLs are the integrator's choice — this file
@@ -20,12 +21,13 @@ Compute the sha384-base64 hashes with the bundled tool:
 node packages/kiwicaptcha-wasm/tools/sri-hashes.mjs
 ```
 
-Example output (run against a build):
+Example output (run against a build — all FOUR release assets):
 
 ```
 kiwicaptcha-wasm.js  sha384-lYQhEK3o/D8piurwe1556/gKHmzDoNv5gumBBIKUCsKQ0ogSvB1HySZm6NeNVdzq
 kiwi-worker.js       sha384-bz5IPxD4I2OK/gEaeUsMGXB0A5caYw5LwU/fQXbxpzQ048kk8K2NsWM/GO3EL9Ii
 widget-driver.js     sha384-osA8vjEQw8Gbqp8Z7Ap9Avv1rH03DOAJVKB7bFMvDSbgZ7N+UU7zFEdKrMfocdQR
+widget.css           sha384-rNPQbDhqKmTBO3cn6mUfG5zR4OeKjMsJ5i1lPv9d9YvTdm1g5iw4yLfRo0PYT8
 ```
 
 Use the SRI script-tag pattern for every asset you serve:
@@ -70,8 +72,10 @@ Notes:
   that follows the URL.
 - Content-addressed naming is the strongest form: the runtime wasm is
   EMBEDDED inside `kiwicaptcha-wasm.js` (the release pipeline publishes
-  the immutable tag-bound JS/CSS artifacts + SHA256SUMS + SRI + provenance
-  — there is currently no standalone raw `.wasm` artifact on the release).
+  the tag-bound JS/CSS artifacts + SHA256SUMS + SRI + SLSA provenance;
+  the release object is immutable under GitHub's Immutable Releases
+  setting, enabled as of v1.6.11 — there is currently no standalone raw
+  `.wasm` artifact on the release).
   Integrators who need the raw wasm may extract it once and serve it under
   a content-addressed name such as `argon-solver.<sha256>.wasm` at their
   CDN layer, or apply the `<name>.<hash>.<ext>` pattern to the
@@ -114,8 +118,10 @@ For each release:
    shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js
    node tools/sri-hashes.mjs
    ```
-2. Publish the hash list in the release notes (SHA-256 for artifact
-   verification, sha384 SRI form for script tags).
+2. Publish the hash list as the attached `SHA256SUMS`/`SRI.txt` manifests
+   (SHA-256 for artifact verification, sha384 SRI form for script tags) —
+   both manifests are SLSA-attested release assets; the release notes
+   reference them.
 3. Attest the artifacts with GitHub artifact attestations. The
    PRODUCER is the release workflow — `actions/attest-build-provenance`
    (SLSA provenance, tied to the OIDC identity of the repository/runner);

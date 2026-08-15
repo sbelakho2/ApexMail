@@ -48,18 +48,61 @@ final class ScopeIssuanceCapTest extends TestCase
         $redis = new FakePredisClient();
         $cap = new ScopeIssuanceCap($redis, '{kiwi:t}:issuance:', 2, $this->hmacKey(), fn (): int => $this->nowSecs);
 
-        self::assertTrue($cap->allow('login'), 'first issuance within the window');
-        self::assertTrue($cap->allow('login'), 'second issuance within the window');
-        self::assertFalse($cap->allow('login'), 'third issuance beyond the per-scope cap');
-        self::assertTrue($cap->allow('signup'), 'a DIFFERENT scope has its own independent window');
+        self::assertTrue($cap->allow('login', 1), 'first issuance within the window');
+        self::assertTrue($cap->allow('login', 1), 'second issuance within the window');
+        self::assertFalse($cap->allow('login', 1), 'third issuance beyond the per-scope cap');
+        self::assertTrue($cap->allow('signup', 2), 'a DIFFERENT scope has its own independent window');
 
-        $key = $this->windowKey($redis, 'login');
+        $key = '{kiwi:t}:issuance:1:'.intdiv($this->nowSecs, 60);
         self::assertSame(3, $redis->counters[$key], 'the fixed-window counter counts every attempt');
         self::assertSame(60_000, $redis->expirations[$key], 'the first increment stamps the 60 s window TTL');
 
         // A new minute opens a fresh window.
         $this->nowSecs += 60;
-        self::assertTrue($cap->allow('login'), 'a new minute resets the window');
+        self::assertTrue($cap->allow('login', 1), 'a new minute resets the window');
+    }
+
+    /**
+     * Audit round 22: the security cap's canonical scope id is MANDATORY —
+     * calling allow() without one is a compile-time/static-analysis error
+     * (there is no nullable fallback that silently recreates the
+     * per-name-HMAC attack surface).
+     */
+    public function testCanonicalScopeIdIsMandatoryForTheSecurityCap(): void
+    {
+        $redis = new FakePredisClient();
+        $cap = new ScopeIssuanceCap($redis, '{kiwi:t}:issuance:', 2, $this->hmacKey(), fn (): int => $this->nowSecs);
+
+        // ArgumentCountError: allow() requires (string $scope, int $canonicalScopeId).
+        try {
+            $cap->allow('login');
+            self::fail('allow() must require the canonical scope id');
+        } catch (\ArgumentCountError) {
+            // expected
+        }
+        self::assertSame([], $redis->counters, 'an incomplete call must never touch Redis');
+    }
+
+    /**
+     * Audit round 22: the per-name HMAC form survives ONLY as the
+     * explicitly-named legacy soft-quota API — it hides bytes but does not
+     * bound cardinality, and the name makes the distinction impossible to
+     * miss.
+     */
+    public function testSoftLegacyApiIsExplicitlyNamedAndNonCardinalitySafe(): void
+    {
+        $redis = new FakePredisClient();
+        $cap = new ScopeIssuanceCap($redis, '{kiwi:t}:issuance:', 2, $this->hmacKey(), fn (): int => $this->nowSecs);
+
+        self::assertTrue($cap->allowSoftLegacy('login'));
+        self::assertTrue($cap->allowSoftLegacy('login'));
+        self::assertFalse($cap->allowSoftLegacy('login'), 'the legacy per-name window caps at 2/min');
+
+        $key = '{kiwi:t}:issuance:'.hash_hmac('sha256', 'login', $this->hmacKey()).':'.intdiv($this->nowSecs, 60);
+        self::assertSame(3, $redis->counters[$key], 'the legacy window is the HMAC per-name form');
+        // And the canonical form is a DIFFERENT window for the same scope
+        // name — the two APIs never share keys.
+        self::assertTrue($cap->allow('login', 1), 'the canonical window is independent of the legacy one');
     }
 
     /**
@@ -71,7 +114,7 @@ final class ScopeIssuanceCapTest extends TestCase
     {
         $redis = new FakePredisClient();
         $cap = new ScopeIssuanceCap($redis, '{kiwi:t}:issuance:', 10, $this->hmacKey(), fn (): int => $this->nowSecs);
-        $cap->allow('login');
+        $cap->allowSoftLegacy('login');
 
         $expected = '{kiwi:t}:issuance:'.hash_hmac('sha256', 'login', $this->hmacKey()).':'.intdiv($this->nowSecs, 60);
         self::assertSame(1, $redis->counters[$expected] ?? null, "the window key is the HMAC'd-scope form");
@@ -176,9 +219,9 @@ final class ScopeIssuanceCapTest extends TestCase
     public function testDisabledCapAlwaysAllows(): void
     {
         $cap = new ScopeIssuanceCap(null, '{kiwi:t}:issuance:', 5, '', fn (): int => $this->nowSecs);
-        self::assertTrue($cap->allow('login'));
+        self::assertTrue($cap->allow('login', 1));
         $cap = new ScopeIssuanceCap(new FakePredisClient(), '{kiwi:t}:issuance:', 0, '', fn (): int => $this->nowSecs);
-        self::assertTrue($cap->allow('login'), 'cap 0 = unlimited');
+        self::assertTrue($cap->allow('login', 1), 'cap 0 = unlimited');
     }
 
     public function testRedisFailurePropagatesFailClosed(): void
@@ -188,7 +231,7 @@ final class ScopeIssuanceCapTest extends TestCase
         $cap = new ScopeIssuanceCap($redis, '{kiwi:t}:issuance:', 10, $this->hmacKey(), fn (): int => $this->nowSecs);
 
         try {
-            $cap->allow('login');
+            $cap->allow('login', 1);
             self::fail('a Redis failure must fail closed (propagate), never silently unlimited');
         } catch (\Predis\Response\ServerException) {
             self::assertTrue(true);

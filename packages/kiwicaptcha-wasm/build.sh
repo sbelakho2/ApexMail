@@ -41,14 +41,17 @@ cargo run --release --locked --manifest-path tools/embed-worker/Cargo.toml --
 
 cargo build --release --locked --target wasm32-unknown-unknown
 
-# Optimize the wasm with binaryen (wasm-opt -O) if available. wasm-opt is a
-# C++ binary — NOT Node.js — and is optional: the pipeline works without it,
-# but -O typically shrinks the wasm ~20% and speeds up the hot solver loops.
-# Download a pinned, checksum-verified wasm-opt on first use (no package
-# managers, no runtime deps). The tarball is verified with SHA-256 before
-# extraction; platforms with no known hash (or a hash mismatch) print a
-# warning and SKIP optimization — the build never fails on it. Set
-# WASM_OPT_SHA256 to override the expected hash for any platform.
+# Optimize the wasm with binaryen (wasm-opt -O). wasm-opt is a C++ binary —
+# NOT Node.js; -O typically shrinks the wasm ~20% and speeds up the hot
+# solver loops. Download a pinned, checksum-verified wasm-opt on first use
+# (no package managers, no runtime deps); the tarball is verified with
+# SHA-256 before extraction. Audit round 22 wording: in NON-STRICT mode
+# optimization may be SKIPPED when wasm-opt is unavailable/unverifiable (a
+# larger, slower artifact — the build id changes, so a mixed-version
+# deployment can never pair an optimized with an unoptimized artifact); in
+# STRICT mode (WASM_OPT_STRICT=1, used by the release pipeline) a missing
+# or unverifiable optimizer is FATAL. Set WASM_OPT_SHA256 to override the
+# expected hash for any platform.
 # Known hashes (computed with `shasum -a 256` at pin time):
 #   Darwin-arm64  version_119: c12dffafb3e3274026268e90577bd86d98186f7be32457618672f8ca437d8d53
 #   Linux-x86_64  version_119: 716bcf9f5f36a6f466239fbb09a925eeaf54c46411ccefac979ec649e7c06d2d

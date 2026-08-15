@@ -671,8 +671,12 @@ impl RedisChallengeStore {
             )?;
             // Durability barrier (audit round 14): when the transition DID
             // execute, the consumed state must reach the configured replica
-            // count before the caller may act on it — a promotion must
-            // never resurrect a consumed record from a stale replica. A
+            // count before the caller may act on it. QUALIFICATION (audit
+            // round 22 — same wording as SECURITY.md): WAIT N proves that
+            // at least N replicas acknowledged the write; it does NOT
+            // constrain which replicas a future failover manager promotes —
+            // replay-safe promotion additionally requires the threshold to
+            // cover every eligible failover target or promotion gating. A
             // barrier failure surfaces as an Err (ConsumeIndeterminate at
             // the verifier), which is exactly right: the transition
             // happened but its durability is unconfirmed.

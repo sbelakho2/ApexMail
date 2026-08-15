@@ -150,25 +150,19 @@ LUA;
      * issuance it then performs). Never throws for a disabled cap (null
      * Redis or cap 0) — always allowed.
      *
-     * @param int|null $canonicalScopeId the server-owned scope identity
-     *                                   (audit rounds 15–16): the configured
-     *                                   `risk.scopes.<name>.id`, the shared
-     *                                   synthetic unknown-scope id, or
-     *                                   {@see self::UNKNOWN_QUOTA_ID} for
-     *                                   every unresolved scope — the
-     *                                   controller ALWAYS passes one, so
-     *                                   the quota namespace is bounded by
-     *                                   the server-owned set. null (only
-     *                                   direct/defensive construction) falls
-     *                                   back to the keyed pseudonym, which
-     *                                   hides the raw bytes but does NOT
-     *                                   bound cardinality (per-name soft
-     *                                   limiting only).
+     * The canonical server-owned scope identity is MANDATORY (audit round
+     * 22): the configured `risk.scopes.<name>.id`, the shared synthetic
+     * unknown-scope id, or {@see self::UNKNOWN_QUOTA_ID} for every
+     * unresolved scope. There is deliberately NO nullable fallback — a
+     * per-name HMAC namespace cannot bound attacker-chosen cardinality, so
+     * it is unreachable from the security cap. (Direct integrators who
+     * explicitly want the non-cardinality-safe per-name form must call
+     * {@see self::allowSoftLegacy()} by that name.)
      *
      * @throws \Throwable when Redis fails (fail closed — the caller refuses
      *                    issuance rather than minting an unbilled challenge)
      */
-    public function allow(string $scope, ?int $canonicalScopeId = null): bool
+    public function allow(string $scope, int $canonicalScopeId): bool
     {
         if ($this->redis === null || $this->cap <= 0) {
             return true;
@@ -180,24 +174,48 @@ LUA;
     }
 
     /**
-     * The fixed-window key for a scope:
-     * `{kiwi:<ns>}:issuance:<scopeIdentity>:<minute>` where scopeIdentity is
-     * the canonical server-owned scope id (decimal, when provided) or
-     * `hex(hmac_sha256(scope, K_scope))` otherwise — the RAW scope never
-     * appears in Redis. The canonical id is the security-quota identity
-     * (cardinality bounded by the server-owned set); the HMAC fallback only
-     * keeps attacker-controlled BYTES out of the key name (audit round 15 —
-     * it does not bound cardinality). The minute comes from the Redis
-     * server clock (one TIME read shared with the script's EXPIRE) or the
-     * injected clock when Redis is unavailable.
+     * LEGACY per-name SOFT quota (audit round 22): keys the window on
+     * `hex(hmac_sha256(scope, K_scope))`, which hides attacker-controlled
+     * BYTES but does NOT bound attacker-controlled cardinality — every
+     * unique scope name mints a unique counter. This is NOT a security
+     * bound and is NOT used anywhere in the bundle; it exists only for
+     * integrators migrating from the pre-round-15 shape and is named to
+     * make the distinction impossible to miss.
      */
-    public function windowKey(string $scope, ?int $canonicalScopeId = null): string
+    public function allowSoftLegacy(string $scope): bool
     {
-        $identity = $canonicalScopeId !== null
-            ? (string) $canonicalScopeId
-            : $this->scopeKey($scope);
+        if ($this->redis === null || $this->cap <= 0) {
+            return true;
+        }
 
-        return sprintf('%s%s:%d', $this->keyPrefix, $identity, $this->minute());
+        $result = $this->eval(self::CHECK_SCRIPT, [$this->windowKeySoftLegacy($scope)], [(string) $this->cap]);
+
+        return (int) $result === 1;
+    }
+
+    /**
+     * The fixed-window key for the security cap:
+     * `{kiwi:<ns>}:issuance:<canonicalScopeId>:<minute>` — the server-owned
+     * scope id (decimal) is the quota identity; the RAW scope never appears
+     * in Redis (audit round 22: the nullable HMAC fallback was removed from
+     * the security path — see {@see self::windowKeySoftLegacy()} for the
+     * explicitly non-cardinality-safe legacy form). The minute comes from
+     * the Redis server clock (one TIME read shared with the script's
+     * EXPIRE) or the injected clock when Redis is unavailable.
+     */
+    public function windowKey(string $scope, int $canonicalScopeId): string
+    {
+        return sprintf('%s%d:%d', $this->keyPrefix, $canonicalScopeId, $this->minute());
+    }
+
+    /**
+     * Legacy per-name window key (`hex(hmac_sha256(scope, K_scope))`) for
+     * {@see self::allowSoftLegacy()} — hides the raw bytes, does NOT bound
+     * cardinality.
+     */
+    public function windowKeySoftLegacy(string $scope): string
+    {
+        return sprintf('%s%s:%d', $this->keyPrefix, $this->scopeKey($scope), $this->minute());
     }
 
     /**
