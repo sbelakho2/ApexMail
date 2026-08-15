@@ -101,7 +101,8 @@ final class KernelIntegrationTest extends TestCase
         // The inlined assets are present in the form-rendered markup.
         self::assertStringContainsString('.kiwi-container', $html);
         self::assertStringContainsString('KIWI_WASM_B64', $html);
-        self::assertStringContainsString('window.KiwiCaptcha = { init:', $html);
+        self::assertStringContainsString('window.KiwiCaptcha = {', $html);
+        self::assertStringContainsString('render: kiwiRender', $html);
     }
 
     public function testFormRendersWidgetMarkupWithoutNonce(): void

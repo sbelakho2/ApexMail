@@ -35,7 +35,8 @@ final class TwigRuntimeTest extends TestCase
         // WASM solver embed inlined
         self::assertStringContainsString('KIWI_WASM_B64', $html);
         // Driver inlined
-        self::assertStringContainsString('window.KiwiCaptcha = { init:', $html);
+        self::assertStringContainsString('window.KiwiCaptcha = {', $html);
+        self::assertStringContainsString('render: kiwiRender', $html);
         // Audit #41: the driver sends the container's request binding with
         // the challenge POST and writes the hidden kiwi_request_binding form
         // field next to the token.
