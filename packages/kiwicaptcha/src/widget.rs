@@ -187,7 +187,8 @@ mod tests {
         // exactly ONE live region element — the compat loader does not
         // alter the native widget's ARIA structure.
         assert_eq!(
-            html.matches("data-kiwi-status role=\"status\" aria-live=\"polite\"").count(),
+            html.matches("data-kiwi-status role=\"status\" aria-live=\"polite\"")
+                .count(),
             2,
             "one rendered status announcer + the compat markup string in the driver"
         );
