@@ -334,13 +334,32 @@
     }
   };
 
+  // Read the wasm glue's exported solver protocol id. The glue's load()
+  // resolves to the RAW wasm exports, where a string-returning Rust
+  // export yields the wasm-bindgen [ptr, len] tuple rather than the
+  // decoded string — decode it from the wasm memory (the wrapper
+  // functions live inside the glue's closure and are not reachable from
+  // the worker). Any failure returns null (fail closed).
+  function wasmProtocolId(w) {
+    if (!w || typeof w.solver_protocol_id !== "function") return null;
+    try {
+      var ret = w.solver_protocol_id();
+      if (!ret || typeof ret[0] !== "number" || typeof ret[1] !== "number") return null;
+      if (!w.memory || !w.memory.buffer) return null;
+      var bytes = new Uint8Array(w.memory.buffer, ret[0], ret[1]);
+      return new TextDecoder().decode(bytes);
+    } catch (e) {
+      return null;
+    }
+  }
+
   // Startup handshake (audit #53 / round 23): BEFORE any solve work,
   // verify the loaded wasm's exported solver_protocol_id() against this
   // constant (driver + worker + wasm must speak the same protocol
   // generation) and only then announce ready — a mismatched pair fails
   // closed instead of solving.
   initWasm().then(function (w) {
-    var wasmProtocol = (w && w.solver_protocol_id) ? w.solver_protocol_id() : null;
+    var wasmProtocol = wasmProtocolId(w);
     if (typeof wasmProtocol !== "string" || wasmProtocol !== KIWI_SOLVER_PROTOCOL_ID) {
       post({ type: "failed", reason: "protocol-mismatch" });
       return;
@@ -621,7 +640,10 @@
           // refused — it never contributes a solution and there is no
           // fallback.
           if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
-            if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ mismatch: true }); }
+            if (!settled) {
+              console.error("KiwiCaptcha worker protocol mismatch: ready buildId", msg.buildId);
+              settled = true; worker.terminate(); teardown(); resolve({ mismatch: true });
+            }
           }
           return;
         }
@@ -647,7 +669,10 @@
           // worker or a mixed-generation deployment; same UX as a worker
           // reporting the wrong protocol id in its ready handshake).
           if (msg.reason === "protocol-mismatch") {
-            if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ mismatch: true }); }
+            if (!settled) {
+              console.error("KiwiCaptcha worker protocol mismatch: wasm/worker generation differ");
+              settled = true; worker.terminate(); teardown(); resolve({ mismatch: true });
+            }
             return;
           }
           settled = true;
