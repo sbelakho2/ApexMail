@@ -1,13 +1,18 @@
 (function() {
   var encoder = new TextEncoder();
 
-  // ── Solver build id (audit #53) ─────────────────────────────────────
-  // Bumped manually at build time. The worker reports the SAME id in its
-  // `ready`/`done` handshake messages; the driver refuses any worker whose
-  // id differs (a stale cached worker must never contribute a solution).
-  // Integrators must serve the driver, worker and wasm from the SAME build
-  // (see SECURITY.md — versioned-resource expectation).
-  var KIWI_SOLVER_BUILD_ID = "2026-08-r1";
+  // ── Solver PROTOCOL id (audit #53 / round 23) ───────────────────────
+  // A protocol/ABI generation label, bumped manually when the solver
+  // protocol or the worker contract changes. The worker reports the SAME
+  // id in its `ready`/`done` handshake messages AND verifies the wasm
+  // glue's exported solver_protocol_id() before ready; the driver refuses
+  // any worker whose id differs (a stale cached worker must never
+  // contribute a solution). This establishes driver+worker+wasm protocol
+  // compatibility ONLY — exact-artifact identity is guaranteed by the
+  // release tag + SHA256SUMS + SRI + attestation, never by this string.
+  // Integrators must serve the driver, worker and wasm from the SAME
+  // release (see SECURITY.md — versioned-resource expectation).
+  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";
 
   // ── Challenge fetch timeout (audit #66) ─────────────────────────────
   // A hung challenge endpoint must never leave the widget stuck: the fetch
@@ -58,10 +63,14 @@
 (function () {
   "use strict";
 
-  // Solver build id (audit #53): MUST equal the widget driver's
-  // KIWI_SOLVER_BUILD_ID constant. Reported in the ready/done handshake
-  // messages so the driver can refuse a stale cached worker.
-  var KIWI_SOLVER_BUILD_ID = "2026-08-r1";
+  // Solver PROTOCOL id (audit round 23 — renamed from the misleading
+  // "build id" semantics): a compatibility/ABI generation label. MUST
+  // equal the widget driver's KIWI_SOLVER_PROTOCOL_ID constant AND the
+  // wasm glue's exported solver_protocol_id() (verified below BEFORE
+  // ready). It proves driver+worker+wasm speak the same protocol
+  // generation — exact artifact identity is guaranteed by the release
+  // tag + SHA256SUMS + SRI + attestation, not by this string.
+  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";
 
   // The wasm glue exposes itself as \`window.__kiwiCaptchaWasm\`, so the
   // worker establishes the \`window\` alias (same prelude the widget driver
@@ -243,7 +252,7 @@
         var res = w.solve_argon2_chunk(pp, prefix.length, sp, salt.length, targetBits, mKib, t, p, counter, 1);
         if (res !== -1) {
           free(w, pp, prefix.length); free(w, sp, salt.length);
-          post({ type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID });
+          post({ type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID });
           return;
         }
         counter += 1;
@@ -280,7 +289,7 @@
           var res = w.solve_sha256_chunk(pp, prefix.length, sp, salt.length, targetBits, counter, 1000);
           if (res !== -1) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
-            post({ type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID });
+            post({ type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID });
             return;
           }
           counter += 1000;
@@ -294,7 +303,7 @@
         for (; counter < end; counter++) {
           if (leadingZeros(deriveHash(prefix, counter, salt)) >= targetBits) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
-            post({ type: "done", counter: counter, buildId: KIWI_SOLVER_BUILD_ID });
+            post({ type: "done", counter: counter, buildId: KIWI_SOLVER_PROTOCOL_ID });
             return;
           }
         }
@@ -325,9 +334,19 @@
     }
   };
 
-  // Startup handshake (audit #53): announce this worker's solver build id
-  // BEFORE any solve work so the driver can refuse a stale worker outright.
-  post({ type: "ready", buildId: KIWI_SOLVER_BUILD_ID });
+  // Startup handshake (audit #53 / round 23): BEFORE any solve work,
+  // verify the loaded wasm's exported solver_protocol_id() against this
+  // constant (driver + worker + wasm must speak the same protocol
+  // generation) and only then announce ready — a mismatched pair fails
+  // closed instead of solving.
+  initWasm().then(function (w) {
+    var wasmProtocol = (w && w.solver_protocol_id) ? w.solver_protocol_id() : null;
+    if (typeof wasmProtocol !== "string" || wasmProtocol !== KIWI_SOLVER_PROTOCOL_ID) {
+      post({ type: "failed", reason: "protocol-mismatch" });
+      return;
+    }
+    post({ type: "ready", buildId: KIWI_SOLVER_PROTOCOL_ID });
+  });
 })();
 `;
 // KIWI_WORKER_SRC_END — generated section (tools/embed-worker): the whole span
@@ -601,7 +620,7 @@
           // solver build id as this driver. A stale cached worker is
           // refused — it never contributes a solution and there is no
           // fallback.
-          if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_BUILD_ID) {
+          if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
             if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ mismatch: true }); }
           }
           return;
@@ -611,7 +630,7 @@
           onProgress(Math.min(95, (msg.counter * 100) / expectedHashes));
         } else if (msg.type === "done") {
           if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
-          if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_BUILD_ID) {
+          if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
             if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ mismatch: true }); }
             return;
           }
@@ -1085,7 +1104,7 @@
     return { disconnect: function () { if (kiwiObserver) kiwiObserver.disconnect(); } };
   }
 
-  window.KiwiCaptcha = { init: initWidget, render: function(s) { document.querySelectorAll(s).forEach(initWidget); }, workerSource: KIWI_WORKER_SRC, buildId: KIWI_SOLVER_BUILD_ID, observe: kiwiObserve, destroy: kiwiDestroy };
+  window.KiwiCaptcha = { init: initWidget, render: function(s) { document.querySelectorAll(s).forEach(initWidget); }, workerSource: KIWI_WORKER_SRC, buildId: KIWI_SOLVER_PROTOCOL_ID, observe: kiwiObserve, destroy: kiwiDestroy };
   var runInit = function() {
     document.querySelectorAll("[data-kiwi-widget]").forEach(function (W) {
       // Click-to-reacquire: after a reset or a settled failure the widget
