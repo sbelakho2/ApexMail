@@ -1095,7 +1095,7 @@ fn record_json_keys_match_php_cross_language_format() {
     // `region` and `issuer` keys (audits #22/#67) are ALWAYS present: null
     // when unbound, exactly like PHP; `kid` (audit #91) is ALWAYS present
     // (default 1). No Redis needed: pure language-neutral schema parity.
-    const PHP_KEYS: [&str; 22] = [
+    const PHP_KEYS: [&str; 23] = [
         "nonce",
         "scope",
         "binding_tag",
