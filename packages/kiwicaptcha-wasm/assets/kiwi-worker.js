@@ -22,10 +22,14 @@
 (function () {
   "use strict";
 
-  // Solver build id (audit #53): MUST equal the widget driver's
-  // KIWI_SOLVER_BUILD_ID constant. Reported in the ready/done handshake
-  // messages so the driver can refuse a stale cached worker.
-  var KIWI_SOLVER_BUILD_ID = "2026-08-r1";
+  // Solver PROTOCOL id (audit round 23 — renamed from the misleading
+  // "build id" semantics): a compatibility/ABI generation label. MUST
+  // equal the widget driver's KIWI_SOLVER_PROTOCOL_ID constant AND the
+  // wasm glue's exported solver_protocol_id() (verified below BEFORE
+  // ready). It proves driver+worker+wasm speak the same protocol
+  // generation — exact artifact identity is guaranteed by the release
+  // tag + SHA256SUMS + SRI + attestation, not by this string.
+  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";
 
   // The wasm glue exposes itself as `window.__kiwiCaptchaWasm`, so the
   // worker establishes the `window` alias (same prelude the widget driver
@@ -207,7 +211,7 @@
         var res = w.solve_argon2_chunk(pp, prefix.length, sp, salt.length, targetBits, mKib, t, p, counter, 1);
         if (res !== -1) {
           free(w, pp, prefix.length); free(w, sp, salt.length);
-          post({ type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID });
+          post({ type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID });
           return;
         }
         counter += 1;
@@ -244,7 +248,7 @@
           var res = w.solve_sha256_chunk(pp, prefix.length, sp, salt.length, targetBits, counter, 1000);
           if (res !== -1) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
-            post({ type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID });
+            post({ type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID });
             return;
           }
           counter += 1000;
@@ -258,7 +262,7 @@
         for (; counter < end; counter++) {
           if (leadingZeros(deriveHash(prefix, counter, salt)) >= targetBits) {
             free(w, pp, prefix.length); free(w, sp, salt.length);
-            post({ type: "done", counter: counter, buildId: KIWI_SOLVER_BUILD_ID });
+            post({ type: "done", counter: counter, buildId: KIWI_SOLVER_PROTOCOL_ID });
             return;
           }
         }
@@ -289,7 +293,17 @@
     }
   };
 
-  // Startup handshake (audit #53): announce this worker's solver build id
-  // BEFORE any solve work so the driver can refuse a stale worker outright.
-  post({ type: "ready", buildId: KIWI_SOLVER_BUILD_ID });
+  // Startup handshake (audit #53 / round 23): BEFORE any solve work,
+  // verify the loaded wasm's exported solver_protocol_id() against this
+  // constant (driver + worker + wasm must speak the same protocol
+  // generation) and only then announce ready — a mismatched pair fails
+  // closed instead of solving.
+  initWasm().then(function (w) {
+    var wasmProtocol = (w && w.solver_protocol_id) ? w.solver_protocol_id() : null;
+    if (typeof wasmProtocol !== "string" || wasmProtocol !== KIWI_SOLVER_PROTOCOL_ID) {
+      post({ type: "failed", reason: "protocol-mismatch" });
+      return;
+    }
+    post({ type: "ready", buildId: KIWI_SOLVER_PROTOCOL_ID });
+  });
 })();

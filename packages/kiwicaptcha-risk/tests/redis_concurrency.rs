@@ -467,9 +467,14 @@ fn global_level_enters_hysteresis_hold_after_storm() {
     // Inside the window: poll the Redis clock to ~1 s past the ratchet
     // (the deadline is ratchet + 2000 ms), then probe REPEATEDLY while the
     // server clock stays inside the window (audit round 18: every
-    // iteration asserts the hold — a scheduling pause can only mean fewer
-    // iterations, never a skipped assertion, and each probe carries a
-    // unique event id so the dedupe never swallows one).
+    // iteration asserts the hold and each probe carries a unique event id
+    // so the dedupe never swallows one). Residual edge (audit round 23,
+    // honestly documented): if the test process is suspended for the
+    // ENTIRE remaining window between the initial wait and the first
+    // probe, the loop can enter after `cool` and execute zero in-window
+    // assertions — the drop phase below always runs; a fully
+    // deterministic logical-clock unit test of the hysteresis state
+    // machine is tracked as future work.
     wait_until_redis_ms(cool - 1_000);
     let mut hold_probe_id = 100u64;
     loop {

@@ -21,13 +21,16 @@ Compute the sha384-base64 hashes with the bundled tool:
 node packages/kiwicaptcha-wasm/tools/sri-hashes.mjs
 ```
 
-Example output (run against a build — all FOUR release assets):
+The tool prints one sha384 value per asset. DO NOT copy values from
+examples or from an older build — each release's authoritative hashes are
+the ATTACHED `SRI.txt` and `SHA256SUMS` release artifacts (both
+SLSA-attested); the shape is:
 
 ```
-kiwicaptcha-wasm.js  sha384-lYQhEK3o/D8piurwe1556/gKHmzDoNv5gumBBIKUCsKQ0ogSvB1HySZm6NeNVdzq
-kiwi-worker.js       sha384-bz5IPxD4I2OK/gEaeUsMGXB0A5caYw5LwU/fQXbxpzQ048kk8K2NsWM/GO3EL9Ii
-widget-driver.js     sha384-osA8vjEQw8Gbqp8Z7Ap9Avv1rH03DOAJVKB7bFMvDSbgZ7N+UU7zFEdKrMfocdQR
-widget.css           sha384-rNPQbDhqKmTBO3cn6mUfG5zR4OeKjMsJ5i1lPv9d9YvTdm1g5iw4yLfRo0PYT8
+kiwicaptcha-wasm.js  sha384-<VALUE-FROM-SRI.txt>
+kiwi-worker.js       sha384-<VALUE-FROM-SRI.txt>
+widget-driver.js     sha384-<VALUE-FROM-SRI.txt>
+widget.css           sha384-<VALUE-FROM-SRI.txt>
 ```
 
 Use the SRI script-tag pattern for every asset you serve:

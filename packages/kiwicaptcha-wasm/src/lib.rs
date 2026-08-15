@@ -29,6 +29,32 @@ pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
+/// The solver PROTOCOL/ABI generation id (audit round 23 — renamed from
+/// the misleading "build id" semantics). The runtime handshake uses it
+/// ONLY to prove that the driver, the worker and the WASM glue speak the
+/// same protocol generation; it is NOT an exact-artifact identity. Exact
+/// byte identity is guaranteed by the release system: tag + SHA256SUMS +
+/// SRI.txt + SLSA attestation.
+///
+/// This value MUST equal `KIWI_SOLVER_PROTOCOL_ID` in
+/// `assets/kiwi-worker.js` — the worker verifies the loaded wasm's
+/// exported value against its constant BEFORE sending `ready`, so a
+/// mismatch fails closed instead of solving with a mismatched pair.
+#[wasm_bindgen]
+pub fn solver_protocol_id() -> String {
+    "2026-08-r1".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solver_protocol_id_is_the_documented_generation() {
+        assert_eq!(solver_protocol_id(), "2026-08-r1");
+    }
+}
+
 /// Allocate `len` bytes in WASM linear memory and return the pointer.
 ///
 /// This is the widget's buffer allocator for the raw-pointer solver ABI.
