@@ -19,7 +19,16 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  * for unknown scopes in 'minimum' mode, or — for ANY scope the server
  * cannot resolve in ANY mode, including risk-disabled deployments —
  * {@see self::UNKNOWN_QUOTA_ID}, one reserved bucket shared by every
- * unresolved name. The cardinality of the quota namespace is therefore
+ * unresolved name.
+ * CLUSTER CLOCK ASSUMPTION (audit round 20): the window minute is read
+ * via Redis TIME and the quota key is then executed against the hash-slot
+ * owner — on a single primary or Sentinel deployment the TIME read and
+ * the Lua share one server, which is the supported topology. On a genuine
+ * multi-primary Redis Cluster the TIME read is NOT intrinsically tied to
+ * the slot owner executing the script, so skew between nodes can shift
+ * window boundaries; Cluster deployments should route TIME and the keyed
+ * EVAL to the same node or accept the skew bound. The cardinality of the
+ * quota namespace is therefore
  * ALWAYS bounded by the server-owned configuration; an attacker can never
  * mint fresh quota windows by inventing scope names. The raw scope string
  * is never a Redis key component (audit #112): the controller always
