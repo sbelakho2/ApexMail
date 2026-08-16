@@ -1854,6 +1854,33 @@ environment, since it cannot enforce single-use across workers. PSR-6 pools
 work but cannot express atomic get-and-delete, so single-use under
 concurrency is best-effort (read-then-delete).
 
+## Incumbent migration (reCAPTCHA / hCaptcha / Turnstile)
+
+A one-script migration surface (round 24):
+
+- `GET {prefix}/api.js?compat=recaptcha|hcaptcha|turnstile` — the
+  same-origin loader (wasm glue + driver, immutable asset). Incumbent
+  pages change only their provider script URL: `.g-recaptcha` /
+  `.h-captcha` / `.cf-turnstile` containers render implicitly, invisible
+  controls (buttons / `data-size="invisible"`) execute on click,
+  `data-callback` / `data-expired-callback` / `data-error-callback` fire
+  with the same token, and the provider globals (`grecaptcha` /
+  `hcaptcha` / `turnstile`) plus the provider response fields
+  (`g-recaptcha-response`, `h-captcha-response`, `cf-turnstile-response`)
+  all share the ONE underlying Kiwi token.
+- `POST {prefix}/siteverify` — provider-shaped JSON (`success`,
+  `challenge_ts`, `hostname`, `error-codes`) over the SAME atomic
+  verifier. Disabled unless `risk.siteverify_secret` is configured; the
+  secret authenticates server-to-server use, `remoteip` is honored only
+  after the secret, and a replayed `response` resolves to the stored
+  deterministic outcome (safe retries).
+- `risk.sitekey_allowlist` maps a public sitekey to a scope
+  (server-owned; unknown sitekeys stay scope names subject to
+  `allowed_scopes` + the risk assessment — never a policy reduction).
+- Solved-token expiry is a first-class lifecycle state: `kiwi:expired`
+  clears the token/binding/alias and fires the provider
+  expired-callback; the server remains the authoritative expiry check.
+
 ## Widget assets
 
 The widget markup/CSS/JS is a **single source of truth** in the Rust
