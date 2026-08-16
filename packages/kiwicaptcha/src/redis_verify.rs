@@ -2,7 +2,7 @@
 //!
 //! [`RedisChallengeStore`] persists [`ChallengeRecord`]s as the language-
 //! neutral JSON schema shared with the PHP core (`packages/kiwicaptcha-php`)
-//! — the same 22 keys `ChallengeRecord::toArray()` emits — under the key
+//! — the same 23 keys `ChallengeRecord::toArray()` emits — under the key
 //! `{prefix}{nonce}` with an EX TTL of `expires_at - now + ttl_margin_secs`
 //! (min 1 s, exactly like the PHP `RedisStorage` plus the audit #22/#23 TTL
 //! margin). A PHP service and a Rust service can read each other's records

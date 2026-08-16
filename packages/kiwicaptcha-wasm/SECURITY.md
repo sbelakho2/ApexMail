@@ -6,7 +6,7 @@ This package ships four browser assets (`assets/`):
 |---|---|
 | `kiwicaptcha-wasm.js` | wasm-bindgen glue with the Argon2id/SHA-256 solver wasm inlined as base64 |
 | `kiwi-worker.js` | standalone same-origin worker solver (`data-kiwi-worker-src`) |
-| `widget-driver.js` | the widget driver; embeds the worker source and the solver build id |
+| `widget-driver.js` | the widget driver; embeds the worker source and the solver protocol id |
 | `widget.css` | the widget stylesheet (first-class release asset since round 18; SRI-capable via `<link>`) |
 
 Everything below is guidance for integrators who serve these assets (self-hosted
@@ -56,7 +56,9 @@ Notes:
   - publish the content-addressed release hash (`argon-solver.<sha256>`-
     style naming, or the §4 release-hash list) and verify it in the
     release pipeline;
-  - the worker's own build-id handshake (`ready`/`done` messages) makes
+  - the worker's own protocol-id handshake (`ready`/`done` messages, plus
+    the wasm glue's exported `solver_protocol_version()` verified before
+    `ready`) makes
     the DRIVER refuse a stale/mismatched worker — a cached old worker can
     never contribute a solution.
   If runtime integrity checking of the worker is required, the driver
@@ -68,7 +70,7 @@ Notes:
 ## 2. Immutable versioned URLs — never a mutable `latest.js`
 
 - Every asset must be served from an immutable, versioned URL path. The
-  version is the solver build id (see §5), e.g.
+  version is the solver protocol id (see §5), e.g.
   `/kiwicaptcha/2026-08-r1/widget-driver.js`.
 - Never publish a mutable `latest.js`/`latest.css` alias: a compromised or
   replaced "latest" file is indistinguishable from a release to SRI pinning
@@ -133,16 +135,28 @@ For each release:
    ```sh
    gh attestation verify assets/kiwicaptcha-wasm.js --repo <org>/<repo>
    ```
-4. Publish the build id (see §5) alongside the hashes so integrators can
-   tell which driver/worker pair a release contains.
+4. Publish the protocol id (see §5) alongside the hashes so integrators
+   can tell which driver/worker pair a release contains. The ATTACHED
+   `SHA256SUMS`/`SRI.txt` manifests are the authoritative record of the
+   exact release bytes. Version immutable resource URLs by RELEASE or
+   CONTENT identity (e.g. `/v1.6.19/widget-driver.js` or
+   `widget-driver.<sha256>.js`) — never by the protocol id alone, because
+   several byte-different compatible releases can legitimately share one
+   protocol id.
 
-## 5. Solver build-id coupling (versioned-resource expectation)
+## 5. Solver protocol-id coupling (versioned-resource expectation)
 
-The widget driver embeds a solver build id constant:
+The widget driver embeds a solver PROTOCOL id constant — a
+protocol/ABI generation LABEL, not an artifact identity:
 
 ```js
-var KIWI_SOLVER_BUILD_ID = "2026-08-r1";   // widget-driver.js
+var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r1";   // widget-driver.js
+var KIWI_SOLVER_PROTOCOL_VERSION = 1;           // integer, checked against
+                                                // the wasm export
 ```
+
+Exact byte identity is guaranteed by the release tag + `SHA256SUMS` +
+`SRI.txt` + SLSA attestation — never by this label.
 
 The worker (both the standalone `kiwi-worker.js` and the copy embedded in the
 driver) declares the same constant and reports it in its handshake messages:
@@ -150,7 +164,8 @@ driver) declares the same constant and reports it in its handshake messages:
 - on startup: `{ type: "ready", v: 1, buildId: "2026-08-r1" }`
 - on success: `{ type: "done", v: 1, counter: <n>, buildId: "2026-08-r1" }`
 
-The driver validates the worker's build id against its own constant. On a
+The driver validates the worker's protocol id against its own constant
+(and the worker validates the wasm's integer protocol version). On a
 mismatch the widget enters the controlled `kiwi:solver-mismatch` state with a
 clear error message and **never** accepts a solution from the mismatched
 worker (no invalid tokens are produced, and there is no fallback to a stale
@@ -160,8 +175,10 @@ Expectation for integrators: the driver, the worker, and the wasm glue served
 to a page must come from the **same build id**. Mixed versions (e.g. a cached
 `kiwi-worker.js` from an older release next to a new driver) produce the
 controlled mismatch state until the serving layer is corrected. When the
-solver is bumped, bump `KIWI_SOLVER_BUILD_ID` in `widget-driver.js` and
-`kiwi-worker.js` (they must stay identical), rebuild, and re-run the SRI tool.
+solver protocol changes, bump `KIWI_SOLVER_PROTOCOL_ID` +
+`KIWI_SOLVER_PROTOCOL_VERSION` in `kiwi-worker.js` (the generator embeds it
+into the driver) and the Rust `SOLVER_PROTOCOL_VERSION` constant (they must
+stay identical), rebuild, and re-run the SRI tool.
 
 ## 6. Widget runtime guarantees (recap)
 

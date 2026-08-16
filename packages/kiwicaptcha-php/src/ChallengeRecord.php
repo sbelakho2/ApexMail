@@ -14,7 +14,7 @@ namespace KiwiCaptcha;
  * `'sha256'|'argon2id'`, `m_kib`, `t`, `p`, `target_bits`, `salt`,
  * `prefix`, `challenge`, `min_duration_ms`, `issued_at_ns`,
  * `protocol_version`, `attempts_used`, `region`, `policy_version`,
- * `request_binding`, `issuer`, `kid` — 22 keys).
+ * `request_binding`, `issuer`, `kid` — 23 keys).
  *
  * Protocol v2 migration: v2 records carry `binding_tag` (a nonce-bound
  * HMAC, never a stable IP-derived identifier — see

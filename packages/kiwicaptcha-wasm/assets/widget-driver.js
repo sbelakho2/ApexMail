@@ -881,10 +881,19 @@
       W.dispatchEvent(ev);
     }
     function announce(text) { if (announcerEl) announcerEl.textContent = text; }
+    // Round 27 (P2): the state attribute belongs on the VISIBLE
+    // .kiwi-widget — the stylesheet keys the pulse/success/failure
+    // styling and the Retry button visibility on
+    // .kiwi-widget[data-state=...]. When initWidget's W is an incumbent
+    // wrapper (.g-recaptcha/.h-captcha/.cf-turnstile), target the inner
+    // widget element instead of leaving it frozen at "idle".
+    var stateEl = (W.matches && W.matches(".kiwi-widget"))
+      ? W
+      : (W.querySelector ? W.querySelector("[data-kiwi-widget]") || W : W);
     function setStatus(label, pillText, state) {
       if (labelEl) labelEl.textContent = label;
       if (pillEl) pillEl.textContent = pillText;
-      if (W) W.setAttribute("data-state", state);
+      if (stateEl) stateEl.setAttribute("data-state", state);
     }
     function setHint(text) { if (hintEl) hintEl.textContent = text; }
     function setProgress(pct) {
@@ -926,7 +935,7 @@
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       writeResponseAlias("");
-      if (W) W.setAttribute("data-state", "expired");
+      if (stateEl) stateEl.setAttribute("data-state", "expired");
       if (countdownEl) countdownEl.textContent = "expired";
       dispatch("expired", {});
       announce("Verification expired");
@@ -990,6 +999,12 @@
       } else {
         setHint("Challenge failed (" + msg + ") \u2014 click the widget to retry.");
         delete W.dataset.kiwiStarted;
+        // Round 27 (P2): terminal failure must surface on the visible
+        // widget — the Retry button's visibility is keyed on
+        // .kiwi-widget[data-state="failed"] (it never appeared before,
+        // because the state was never set on failure).
+        setStatus("Challenge failed", "Failed", "failed");
+        if (retryEl) retryEl.style.display = "";
       }
     }
     // Build-id mismatch (audit #53): the worker reported a solver build id
@@ -1164,7 +1179,8 @@
       var retryEl = W.querySelector("[data-kiwi-retry]");
       if (retryEl) kiwiRemoveListeners(retryEl);
       delete W.dataset.kiwiStarted;
-      W.removeAttribute("data-state");
+      var destroyStateEl = (W.matches && W.matches(".kiwi-widget")) ? W : (W.querySelector ? W.querySelector("[data-kiwi-widget]") || W : W);
+      destroyStateEl.removeAttribute("data-state");
       var tokenEl = W.querySelector("[data-kiwi-token]");
       if (tokenEl) tokenEl.value = "";
     }
@@ -1344,7 +1360,11 @@
     var compatMatch = compatScriptUrl ? compatScriptUrl.match(/[?&]compat=(recaptcha|hcaptcha|turnstile)/) : null;
     if (compatMatch) compat = compatMatch[1];
     if (compat && compatScriptUrl) {
-      kiwiCompatGlueReady = fetch(compatScriptUrl.split("?")[0], { cache: "force-cache" })
+      // Round 27 (P2): revalidate — force-cache would let the browser
+      // reuse a stale /api.js representation, defeating the server's ETag
+      // policy and potentially pairing the current driver with an old
+      // glue of the same protocol generation.
+      kiwiCompatGlueReady = fetch(compatScriptUrl.split("?")[0], { cache: "no-cache", credentials: "same-origin" })
         .then(function (r) { return r.ok ? r.text() : null; })
         .then(function (src) {
           if (!src) return;

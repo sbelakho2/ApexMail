@@ -1872,7 +1872,10 @@ A one-script migration surface (round 24):
   `challenge_ts`, `hostname`, `error-codes`) over the SAME atomic
   verifier. Disabled unless `risk.siteverify_secrets` is configured (a
   map of secret -> expected scope, so each backend's secret enforces its
-  own policy scope server-side); the
+  own policy scope server-side). `remoteip` is syntactically optional,
+  but REQUIRED whenever IP binding is enabled (the default) — a bound
+  challenge without the end-user IP fails closed (`missing-input-response`
+  / `invalid-input-response`), exactly like the incumbent providers; the
   secret authenticates server-to-server use, `remoteip` is honored only
   after the secret, and a replayed `response` resolves to the stored
   deterministic outcome (safe retries).

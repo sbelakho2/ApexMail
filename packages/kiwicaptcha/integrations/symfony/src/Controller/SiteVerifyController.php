@@ -107,7 +107,8 @@ final class SiteVerifyController
         // presented to the financial secret is rejected (WrongScope) — the
         // sitekey-allowlist mapping is enforced end to end. `remoteip` is
         // only honored because the caller proved possession of a valid
-        // secret above; when absent, bound challenges still fail closed.
+        // secret above; it is REQUIRED whenever IP binding is enabled
+        // (the default) — a bound challenge without it fails closed.
         $outcome = $this->verifier->verify(
             $response,
             $this->secretKey,

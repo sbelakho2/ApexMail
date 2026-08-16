@@ -344,6 +344,23 @@ final class ConfigurationTest extends TestCase
         }
     }
 
+    public function testSiteverifySecretsRequireStrongKeys(): void
+    {
+        // Round 27: the siteverify secrets are the entire server-to-server
+        // authentication boundary — configuration rejects weak keys.
+        $processed = $this->process(['risk' => ['siteverify_secrets' => ['0123456789abcdef' => 'login']]])['risk']['siteverify_secrets'];
+        self::assertSame(['0123456789abcdef' => 'login'], $processed);
+
+        foreach ([['short' => 'login'], ['0123456789abcde' => 'login']] as $weak) {
+            try {
+                $this->process(['risk' => ['siteverify_secrets' => $weak]]);
+                self::fail('a siteverify secret under 16 bytes must be rejected at config load');
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                // expected
+            }
+        }
+    }
+
     public function testRiskRedisHardeningDefaults(): void
     {
         $redis = $this->process()['risk']['redis'];

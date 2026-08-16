@@ -359,6 +359,21 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
             return Err(VerifyError::MalformedRecord);
         }
     }
+    // Round 27 (P3, hostname parity with PHP fromArray): the server-side
+    // hostname metadata is validated on read — a label of at most 4096
+    // bytes with no whitespace/control characters, or None. It is NOT part
+    // of the signed security payload, so this is interoperability rigor,
+    // not a verification boundary.
+    if let Some(hostname) = record.hostname.as_deref() {
+        if hostname.is_empty()
+            || hostname.len() > 4096
+            || hostname
+                .bytes()
+                .any(|b| b <= 0x20 || b == 0x7f)
+        {
+            return Err(VerifyError::MalformedRecord);
+        }
+    }
     // Audit #113: exact-length pre-bounds BEFORE any base64 decode — the
     // nonce is the 44-char base64 of 32 bytes and the salt the 24-char
     // base64 of 16 bytes. An oversized (attacker-written) value is rejected

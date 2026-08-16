@@ -290,4 +290,48 @@ final class KernelIntegrationTest extends TestCase
 
         return implode('; ', $messages);
     }
+
+    /**
+     * Round 27 (P1): the REAL bundle routes must serve the compatibility
+     * loader — the browser fixture previously hid the missing Request
+     * import (the controller's type declarations resolved to a
+     * nonexistent namespace-local class and the production routes could
+     * not dispatch).
+     */
+    public function testApiJsRouteServesTheLoaderWithEtagRevalidation(): void
+    {
+        $kernel = self::$kernel;
+
+        $response = $kernel->handle(Request::create('/kiwi-captcha/api.js?compat=recaptcha', 'GET'));
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame('application/javascript; charset=UTF-8', $response->headers->get('Content-Type'));
+        self::assertNotNull($response->headers->get('ETag'), 'the mutable stable URL must carry an ETag for revalidation');
+        $body = (string) $response->getContent();
+        self::assertStringContainsString('/*KIWI_COMPAT_SPLIT*/', $body);
+        self::assertStringContainsString('solver_protocol_version', $body);
+        self::assertStringContainsString('compat', $body);
+
+        // Revalidation: the same ETag -> 304, no body.
+        $second = $kernel->handle(Request::create(
+            '/kiwi-captcha/api.js?compat=recaptcha',
+            'GET',
+            [],
+            [],
+            [],
+            ['HTTP_IF_NONE_MATCH' => $response->headers->get('ETag')],
+        ));
+        self::assertSame(304, $second->getStatusCode());
+        self::assertSame('', (string) $second->getContent());
+    }
+
+    public function testWidgetCssRouteIsServed(): void
+    {
+        $kernel = self::$kernel;
+
+        $response = $kernel->handle(Request::create('/kiwi-captcha/widget.css', 'GET'));
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame('text/css; charset=UTF-8', $response->headers->get('Content-Type'));
+        self::assertStringContainsString('.kiwi-widget', (string) $response->getContent());
+        self::assertNotNull($response->headers->get('ETag'));
+    }
 }

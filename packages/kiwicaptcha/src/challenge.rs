@@ -112,7 +112,7 @@ pub enum BindingMode {
 /// binding_tag, issued_at, expires_at, algorithm 'sha256'|'argon2id', m_kib,
 /// t, p, target_bits, salt, prefix, challenge, min_duration_ms, issued_at_ns,
 /// attempts_used optional, protocol_version, region, policy_version,
-/// request_binding, issuer, kid — 22 keys). PoWAlgorithm already serializes
+/// request_binding, issuer, kid — 23 keys). PoWAlgorithm already serializes
 /// lowercase — keep it. Both languages write and read this exact
 /// shape, so a record persisted by PHP can be verified by Rust and vice
 /// versa.
