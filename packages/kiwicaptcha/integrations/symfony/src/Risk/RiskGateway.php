@@ -196,10 +196,15 @@ final class RiskGateway
         ));
     }
 
-    /** Whether a VALID solve of this scope must pass the post-solve re-assessment. */
-    public function postSolveCheck(string $scope): bool
+    /**
+     * Whether a VALID solve of this scope must pass the post-solve
+     * re-assessment. Null scope = an accept-any-scope constraint, which
+     * never demands a post-solve re-assessment (the per-scope table is
+     * keyed by the issued scope).
+     */
+    public function postSolveCheck(?string $scope): bool
     {
-        return $this->postSolveScopes[$scope] ?? false;
+        return $scope !== null ? ($this->postSolveScopes[$scope] ?? false) : false;
     }
 
     /**

@@ -540,7 +540,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *         canonical jti + signed binding of the consumed record (the
      *         SAME outcome the original verification produced)
      */
-    private function resolveAmbiguousConsume(string $token, ?Request $request, string $scope): string
+    private function resolveAmbiguousConsume(string $token, ?Request $request, ?string $scope): string
     {
         $record = $this->findConsumedRecord($token);
         if ($record === null) {

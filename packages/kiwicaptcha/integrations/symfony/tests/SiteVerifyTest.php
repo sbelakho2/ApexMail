@@ -54,6 +54,16 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(404, $response->getStatusCode());
     }
 
+    public function testOversizedBodyIsRefusedBeforeParsing(): void
+    {
+        $controller = $this->controller();
+        $request = Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], [], json_encode(['response' => str_repeat('x', 32 * 1024)]));
+        $response = $controller->siteverify($request);
+        self::assertSame(413, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('bad-request', $body['error-codes'][0] ?? null);
+    }
+
     public function testInvalidSecretIsRejectedWithProviderCode(): void
     {
         $response = $this->controller()->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => 'x', 'secret' => 'wrong']));

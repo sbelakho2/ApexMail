@@ -47,10 +47,11 @@ cargo build --release --locked --target wasm32-unknown-unknown
 # (no package managers, no runtime deps); the tarball is verified with
 # SHA-256 before extraction. Audit round 22 wording: in NON-STRICT mode
 # optimization may be SKIPPED when wasm-opt is unavailable/unverifiable (a
-# larger, slower artifact — the build id changes, so a mixed-version
-# deployment can never pair an optimized with an unoptimized artifact —
-# the protocol id is unchanged by optimization; the artifact identity is
-# the release SHA256SUMS/SRI chain); in
+# larger, slower artifact — its byte identity differs (the released
+# SHA256SUMS/SRI hashes change; the solver PROTOCOL id is unchanged by
+# optimization, so a mixed-version deployment can never pair an optimized
+# with an unoptimized artifact under the same hash pins — the artifact
+# identity is the release SHA256SUMS/SRI chain, never the protocol id); in
 # STRICT mode (WASM_OPT_STRICT=1, used by the release pipeline) a missing
 # or unverifiable optimizer is FATAL. Set WASM_OPT_SHA256 to override the
 # expected hash for any platform.

@@ -36,10 +36,13 @@ widget.css           sha384-<VALUE-FROM-SRI.txt>
 Use the SRI script-tag pattern for every asset you serve:
 
 ```html
-<script src="https://cdn.example.com/kiwicaptcha/2026-08-r1/widget-driver.js"
+<script src="https://cdn.example.com/kiwicaptcha/v1.6.20/widget-driver.js"
         integrity="sha384-osA8vjEQw8Gbqp8Z7Ap9Avv1rH03DOAJVKB7bFMvDSbgZ7N+UU7zFEdKrMfocdQR"
         crossorigin="anonymous"></script>
 ```
+
+(Round 28: the example path uses the RELEASE version — the solver protocol
+id is a protocol/ABI label, not an artifact identity; see §2 below.)
 
 Notes:
 
@@ -51,7 +54,7 @@ Notes:
   has no SRI parameter, so the standalone `kiwi-worker.js` served via
   `data-kiwi-worker-src` must be protected differently:
   - serve it from an **immutable, versioned, same-origin URL**
-    (e.g. `/kiwicaptcha/2026-08-r1/kiwi-worker.js`) — never a mutable
+    (e.g. `/kiwicaptcha/v1.6.20/kiwi-worker.js`) — never a mutable
     `latest.js` alias;
   - publish the content-addressed release hash (`argon-solver.<sha256>`-
     style naming, or the §4 release-hash list) and verify it in the
@@ -70,8 +73,12 @@ Notes:
 ## 2. Immutable versioned URLs — never a mutable `latest.js`
 
 - Every asset must be served from an immutable, versioned URL path. The
-  version is the solver protocol id (see §5), e.g.
-  `/kiwicaptcha/2026-08-r1/widget-driver.js`.
+  version is the RELEASE tag (or a content address — the strongest form,
+  below), e.g. `/kiwicaptcha/v1.6.20/widget-driver.js`. Round 28: the
+  solver protocol id (§5) is an ABI/protocol label — multiple
+  byte-different compatible releases legitimately share it, so it must
+  NEVER be used as the URL version (a "v2026-08-r1" path would silently
+  serve any compatible release's bytes).
 - Never publish a mutable `latest.js`/`latest.css` alias: a compromised or
   replaced "latest" file is indistinguishable from a release to SRI pinning
   that follows the URL.

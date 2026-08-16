@@ -588,7 +588,8 @@
     return null;
   }
   function solveWithWorker(data, onProgress, container) {
-    return new Promise(function(resolve) {
+    var terminateHandle = function () {};
+    var promise = new Promise(function(resolve) {
       if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
       var worker = null;
       var blobUrl = null;
@@ -608,6 +609,13 @@
       if (!worker) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
       if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
       kiwiActiveBlobUrl = blobUrl;
+      // Round 28 (P2): explicit termination handle — a cancelled
+      // generation terminates the worker outright (revoking the blob URL
+      // alone would NOT stop it).
+      terminateHandle = function () {
+        try { worker.terminate(); } catch (e) {}
+        teardown();
+      };
       window.__kiwiWorkerUsed = true;
       var workerStart = performance.now();
       var expectedHashes = Math.pow(2, data.targetBits);
@@ -713,6 +721,7 @@
         if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ unavailable: true, reason: "post-failed" }); }
       }
     });
+    return { promise: promise, terminate: terminateHandle };
   }
 
   // ── Privacy-aware telemetry (widget-local, mode-gated) ──────────────
@@ -794,22 +803,208 @@
     if (main) main.appendChild(s); else W.appendChild(s);
     return s;
   }
+  // ── Round 29: localization (WCAG 3.1.2) ─────────────────────────────
+  // A reusable security component for European deployment needs a real
+  // locale contract: `lang` is a first-class widget option
+  // (options.lang / data-kiwi-lang / navigator.language in that order),
+  // the resolved language is written to the widget subtree's lang
+  // attribute (dir for RTL packs), and an untranslated fallback stays
+  // English and is explicitly marked lang="en" so the passage language is
+  // always programmatically determinable.
+  var kiwiLocalePacks = {
+    en: { dir: "ltr",
+      label: "Security Check", badgeIdle: "Idle", badgeWait: "Wait",
+      badgeWorking: "Working", badgeSuccess: "Success", badgeFailed: "Failed",
+      badgeVersionError: "Version Error", badgeUnavailable: "Unavailable",
+      statusConnecting: "Connecting\u2026", statusVerifying: "Verifying\u2026",
+      statusVerified: "Verification complete", statusFailed: "Verification failed",
+      statusExpired: "Verification expired", statusWorkerUnavailable: "Worker unavailable",
+      statusSolverMismatch: "Solver version mismatch",
+      hintProtected: "Protected", hintRetrying: "Challenge failed ({msg}) \u2014 retrying\u2026",
+      hintClickRetry: "Challenge failed ({msg}) \u2014 press the Retry button to try again.",
+      hintVerified: "Proof-of-work verified locally.",
+      hintWorker: "Worker unavailable \u2014 Argon2id needs a Web Worker that this page's CSP blocks; retry, or configure data-kiwi-worker-src.",
+      hintSolver: "The solver worker is out of date \u2014 reload the page to load the current version.",
+      expired: "expired", retryButton: "Retry", checking: "Checking\u2026" },
+    de: { dir: "ltr",
+      label: "Sicherheitspr\u00fcfung", badgeIdle: "Bereit", badgeWait: "Warten",
+      badgeWorking: "Arbeitet", badgeSuccess: "Erfolgreich", badgeFailed: "Fehlgeschlagen",
+      badgeVersionError: "Versionsfehler", badgeUnavailable: "Nicht verf\u00fcgbar",
+      statusConnecting: "Verbinde\u2026", statusVerifying: "Pr\u00fcfe\u2026",
+      statusVerified: "Pr\u00fcfung abgeschlossen", statusFailed: "Pr\u00fcfung fehlgeschlagen",
+      statusExpired: "Pr\u00fcfung abgelaufen", statusWorkerUnavailable: "Worker nicht verf\u00fcgbar",
+      statusSolverMismatch: "Solver-Version stimmt nicht",
+      hintProtected: "Gesch\u00fctzt", hintRetrying: "Pr\u00fcfung fehlgeschlagen ({msg}) \u2014 neuer Versuch\u2026",
+      hintClickRetry: "Pr\u00fcfung fehlgeschlagen ({msg}) \u2014 dr\u00fccken Sie die Schaltfl\u00e4che Erneut.",
+      hintVerified: "Proof-of-Work lokal verifiziert.",
+      hintWorker: "Worker nicht verf\u00fcgbar \u2014 Argon2id ben\u00f6tigt einen Web Worker, den das CSP dieser Seite blockiert; erneut versuchen oder data-kiwi-worker-src konfigurieren.",
+      hintSolver: "Der Solver-Worker ist veraltet \u2014 laden Sie die Seite neu, um die aktuelle Version zu laden.",
+      expired: "abgelaufen", retryButton: "Erneut", checking: "Pr\u00fcfe\u2026" },
+    fr: { dir: "ltr",
+      label: "Contr\u00f4le de s\u00e9curit\u00e9", badgeIdle: "Inactif", badgeWait: "Attente",
+      badgeWorking: "Traitement", badgeSuccess: "R\u00e9ussi", badgeFailed: "\u00c9chec",
+      badgeVersionError: "Erreur de version", badgeUnavailable: "Indisponible",
+      statusConnecting: "Connexion\u2026", statusVerifying: "V\u00e9rification\u2026",
+      statusVerified: "V\u00e9rification termin\u00e9e", statusFailed: "V\u00e9rification \u00e9chou\u00e9e",
+      statusExpired: "V\u00e9rification expir\u00e9e", statusWorkerUnavailable: "Worker indisponible",
+      statusSolverMismatch: "Version du solveur incompatible",
+      hintProtected: "Prot\u00e9g\u00e9", hintRetrying: "V\u00e9rification \u00e9chou\u00e9e ({msg}) \u2014 nouvelle tentative\u2026",
+      hintClickRetry: "V\u00e9rification \u00e9chou\u00e9e ({msg}) \u2014 appuyez sur le bouton R\u00e9essayer.",
+      hintVerified: "Preuve de travail v\u00e9rifi\u00e9e localement.",
+      hintWorker: "Worker indisponible \u2014 Argon2id n\u00e9cessite un Web Worker que le CSP de cette page bloque; r\u00e9essayez ou configurez data-kiwi-worker-src.",
+      hintSolver: "Le solveur est obsol\u00e8te \u2014 rechargez la page pour charger la version actuelle.",
+      expired: "expir\u00e9", retryButton: "R\u00e9essayer", checking: "V\u00e9rification\u2026" },
+    es: { dir: "ltr",
+      label: "Comprobaci\u00f3n de seguridad", badgeIdle: "Inactivo", badgeWait: "Espera",
+      badgeWorking: "Trabajando", badgeSuccess: "Correcto", badgeFailed: "Fall\u00f3",
+      badgeVersionError: "Error de versi\u00f3n", badgeUnavailable: "No disponible",
+      statusConnecting: "Conectando\u2026", statusVerifying: "Verificando\u2026",
+      statusVerified: "Verificaci\u00f3n completada", statusFailed: "Verificaci\u00f3n fallida",
+      statusExpired: "Verificaci\u00f3n caducada", statusWorkerUnavailable: "Worker no disponible",
+      statusSolverMismatch: "Versi\u00f3n del solver no coincide",
+      hintProtected: "Protegido", hintRetrying: "Verificaci\u00f3n fallida ({msg}) \u2014 reintentando\u2026",
+      hintClickRetry: "Verificaci\u00f3n fallida ({msg}) \u2014 pulse el bot\u00f3n Reintentar.",
+      hintVerified: "Prueba de trabajo verificada localmente.",
+      hintWorker: "Worker no disponible \u2014 Argon2id necesita un Web Worker que el CSP de esta p\u00e1gina bloquea; reintente o configure data-kiwi-worker-src.",
+      hintSolver: "El worker del solver est\u00e1 desactualizado \u2014 recargue la p\u00e1gina para cargar la versi\u00f3n actual.",
+      expired: "caducado", retryButton: "Reintentar", checking: "Verificando\u2026" },
+    it: { dir: "ltr",
+      label: "Controllo di sicurezza", badgeIdle: "Inattivo", badgeWait: "Attesa",
+      badgeWorking: "In corso", badgeSuccess: "Riuscito", badgeFailed: "Non riuscito",
+      badgeVersionError: "Errore di versione", badgeUnavailable: "Non disponibile",
+      statusConnecting: "Connessione\u2026", statusVerifying: "Verifica\u2026",
+      statusVerified: "Verifica completata", statusFailed: "Verifica non riuscita",
+      statusExpired: "Verifica scaduta", statusWorkerUnavailable: "Worker non disponibile",
+      statusSolverMismatch: "Versione del solver non corrispondente",
+      hintProtected: "Protetto", hintRetrying: "Verifica non riuscita ({msg}) \u2014 nuovo tentativo\u2026",
+      hintClickRetry: "Verifica non riuscita ({msg}) \u2014 premere il pulsante Riprova.",
+      hintVerified: "Prova di lavoro verificata localmente.",
+      hintWorker: "Worker non disponibile \u2014 Argon2id richiede un Web Worker bloccato dal CSP di questa pagina; riprovare o configurare data-kiwi-worker-src.",
+      hintSolver: "Il worker del solver \u00e8 obsoleto \u2014 ricaricare la pagina per caricare la versione corrente.",
+      expired: "scaduto", retryButton: "Riprova", checking: "Verifica\u2026" },
+    nl: { dir: "ltr",
+      label: "Beveiligingscontrole", badgeIdle: "Inactief", badgeWait: "Wachten",
+      badgeWorking: "Bezig", badgeSuccess: "Geslaagd", badgeFailed: "Mislukt",
+      badgeVersionError: "Versiefout", badgeUnavailable: "Niet beschikbaar",
+      statusConnecting: "Verbinden\u2026", statusVerifying: "Controleren\u2026",
+      statusVerified: "Controle voltooid", statusFailed: "Controle mislukt",
+      statusExpired: "Controle verlopen", statusWorkerUnavailable: "Worker niet beschikbaar",
+      statusSolverMismatch: "Solver-versie komt niet overeen",
+      hintProtected: "Beschermd", hintRetrying: "Controle mislukt ({msg}) \u2014 opnieuw proberen\u2026",
+      hintClickRetry: "Controle mislukt ({msg}) \u2014 druk op de knop Opnieuw.",
+      hintVerified: "Proof of work lokaal geverifieerd.",
+      hintWorker: "Worker niet beschikbaar \u2014 Argon2id vereist een Web Worker die door het CSP van deze pagina wordt geblokkeerd; probeer opnieuw of configureer data-kiwi-worker-src.",
+      hintSolver: "De solver-worker is verouderd \u2014 herlaad de pagina om de huidige versie te laden.",
+      expired: "verlopen", retryButton: "Opnieuw", checking: "Controleren\u2026" },
+    pl: { dir: "ltr",
+      label: "Kontrola bezpiecze\u0144stwa", badgeIdle: "Bezczynny", badgeWait: "Oczekiwanie",
+      badgeWorking: "Pracuje", badgeSuccess: "Powodzenie", badgeFailed: "Niepowodzenie",
+      badgeVersionError: "B\u0142\u0105d wersji", badgeUnavailable: "Niedost\u0119pny",
+      statusConnecting: "\u0141\u0105czenie\u2026", statusVerifying: "Weryfikacja\u2026",
+      statusVerified: "Weryfikacja zako\u0144czona", statusFailed: "Weryfikacja nieudana",
+      statusExpired: "Weryfikacja wygas\u0142a", statusWorkerUnavailable: "Worker niedost\u0119pny",
+      statusSolverMismatch: "Niezgodna wersja solwera",
+      hintProtected: "Chronione", hintRetrying: "Weryfikacja nieudana ({msg}) \u2014 ponawianie\u2026",
+      hintClickRetry: "Weryfikacja nieudana ({msg}) \u2014 naci\u015bnij przycisk Pon\u00f3w.",
+      hintVerified: "Dow\u00f3d pracy zweryfikowany lokalnie.",
+      hintWorker: "Worker niedost\u0119pny \u2014 Argon2id wymaga Web Workera blokowanego przez CSP tej strony; spr\u00f3buj ponownie lub skonfiguruj data-kiwi-worker-src.",
+      hintSolver: "Worker solwera jest nieaktualny \u2014 prze\u0142aduj stron\u0119, aby za\u0142adowa\u0107 bie\u017c\u0105c\u0105 wersj\u0119.",
+      expired: "wygas\u0142", retryButton: "Pon\u00f3w", checking: "Weryfikacja\u2026" },
+    pt: { dir: "ltr",
+      label: "Verifica\u00e7\u00e3o de seguran\u00e7a", badgeIdle: "Inativo", badgeWait: "Aguardar",
+      badgeWorking: "A trabalhar", badgeSuccess: "Conclu\u00eddo", badgeFailed: "Falhou",
+      badgeVersionError: "Erro de vers\u00e3o", badgeUnavailable: "Indispon\u00edvel",
+      statusConnecting: "A ligar\u2026", statusVerifying: "A verificar\u2026",
+      statusVerified: "Verifica\u00e7\u00e3o conclu\u00edda", statusFailed: "Verifica\u00e7\u00e3o falhada",
+      statusExpired: "Verifica\u00e7\u00e3o expirada", statusWorkerUnavailable: "Worker indispon\u00edvel",
+      statusSolverMismatch: "Vers\u00e3o do solver incompat\u00edvel",
+      hintProtected: "Protegido", hintRetrying: "Verifica\u00e7\u00e3o falhada ({msg}) \u2014 a tentar novamente\u2026",
+      hintClickRetry: "Verifica\u00e7\u00e3o falhada ({msg}) \u2014 prima o bot\u00e3o Repetir.",
+      hintVerified: "Prova de trabalho verificada localmente.",
+      hintWorker: "Worker indispon\u00edvel \u2014 Argon2id precisa de um Web Worker que o CSP desta p\u00e1gina bloqueia; tente novamente ou configure data-kiwi-worker-src.",
+      hintSolver: "O worker do solver est\u00e1 desatualizado \u2014 recarregue a p\u00e1gina para carregar a vers\u00e3o atual.",
+      expired: "expirado", retryButton: "Repetir", checking: "A verificar\u2026" },
+    ar: { dir: "rtl",
+      label: "\u0641\u062d\u0635 \u0627\u0644\u0623\u0645\u0627\u0646", badgeIdle: "\u062e\u0627\u0645\u062f", badgeWait: "\u0627\u0646\u062a\u0638\u0627\u0631",
+      badgeWorking: "\u064a\u0639\u0645\u0644", badgeSuccess: "\u0646\u0627\u062c\u062d", badgeFailed: "\u0641\u0634\u0644",
+      badgeVersionError: "\u062e\u0637\u0623 \u0641\u064a \u0627\u0644\u0625\u0635\u062f\u0627\u0631", badgeUnavailable: "\u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631",
+      statusConnecting: "\u062c\u0627\u0631\u064d \u0627\u0644\u0627\u062a\u0635\u0627\u0644\u2026", statusVerifying: "\u062c\u0627\u0631\u064d \u0627\u0644\u062a\u062d\u0642\u0642\u2026",
+      statusVerified: "\u0627\u0643\u062a\u0645\u0644 \u0627\u0644\u062a\u062d\u0642\u0642", statusFailed: "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642",
+      statusExpired: "\u0627\u0646\u062a\u0647\u062a \u0645\u0647\u0644\u0629 \u0627\u0644\u062a\u062d\u0642\u0642", statusWorkerUnavailable: "\u0627\u0644\u0639\u0627\u0645\u0644 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631",
+      statusSolverMismatch: "\u0625\u0635\u062f\u0627\u0631 \u0627\u0644\u062d\u0644 \u063a\u064a\u0631 \u0645\u062a\u0637\u0627\u0628\u0642",
+      hintProtected: "\u0645\u062d\u0645\u064a", hintRetrying: "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642 ({msg}) \u2014 \u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629\u2026",
+      hintClickRetry: "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642 ({msg}) \u2014 \u0627\u0636\u063a\u0637 \u0639\u0644\u0649 \u0632\u0631 \u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629.",
+      hintVerified: "\u062a\u0645 \u0627\u0644\u062a\u062d\u0642\u0642 \u0645\u0646 \u062f\u0644\u064a\u0644 \u0627\u0644\u0639\u0645\u0644 \u0645\u062d\u0644\u064a\u064b\u0627.",
+      hintWorker: "\u0627\u0644\u0639\u0627\u0645\u0644 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631 \u2014 \u064a\u062a\u0637\u0644\u0628 Argon2id \u0639\u0627\u0645\u0644 \u0648\u064a\u0628 \u062a\u062d\u062c\u0628\u0647 \u0633\u064a\u0627\u0633\u0629 CSP \u0647\u0630\u0647 \u0627\u0644\u0635\u0641\u062d\u0629\u061b \u0623\u0639\u062f \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629 \u0623\u0648 \u0642\u0645 \u0628\u062a\u0643\u0648\u064a\u0646 data-kiwi-worker-src.",
+      hintSolver: "\u0639\u0627\u0645\u0644 \u0627\u0644\u062d\u0644 \u0642\u062f\u064a\u0645 \u2014 \u0623\u0639\u062f \u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0635\u0641\u062d\u0629 \u0644\u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u0627\u0644\u062d\u0627\u0644\u064a.",
+      expired: "\u0627\u0646\u062a\u0647\u062a \u0627\u0644\u0645\u0647\u0644\u0629", retryButton: "\u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629", checking: "\u062c\u0627\u0631\u064d \u0627\u0644\u062a\u062d\u0642\u0642\u2026" }
+  };
+  var kiwiFallbackLang = "en";
+  function kiwiNormalizeLang(pref) {
+    if (typeof pref !== "string") return "";
+    return pref.trim().toLowerCase().split(/[_-]/)[0] || "";
+  }
+  function kiwiResolveLang(options) {
+    var prefs = [];
+    if (options && typeof options.lang === "string" && options.lang) prefs.push(options.lang);
+    if (!prefs.length && typeof document !== "undefined") {
+      var attr = null;
+      try {
+        var cs = document.currentScript;
+        attr = cs && cs.getAttribute ? cs.getAttribute("data-kiwi-lang") : null;
+      } catch (e) {}
+      if (attr) prefs.push(attr);
+    }
+    if (!prefs.length && navigator && navigator.language) prefs.push(navigator.language);
+    for (var i = 0; i < prefs.length; i++) {
+      var base = kiwiNormalizeLang(prefs[i]);
+      if (kiwiLocalePacks[base]) return base;
+    }
+    return kiwiFallbackLang;
+  }
+  function kiwiPackFor(lang) { return kiwiLocalePacks[lang] || kiwiLocalePacks[kiwiFallbackLang]; }
   // Manual retry is a genuine native <button> (focusable, Enter/Space
   // activation built in) rendered in the error/unavailable states. It
   // triggers the SAME re-init path as the click/tap reacquire.
-  function createRetryButton(W) {
+  function createRetryButton(W, retryLabel) {
     var b = document.createElement("button");
     b.type = "button";
     b.className = "kiwi-retry";
     b.setAttribute("data-kiwi-retry", "");
-    b.textContent = "Retry";
+    b.textContent = retryLabel || kiwiLocalePacks[kiwiFallbackLang].retryButton;
     var bottom = W.querySelector(".kiwi-bottom");
     if (bottom) bottom.appendChild(b);
     else { var main = W.querySelector(".kiwi-main"); if (main) main.appendChild(b); else W.appendChild(b); }
     return b;
   }
 
-  var kiwiWidgets = {}; // widgetId -> {W, options, state, token, expiryTimer}
+  // Round 28 (P2): per-widget generation + cancellation handles. Every
+  // async continuation (fetch, worker, retry, expiry) captures the
+  // generation it started under and refuses to touch state once the
+  // generation is no longer current — reset()/remove()/destroy() bump the
+  // generation and abort/terminate/clear the handles, so a stale
+  // generation can never write a token, invoke a callback or flip state.
+  // Handles: gen (generation counter), abortController/abortTimer (challenge
+  // fetch), worker (active solver worker), retryTimer (backoff retry),
+  // countdownTimer/expiryTimer (timers), errorFired (one error callback per
+  // generation).
+  var kiwiWidgets = {}; // widgetId -> {W, options, state, token, gen, abortController, abortTimer, worker, retryTimer, countdownTimer, expiryTimer, errorFired}
+  function kiwiGenerationCurrent(id, gen) {
+    var r = kiwiWidgets[id];
+    return !!(r && r.gen === gen);
+  }
+  function kiwiCancelGeneration(id) {
+    var r = kiwiWidgets[id];
+    if (!r) return;
+    r.gen++; // any in-flight generation is stale from here on
+    r.errorFired = false;
+    if (r.abortController) { try { r.abortController.abort(); } catch (e) {} r.abortController = null; }
+    if (r.abortTimer) { clearTimeout(r.abortTimer); r.abortTimer = null; }
+    if (r.worker) { try { r.worker.terminate(); } catch (e) {} r.worker = null; }
+    if (r.retryTimer) { clearTimeout(r.retryTimer); r.retryTimer = null; }
+    if (r.countdownTimer) { clearInterval(r.countdownTimer); r.countdownTimer = null; }
+    if (r.expiryTimer) { clearTimeout(r.expiryTimer); r.expiryTimer = null; }
+  }
   function initWidget(W, options) {
     if (!W || W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return null;
     options = options || {};
@@ -823,11 +1018,30 @@
     }
     // Round 24: formal widget instances — widgetId == data-kiwi-instance.
     var widgetId = W.dataset.kiwiInstance;
-    kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", expiryTimer: null };
+    // Round 28 (P2): the generation COUNTER MUST CONTINUE across re-inits —
+    // a re-init that restarts at 1 would let a stale in-flight run see
+    // itself as current again after a reset cancelled it (the record is
+    // replaced, so the old captured generation must never match).
+    var prevRecord = kiwiWidgets[widgetId];
+    var newGen = prevRecord ? prevRecord.gen + 1 : 1;
+    kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", gen: newGen, abortController: null, abortTimer: null, worker: null, retryTimer: null, countdownTimer: null, expiryTimer: null, errorFired: false };
     // Neutral role: the widget is a passive status/group, never a
     // checkbox, and it is NOT focusable — the retry button is.
     if (!W.getAttribute("role")) W.setAttribute("role", "group");
     var container = W.closest(".kiwi-container") || W;
+    // Round 29 (WCAG 3.1.2): resolve the widget language and write it onto
+    // the widget subtree (lang + dir for RTL packs). Preference order:
+    // options.lang -> data-kiwi-lang on the widget/container ->
+    // navigator.language. The untranslated fallback is explicitly
+    // lang="en". (document.currentScript is NULL during the async init,
+    // so the attribute is read from the subtree, not the script tag.)
+    var kiwiLangAttr = (W.getAttribute ? W.getAttribute("data-kiwi-lang") : null)
+      || (container && container.getAttribute ? container.getAttribute("data-kiwi-lang") : null);
+    var kiwiWidgetLang = kiwiResolveLang({ lang: (options && options.lang) || kiwiLangAttr || undefined });
+    var kiwiWidgetPack = kiwiPackFor(kiwiWidgetLang);
+    W.setAttribute("lang", kiwiWidgetLang);
+    if (kiwiWidgetPack.dir) W.setAttribute("dir", kiwiWidgetPack.dir);
+    function kiwiT(key) { return (kiwiWidgetPack[key] !== undefined) ? kiwiWidgetPack[key] : kiwiLocalePacks[kiwiFallbackLang][key] || key; }
     var labelEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
     var announcerEl = W.querySelector("[data-kiwi-status]") || createAnnouncer(W);
     // The mascot is decorative next to the already-labelled widget: hide it
@@ -851,7 +1065,7 @@
       if (reducedMotionQuery.matches) kiwiRemoveWink();
       else if (reducedMotionQuery.addEventListener) reducedMotionQuery.addEventListener("change", kiwiRemoveWink);
     }
-    var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W);
+    var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W, kiwiWidgetPack.retryButton);
     var telemetry = telemetrySession(container, W);
     // Round 26 (P1): options.scope is AUTHORITATIVE — the incumbent
     // compatibility loader passes the data-sitekey as the scope, and the
@@ -896,11 +1110,15 @@
       if (stateEl) stateEl.setAttribute("data-state", state);
     }
     function setHint(text) { if (hintEl) hintEl.textContent = text; }
+    // Round 29: paint the resolved language immediately (the static
+    // template is English until the driver runs; the widget subtree lang
+    // attribute was set above, so the English fallback is programmatically
+    // marked until localized).
+    setStatus(kiwiT("label"), kiwiT("badgeIdle"), "idle");
+    setHint(kiwiT("hintProtected"));
     function setProgress(pct) {
       var clamped = Math.max(0, Math.min(100, pct));
       if (fillEl) fillEl.setAttribute("data-progress", String(clamped));
-      /* Sync aria-valuenow on the progressbar role (WCAG 4.1.2). */
-      if (trackEl) trackEl.setAttribute("aria-valuenow", String(clamped));
     }
     
     var countdownTimer = null;
@@ -936,9 +1154,9 @@
       setBinding("");
       writeResponseAlias("");
       if (stateEl) stateEl.setAttribute("data-state", "expired");
-      if (countdownEl) countdownEl.textContent = "expired";
+      if (countdownEl) countdownEl.textContent = kiwiT("expired");
       dispatch("expired", {});
-      announce("Verification expired");
+      announce(kiwiT("statusExpired"));
       if (options.expiredCallback) { try { options.expiredCallback(); } catch (e) {} }
     }
     function scheduleExpiry(ttlSecs) {
@@ -950,9 +1168,11 @@
     }
     function startCountdown(ttlSecs) {
       var remaining = ttlSecs;
-      var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : "expired"; };
+      var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : kiwiT("expired"); };
       tick(); clearInterval(countdownTimer);
       countdownTimer = setInterval(function() { remaining--; tick(); if (remaining <= 0) clearInterval(countdownTimer); }, 1000);
+      var rc = kiwiWidgets[widgetId];
+      if (rc) rc.countdownTimer = countdownTimer;
     }
     // Request binding (audit #41): a hidden input carrying the bound value,
     // placed next to the token input (mirroring how the token is written).
@@ -970,6 +1190,8 @@
     }
     function resetToIdle() {
       clearInterval(countdownTimer);
+      var rc = kiwiWidgets[widgetId];
+      if (rc) rc.countdownTimer = null;
       clearExpiryTimer();
       writeResponseAlias("");
       kiwiRecordState("idle", "");
@@ -980,31 +1202,44 @@
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
-      setStatus("Security Check", "Idle", "idle");
-      setHint("Protected");
+      setStatus(kiwiT("label"), kiwiT("badgeIdle"), "idle");
+      setHint(kiwiT("hintProtected"));
       setProgress(0);
     }
     // Failure recovery (audit #55): an error never leaves the widget stuck
     // in "failed" — it resets to idle, retries a bounded number of times
     // with backoff, then settles idle and reacquires on the next
     // interaction (click the widget, the Retry button, or a page re-init).
+    function fireErrorCallback(msg) {
+      var r = kiwiWidgets[widgetId];
+      if (!r || r.errorFired || !options.errorCallback) return;
+      r.errorFired = true;
+      try { options.errorCallback(msg || "challenge-failed"); } catch (e) {}
+    }
     function fail(msg) {
       resetToIdle();
-      announce("Verification failed");
+      announce(kiwiT("statusFailed"));
       dispatch("error", { error: msg });
       if (retryCount < RETRY_LIMIT) {
         retryCount++;
-        setHint("Challenge failed (" + msg + ") \u2014 retrying\u2026");
-        setTimeout(run, 1000 * retryCount);
+        setHint(kiwiT("hintRetrying").replace("{msg}", msg));
+        // Round 28 (P2): the retry is a cancellable handle — a reset that
+        // lands during the backoff must never start a stale run().
+        var r = kiwiWidgets[widgetId];
+        if (r && r.retryTimer) clearTimeout(r.retryTimer);
+        if (r) r.retryTimer = setTimeout(function () { if (r) r.retryTimer = null; run(); }, 1000 * retryCount);
       } else {
-        setHint("Challenge failed (" + msg + ") \u2014 click the widget to retry.");
+        setHint(kiwiT("hintClickRetry").replace("{msg}", msg));
         delete W.dataset.kiwiStarted;
         // Round 27 (P2): terminal failure must surface on the visible
         // widget — the Retry button's visibility is keyed on
         // .kiwi-widget[data-state="failed"] (it never appeared before,
         // because the state was never set on failure).
-        setStatus("Challenge failed", "Failed", "failed");
+        setStatus(kiwiT("label"), kiwiT("badgeFailed"), "failed");
         if (retryEl) retryEl.style.display = "";
+        // Round 28 (P2): the provider error callback fires exactly once
+        // per generation, at automatic-retry exhaustion.
+        fireErrorCallback(msg);
       }
     }
     // Build-id mismatch (audit #53): the worker reported a solver build id
@@ -1017,9 +1252,10 @@
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
-      setStatus("Solver version mismatch", "Version Error", "kiwi:solver-mismatch");
-      setHint("The solver worker is out of date \u2014 reload the page to load the current version.");
+      setStatus(kiwiT("statusSolverMismatch"), kiwiT("badgeVersionError"), "kiwi:solver-mismatch");
+      setHint(kiwiT("hintSolver"));
       setProgress(0);
+      fireErrorCallback("solver-mismatch");
     }
     // Round-13 invariant: worker creation failure or a worker solve failure
     // for a memory-hard challenge enters this controlled state. The token
@@ -1034,17 +1270,24 @@
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
-      setStatus("Worker unavailable", "Unavailable", "kiwi:worker-unavailable");
-      setHint("Worker unavailable \u2014 Argon2id needs a Web Worker that this page's CSP blocks; retry, or configure data-kiwi-worker-src.");
+      setStatus(kiwiT("statusWorkerUnavailable"), kiwiT("badgeUnavailable"), "kiwi:worker-unavailable");
+      setHint(kiwiT("hintWorker"));
       setProgress(0);
-      announce("Worker unavailable");
+      announce(kiwiT("statusWorkerUnavailable"));
       dispatch("worker-unavailable", { reason: reason || "worker-creation-failed" });
       delete W.dataset.kiwiStarted;
+      // Round 28 (P2): worker conditions are non-retryable within the
+      // flow — the provider error callback fires immediately.
+      fireErrorCallback("worker-unavailable");
     }
     // BFCache restore (audit #54): a persisted pageshow must NOT auto-solve —
     // it clears the solved state and leaves the widget idle, ready to
-    // reacquire on the next interaction or page re-init.
+    // reacquire on the next interaction or page re-init. Round 28 (P2): the
+    // restore also CANCELS the in-flight generation (abort fetch, terminate
+    // worker, clear retry/expiry timers) — a solve from before the restore
+    // can never write a token afterwards.
     function reset() {
+      kiwiCancelGeneration(widgetId);
       resetToIdle();
       delete W.dataset.kiwiStarted;
     }
@@ -1063,8 +1306,14 @@
     kiwiCleanups.set(W, function () { resetToIdle(); });
 
     async function run() {
+      // Round 28 (P2): every continuation is generation-guarded — a reset
+      // that lands while this run is in flight bumps the generation and
+      // aborts/terminates the handles; this run then bails without ever
+      // touching state.
+      var gen = (kiwiWidgets[widgetId] || {}).gen || 1;
+      if (!kiwiGenerationCurrent(widgetId, gen)) return;
       try {
-        setStatus("Connecting\u2026", "Wait", "connecting");
+        setStatus(kiwiT("statusConnecting"), kiwiT("badgeWait"), "connecting");
         var endpoint = kiwiEndpoint(W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge");
         // Algorithm selection (audit #62): the client may only select among
         // the solver profiles the server offers (sha256 / argon2id). Any
@@ -1084,6 +1333,8 @@
         if (!(fetchTimeoutMs > 0)) fetchTimeoutMs = KIWI_FETCH_TIMEOUT_MS;
         var abortController = new AbortController();
         var abortTimer = setTimeout(function () { abortController.abort(); }, fetchTimeoutMs);
+        var rw = kiwiWidgets[widgetId];
+        if (rw) { rw.abortController = abortController; rw.abortTimer = abortTimer; }
         var resp, data;
         try {
           resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody), signal: abortController.signal });
@@ -1091,15 +1342,19 @@
           data = await resp.json();
         } finally {
           clearTimeout(abortTimer);
+          var rw2 = kiwiWidgets[widgetId];
+          if (rw2 && rw2.abortTimer === abortTimer) rw2.abortTimer = null;
         }
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         // No weaker challenge (audit #62): the response algorithm may only
         // be equal or stronger than requested — a server downgrade (argon2id
         // requested, sha256 returned) is a FAILED challenge, never a weaker
         // solve. The client may only ever accept what it asked for or more.
         if (algorithm === "argon2id" && (data.algorithm || "sha256") !== "argon2id") throw new Error("Challenge downgraded");
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         if (data.ttlSecs) startCountdown(data.ttlSecs);
-        setStatus("Verifying\u2026", "Working", "solving");
-        announce("Checking\u2026");
+        setStatus(kiwiT("statusVerifying"), kiwiT("badgeWorking"), "solving");
+        announce(kiwiT("checking"));
         dispatch("verifying");
         var result = null;
         if ((data.algorithm || "sha256") === "argon2id") {
@@ -1107,18 +1362,28 @@
           // same-origin worker. There is no synchronous CHUNK=1 fallback
           // and no weaker-profile retry — a missing or failed worker enters
           // the controlled kiwi:worker-unavailable state.
-          result = await solveWithWorker(data, setProgress, container);
+          // Round 28 (P2): the worker handle is stored on the widget record
+          // so a cancelled generation can terminate() it outright.
+          var workerHandle = solveWithWorker(data, setProgress, container);
+          var wr = kiwiWidgets[widgetId];
+          if (wr) wr.worker = workerHandle.terminate;
+          result = await workerHandle.promise;
+          var wr2 = kiwiWidgets[widgetId];
+          if (wr2 && wr2.worker === workerHandle.terminate) wr2.worker = null;
+          if (!kiwiGenerationCurrent(widgetId, gen)) return;
           if (result && result.mismatch) { solverMismatch(); return; }
           if (!result || result.unavailable) { workerUnavailable(result ? result.reason : "solve-failed"); return; }
         } else {
           result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress);
         }
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         if (!result) throw new Error("Exhausted");
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()));
         setBinding(requestBinding || "");
         retryCount = 0;
-        setStatus("Verified", "Success", "done"); setHint("Proof-of-work verified locally."); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
-        announce("Verification complete");
+        setStatus(kiwiT("label"), kiwiT("badgeSuccess"), "done"); setHint(kiwiT("hintVerified")); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
+        announce(kiwiT("statusVerified"));
         var token = tokenEl.value;
         kiwiRecordState("verified", token);
         writeResponseAlias(token);
@@ -1130,7 +1395,10 @@
         scheduleExpiry(data.ttlSecs || 0);
         if (options.callback) { try { options.callback(token); } catch (e) {} }
         telemetry.stop();
-      } catch (e) { fail(e.message); }
+      } catch (e) {
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        fail(e.message);
+      }
     }
     dispatch("ready");
     run();
@@ -1173,6 +1441,9 @@
       if (!W || W.nodeType !== 1) continue;
       W.dataset.kiwiDestroyed = "1";
       kiwiResetHooks = kiwiResetHooks.filter(function (h) { return h.el !== W; });
+      if (W.dataset.kiwiInstance && kiwiWidgets[W.dataset.kiwiInstance]) {
+        kiwiCancelGeneration(W.dataset.kiwiInstance);
+      }
       var cleanup = kiwiCleanups.get(W);
       if (cleanup) { try { cleanup(); } catch (err) {} kiwiCleanups.delete(W); }
       kiwiRemoveListeners(W);
@@ -1250,7 +1521,10 @@
   function kiwiReset(id) {
     var r = kiwiWidgets[id];
     if (!r) return;
-    clearTimeout(r.expiryTimer); r.expiryTimer = null;
+    // Round 28 (P2): reset is cancellation — the old generation's fetch is
+    // aborted, its worker terminated, its retry/expiry timers cleared; the
+    // new initWidget starts generation +1.
+    kiwiCancelGeneration(id);
     var W = r.W;
     if (W) {
       var t = W.querySelector("[data-kiwi-token]");
@@ -1287,7 +1561,11 @@
         resolve(cur ? (cur.token || "") : "");
       };
       var onError = function (ev) {
-        reject(new Error((ev && ev.detail && ev.detail.reason) || "kiwicaptcha: solve failed"));
+        // Round 28 (P3): fail() dispatches {error: msg} — the promise must
+        // reject with the ACTUAL reason, not the generic fallback.
+        var detail = (ev && ev.detail) || {};
+        var reason = detail.error || detail.reason || "kiwicaptcha: solve failed";
+        reject(new Error(String(reason)));
       };
       if (W) {
         W.addEventListener("kiwi:verified", onVerified, { once: true });
@@ -1305,7 +1583,7 @@
   function kiwiRemove(id) {
     var r = kiwiWidgets[id];
     if (!r) return;
-    if (r.expiryTimer) clearTimeout(r.expiryTimer);
+    kiwiCancelGeneration(id);
     if (r.W) {
       kiwiDestroy(r.W);
       // Provider parity (Turnstile remove()): the widget markup leaves the
@@ -1342,6 +1620,10 @@
   // its provider script URL.
   var compat = null;
   var compatScriptUrl = null;
+  // Round 29 (P1): Google's API defaults reset()/getResponse() and
+  // invisible execute() to the FIRST CREATED widget when the id is
+  // omitted. Track the first successful compat render.
+  var kiwiCompatFirstId = null;
   // Round 26 (P1): when the driver is loaded as the external
   // /kiwi-captcha/api.js (glue + driver concatenated, split by the
   // /*KIWI_COMPAT_SPLIT*/ marker), the worker cannot find the glue in an
@@ -1359,6 +1641,18 @@
     compatScriptUrl = currentScript && currentScript.src ? currentScript.src : null;
     var compatMatch = compatScriptUrl ? compatScriptUrl.match(/[?&]compat=(recaptcha|hcaptcha|turnstile)/) : null;
     if (compatMatch) compat = compatMatch[1];
+    // Round 29 (P1): Google's standard explicit-loading form —
+    // render=explicit suppresses automatic rendering and the named onload
+    // callback runs after dependencies become ready. Both parameters are
+    // read from the loader URL exactly like the incumbent loader does.
+    var compatRenderMode = "auto";
+    var compatOnloadName = null;
+    if (compatScriptUrl) {
+      var renderMatch = compatScriptUrl.match(/[?&]render=explicit(?:&|$)/);
+      if (renderMatch) compatRenderMode = "explicit";
+      var onloadMatch = compatScriptUrl.match(/[?&]onload=([A-Za-z_$][A-Za-z0-9_$]*)/);
+      if (onloadMatch) compatOnloadName = onloadMatch[1];
+    }
     if (compat && compatScriptUrl) {
       // Round 27 (P2): revalidate — force-cache would let the browser
       // reuse a stale /api.js representation, defeating the server's ETag
@@ -1392,7 +1686,7 @@
         '<div class="kiwi-widget" data-kiwi-widget data-kiwi-started="1" data-state="idle" role="group" aria-label="KiwiCaptcha security check">' +
         '<div class="kiwi-icon-wrapper" aria-hidden="true">' + COMPAT_SVG + '<div class="kiwi-glow"></div></div>' +
         '<div class="kiwi-main"><div class="kiwi-top"><span class="kiwi-label" data-kiwi-label>Security Check</span><span class="kiwi-badge" data-kiwi-badge>Idle</span></div>' +
-        '<div class="kiwi-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="kiwi-bar" data-kiwi-bar></div></div>' +
+        '<div class="kiwi-track" aria-hidden="true"><div class="kiwi-bar" data-kiwi-bar></div></div>' +
         '<div class="kiwi-bottom"><p class="kiwi-info" data-kiwi-info>Protected by KiwiCaptcha</p><span class="kiwi-timer" data-kiwi-timer></span></div></div>' +
         '<span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span></div></div>';
     }
@@ -1408,8 +1702,25 @@
         errorCallback: cb("error-callback")
       };
     }
-    function compatRender(el, params) {
+    function compatRender(target, params) {
+      // Round 28 (P2): grecaptcha.render("id", ...) / render(selector, ...)
+      // resolve through the same target resolver as the native API — an
+      // explicit string id previously returned 0 silently.
+      var el = kiwiResolveTarget(target);
       if (!el || el.nodeType !== 1) return 0;
+      // Round 28 (P2): re-rendering an already-rendered container must be
+      // idempotent — the existing widget instance is returned instead of
+      // double-initializing the same container (a second solve on the same
+      // element would race the first). initWidget keys the instance on the
+      // CONTAINER (el.dataset.kiwiInstance); the inner [data-kiwi-widget]
+      // markup carries no instance id of its own.
+      if (el.dataset.kiwiInstance && kiwiWidgets[el.dataset.kiwiInstance]) {
+        return el.dataset.kiwiInstance;
+      }
+      var existingWidget = el.querySelector ? el.querySelector("[data-kiwi-widget]") : null;
+      if (existingWidget && existingWidget.dataset.kiwiInstance && kiwiWidgets[existingWidget.dataset.kiwiInstance]) {
+        return existingWidget.dataset.kiwiInstance;
+      }
       if (!el.querySelector("[data-kiwi-widget]")) {
         if (el.tagName === "BUTTON" || el.tagName === "INPUT") {
           // Invisible-style controls keep their label; the widget is
@@ -1444,11 +1755,24 @@
         callback: cbs.callback,
         expiredCallback: cbs.expiredCallback,
         errorCallback: cbs.errorCallback,
-        responseField: COMPAT_FIELD
+        // Round 29 (P3): Turnstile's configurable response field
+        // (response-field-name / params["response-field-name"]) — the
+        // default stays the provider-named field.
+        responseField: (params && typeof params["response-field-name"] === "string" && params["response-field-name"])
+          || el.getAttribute("data-response-field-name") || COMPAT_FIELD,
+        // Round 29 (WCAG 3.1.2): grecaptcha.render(el, {lang: "de"}) or
+        // data-kiwi-lang on the incumbent container.
+        lang: (params && typeof params.lang === "string" && params.lang)
+          || el.getAttribute("data-kiwi-lang") || undefined
       });
+      if (id && !kiwiCompatFirstId) kiwiCompatFirstId = id;
       return id || 0;
     }
     function compatExecute(arg, opts) {
+      // Round 29 (P1): execute() with NO argument targets the first widget.
+      if (arg === undefined || arg === null) {
+        return kiwiCompatFirstId ? kiwiExecute(kiwiCompatFirstId) : Promise.reject(new Error("kiwicaptcha: no widget has been rendered"));
+      }
       var id = (typeof arg === "string" && kiwiWidgets[arg]) ? arg : null;
       if (id) return kiwiExecute(id);
       // v3-style execute(sitekey, {action}): map action -> Kiwi scope on a
@@ -1462,34 +1786,79 @@
       var inner = document.createElement("div");
       inner.className = "kiwi-container";
       inner.setAttribute("data-kiwi-scope", action);
-      inner.innerHTML = compatMarkup();
       holder.appendChild(inner);
       document.body.appendChild(holder);
-      var id2 = kiwiRender(inner, { scope: action, responseField: COMPAT_FIELD });
-      return kiwiExecute(id2);
+      // Round 28 (P3): render through compatRender so the same endpoint/
+      // scope/response-field defaults land on the holder (an explicit
+      // native-default endpoint would 404 on a compat deployment).
+      var id2 = compatRender(inner, { sitekey: action });
+      if (!id2) {
+        if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+        return Promise.reject(new Error("kiwicaptcha: hidden render failed"));
+      }
+      var p = kiwiExecute(id2);
+      // Round 28 (P3): a long-lived SPA repeatedly calling execute()
+      // must not accumulate hidden DOM, registry entries or reset hooks —
+      // the holder is removed and the widget destroyed on BOTH paths.
+      if (p && typeof p.then === "function") {
+        return p.then(function (tok) {
+          if (id2 && kiwiWidgets[id2]) kiwiRemove(id2);
+          if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+          return tok;
+        }, function (err) {
+          if (id2 && kiwiWidgets[id2]) kiwiRemove(id2);
+          if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+          throw err;
+        });
+      }
+      return p;
+    }
+    function compatResolveId(idOrEl) {
+      // Round 29 (P1): an OMITTED id targets the first created widget
+      // (the incumbent providers' documented default); an element resolves
+      // to its rendered widget instance.
+      if (idOrEl === undefined || idOrEl === null) return kiwiCompatFirstId;
+      if (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) return idOrEl;
+      if (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector) {
+        return (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance || null;
+      }
+      return null;
     }
     var compatApi = {
       render: compatRender,
       reset: function (idOrEl) {
-        var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
-          : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+        var id = compatResolveId(idOrEl);
         if (id) kiwiReset(id);
       },
       getResponse: function (idOrEl) {
-        var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
-          : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+        var id = compatResolveId(idOrEl);
         return id ? kiwiGetResponse(id) : "";
       },
       execute: compatExecute,
       remove: function (idOrEl) {
-        var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
-          : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+        var id = compatResolveId(idOrEl);
         if (id) kiwiRemove(id);
+      },
+      // Round 29 (P3): Turnstile's ready() + isExpired() lifecycle surface.
+      ready: function (fn) {
+        if (typeof fn !== "function") return;
+        (kiwiCompatGlueReady || Promise.resolve()).then(function () { try { fn(); } catch (e) {} });
+      },
+      isExpired: function (idOrEl) {
+        var id = compatResolveId(idOrEl);
+        return id ? kiwiIsExpired(id) : false;
       }
     };
     if (compat === "recaptcha") {
       window.grecaptcha = window.grecaptcha || Object.assign({}, compatApi, {
-        ready: function (fn) { if (typeof fn === "function") { try { fn(); } catch (e) {} } },
+        // Round 28 (P2): ready() queues until the compat loader's glue
+        // self-fetch resolves — an explicit render() inside ready() that
+        // immediately starts an Argon challenge can no longer race the
+        // glue bootstrap (implicit rendering already waited).
+        ready: function (fn) {
+          if (typeof fn !== "function") return;
+          (kiwiCompatGlueReady || Promise.resolve()).then(function () { try { fn(); } catch (e) {} });
+        },
         enterprise: undefined
       });
     } else if (compat === "hcaptcha") {
@@ -1504,10 +1873,21 @@
       window.turnstile = window.turnstile || compatApi;
     }
     compatInjectCss();
-    // Implicit render: every incumbent container on the page. The initial
-    // render waits for the loader-glue fetch so Argon2id solves work on
-    // first paint through the external /api.js path (round 26).
+    // Round 29 (P1): render=explicit suppresses automatic rendering — the
+    // application calls render() itself (the documented explicit pattern);
+    // onload=<fn> runs after the loader glue is ready so an immediate
+    // explicit Argon render can never race the glue bootstrap.
     (kiwiCompatGlueReady || Promise.resolve()).then(function () {
+      if (compatOnloadName) {
+        try {
+          var onloadFn = window[compatOnloadName];
+          if (typeof onloadFn === "function") onloadFn();
+        } catch (e) {}
+      }
+      if (compatRenderMode === "explicit") return;
+      // Implicit render: every incumbent container on the page. The initial
+      // render waits for the loader-glue fetch so Argon2id solves work on
+      // first paint through the external /api.js path (round 26).
       var compatContainers = document.querySelectorAll(COMPAT_SELECTOR);
       for (var ci = 0; ci < compatContainers.length; ci++) {
         var el = compatContainers[ci];
@@ -1542,15 +1922,10 @@
 
   var runInit = function() {
     document.querySelectorAll("[data-kiwi-widget]").forEach(function (W) {
-      // Click-to-reacquire: after a reset or a settled failure the widget
-      // is idle and ready for a fresh challenge on the next interaction
-      // (audit #54/#55). Bound once per element.
-      if (!W.dataset.kiwiRetryBound) {
-        W.dataset.kiwiRetryBound = "1";
-        kiwiAddListener(W, "pointerdown", function () {
-          if (!W.dataset.kiwiStarted) initWidget(W);
-        });
-      }
+      // Round 29 (WCAG 2.5.2): no pointerdown-only activation. After a
+      // reset or a settled failure the widget is idle; the native Retry
+      // button (visible in idle/failed/unavailable states via
+      // data-state CSS) is the reacquire control for EVERY input method.
       initWidget(W);
     });
   };

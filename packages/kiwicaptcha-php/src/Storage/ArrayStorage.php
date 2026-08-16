@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Storage;
 
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
+use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ConsumedResult;
 use KiwiCaptcha\StorageInterface;
 
@@ -15,11 +16,16 @@ use KiwiCaptcha\StorageInterface;
  *
  * consume() is the one-shot TRANSITION (audit #74): the record is marked
  * consumed and KEPT until deletion — replay protection is the consumed
- * marker, not absence. The transition is read-then-write: NOT atomic under
- * concurrency (two racing requests in the same process can both win
- * `consumedNow`). Use {@see RedisStorage} for strict single-use.
+ * marker, not absence. The transition is read-then-write; the state is a
+ * plain in-process array that NO other process or thread can observe (PHP
+ * copies on fork, so forked children never share it). Because the state is
+ * unshareable, the read-modify-write transition is de-facto atomic — the
+ * class therefore implements {@see AtomicStorageInterface}. Shared backends
+ * with genuine concurrent access (PSR-6 pools, Redis MULTI-less clients)
+ * must implement the compare-and-set contract themselves; see
+ * {@see Psr6Storage} for the documented counter-example.
  */
-final class ArrayStorage implements StorageInterface
+final class ArrayStorage implements AtomicStorageInterface
 {
     /** @var array<string, array{record: ChallengeRecord, consumed: bool, result: ConsumedResult|null}> */
     private array $records = [];

@@ -7,6 +7,7 @@ namespace KiwiCaptcha\Risk\Tests;
 use KiwiCaptcha\Risk\ResourcePressure;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskPolicy;
+use KiwiCaptcha\Risk\RiskReason;
 use KiwiCaptcha\Risk\RiskWeights;
 use KiwiCaptcha\Risk\ScopeActionHysteresis;
 use KiwiCaptcha\Risk\SignalVector;
@@ -239,4 +240,45 @@ final class ScopeActionHysteresisTest extends TestCase
             $h->lastAction(ScopeActionHysteresis::MAX_SCOPES + 1, $now + 10_000_000)
         );
     }
+
+
+    /**
+     * Round 28 (P3): deterministic logical-clock boundary test for the
+     * COOLDOWN hold gate (the real-Redis cooldown integration test can
+     * legitimately zero-assert if the process is suspended across the
+     * whole interval — this pure-function test pins the exact edges).
+     * The gate: cooldown denial applies only while
+     * nowMs < cooldownUntilMs AND globalLevel >= 4.
+     */
+    public function testCooldownHoldBoundariesCooldownMinusOneThroughPlusOne(): void
+    {
+        $policy = $this->policy();
+        $h = new ScopeActionHysteresis();
+        $cooldown = self::T0 + 10_000;
+
+        $inside = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 4, $cooldown - 1, $cooldown, $h);
+        self::assertSame(RiskAction::Deny, $inside->action, 'cooldown - 1 ms: still inside the hold window -> Deny');
+        self::assertContains(RiskReason::Cooldown, $inside->reasons);
+
+        $exact = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 4, $cooldown, $cooldown, $h);
+        self::assertNotSame(RiskAction::Deny, $exact->action, 'cooldown + 0 ms: the hold expires AT the deadline');
+
+        $after = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 4, $cooldown + 1, $cooldown, $h);
+        self::assertNotSame(RiskAction::Deny, $after->action, 'cooldown + 1 ms: fully outside the hold window');
+    }
+
+    public function testCooldownHoldRequiresEmergencyLevel(): void
+    {
+        $policy = $this->policy();
+        $h = new ScopeActionHysteresis();
+        $cooldown = self::T0 + 10_000;
+
+        // Level 3 (below the emergency threshold) ignores the hold marker:
+        // an elevated-but-not-emergency global level must not become a
+        // blanket admission stop.
+        $level3 = $policy->decide(1, 100, SignalVector::zero(), new ResourcePressure(1000, 1000), 3, $cooldown - 1, $cooldown, $h);
+        self::assertNotSame(RiskAction::Deny, $level3->action);
+        self::assertNotContains(RiskReason::Cooldown, $level3->reasons);
+    }
+
 }

@@ -47,8 +47,8 @@ namespace KiwiCaptcha;
  * since round 9; see {@see Issuer::canonicalPayload()}): the region the
  * challenge was issued for, or null when unbound. The JSON key is ALWAYS
  * present (null when unbound) for byte parity with the Rust serde schema
- * (21 keys), which the Rust reader requires via `#[serde(default)]` for
- * legacy records. A verifier configured with an expected region rejects
+ * (23 keys including hostname), which the Rust reader requires via
+ * `#[serde(default)]` for legacy records. A verifier configured with an expected region rejects
  * records whose region does not match exactly
  * ({@see \KiwiCaptcha\VerifyError::WrongRegion}).
  *
@@ -95,7 +95,8 @@ namespace KiwiCaptcha;
 final class ChallengeRecord
 {
     /**
-     * The 22-key wire schema, mirroring the Rust serde struct fields
+     * The 23-key wire schema (round 28: hostname is the 23rd key, always
+     * present, null when unbound), mirroring the Rust serde struct fields
      * (deny_unknown_fields). `ip_hash` is the legacy v1 alias for
      * `binding_tag` (serde `#[serde(alias = "ip_hash")]`). `issuer`
      * (audit #67) is the deployment identity — always present, null when

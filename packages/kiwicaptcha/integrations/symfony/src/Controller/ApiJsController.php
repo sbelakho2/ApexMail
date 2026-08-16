@@ -18,12 +18,17 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  * (grecaptcha/hcaptcha/turnstile), and keeps the provider-named response
  * field in sync — an incumbent page changes only its provider script URL.
  *
- * The response is an immutable, cacheable public asset (the bytes are the
- * same canonical assets the browser tests verify); CSP guidance: this path
- * is served same-origin, so a conventional deployment approaches
- * `script-src 'self'` + `worker-src 'self'` with no inline/blob
- * directives (SHA-256 mode needs no WASM capability thanks to the pure-JS
- * fallback; Argon2id deployments add the WASM permission).
+ * Round 28 (P3) wording: the response is a MUTABLE public asset (the
+ * stable {prefix}/api.js URL changes on every upgrade) with ETag + no-cache
+ * revalidation — the bytes ARE the same canonical assets the browser tests
+ * verify, but only versioned/content-addressed URLs (e.g.
+ * /kiwicaptcha/v1.6.20/api.js) or the release SHA256SUMS/SRI pins are
+ * immutable. CSP guidance: the path is served same-origin; Argon2id solves
+ * REQUIRE a Blob worker built by this same-origin script, so a conventional
+ * deployment must allow blob: workers — `script-src 'self'` +
+ * `worker-src 'self' blob:` (SHA-256 mode needs no worker and no WASM
+ * capability thanks to the pure-JS solver; Argon2id adds the WASM
+ * permission via the worker's own CSP-less context).
  */
 final class ApiJsController
 {

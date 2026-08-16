@@ -46,6 +46,7 @@ use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\RedisStorage;
+use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -188,6 +189,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $container->setParameter('kiwi_captcha.min_duration_ms', $config['min_duration_ms']);
 
         $storageRef = $this->resolveStorage($config['storage'], $this->environment($container), $container);
+        $this->requireAtomicStorageWhenNeeded(
+            $storageRef,
+            $config['storage'],
+            $this->environment($container),
+            (bool) ($config['allow_best_effort_storage'] ?? false),
+            $config['risk']['siteverify_secrets'] ?? [],
+            $container,
+        );
         $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
 
         // Audit #22/#23: the risk.redis knobs (wait_replicas /
@@ -223,6 +232,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Audit #42: the security-policy epoch (risk.policy_version) is
             // stamped into every issued challenge record.
             ->setArgument('$policyVersion', $config['risk']['policy_version'])
+            // Round 28 (P2): deployment issuer + signing key id are now
+            // first-class bundle options (HMAC-key rotation control) — the
+            // core's strongest identity/key controls are no longer only
+            // reachable by replacing services.
+            ->setArgument('$issuer', $config['issuer'])
+            ->setArgument('$kid', $config['kid'])
             ->setPublic(true);
         $container->setDefinition('kiwi_captcha.config', $configDef);
 
@@ -301,6 +316,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // (WrongPolicyVersion) so bumping risk.policy_version invalidates
             // outstanding challenges immediately.
             ->setArgument('$expectedPolicyVersion', $config['risk']['policy_version'])
+            // Round 28 (P2): HMAC-key rotation (secretsByKid) + emergency
+            // revocation (revokedKids) + expected issuer are first-class
+            // bundle options now.
+            ->setArgument('$expectedIssuer', $config['issuer'])
+            ->setArgument('$secretsByKid', $config['secrets_by_kid'])
+            ->setArgument('$revokedKids', $config['revoked_kids'])
             ->setPublic(true));
         if ($config['risk']['region'] !== null) {
             $container->getDefinition('kiwi_captcha.verifier')
@@ -728,7 +749,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Round 26: map of siteverify secret -> expected scope; empty
             // disables the endpoint.
             $riskConfig['siteverify_secrets'],
-            new Reference(StorageInterface::class),
+            // Round 28 (P1): the one-success provider contract REQUIRES an
+            // atomic backend — requireAtomicStorageWhenNeeded() refuses any
+            // non-atomic combination (Psr6Storage included) at compile time.
+            $riskConfig['siteverify_secrets'] !== [] ? new Reference(StorageInterface::class) : null,
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Migration compatibility loader (round 24) ──
@@ -851,6 +875,67 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return new Reference($storageId);
+    }
+
+    /**
+     * Round 28 (P1): strict single-use requires an ATOMIC storage backend.
+     * In production (not test/dev):
+     *  - unless allow_best_effort_storage is explicitly true, the resolved
+     *    storage must implement KiwiCaptcha\AtomicStorageInterface — a
+     *    non-atomic backend (e.g. Psr6Storage) lets two racing requests
+     *    both observe pending and both win verification (the documented
+     *    PSR-6 race semantics);
+     *  - when siteverify_secrets is configured, an atomic backend is
+     *    REQUIRED REGARDLESS of the override — the provider one-success
+     *    contract cannot exist on a non-atomic backend, so the container
+     *    refuses the combination.
+     * Fails closed at container compile time (a LogicException names the
+     * exact misconfiguration).
+     *
+     * @param array<string, string> $siteverifySecrets
+     */
+    private function requireAtomicStorageWhenNeeded(Reference $storageRef, string $storageId, string $environment, bool $allowBestEffort, array $siteverifySecrets, ContainerBuilder $container): void
+    {
+        $siteverifyEnabled = $siteverifySecrets !== [];
+        $production = !\in_array($environment, ['test', 'dev'], true);
+        if (!$production && !$siteverifyEnabled) {
+            return;
+        }
+        if ($siteverifyEnabled && $allowBestEffort) {
+            throw new \LogicException('KiwiCaptcha: siteverify_secrets requires an ATOMIC storage backend (KiwiCaptcha\AtomicStorageInterface) — the provider one-success contract is impossible on a non-atomic backend, and allow_best_effort_storage cannot override this combination.');
+        }
+
+        $id = $storageId;
+        if ($container->hasAlias($id)) {
+            $id = (string) $container->getAlias($id);
+        }
+        $class = null;
+        if ($container->hasDefinition($id)) {
+            $class = $container->getDefinition($id)->getClass();
+            if ($class !== null && str_starts_with($class, '%') && $container->hasParameter(trim($class, '%'))) {
+                $class = $container->getParameter(trim($class, '%'));
+            }
+        }
+        $isAtomic = $class !== null && \is_string($class) && \is_a($class, AtomicStorageInterface::class, true);
+        if ($isAtomic) {
+            return;
+        }
+        if ($siteverifyEnabled) {
+            throw new \LogicException(sprintf(
+                'KiwiCaptcha: siteverify_secrets requires an ATOMIC storage backend (KiwiCaptcha\AtomicStorageInterface) — the provider one-success contract is impossible on a non-atomic backend. Configure "storage: kiwicaptcha.storage.redis" (RedisStorage) or any service implementing AtomicStorageInterface (resolved class %s).',
+                $class === null ? '(unresolvable)' : $class,
+            ));
+        }
+        if ($allowBestEffort) {
+            return;
+        }
+        if ($production) {
+            throw new \LogicException(sprintf(
+                'KiwiCaptcha: production verification requires an ATOMIC storage backend (KiwiCaptcha\AtomicStorageInterface — e.g. RedisStorage, whose Lua pending→consumed transition guarantees exactly one winner). The configured storage %s resolves to %s. Set the explicitly-named "allow_best_effort_storage: true" only if you deliberately accept weaker concurrency semantics.',
+                $storageId,
+                $class === null ? '(unresolvable class)' : $class,
+            ));
+        }
     }
 
     /**

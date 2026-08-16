@@ -54,6 +54,10 @@
     --kiwi-bg: #fafafa;
     --kiwi-text: #333333;
     --kiwi-text-muted: #737373;
+    /* Round 29: the badge's neutral-state foreground must clear 4.5:1 on
+       the --kiwi-border surface (muted #737373 measured 3.59:1) — #5c5c5c
+       gives 5.07:1 with headroom. */
+    --kiwi-badge-text: #5c5c5c;
     --kiwi-border: #e0e0e0;
 
     /* Shadow — subtle, single-layer (Turnstile-style, not heavy). */
@@ -75,6 +79,7 @@
       --kiwi-bg: #222222;
       --kiwi-text: #f5f5f5;
       --kiwi-text-muted: #a3a3a3;
+      --kiwi-badge-text: #a3a3a3;
       --kiwi-primary: #60a5fa;
       --kiwi-primary-rgb: 96, 165, 250;
       --kiwi-success: #34d399;
@@ -124,7 +129,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgb(var(--kiwi-primary-rgb) / 0.08);
+    background: rgba(var(--kiwi-primary-rgb), 0.08);
     color: var(--kiwi-primary);
     transition: background 0.3s ease, color 0.3s ease, transform 0.3s ease;
     position: relative;
@@ -143,7 +148,7 @@
   }
   /* --- State: failed (error icon — red on ICON only, per Cloudflare rule) --- */
   .kiwi-widget[data-state="failed"] .kiwi-icon-wrapper {
-    background: rgb(var(--kiwi-error-rgb) / 0.1);
+    background: rgba(var(--kiwi-error-rgb), 0.1);
     color: var(--kiwi-error);
   }
   @keyframes kiwi-pulse {
@@ -178,20 +183,29 @@
     padding: 2px 6px;
     border-radius: var(--kiwi-radius);
     background: var(--kiwi-border);
-    color: var(--kiwi-text-muted);
-    transition: background 0.3s ease, color 0.3s ease;
+    color: var(--kiwi-badge-text);
+    /* Round 29: NO color transition — a 0.3s cross-fade passes through
+       low-contrast mixes of the two state colors (the badge changes
+       instantly; WCAG 1.4.3 applies to every visible state). */
   }
+  /* Round 29 (WCAG 1.4.3): the state colors on their 12% tints measured
+     3.86-3.96:1 — below the 4.5:1 normal-text threshold. The badge
+     foregrounds are darkened (blue 5.71:1, green 6.09:1, red 5.05:1 on
+     the #FAFAFA-tinted surfaces) so antialiasing and future palette
+     changes keep >= 5:1 headroom. Color is never the only state signal:
+     the badge TEXT ("Working"/"Success"/"Failed") and the live-region
+     announcements carry the state for non-color users. */
   .kiwi-widget[data-state="solving"] .kiwi-badge {
-    background: rgb(var(--kiwi-primary-rgb) / 0.12);
-    color: var(--kiwi-primary);
+    background: rgba(var(--kiwi-primary-rgb), 0.12);
+    color: #1055ad;
   }
   .kiwi-widget[data-state="done"] .kiwi-badge {
-    background: rgb(var(--kiwi-success-rgb) / 0.12);
-    color: var(--kiwi-success);
+    background: rgba(var(--kiwi-success-rgb), 0.12);
+    color: #00603e;
   }
   .kiwi-widget[data-state="failed"] .kiwi-badge {
-    background: rgb(var(--kiwi-error-rgb) / 0.12);
-    color: var(--kiwi-error);
+    background: rgba(var(--kiwi-error-rgb), 0.12);
+    color: #b91c1c;
   }
 
   /* --- Progress bar (4px — Friendly Captcha convention) --- */
@@ -258,6 +272,12 @@
     font-family: inherit;
     line-height: 1.2;
     padding: 4px 10px;
+    /* Round 29 (WCAG 2.5.8): the 11px/1.2/4px-padding/1px-border button
+       measured ~23.2 CSS px tall — below the 24x24 AA baseline. The
+       target is a full 32px minimum height (an accessibility/security
+       control has no reason to be cramped) and 24px minimum width. */
+    min-height: 32px;
+    min-width: 24px;
     border: 1px solid var(--kiwi-primary);
     border-radius: var(--kiwi-radius);
     background: transparent;
@@ -265,8 +285,13 @@
     cursor: pointer;
   }
   .kiwi-retry:hover {
-    background: rgb(var(--kiwi-primary-rgb) / 0.08);
+    background: rgba(var(--kiwi-primary-rgb), 0.08);
   }
+  /* Round 29 (WCAG 2.5.2/2.1.1): idle also shows the native Retry —
+     after a reset/BFCache restore the widget needs manual reacquisition,
+     and the button is the keyboard-accessible path (the widget itself
+     stays a passive, non-focusable group). */
+  .kiwi-widget[data-state="idle"] .kiwi-retry,
   .kiwi-widget[data-state="failed"] .kiwi-retry,
   .kiwi-widget[data-state="kiwi:worker-unavailable"] .kiwi-retry {
     display: inline-flex;
@@ -292,7 +317,7 @@
   .kiwi-glow {
     position: absolute;
     top: 0; left: -100%; width: 50%; height: 100%;
-    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.2), transparent);
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
     transform: skewX(-25deg);
     pointer-events: none;
   }
@@ -317,5 +342,29 @@
     .kiwi-retry {
       animation: none !important;
       transition: none !important;
+    }
+  }
+
+  /* Round 29 (forced-colors): the widget's custom palette is replaced by
+     the user's system colors; the Retry button keeps its border/background
+     contrast from the OS palette and the focus ring stays visible. */
+  @media (forced-colors: active) {
+    .kiwi-widget {
+      border: 1px solid CanvasText;
+    }
+    .kiwi-retry {
+      border: 1px solid ButtonText;
+      background: ButtonFace;
+      color: ButtonText;
+    }
+    .kiwi-badge,
+    .kiwi-widget[data-state="solving"] .kiwi-badge,
+    .kiwi-widget[data-state="done"] .kiwi-badge,
+    .kiwi-widget[data-state="failed"] .kiwi-badge {
+      background: transparent;
+      color: CanvasText;
+    }
+    .kiwi-track {
+      border: 1px solid CanvasText;
     }
   }

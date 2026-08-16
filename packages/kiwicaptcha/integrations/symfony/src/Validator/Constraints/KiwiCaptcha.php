@@ -100,6 +100,15 @@ class KiwiCaptcha extends Constraint
         mixed $payload = null,
     ) {
         parent::__construct($options, $groups, $payload);
+        // Symfony 8 removed the array-options -> constructor-parameter
+        // hydration (deprecated since 7.1), so `new KiwiCaptcha(['scope'
+        // => 'login'])` — the documented convention on 6.x/7.x — silently
+        // produced a null scope. Accept BOTH forms explicitly: array
+        // options (6.x/7.x convention) and named arguments (8.x).
+        if (\is_array($options)) {
+            $scope = \is_string($options['scope'] ?? null) ? $options['scope'] : $scope;
+            $message = \is_string($options['message'] ?? null) ? $options['message'] : $message;
+        }
         $this->scope = $scope ?? $this->scope;
         $this->message = $message ?? $this->message;
     }
