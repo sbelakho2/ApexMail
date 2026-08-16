@@ -89,15 +89,19 @@ module.exports = {
         mono: ['var(--font-mono)'],
       },
       borderRadius: {
+        DEFAULT: 'var(--radius)',
         sm: 'var(--radius-sm)',
         md: 'var(--radius-md)',
         lg: 'var(--radius-lg)',
         xl: 'var(--radius-xl)',
+        '2xl': 'var(--radius-xl)',
       },
       boxShadow: {
-        premium: '0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)',
-        'premium-sm': '0 4px 12px rgba(0, 0, 0, 0.05)',
-        'premium-hover': '0 20px 40px rgba(0, 0, 0, 0.12)',
+        premium:
+          '0 1px 2px rgb(15 17 22 / 0.04), 0 6px 16px rgb(15 17 22 / 0.06)',
+        'premium-sm': '0 1px 2px rgb(15 17 22 / 0.04)',
+        'premium-hover':
+          '0 1px 2px rgb(15 17 22 / 0.05), 0 10px 24px rgb(15 17 22 / 0.09)',
         inner: 'inset 0 2px 4px 0 rgb(0 0 0 / 0.05)',
       },
       transitionTimingFunction: {

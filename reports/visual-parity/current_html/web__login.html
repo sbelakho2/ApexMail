@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en" class="__variable_712c26 __variable_60443c"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexMail</title><meta name="description" content="Modern email infrastructure for developers"><script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();</script><link rel="stylesheet" href="/assets/globals.css"></head><body class="font-apex antialiased text-[16px] leading-[1.55]"><a href="#app-main" class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950">Skip to content</a><main id="app-main" class="min-h-screen bg-background"><main class="min-h-screen bg-[#f8f9fa] relative flex items-center justify-center p-6"><div class="absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid"></div><div class="relative z-10 w-full max-w-[400px]"><div class="bg-white rounded-2xl shadow-premium border border-surface-200/60 overflow-hidden"><div class="p-8 pb-0"><a href="/" class="inline-block mb-6 group transition-all hover:opacity-80"><span class="text-2xl font-bold tracking-tighter"><span class="text-primary">Apex</span><span class="text-surface-950">Mail</span></span></a><h1 class="text-2xl font-bold text-surface-950 tracking-tight">Welcome back</h1><p class="text-surface-500 mt-2 text-sm font-medium">Sign in to your ApexMail account</p></div><form class="p-8 space-y-6" action="/v1/auth/login" method="POST"><input type="hidden" name="_csrf" value="" /><div class="space-y-2"><label class="text-xs font-bold text-surface-900" for="login-email">Email</label><input id="login-email" name="email" type="email" required autocomplete="username" placeholder="you@example.com" class="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950" /></div><div class="space-y-2"><div class="flex items-center justify-between"><label class="text-xs font-bold text-surface-900" for="password">Password</label></div><div class="relative"><input id="password" name="password" type="password" required autocomplete="current-password" placeholder="Enter password" class="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12" /><button type="button" class="absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors" aria-label="Show password" aria-pressed="false" data-password-toggle="password" aria-controls="password">Show</button></div></div><div class="flex items-center justify-between py-1"><div class="flex items-center gap-2"><input id="rememberMe" name="rememberMe" type="checkbox" checked class="h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary transition-all cursor-pointer" /><label for="rememberMe" class="text-xs text-surface-500 font-medium cursor-pointer">Keep me signed in</label></div><a href="/forgot-password" class="text-xs font-bold text-primary hover:text-brand-700">Forgot password?</a></div><style>
+<!DOCTYPE html><html lang="en" class="__variable_712c26 __variable_60443c"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexMail</title><meta name="description" content="Modern email infrastructure for developers"><script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;function a(){d.classList.remove('dark','light');var v=localStorage.getItem(k);if(v==='dark'||(!v&&window.matchMedia('(prefers-color-scheme:dark)').matches)){d.classList.add('dark')}else if(v==='light'){d.classList.add('light')}}function t(){var v=localStorage.getItem(k);var m=['system','dark','light'];var i=v?m.indexOf(v):0;if(i<0)i=0;i=(i+1)%3;var n=m[i];if(n==='system'){localStorage.removeItem(k)}else{localStorage.setItem(k,n)}a();var b=document.querySelector('[data-theme-toggle]');if(b){b.setAttribute('aria-pressed',n==='dark'?'true':'false')}}a();document.addEventListener('click',function(e){var b=e.target.closest('[data-theme-toggle]');if(b){e.preventDefault();t()}})})();</script><link rel="stylesheet" href="/assets/globals.css"></head><body class="font-apex antialiased text-[16px] leading-[1.55]"><a href="#app-main" class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950">Skip to content</a><main id="app-main" class="min-h-screen bg-background"><main class="min-h-screen bg-[#f8f9fa] relative flex items-center justify-center p-6"><div class="absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid"></div><div class="relative z-10 w-full max-w-[400px]"><div class="bg-white rounded-xl shadow-premium border border-surface-200/60 overflow-hidden"><div class="p-8 pb-0"><a href="/" class="inline-block mb-6 group transition-all hover:opacity-80"><span class="text-2xl font-bold tracking-tighter"><span class="text-primary">Apex</span><span class="text-surface-950">Mail</span></span></a><h1 class="text-2xl font-bold text-surface-950 tracking-tight">Welcome back</h1><p class="text-surface-500 mt-2 text-sm font-medium">Sign in to your ApexMail account</p></div><form class="p-8 space-y-6" action="/v1/auth/login" method="POST"><input type="hidden" name="_csrf" value="" /><div class="space-y-2"><label class="text-xs font-bold text-surface-900" for="login-email">Email</label><input id="login-email" name="email" type="email" required autocomplete="username" placeholder="you@example.com" class="w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950" /></div><div class="space-y-2"><div class="flex items-center justify-between"><label class="text-xs font-bold text-surface-900" for="password">Password</label></div><div class="relative"><input id="password" name="password" type="password" required autocomplete="current-password" placeholder="Enter password" class="w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12" /><button type="button" class="absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors" aria-label="Show password" aria-pressed="false" data-password-toggle="password" aria-controls="password">Show</button></div></div><div class="flex items-center justify-between py-1"><div class="flex items-center gap-2"><input id="rememberMe" name="rememberMe" type="checkbox" checked class="h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary transition-all cursor-pointer" /><label for="rememberMe" class="text-xs text-surface-500 font-medium cursor-pointer">Keep me signed in</label></div><a href="/forgot-password" class="text-xs font-bold text-primary hover:text-brand-700">Forgot password?</a></div><style>
 /* ==========================================================================
    KiwiCaptcha widget — industry-aligned design system
    ==========================================================================
@@ -55,6 +55,10 @@
     --kiwi-bg: #fafafa;
     --kiwi-text: #333333;
     --kiwi-text-muted: #737373;
+    /* Round 29: the badge's neutral-state foreground must clear 4.5:1 on
+       the --kiwi-border surface (muted #737373 measured 3.59:1) — #5c5c5c
+       gives 5.07:1 with headroom. */
+    --kiwi-badge-text: #5c5c5c;
     --kiwi-border: #e0e0e0;
 
     /* Shadow — subtle, single-layer (Turnstile-style, not heavy). */
@@ -76,6 +80,7 @@
       --kiwi-bg: #222222;
       --kiwi-text: #f5f5f5;
       --kiwi-text-muted: #a3a3a3;
+      --kiwi-badge-text: #a3a3a3;
       --kiwi-primary: #60a5fa;
       --kiwi-primary-rgb: 96, 165, 250;
       --kiwi-success: #34d399;
@@ -125,7 +130,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgb(var(--kiwi-primary-rgb) / 0.08);
+    background: rgba(var(--kiwi-primary-rgb), 0.08);
     color: var(--kiwi-primary);
     transition: background 0.3s ease, color 0.3s ease, transform 0.3s ease;
     position: relative;
@@ -144,7 +149,7 @@
   }
   /* --- State: failed (error icon — red on ICON only, per Cloudflare rule) --- */
   .kiwi-widget[data-state="failed"] .kiwi-icon-wrapper {
-    background: rgb(var(--kiwi-error-rgb) / 0.1);
+    background: rgba(var(--kiwi-error-rgb), 0.1);
     color: var(--kiwi-error);
   }
   @keyframes kiwi-pulse {
@@ -179,20 +184,29 @@
     padding: 2px 6px;
     border-radius: var(--kiwi-radius);
     background: var(--kiwi-border);
-    color: var(--kiwi-text-muted);
-    transition: background 0.3s ease, color 0.3s ease;
+    color: var(--kiwi-badge-text);
+    /* Round 29: NO color transition — a 0.3s cross-fade passes through
+       low-contrast mixes of the two state colors (the badge changes
+       instantly; WCAG 1.4.3 applies to every visible state). */
   }
+  /* Round 29 (WCAG 1.4.3): the state colors on their 12% tints measured
+     3.86-3.96:1 — below the 4.5:1 normal-text threshold. The badge
+     foregrounds are darkened (blue 5.71:1, green 6.09:1, red 5.05:1 on
+     the #FAFAFA-tinted surfaces) so antialiasing and future palette
+     changes keep >= 5:1 headroom. Color is never the only state signal:
+     the badge TEXT ("Working"/"Success"/"Failed") and the live-region
+     announcements carry the state for non-color users. */
   .kiwi-widget[data-state="solving"] .kiwi-badge {
-    background: rgb(var(--kiwi-primary-rgb) / 0.12);
-    color: var(--kiwi-primary);
+    background: rgba(var(--kiwi-primary-rgb), 0.12);
+    color: #1055ad;
   }
   .kiwi-widget[data-state="done"] .kiwi-badge {
-    background: rgb(var(--kiwi-success-rgb) / 0.12);
-    color: var(--kiwi-success);
+    background: rgba(var(--kiwi-success-rgb), 0.12);
+    color: #00603e;
   }
   .kiwi-widget[data-state="failed"] .kiwi-badge {
-    background: rgb(var(--kiwi-error-rgb) / 0.12);
-    color: var(--kiwi-error);
+    background: rgba(var(--kiwi-error-rgb), 0.12);
+    color: #b91c1c;
   }
 
   /* --- Progress bar (4px — Friendly Captcha convention) --- */
@@ -259,6 +273,12 @@
     font-family: inherit;
     line-height: 1.2;
     padding: 4px 10px;
+    /* Round 29 (WCAG 2.5.8): the 11px/1.2/4px-padding/1px-border button
+       measured ~23.2 CSS px tall — below the 24x24 AA baseline. The
+       target is a full 32px minimum height (an accessibility/security
+       control has no reason to be cramped) and 24px minimum width. */
+    min-height: 32px;
+    min-width: 24px;
     border: 1px solid var(--kiwi-primary);
     border-radius: var(--kiwi-radius);
     background: transparent;
@@ -266,8 +286,13 @@
     cursor: pointer;
   }
   .kiwi-retry:hover {
-    background: rgb(var(--kiwi-primary-rgb) / 0.08);
+    background: rgba(var(--kiwi-primary-rgb), 0.08);
   }
+  /* Round 29 (WCAG 2.5.2/2.1.1): idle also shows the native Retry —
+     after a reset/BFCache restore the widget needs manual reacquisition,
+     and the button is the keyboard-accessible path (the widget itself
+     stays a passive, non-focusable group). */
+  .kiwi-widget[data-state="idle"] .kiwi-retry,
   .kiwi-widget[data-state="failed"] .kiwi-retry,
   .kiwi-widget[data-state="kiwi:worker-unavailable"] .kiwi-retry {
     display: inline-flex;
@@ -293,7 +318,7 @@
   .kiwi-glow {
     position: absolute;
     top: 0; left: -100%; width: 50%; height: 100%;
-    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.2), transparent);
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
     transform: skewX(-25deg);
     pointer-events: none;
   }
@@ -321,6 +346,30 @@
     }
   }
 
+  /* Round 29 (forced-colors): the widget's custom palette is replaced by
+     the user's system colors; the Retry button keeps its border/background
+     contrast from the OS palette and the focus ring stays visible. */
+  @media (forced-colors: active) {
+    .kiwi-widget {
+      border: 1px solid CanvasText;
+    }
+    .kiwi-retry {
+      border: 1px solid ButtonText;
+      background: ButtonFace;
+      color: ButtonText;
+    }
+    .kiwi-badge,
+    .kiwi-widget[data-state="solving"] .kiwi-badge,
+    .kiwi-widget[data-state="done"] .kiwi-badge,
+    .kiwi-widget[data-state="failed"] .kiwi-badge {
+      background: transparent;
+      color: CanvasText;
+    }
+    .kiwi-track {
+      border: 1px solid CanvasText;
+    }
+  }
+
 </style>
 <div class="kiwi-container" data-kiwi-endpoint="/api/kcaptcha/challenge" data-kiwi-scope="login">
   <input type="hidden" name="kiwi__token" data-kiwi-token value="" />
@@ -345,7 +394,7 @@
         <span class="kiwi-label" data-kiwi-label>Security Check</span>
         <span class="kiwi-badge" data-kiwi-badge>Idle</span>
       </div>
-      <div class="kiwi-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="kiwi-track" aria-hidden="true">
         <div class="kiwi-bar" data-kiwi-bar></div>
       </div>
       <div class="kiwi-bottom">
@@ -1308,7 +1357,8 @@ async function __wbg_init(module_or_path) {
     return null;
   }
   function solveWithWorker(data, onProgress, container) {
-    return new Promise(function(resolve) {
+    var terminateHandle = function () {};
+    var promise = new Promise(function(resolve) {
       if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
       var worker = null;
       var blobUrl = null;
@@ -1317,7 +1367,9 @@ async function __wbg_init(module_or_path) {
         if (workerSrc) {
           worker = new Worker(workerSrc);
         } else {
-          var glue = kiwiFindGlueSource();
+          // Round 26: the compat loader's fetched glue covers the external
+          // /api.js case (no inline script element on the page).
+          var glue = kiwiFindGlueSource() || kiwiCompatGlue;
           var blobSrc = (glue ? "var window = self;" + glue + "\n" : "") + KIWI_WORKER_SRC;
           blobUrl = URL.createObjectURL(new Blob([blobSrc], { type: "application/javascript" }));
           worker = new Worker(blobUrl);
@@ -1326,6 +1378,13 @@ async function __wbg_init(module_or_path) {
       if (!worker) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
       if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
       kiwiActiveBlobUrl = blobUrl;
+      // Round 28 (P2): explicit termination handle — a cancelled
+      // generation terminates the worker outright (revoking the blob URL
+      // alone would NOT stop it).
+      terminateHandle = function () {
+        try { worker.terminate(); } catch (e) {}
+        teardown();
+      };
       window.__kiwiWorkerUsed = true;
       var workerStart = performance.now();
       var expectedHashes = Math.pow(2, data.targetBits);
@@ -1431,6 +1490,7 @@ async function __wbg_init(module_or_path) {
         if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ unavailable: true, reason: "post-failed" }); }
       }
     });
+    return { promise: promise, terminate: terminateHandle };
   }
 
   // ── Privacy-aware telemetry (widget-local, mode-gated) ──────────────
@@ -1512,22 +1572,208 @@ async function __wbg_init(module_or_path) {
     if (main) main.appendChild(s); else W.appendChild(s);
     return s;
   }
+  // ── Round 29: localization (WCAG 3.1.2) ─────────────────────────────
+  // A reusable security component for European deployment needs a real
+  // locale contract: `lang` is a first-class widget option
+  // (options.lang / data-kiwi-lang / navigator.language in that order),
+  // the resolved language is written to the widget subtree's lang
+  // attribute (dir for RTL packs), and an untranslated fallback stays
+  // English and is explicitly marked lang="en" so the passage language is
+  // always programmatically determinable.
+  var kiwiLocalePacks = {
+    en: { dir: "ltr",
+      label: "Security Check", badgeIdle: "Idle", badgeWait: "Wait",
+      badgeWorking: "Working", badgeSuccess: "Success", badgeFailed: "Failed",
+      badgeVersionError: "Version Error", badgeUnavailable: "Unavailable",
+      statusConnecting: "Connecting\u2026", statusVerifying: "Verifying\u2026",
+      statusVerified: "Verification complete", statusFailed: "Verification failed",
+      statusExpired: "Verification expired", statusWorkerUnavailable: "Worker unavailable",
+      statusSolverMismatch: "Solver version mismatch",
+      hintProtected: "Protected", hintRetrying: "Challenge failed ({msg}) \u2014 retrying\u2026",
+      hintClickRetry: "Challenge failed ({msg}) \u2014 press the Retry button to try again.",
+      hintVerified: "Proof-of-work verified locally.",
+      hintWorker: "Worker unavailable \u2014 Argon2id needs a Web Worker that this page's CSP blocks; retry, or configure data-kiwi-worker-src.",
+      hintSolver: "The solver worker is out of date \u2014 reload the page to load the current version.",
+      expired: "expired", retryButton: "Retry", checking: "Checking\u2026" },
+    de: { dir: "ltr",
+      label: "Sicherheitspr\u00fcfung", badgeIdle: "Bereit", badgeWait: "Warten",
+      badgeWorking: "Arbeitet", badgeSuccess: "Erfolgreich", badgeFailed: "Fehlgeschlagen",
+      badgeVersionError: "Versionsfehler", badgeUnavailable: "Nicht verf\u00fcgbar",
+      statusConnecting: "Verbinde\u2026", statusVerifying: "Pr\u00fcfe\u2026",
+      statusVerified: "Pr\u00fcfung abgeschlossen", statusFailed: "Pr\u00fcfung fehlgeschlagen",
+      statusExpired: "Pr\u00fcfung abgelaufen", statusWorkerUnavailable: "Worker nicht verf\u00fcgbar",
+      statusSolverMismatch: "Solver-Version stimmt nicht",
+      hintProtected: "Gesch\u00fctzt", hintRetrying: "Pr\u00fcfung fehlgeschlagen ({msg}) \u2014 neuer Versuch\u2026",
+      hintClickRetry: "Pr\u00fcfung fehlgeschlagen ({msg}) \u2014 dr\u00fccken Sie die Schaltfl\u00e4che Erneut.",
+      hintVerified: "Proof-of-Work lokal verifiziert.",
+      hintWorker: "Worker nicht verf\u00fcgbar \u2014 Argon2id ben\u00f6tigt einen Web Worker, den das CSP dieser Seite blockiert; erneut versuchen oder data-kiwi-worker-src konfigurieren.",
+      hintSolver: "Der Solver-Worker ist veraltet \u2014 laden Sie die Seite neu, um die aktuelle Version zu laden.",
+      expired: "abgelaufen", retryButton: "Erneut", checking: "Pr\u00fcfe\u2026" },
+    fr: { dir: "ltr",
+      label: "Contr\u00f4le de s\u00e9curit\u00e9", badgeIdle: "Inactif", badgeWait: "Attente",
+      badgeWorking: "Traitement", badgeSuccess: "R\u00e9ussi", badgeFailed: "\u00c9chec",
+      badgeVersionError: "Erreur de version", badgeUnavailable: "Indisponible",
+      statusConnecting: "Connexion\u2026", statusVerifying: "V\u00e9rification\u2026",
+      statusVerified: "V\u00e9rification termin\u00e9e", statusFailed: "V\u00e9rification \u00e9chou\u00e9e",
+      statusExpired: "V\u00e9rification expir\u00e9e", statusWorkerUnavailable: "Worker indisponible",
+      statusSolverMismatch: "Version du solveur incompatible",
+      hintProtected: "Prot\u00e9g\u00e9", hintRetrying: "V\u00e9rification \u00e9chou\u00e9e ({msg}) \u2014 nouvelle tentative\u2026",
+      hintClickRetry: "V\u00e9rification \u00e9chou\u00e9e ({msg}) \u2014 appuyez sur le bouton R\u00e9essayer.",
+      hintVerified: "Preuve de travail v\u00e9rifi\u00e9e localement.",
+      hintWorker: "Worker indisponible \u2014 Argon2id n\u00e9cessite un Web Worker que le CSP de cette page bloque; r\u00e9essayez ou configurez data-kiwi-worker-src.",
+      hintSolver: "Le solveur est obsol\u00e8te \u2014 rechargez la page pour charger la version actuelle.",
+      expired: "expir\u00e9", retryButton: "R\u00e9essayer", checking: "V\u00e9rification\u2026" },
+    es: { dir: "ltr",
+      label: "Comprobaci\u00f3n de seguridad", badgeIdle: "Inactivo", badgeWait: "Espera",
+      badgeWorking: "Trabajando", badgeSuccess: "Correcto", badgeFailed: "Fall\u00f3",
+      badgeVersionError: "Error de versi\u00f3n", badgeUnavailable: "No disponible",
+      statusConnecting: "Conectando\u2026", statusVerifying: "Verificando\u2026",
+      statusVerified: "Verificaci\u00f3n completada", statusFailed: "Verificaci\u00f3n fallida",
+      statusExpired: "Verificaci\u00f3n caducada", statusWorkerUnavailable: "Worker no disponible",
+      statusSolverMismatch: "Versi\u00f3n del solver no coincide",
+      hintProtected: "Protegido", hintRetrying: "Verificaci\u00f3n fallida ({msg}) \u2014 reintentando\u2026",
+      hintClickRetry: "Verificaci\u00f3n fallida ({msg}) \u2014 pulse el bot\u00f3n Reintentar.",
+      hintVerified: "Prueba de trabajo verificada localmente.",
+      hintWorker: "Worker no disponible \u2014 Argon2id necesita un Web Worker que el CSP de esta p\u00e1gina bloquea; reintente o configure data-kiwi-worker-src.",
+      hintSolver: "El worker del solver est\u00e1 desactualizado \u2014 recargue la p\u00e1gina para cargar la versi\u00f3n actual.",
+      expired: "caducado", retryButton: "Reintentar", checking: "Verificando\u2026" },
+    it: { dir: "ltr",
+      label: "Controllo di sicurezza", badgeIdle: "Inattivo", badgeWait: "Attesa",
+      badgeWorking: "In corso", badgeSuccess: "Riuscito", badgeFailed: "Non riuscito",
+      badgeVersionError: "Errore di versione", badgeUnavailable: "Non disponibile",
+      statusConnecting: "Connessione\u2026", statusVerifying: "Verifica\u2026",
+      statusVerified: "Verifica completata", statusFailed: "Verifica non riuscita",
+      statusExpired: "Verifica scaduta", statusWorkerUnavailable: "Worker non disponibile",
+      statusSolverMismatch: "Versione del solver non corrispondente",
+      hintProtected: "Protetto", hintRetrying: "Verifica non riuscita ({msg}) \u2014 nuovo tentativo\u2026",
+      hintClickRetry: "Verifica non riuscita ({msg}) \u2014 premere il pulsante Riprova.",
+      hintVerified: "Prova di lavoro verificata localmente.",
+      hintWorker: "Worker non disponibile \u2014 Argon2id richiede un Web Worker bloccato dal CSP di questa pagina; riprovare o configurare data-kiwi-worker-src.",
+      hintSolver: "Il worker del solver \u00e8 obsoleto \u2014 ricaricare la pagina per caricare la versione corrente.",
+      expired: "scaduto", retryButton: "Riprova", checking: "Verifica\u2026" },
+    nl: { dir: "ltr",
+      label: "Beveiligingscontrole", badgeIdle: "Inactief", badgeWait: "Wachten",
+      badgeWorking: "Bezig", badgeSuccess: "Geslaagd", badgeFailed: "Mislukt",
+      badgeVersionError: "Versiefout", badgeUnavailable: "Niet beschikbaar",
+      statusConnecting: "Verbinden\u2026", statusVerifying: "Controleren\u2026",
+      statusVerified: "Controle voltooid", statusFailed: "Controle mislukt",
+      statusExpired: "Controle verlopen", statusWorkerUnavailable: "Worker niet beschikbaar",
+      statusSolverMismatch: "Solver-versie komt niet overeen",
+      hintProtected: "Beschermd", hintRetrying: "Controle mislukt ({msg}) \u2014 opnieuw proberen\u2026",
+      hintClickRetry: "Controle mislukt ({msg}) \u2014 druk op de knop Opnieuw.",
+      hintVerified: "Proof of work lokaal geverifieerd.",
+      hintWorker: "Worker niet beschikbaar \u2014 Argon2id vereist een Web Worker die door het CSP van deze pagina wordt geblokkeerd; probeer opnieuw of configureer data-kiwi-worker-src.",
+      hintSolver: "De solver-worker is verouderd \u2014 herlaad de pagina om de huidige versie te laden.",
+      expired: "verlopen", retryButton: "Opnieuw", checking: "Controleren\u2026" },
+    pl: { dir: "ltr",
+      label: "Kontrola bezpiecze\u0144stwa", badgeIdle: "Bezczynny", badgeWait: "Oczekiwanie",
+      badgeWorking: "Pracuje", badgeSuccess: "Powodzenie", badgeFailed: "Niepowodzenie",
+      badgeVersionError: "B\u0142\u0105d wersji", badgeUnavailable: "Niedost\u0119pny",
+      statusConnecting: "\u0141\u0105czenie\u2026", statusVerifying: "Weryfikacja\u2026",
+      statusVerified: "Weryfikacja zako\u0144czona", statusFailed: "Weryfikacja nieudana",
+      statusExpired: "Weryfikacja wygas\u0142a", statusWorkerUnavailable: "Worker niedost\u0119pny",
+      statusSolverMismatch: "Niezgodna wersja solwera",
+      hintProtected: "Chronione", hintRetrying: "Weryfikacja nieudana ({msg}) \u2014 ponawianie\u2026",
+      hintClickRetry: "Weryfikacja nieudana ({msg}) \u2014 naci\u015bnij przycisk Pon\u00f3w.",
+      hintVerified: "Dow\u00f3d pracy zweryfikowany lokalnie.",
+      hintWorker: "Worker niedost\u0119pny \u2014 Argon2id wymaga Web Workera blokowanego przez CSP tej strony; spr\u00f3buj ponownie lub skonfiguruj data-kiwi-worker-src.",
+      hintSolver: "Worker solwera jest nieaktualny \u2014 prze\u0142aduj stron\u0119, aby za\u0142adowa\u0107 bie\u017c\u0105c\u0105 wersj\u0119.",
+      expired: "wygas\u0142", retryButton: "Pon\u00f3w", checking: "Weryfikacja\u2026" },
+    pt: { dir: "ltr",
+      label: "Verifica\u00e7\u00e3o de seguran\u00e7a", badgeIdle: "Inativo", badgeWait: "Aguardar",
+      badgeWorking: "A trabalhar", badgeSuccess: "Conclu\u00eddo", badgeFailed: "Falhou",
+      badgeVersionError: "Erro de vers\u00e3o", badgeUnavailable: "Indispon\u00edvel",
+      statusConnecting: "A ligar\u2026", statusVerifying: "A verificar\u2026",
+      statusVerified: "Verifica\u00e7\u00e3o conclu\u00edda", statusFailed: "Verifica\u00e7\u00e3o falhada",
+      statusExpired: "Verifica\u00e7\u00e3o expirada", statusWorkerUnavailable: "Worker indispon\u00edvel",
+      statusSolverMismatch: "Vers\u00e3o do solver incompat\u00edvel",
+      hintProtected: "Protegido", hintRetrying: "Verifica\u00e7\u00e3o falhada ({msg}) \u2014 a tentar novamente\u2026",
+      hintClickRetry: "Verifica\u00e7\u00e3o falhada ({msg}) \u2014 prima o bot\u00e3o Repetir.",
+      hintVerified: "Prova de trabalho verificada localmente.",
+      hintWorker: "Worker indispon\u00edvel \u2014 Argon2id precisa de um Web Worker que o CSP desta p\u00e1gina bloqueia; tente novamente ou configure data-kiwi-worker-src.",
+      hintSolver: "O worker do solver est\u00e1 desatualizado \u2014 recarregue a p\u00e1gina para carregar a vers\u00e3o atual.",
+      expired: "expirado", retryButton: "Repetir", checking: "A verificar\u2026" },
+    ar: { dir: "rtl",
+      label: "\u0641\u062d\u0635 \u0627\u0644\u0623\u0645\u0627\u0646", badgeIdle: "\u062e\u0627\u0645\u062f", badgeWait: "\u0627\u0646\u062a\u0638\u0627\u0631",
+      badgeWorking: "\u064a\u0639\u0645\u0644", badgeSuccess: "\u0646\u0627\u062c\u062d", badgeFailed: "\u0641\u0634\u0644",
+      badgeVersionError: "\u062e\u0637\u0623 \u0641\u064a \u0627\u0644\u0625\u0635\u062f\u0627\u0631", badgeUnavailable: "\u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631",
+      statusConnecting: "\u062c\u0627\u0631\u064d \u0627\u0644\u0627\u062a\u0635\u0627\u0644\u2026", statusVerifying: "\u062c\u0627\u0631\u064d \u0627\u0644\u062a\u062d\u0642\u0642\u2026",
+      statusVerified: "\u0627\u0643\u062a\u0645\u0644 \u0627\u0644\u062a\u062d\u0642\u0642", statusFailed: "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642",
+      statusExpired: "\u0627\u0646\u062a\u0647\u062a \u0645\u0647\u0644\u0629 \u0627\u0644\u062a\u062d\u0642\u0642", statusWorkerUnavailable: "\u0627\u0644\u0639\u0627\u0645\u0644 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631",
+      statusSolverMismatch: "\u0625\u0635\u062f\u0627\u0631 \u0627\u0644\u062d\u0644 \u063a\u064a\u0631 \u0645\u062a\u0637\u0627\u0628\u0642",
+      hintProtected: "\u0645\u062d\u0645\u064a", hintRetrying: "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642 ({msg}) \u2014 \u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629\u2026",
+      hintClickRetry: "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642 ({msg}) \u2014 \u0627\u0636\u063a\u0637 \u0639\u0644\u0649 \u0632\u0631 \u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629.",
+      hintVerified: "\u062a\u0645 \u0627\u0644\u062a\u062d\u0642\u0642 \u0645\u0646 \u062f\u0644\u064a\u0644 \u0627\u0644\u0639\u0645\u0644 \u0645\u062d\u0644\u064a\u064b\u0627.",
+      hintWorker: "\u0627\u0644\u0639\u0627\u0645\u0644 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631 \u2014 \u064a\u062a\u0637\u0644\u0628 Argon2id \u0639\u0627\u0645\u0644 \u0648\u064a\u0628 \u062a\u062d\u062c\u0628\u0647 \u0633\u064a\u0627\u0633\u0629 CSP \u0647\u0630\u0647 \u0627\u0644\u0635\u0641\u062d\u0629\u061b \u0623\u0639\u062f \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629 \u0623\u0648 \u0642\u0645 \u0628\u062a\u0643\u0648\u064a\u0646 data-kiwi-worker-src.",
+      hintSolver: "\u0639\u0627\u0645\u0644 \u0627\u0644\u062d\u0644 \u0642\u062f\u064a\u0645 \u2014 \u0623\u0639\u062f \u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0635\u0641\u062d\u0629 \u0644\u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u0627\u0644\u062d\u0627\u0644\u064a.",
+      expired: "\u0627\u0646\u062a\u0647\u062a \u0627\u0644\u0645\u0647\u0644\u0629", retryButton: "\u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629", checking: "\u062c\u0627\u0631\u064d \u0627\u0644\u062a\u062d\u0642\u0642\u2026" }
+  };
+  var kiwiFallbackLang = "en";
+  function kiwiNormalizeLang(pref) {
+    if (typeof pref !== "string") return "";
+    return pref.trim().toLowerCase().split(/[_-]/)[0] || "";
+  }
+  function kiwiResolveLang(options) {
+    var prefs = [];
+    if (options && typeof options.lang === "string" && options.lang) prefs.push(options.lang);
+    if (!prefs.length && typeof document !== "undefined") {
+      var attr = null;
+      try {
+        var cs = document.currentScript;
+        attr = cs && cs.getAttribute ? cs.getAttribute("data-kiwi-lang") : null;
+      } catch (e) {}
+      if (attr) prefs.push(attr);
+    }
+    if (!prefs.length && navigator && navigator.language) prefs.push(navigator.language);
+    for (var i = 0; i < prefs.length; i++) {
+      var base = kiwiNormalizeLang(prefs[i]);
+      if (kiwiLocalePacks[base]) return base;
+    }
+    return kiwiFallbackLang;
+  }
+  function kiwiPackFor(lang) { return kiwiLocalePacks[lang] || kiwiLocalePacks[kiwiFallbackLang]; }
   // Manual retry is a genuine native <button> (focusable, Enter/Space
   // activation built in) rendered in the error/unavailable states. It
   // triggers the SAME re-init path as the click/tap reacquire.
-  function createRetryButton(W) {
+  function createRetryButton(W, retryLabel) {
     var b = document.createElement("button");
     b.type = "button";
     b.className = "kiwi-retry";
     b.setAttribute("data-kiwi-retry", "");
-    b.textContent = "Retry";
+    b.textContent = retryLabel || kiwiLocalePacks[kiwiFallbackLang].retryButton;
     var bottom = W.querySelector(".kiwi-bottom");
     if (bottom) bottom.appendChild(b);
     else { var main = W.querySelector(".kiwi-main"); if (main) main.appendChild(b); else W.appendChild(b); }
     return b;
   }
 
-  var kiwiWidgets = {}; // widgetId -> {W, options, state, token, expiryTimer}
+  // Round 28 (P2): per-widget generation + cancellation handles. Every
+  // async continuation (fetch, worker, retry, expiry) captures the
+  // generation it started under and refuses to touch state once the
+  // generation is no longer current — reset()/remove()/destroy() bump the
+  // generation and abort/terminate/clear the handles, so a stale
+  // generation can never write a token, invoke a callback or flip state.
+  // Handles: gen (generation counter), abortController/abortTimer (challenge
+  // fetch), worker (active solver worker), retryTimer (backoff retry),
+  // countdownTimer/expiryTimer (timers), errorFired (one error callback per
+  // generation).
+  var kiwiWidgets = {}; // widgetId -> {W, options, state, token, gen, abortController, abortTimer, worker, retryTimer, countdownTimer, expiryTimer, errorFired}
+  function kiwiGenerationCurrent(id, gen) {
+    var r = kiwiWidgets[id];
+    return !!(r && r.gen === gen);
+  }
+  function kiwiCancelGeneration(id) {
+    var r = kiwiWidgets[id];
+    if (!r) return;
+    r.gen++; // any in-flight generation is stale from here on
+    r.errorFired = false;
+    if (r.abortController) { try { r.abortController.abort(); } catch (e) {} r.abortController = null; }
+    if (r.abortTimer) { clearTimeout(r.abortTimer); r.abortTimer = null; }
+    if (r.worker) { try { r.worker.terminate(); } catch (e) {} r.worker = null; }
+    if (r.retryTimer) { clearTimeout(r.retryTimer); r.retryTimer = null; }
+    if (r.countdownTimer) { clearInterval(r.countdownTimer); r.countdownTimer = null; }
+    if (r.expiryTimer) { clearTimeout(r.expiryTimer); r.expiryTimer = null; }
+  }
   function initWidget(W, options) {
     if (!W || W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return null;
     options = options || {};
@@ -1541,11 +1787,30 @@ async function __wbg_init(module_or_path) {
     }
     // Round 24: formal widget instances — widgetId == data-kiwi-instance.
     var widgetId = W.dataset.kiwiInstance;
-    kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", expiryTimer: null };
+    // Round 28 (P2): the generation COUNTER MUST CONTINUE across re-inits —
+    // a re-init that restarts at 1 would let a stale in-flight run see
+    // itself as current again after a reset cancelled it (the record is
+    // replaced, so the old captured generation must never match).
+    var prevRecord = kiwiWidgets[widgetId];
+    var newGen = prevRecord ? prevRecord.gen + 1 : 1;
+    kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", gen: newGen, abortController: null, abortTimer: null, worker: null, retryTimer: null, countdownTimer: null, expiryTimer: null, errorFired: false };
     // Neutral role: the widget is a passive status/group, never a
     // checkbox, and it is NOT focusable — the retry button is.
     if (!W.getAttribute("role")) W.setAttribute("role", "group");
     var container = W.closest(".kiwi-container") || W;
+    // Round 29 (WCAG 3.1.2): resolve the widget language and write it onto
+    // the widget subtree (lang + dir for RTL packs). Preference order:
+    // options.lang -> data-kiwi-lang on the widget/container ->
+    // navigator.language. The untranslated fallback is explicitly
+    // lang="en". (document.currentScript is NULL during the async init,
+    // so the attribute is read from the subtree, not the script tag.)
+    var kiwiLangAttr = (W.getAttribute ? W.getAttribute("data-kiwi-lang") : null)
+      || (container && container.getAttribute ? container.getAttribute("data-kiwi-lang") : null);
+    var kiwiWidgetLang = kiwiResolveLang({ lang: (options && options.lang) || kiwiLangAttr || undefined });
+    var kiwiWidgetPack = kiwiPackFor(kiwiWidgetLang);
+    W.setAttribute("lang", kiwiWidgetLang);
+    if (kiwiWidgetPack.dir) W.setAttribute("dir", kiwiWidgetPack.dir);
+    function kiwiT(key) { return (kiwiWidgetPack[key] !== undefined) ? kiwiWidgetPack[key] : kiwiLocalePacks[kiwiFallbackLang][key] || key; }
     var labelEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
     var announcerEl = W.querySelector("[data-kiwi-status]") || createAnnouncer(W);
     // The mascot is decorative next to the already-labelled widget: hide it
@@ -1569,9 +1834,18 @@ async function __wbg_init(module_or_path) {
       if (reducedMotionQuery.matches) kiwiRemoveWink();
       else if (reducedMotionQuery.addEventListener) reducedMotionQuery.addEventListener("change", kiwiRemoveWink);
     }
-    var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W);
+    var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W, kiwiWidgetPack.retryButton);
     var telemetry = telemetrySession(container, W);
-    var scope = W.getAttribute("data-kiwi-scope") || container.getAttribute("data-kiwi-scope");
+    // Round 26 (P1): options.scope is AUTHORITATIVE — the incumbent
+    // compatibility loader passes the data-sitekey as the scope, and the
+    // server maps it through the sitekey allowlist to the intended policy
+    // scope. Letting DOM/path heuristics override it would silently
+    // downgrade admin_login/financial_action challenges to the login
+    // policy. Explicit options.scope beats the container attribute beats
+    // the path heuristics.
+    var scope = (options && typeof options.scope === "string" && options.scope)
+      || W.getAttribute("data-kiwi-scope")
+      || container.getAttribute("data-kiwi-scope");
     if (!scope) {
       scope = "login";
       var p = window.location.pathname.toLowerCase();
@@ -1590,17 +1864,30 @@ async function __wbg_init(module_or_path) {
       W.dispatchEvent(ev);
     }
     function announce(text) { if (announcerEl) announcerEl.textContent = text; }
+    // Round 27 (P2): the state attribute belongs on the VISIBLE
+    // .kiwi-widget — the stylesheet keys the pulse/success/failure
+    // styling and the Retry button visibility on
+    // .kiwi-widget[data-state=...]. When initWidget's W is an incumbent
+    // wrapper (.g-recaptcha/.h-captcha/.cf-turnstile), target the inner
+    // widget element instead of leaving it frozen at "idle".
+    var stateEl = (W.matches && W.matches(".kiwi-widget"))
+      ? W
+      : (W.querySelector ? W.querySelector("[data-kiwi-widget]") || W : W);
     function setStatus(label, pillText, state) {
       if (labelEl) labelEl.textContent = label;
       if (pillEl) pillEl.textContent = pillText;
-      if (W) W.setAttribute("data-state", state);
+      if (stateEl) stateEl.setAttribute("data-state", state);
     }
     function setHint(text) { if (hintEl) hintEl.textContent = text; }
+    // Round 29: paint the resolved language immediately (the static
+    // template is English until the driver runs; the widget subtree lang
+    // attribute was set above, so the English fallback is programmatically
+    // marked until localized).
+    setStatus(kiwiT("label"), kiwiT("badgeIdle"), "idle");
+    setHint(kiwiT("hintProtected"));
     function setProgress(pct) {
       var clamped = Math.max(0, Math.min(100, pct));
       if (fillEl) fillEl.setAttribute("data-progress", String(clamped));
-      /* Sync aria-valuenow on the progressbar role (WCAG 4.1.2). */
-      if (trackEl) trackEl.setAttribute("aria-valuenow", String(clamped));
     }
     
     var countdownTimer = null;
@@ -1635,10 +1922,10 @@ async function __wbg_init(module_or_path) {
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       writeResponseAlias("");
-      if (W) W.setAttribute("data-state", "expired");
-      if (countdownEl) countdownEl.textContent = "expired";
+      if (stateEl) stateEl.setAttribute("data-state", "expired");
+      if (countdownEl) countdownEl.textContent = kiwiT("expired");
       dispatch("expired", {});
-      announce("Verification expired");
+      announce(kiwiT("statusExpired"));
       if (options.expiredCallback) { try { options.expiredCallback(); } catch (e) {} }
     }
     function scheduleExpiry(ttlSecs) {
@@ -1650,9 +1937,11 @@ async function __wbg_init(module_or_path) {
     }
     function startCountdown(ttlSecs) {
       var remaining = ttlSecs;
-      var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : "expired"; };
+      var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : kiwiT("expired"); };
       tick(); clearInterval(countdownTimer);
       countdownTimer = setInterval(function() { remaining--; tick(); if (remaining <= 0) clearInterval(countdownTimer); }, 1000);
+      var rc = kiwiWidgets[widgetId];
+      if (rc) rc.countdownTimer = countdownTimer;
     }
     // Request binding (audit #41): a hidden input carrying the bound value,
     // placed next to the token input (mirroring how the token is written).
@@ -1670,6 +1959,8 @@ async function __wbg_init(module_or_path) {
     }
     function resetToIdle() {
       clearInterval(countdownTimer);
+      var rc = kiwiWidgets[widgetId];
+      if (rc) rc.countdownTimer = null;
       clearExpiryTimer();
       writeResponseAlias("");
       kiwiRecordState("idle", "");
@@ -1680,25 +1971,44 @@ async function __wbg_init(module_or_path) {
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
-      setStatus("Security Check", "Idle", "idle");
-      setHint("Protected");
+      setStatus(kiwiT("label"), kiwiT("badgeIdle"), "idle");
+      setHint(kiwiT("hintProtected"));
       setProgress(0);
     }
     // Failure recovery (audit #55): an error never leaves the widget stuck
     // in "failed" — it resets to idle, retries a bounded number of times
     // with backoff, then settles idle and reacquires on the next
     // interaction (click the widget, the Retry button, or a page re-init).
+    function fireErrorCallback(msg) {
+      var r = kiwiWidgets[widgetId];
+      if (!r || r.errorFired || !options.errorCallback) return;
+      r.errorFired = true;
+      try { options.errorCallback(msg || "challenge-failed"); } catch (e) {}
+    }
     function fail(msg) {
       resetToIdle();
-      announce("Verification failed");
+      announce(kiwiT("statusFailed"));
       dispatch("error", { error: msg });
       if (retryCount < RETRY_LIMIT) {
         retryCount++;
-        setHint("Challenge failed (" + msg + ") \u2014 retrying\u2026");
-        setTimeout(run, 1000 * retryCount);
+        setHint(kiwiT("hintRetrying").replace("{msg}", msg));
+        // Round 28 (P2): the retry is a cancellable handle — a reset that
+        // lands during the backoff must never start a stale run().
+        var r = kiwiWidgets[widgetId];
+        if (r && r.retryTimer) clearTimeout(r.retryTimer);
+        if (r) r.retryTimer = setTimeout(function () { if (r) r.retryTimer = null; run(); }, 1000 * retryCount);
       } else {
-        setHint("Challenge failed (" + msg + ") \u2014 click the widget to retry.");
+        setHint(kiwiT("hintClickRetry").replace("{msg}", msg));
         delete W.dataset.kiwiStarted;
+        // Round 27 (P2): terminal failure must surface on the visible
+        // widget — the Retry button's visibility is keyed on
+        // .kiwi-widget[data-state="failed"] (it never appeared before,
+        // because the state was never set on failure).
+        setStatus(kiwiT("label"), kiwiT("badgeFailed"), "failed");
+        if (retryEl) retryEl.style.display = "";
+        // Round 28 (P2): the provider error callback fires exactly once
+        // per generation, at automatic-retry exhaustion.
+        fireErrorCallback(msg);
       }
     }
     // Build-id mismatch (audit #53): the worker reported a solver build id
@@ -1711,9 +2021,10 @@ async function __wbg_init(module_or_path) {
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
-      setStatus("Solver version mismatch", "Version Error", "kiwi:solver-mismatch");
-      setHint("The solver worker is out of date \u2014 reload the page to load the current version.");
+      setStatus(kiwiT("statusSolverMismatch"), kiwiT("badgeVersionError"), "kiwi:solver-mismatch");
+      setHint(kiwiT("hintSolver"));
       setProgress(0);
+      fireErrorCallback("solver-mismatch");
     }
     // Round-13 invariant: worker creation failure or a worker solve failure
     // for a memory-hard challenge enters this controlled state. The token
@@ -1728,17 +2039,24 @@ async function __wbg_init(module_or_path) {
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
-      setStatus("Worker unavailable", "Unavailable", "kiwi:worker-unavailable");
-      setHint("Worker unavailable \u2014 Argon2id needs a Web Worker that this page's CSP blocks; retry, or configure data-kiwi-worker-src.");
+      setStatus(kiwiT("statusWorkerUnavailable"), kiwiT("badgeUnavailable"), "kiwi:worker-unavailable");
+      setHint(kiwiT("hintWorker"));
       setProgress(0);
-      announce("Worker unavailable");
+      announce(kiwiT("statusWorkerUnavailable"));
       dispatch("worker-unavailable", { reason: reason || "worker-creation-failed" });
       delete W.dataset.kiwiStarted;
+      // Round 28 (P2): worker conditions are non-retryable within the
+      // flow — the provider error callback fires immediately.
+      fireErrorCallback("worker-unavailable");
     }
     // BFCache restore (audit #54): a persisted pageshow must NOT auto-solve —
     // it clears the solved state and leaves the widget idle, ready to
-    // reacquire on the next interaction or page re-init.
+    // reacquire on the next interaction or page re-init. Round 28 (P2): the
+    // restore also CANCELS the in-flight generation (abort fetch, terminate
+    // worker, clear retry/expiry timers) — a solve from before the restore
+    // can never write a token afterwards.
     function reset() {
+      kiwiCancelGeneration(widgetId);
       resetToIdle();
       delete W.dataset.kiwiStarted;
     }
@@ -1757,8 +2075,14 @@ async function __wbg_init(module_or_path) {
     kiwiCleanups.set(W, function () { resetToIdle(); });
 
     async function run() {
+      // Round 28 (P2): every continuation is generation-guarded — a reset
+      // that lands while this run is in flight bumps the generation and
+      // aborts/terminates the handles; this run then bails without ever
+      // touching state.
+      var gen = (kiwiWidgets[widgetId] || {}).gen || 1;
+      if (!kiwiGenerationCurrent(widgetId, gen)) return;
       try {
-        setStatus("Connecting\u2026", "Wait", "connecting");
+        setStatus(kiwiT("statusConnecting"), kiwiT("badgeWait"), "connecting");
         var endpoint = kiwiEndpoint(W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge");
         // Algorithm selection (audit #62): the client may only select among
         // the solver profiles the server offers (sha256 / argon2id). Any
@@ -1778,6 +2102,8 @@ async function __wbg_init(module_or_path) {
         if (!(fetchTimeoutMs > 0)) fetchTimeoutMs = KIWI_FETCH_TIMEOUT_MS;
         var abortController = new AbortController();
         var abortTimer = setTimeout(function () { abortController.abort(); }, fetchTimeoutMs);
+        var rw = kiwiWidgets[widgetId];
+        if (rw) { rw.abortController = abortController; rw.abortTimer = abortTimer; }
         var resp, data;
         try {
           resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody), signal: abortController.signal });
@@ -1785,15 +2111,19 @@ async function __wbg_init(module_or_path) {
           data = await resp.json();
         } finally {
           clearTimeout(abortTimer);
+          var rw2 = kiwiWidgets[widgetId];
+          if (rw2 && rw2.abortTimer === abortTimer) rw2.abortTimer = null;
         }
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         // No weaker challenge (audit #62): the response algorithm may only
         // be equal or stronger than requested — a server downgrade (argon2id
         // requested, sha256 returned) is a FAILED challenge, never a weaker
         // solve. The client may only ever accept what it asked for or more.
         if (algorithm === "argon2id" && (data.algorithm || "sha256") !== "argon2id") throw new Error("Challenge downgraded");
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         if (data.ttlSecs) startCountdown(data.ttlSecs);
-        setStatus("Verifying\u2026", "Working", "solving");
-        announce("Checking\u2026");
+        setStatus(kiwiT("statusVerifying"), kiwiT("badgeWorking"), "solving");
+        announce(kiwiT("checking"));
         dispatch("verifying");
         var result = null;
         if ((data.algorithm || "sha256") === "argon2id") {
@@ -1801,18 +2131,28 @@ async function __wbg_init(module_or_path) {
           // same-origin worker. There is no synchronous CHUNK=1 fallback
           // and no weaker-profile retry — a missing or failed worker enters
           // the controlled kiwi:worker-unavailable state.
-          result = await solveWithWorker(data, setProgress, container);
+          // Round 28 (P2): the worker handle is stored on the widget record
+          // so a cancelled generation can terminate() it outright.
+          var workerHandle = solveWithWorker(data, setProgress, container);
+          var wr = kiwiWidgets[widgetId];
+          if (wr) wr.worker = workerHandle.terminate;
+          result = await workerHandle.promise;
+          var wr2 = kiwiWidgets[widgetId];
+          if (wr2 && wr2.worker === workerHandle.terminate) wr2.worker = null;
+          if (!kiwiGenerationCurrent(widgetId, gen)) return;
           if (result && result.mismatch) { solverMismatch(); return; }
           if (!result || result.unavailable) { workerUnavailable(result ? result.reason : "solve-failed"); return; }
         } else {
           result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress);
         }
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         if (!result) throw new Error("Exhausted");
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()));
         setBinding(requestBinding || "");
         retryCount = 0;
-        setStatus("Verified", "Success", "done"); setHint("Proof-of-work verified locally."); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
-        announce("Verification complete");
+        setStatus(kiwiT("label"), kiwiT("badgeSuccess"), "done"); setHint(kiwiT("hintVerified")); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
+        announce(kiwiT("statusVerified"));
         var token = tokenEl.value;
         kiwiRecordState("verified", token);
         writeResponseAlias(token);
@@ -1824,7 +2164,10 @@ async function __wbg_init(module_or_path) {
         scheduleExpiry(data.ttlSecs || 0);
         if (options.callback) { try { options.callback(token); } catch (e) {} }
         telemetry.stop();
-      } catch (e) { fail(e.message); }
+      } catch (e) {
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        fail(e.message);
+      }
     }
     dispatch("ready");
     run();
@@ -1867,13 +2210,17 @@ async function __wbg_init(module_or_path) {
       if (!W || W.nodeType !== 1) continue;
       W.dataset.kiwiDestroyed = "1";
       kiwiResetHooks = kiwiResetHooks.filter(function (h) { return h.el !== W; });
+      if (W.dataset.kiwiInstance && kiwiWidgets[W.dataset.kiwiInstance]) {
+        kiwiCancelGeneration(W.dataset.kiwiInstance);
+      }
       var cleanup = kiwiCleanups.get(W);
       if (cleanup) { try { cleanup(); } catch (err) {} kiwiCleanups.delete(W); }
       kiwiRemoveListeners(W);
       var retryEl = W.querySelector("[data-kiwi-retry]");
       if (retryEl) kiwiRemoveListeners(retryEl);
       delete W.dataset.kiwiStarted;
-      W.removeAttribute("data-state");
+      var destroyStateEl = (W.matches && W.matches(".kiwi-widget")) ? W : (W.querySelector ? W.querySelector("[data-kiwi-widget]") || W : W);
+      destroyStateEl.removeAttribute("data-state");
       var tokenEl = W.querySelector("[data-kiwi-token]");
       if (tokenEl) tokenEl.value = "";
     }
@@ -1943,7 +2290,10 @@ async function __wbg_init(module_or_path) {
   function kiwiReset(id) {
     var r = kiwiWidgets[id];
     if (!r) return;
-    clearTimeout(r.expiryTimer); r.expiryTimer = null;
+    // Round 28 (P2): reset is cancellation — the old generation's fetch is
+    // aborted, its worker terminated, its retry/expiry timers cleared; the
+    // new initWidget starts generation +1.
+    kiwiCancelGeneration(id);
     var W = r.W;
     if (W) {
       var t = W.querySelector("[data-kiwi-token]");
@@ -1980,7 +2330,11 @@ async function __wbg_init(module_or_path) {
         resolve(cur ? (cur.token || "") : "");
       };
       var onError = function (ev) {
-        reject(new Error((ev && ev.detail && ev.detail.reason) || "kiwicaptcha: solve failed"));
+        // Round 28 (P3): fail() dispatches {error: msg} — the promise must
+        // reject with the ACTUAL reason, not the generic fallback.
+        var detail = (ev && ev.detail) || {};
+        var reason = detail.error || detail.reason || "kiwicaptcha: solve failed";
+        reject(new Error(String(reason)));
       };
       if (W) {
         W.addEventListener("kiwi:verified", onVerified, { once: true });
@@ -1998,7 +2352,7 @@ async function __wbg_init(module_or_path) {
   function kiwiRemove(id) {
     var r = kiwiWidgets[id];
     if (!r) return;
-    if (r.expiryTimer) clearTimeout(r.expiryTimer);
+    kiwiCancelGeneration(id);
     if (r.W) {
       kiwiDestroy(r.W);
       // Provider parity (Turnstile remove()): the widget markup leaves the
@@ -2035,6 +2389,18 @@ async function __wbg_init(module_or_path) {
   // its provider script URL.
   var compat = null;
   var compatScriptUrl = null;
+  // Round 29 (P1): Google's API defaults reset()/getResponse() and
+  // invisible execute() to the FIRST CREATED widget when the id is
+  // omitted. Track the first successful compat render.
+  var kiwiCompatFirstId = null;
+  // Round 26 (P1): when the driver is loaded as the external
+  // /kiwi-captcha/api.js (glue + driver concatenated, split by the
+  // /*KIWI_COMPAT_SPLIT*/ marker), the worker cannot find the glue in an
+  // inline script element. Fetch the loader's own source once and keep the
+  // glue part for the Blob-worker prelude — Argon2id stays worker-only and
+  // WORKING through the external loader.
+  var kiwiCompatGlue = null;
+  var kiwiCompatGlueReady = null;
   try {
     var currentScript = document.currentScript;
     if (!currentScript) {
@@ -2044,6 +2410,32 @@ async function __wbg_init(module_or_path) {
     compatScriptUrl = currentScript && currentScript.src ? currentScript.src : null;
     var compatMatch = compatScriptUrl ? compatScriptUrl.match(/[?&]compat=(recaptcha|hcaptcha|turnstile)/) : null;
     if (compatMatch) compat = compatMatch[1];
+    // Round 29 (P1): Google's standard explicit-loading form —
+    // render=explicit suppresses automatic rendering and the named onload
+    // callback runs after dependencies become ready. Both parameters are
+    // read from the loader URL exactly like the incumbent loader does.
+    var compatRenderMode = "auto";
+    var compatOnloadName = null;
+    if (compatScriptUrl) {
+      var renderMatch = compatScriptUrl.match(/[?&]render=explicit(?:&|$)/);
+      if (renderMatch) compatRenderMode = "explicit";
+      var onloadMatch = compatScriptUrl.match(/[?&]onload=([A-Za-z_$][A-Za-z0-9_$]*)/);
+      if (onloadMatch) compatOnloadName = onloadMatch[1];
+    }
+    if (compat && compatScriptUrl) {
+      // Round 27 (P2): revalidate — force-cache would let the browser
+      // reuse a stale /api.js representation, defeating the server's ETag
+      // policy and potentially pairing the current driver with an old
+      // glue of the same protocol generation.
+      kiwiCompatGlueReady = fetch(compatScriptUrl.split("?")[0], { cache: "no-cache", credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.text() : null; })
+        .then(function (src) {
+          if (!src) return;
+          var idx = src.indexOf("/*KIWI_COMPAT_SPLIT*/");
+          if (idx !== -1) kiwiCompatGlue = src.slice(0, idx);
+        })
+        .catch(function () {});
+    }
   } catch (e) {}
   if (compat) {
     var COMPAT_FIELD = { recaptcha: "g-recaptcha-response", hcaptcha: "h-captcha-response", turnstile: "cf-turnstile-response" }[compat];
@@ -2063,7 +2455,7 @@ async function __wbg_init(module_or_path) {
         '<div class="kiwi-widget" data-kiwi-widget data-kiwi-started="1" data-state="idle" role="group" aria-label="KiwiCaptcha security check">' +
         '<div class="kiwi-icon-wrapper" aria-hidden="true">' + COMPAT_SVG + '<div class="kiwi-glow"></div></div>' +
         '<div class="kiwi-main"><div class="kiwi-top"><span class="kiwi-label" data-kiwi-label>Security Check</span><span class="kiwi-badge" data-kiwi-badge>Idle</span></div>' +
-        '<div class="kiwi-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="kiwi-bar" data-kiwi-bar></div></div>' +
+        '<div class="kiwi-track" aria-hidden="true"><div class="kiwi-bar" data-kiwi-bar></div></div>' +
         '<div class="kiwi-bottom"><p class="kiwi-info" data-kiwi-info>Protected by KiwiCaptcha</p><span class="kiwi-timer" data-kiwi-timer></span></div></div>' +
         '<span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span></div></div>';
     }
@@ -2079,8 +2471,25 @@ async function __wbg_init(module_or_path) {
         errorCallback: cb("error-callback")
       };
     }
-    function compatRender(el, params) {
+    function compatRender(target, params) {
+      // Round 28 (P2): grecaptcha.render("id", ...) / render(selector, ...)
+      // resolve through the same target resolver as the native API — an
+      // explicit string id previously returned 0 silently.
+      var el = kiwiResolveTarget(target);
       if (!el || el.nodeType !== 1) return 0;
+      // Round 28 (P2): re-rendering an already-rendered container must be
+      // idempotent — the existing widget instance is returned instead of
+      // double-initializing the same container (a second solve on the same
+      // element would race the first). initWidget keys the instance on the
+      // CONTAINER (el.dataset.kiwiInstance); the inner [data-kiwi-widget]
+      // markup carries no instance id of its own.
+      if (el.dataset.kiwiInstance && kiwiWidgets[el.dataset.kiwiInstance]) {
+        return el.dataset.kiwiInstance;
+      }
+      var existingWidget = el.querySelector ? el.querySelector("[data-kiwi-widget]") : null;
+      if (existingWidget && existingWidget.dataset.kiwiInstance && kiwiWidgets[existingWidget.dataset.kiwiInstance]) {
+        return existingWidget.dataset.kiwiInstance;
+      }
       if (!el.querySelector("[data-kiwi-widget]")) {
         if (el.tagName === "BUTTON" || el.tagName === "INPUT") {
           // Invisible-style controls keep their label; the widget is
@@ -2101,6 +2510,12 @@ async function __wbg_init(module_or_path) {
           if (el.hasAttribute(attr) && !inner.hasAttribute(attr)) inner.setAttribute(attr, el.getAttribute(attr));
         });
         if (!inner.hasAttribute("data-kiwi-endpoint")) inner.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
+        // The driver reads the endpoint from the rendered container AND
+        // from its own ancestor chain — mirror the default onto the
+        // incumbent container so a page with NO explicit endpoint uses
+        // the bundle's same-origin prefix (round 26: the one-line
+        // migration contract relies on this default).
+        if (!el.hasAttribute("data-kiwi-endpoint")) el.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
       }
       var sitekey = (params && (params.sitekey || params["sitekey"])) || el.getAttribute("data-sitekey") || "";
       var cbs = compatReadCallbacks(el, params);
@@ -2109,11 +2524,24 @@ async function __wbg_init(module_or_path) {
         callback: cbs.callback,
         expiredCallback: cbs.expiredCallback,
         errorCallback: cbs.errorCallback,
-        responseField: COMPAT_FIELD
+        // Round 29 (P3): Turnstile's configurable response field
+        // (response-field-name / params["response-field-name"]) — the
+        // default stays the provider-named field.
+        responseField: (params && typeof params["response-field-name"] === "string" && params["response-field-name"])
+          || el.getAttribute("data-response-field-name") || COMPAT_FIELD,
+        // Round 29 (WCAG 3.1.2): grecaptcha.render(el, {lang: "de"}) or
+        // data-kiwi-lang on the incumbent container.
+        lang: (params && typeof params.lang === "string" && params.lang)
+          || el.getAttribute("data-kiwi-lang") || undefined
       });
+      if (id && !kiwiCompatFirstId) kiwiCompatFirstId = id;
       return id || 0;
     }
     function compatExecute(arg, opts) {
+      // Round 29 (P1): execute() with NO argument targets the first widget.
+      if (arg === undefined || arg === null) {
+        return kiwiCompatFirstId ? kiwiExecute(kiwiCompatFirstId) : Promise.reject(new Error("kiwicaptcha: no widget has been rendered"));
+      }
       var id = (typeof arg === "string" && kiwiWidgets[arg]) ? arg : null;
       if (id) return kiwiExecute(id);
       // v3-style execute(sitekey, {action}): map action -> Kiwi scope on a
@@ -2127,34 +2555,79 @@ async function __wbg_init(module_or_path) {
       var inner = document.createElement("div");
       inner.className = "kiwi-container";
       inner.setAttribute("data-kiwi-scope", action);
-      inner.innerHTML = compatMarkup();
       holder.appendChild(inner);
       document.body.appendChild(holder);
-      var id2 = kiwiRender(inner, { scope: action, responseField: COMPAT_FIELD });
-      return kiwiExecute(id2);
+      // Round 28 (P3): render through compatRender so the same endpoint/
+      // scope/response-field defaults land on the holder (an explicit
+      // native-default endpoint would 404 on a compat deployment).
+      var id2 = compatRender(inner, { sitekey: action });
+      if (!id2) {
+        if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+        return Promise.reject(new Error("kiwicaptcha: hidden render failed"));
+      }
+      var p = kiwiExecute(id2);
+      // Round 28 (P3): a long-lived SPA repeatedly calling execute()
+      // must not accumulate hidden DOM, registry entries or reset hooks —
+      // the holder is removed and the widget destroyed on BOTH paths.
+      if (p && typeof p.then === "function") {
+        return p.then(function (tok) {
+          if (id2 && kiwiWidgets[id2]) kiwiRemove(id2);
+          if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+          return tok;
+        }, function (err) {
+          if (id2 && kiwiWidgets[id2]) kiwiRemove(id2);
+          if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+          throw err;
+        });
+      }
+      return p;
+    }
+    function compatResolveId(idOrEl) {
+      // Round 29 (P1): an OMITTED id targets the first created widget
+      // (the incumbent providers' documented default); an element resolves
+      // to its rendered widget instance.
+      if (idOrEl === undefined || idOrEl === null) return kiwiCompatFirstId;
+      if (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) return idOrEl;
+      if (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector) {
+        return (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance || null;
+      }
+      return null;
     }
     var compatApi = {
       render: compatRender,
       reset: function (idOrEl) {
-        var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
-          : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+        var id = compatResolveId(idOrEl);
         if (id) kiwiReset(id);
       },
       getResponse: function (idOrEl) {
-        var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
-          : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+        var id = compatResolveId(idOrEl);
         return id ? kiwiGetResponse(id) : "";
       },
       execute: compatExecute,
       remove: function (idOrEl) {
-        var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
-          : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+        var id = compatResolveId(idOrEl);
         if (id) kiwiRemove(id);
+      },
+      // Round 29 (P3): Turnstile's ready() + isExpired() lifecycle surface.
+      ready: function (fn) {
+        if (typeof fn !== "function") return;
+        (kiwiCompatGlueReady || Promise.resolve()).then(function () { try { fn(); } catch (e) {} });
+      },
+      isExpired: function (idOrEl) {
+        var id = compatResolveId(idOrEl);
+        return id ? kiwiIsExpired(id) : false;
       }
     };
     if (compat === "recaptcha") {
       window.grecaptcha = window.grecaptcha || Object.assign({}, compatApi, {
-        ready: function (fn) { if (typeof fn === "function") { try { fn(); } catch (e) {} } },
+        // Round 28 (P2): ready() queues until the compat loader's glue
+        // self-fetch resolves — an explicit render() inside ready() that
+        // immediately starts an Argon challenge can no longer race the
+        // glue bootstrap (implicit rendering already waited).
+        ready: function (fn) {
+          if (typeof fn !== "function") return;
+          (kiwiCompatGlueReady || Promise.resolve()).then(function () { try { fn(); } catch (e) {} });
+        },
         enterprise: undefined
       });
     } else if (compat === "hcaptcha") {
@@ -2169,22 +2642,37 @@ async function __wbg_init(module_or_path) {
       window.turnstile = window.turnstile || compatApi;
     }
     compatInjectCss();
-    // Implicit render: every incumbent container on the page.
-    var compatContainers = document.querySelectorAll(COMPAT_SELECTOR);
-    for (var ci = 0; ci < compatContainers.length; ci++) {
-      var el = compatContainers[ci];
-      var wid = compatRender(el);
-      // Invisible-style controls (buttons / inputs / data-size="invisible"):
-      // clicking the control triggers execute() — the incumbent pattern.
-      if (wid && (el.tagName === "BUTTON" || el.tagName === "INPUT" || el.getAttribute("data-size") === "invisible")) {
-        (function (id, node) {
-          node.addEventListener("click", function (ev) {
-            ev.preventDefault();
-            kiwiExecute(id);
-          });
-        })(wid, el);
+    // Round 29 (P1): render=explicit suppresses automatic rendering — the
+    // application calls render() itself (the documented explicit pattern);
+    // onload=<fn> runs after the loader glue is ready so an immediate
+    // explicit Argon render can never race the glue bootstrap.
+    (kiwiCompatGlueReady || Promise.resolve()).then(function () {
+      if (compatOnloadName) {
+        try {
+          var onloadFn = window[compatOnloadName];
+          if (typeof onloadFn === "function") onloadFn();
+        } catch (e) {}
       }
-    }
+      if (compatRenderMode === "explicit") return;
+      // Implicit render: every incumbent container on the page. The initial
+      // render waits for the loader-glue fetch so Argon2id solves work on
+      // first paint through the external /api.js path (round 26).
+      var compatContainers = document.querySelectorAll(COMPAT_SELECTOR);
+      for (var ci = 0; ci < compatContainers.length; ci++) {
+        var el = compatContainers[ci];
+        var wid = compatRender(el);
+        // Invisible-style controls (buttons / inputs / data-size="invisible"):
+        // clicking the control triggers execute() — the incumbent pattern.
+        if (wid && (el.tagName === "BUTTON" || el.tagName === "INPUT" || el.getAttribute("data-size") === "invisible")) {
+          (function (id, node) {
+            node.addEventListener("click", function (ev) {
+              ev.preventDefault();
+              kiwiExecute(id);
+            });
+          })(wid, el);
+        }
+      }
+    });
     // Support grecaptcha.render(el, params) called LATER (dynamic widgets).
     if (compat === "recaptcha" && typeof MutationObserver !== "undefined") {
       new MutationObserver(function (mutations) {
@@ -2203,20 +2691,15 @@ async function __wbg_init(module_or_path) {
 
   var runInit = function() {
     document.querySelectorAll("[data-kiwi-widget]").forEach(function (W) {
-      // Click-to-reacquire: after a reset or a settled failure the widget
-      // is idle and ready for a fresh challenge on the next interaction
-      // (audit #54/#55). Bound once per element.
-      if (!W.dataset.kiwiRetryBound) {
-        W.dataset.kiwiRetryBound = "1";
-        kiwiAddListener(W, "pointerdown", function () {
-          if (!W.dataset.kiwiStarted) initWidget(W);
-        });
-      }
+      // Round 29 (WCAG 2.5.2): no pointerdown-only activation. After a
+      // reset or a settled failure the widget is idle; the native Retry
+      // button (visible in idle/failed/unavailable states via
+      // data-state CSS) is the reacquire control for EVERY input method.
       initWidget(W);
     });
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", runInit); else runInit();
 })();
 
-</script><button type="submit" class="w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2"><span>Sign In</span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><path d="M5 12h12m-4-4 4 4-4 4"></path></svg></button><div class="text-center text-xs font-medium text-surface-500">No account? <a href="/signup" class="text-primary font-bold hover:underline">Sign up</a></div><div id="login-mfa" data-mfa-section class="hidden" aria-hidden="true"><p class="text-[11px] font-bold uppercase tracking-tight text-surface-500">Additional verification required. Enter your MFA code.</p><input id="mfaCode" name="mfaCode" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="000000" class="flex h-12 w-full rounded-xl border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all" /></div><div id="login-form-errors" class="hidden" role="alert" aria-live="assertive" data-error-key="auth.error.rate_limited"></div></form><div class="px-8 pb-8 bg-white"><div class="relative mb-6"><div class="absolute inset-0 flex items-center"><div class="w-full border-t border-surface-200/60"></div></div><div class="relative flex justify-center text-[10px] uppercase font-bold tracking-[0.2em]"><span class="bg-white px-4 text-surface-400">Or continue with</span></div></div><div class="flex flex-col gap-3"><button type="button" aria-label="Continue with Google" class="flex items-center justify-center gap-3 px-4 py-3 rounded-xl border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]"><svg aria-hidden="true" class="w-5 h-5" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"></path><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"></path><path d="M5.84 14.17c-.22-.66-.35-1.36-.35-2.17s.13-1.51.35-2.17V7.69H2.18C.79 10.45 0 13.63 0 17c0 3.37.79 6.55 2.18 9.31l3.66-2.84z" fill="#FBBC05"></path><path d="M12 4.6c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 1.09 14.97 0 12 0 7.7 0 3.99 2.47 2.18 5.69l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"></path></svg><span class="text-sm font-semibold text-surface-950">Google</span></button><button type="button" aria-label="Continue with GitHub" class="flex items-center justify-center gap-3 px-4 py-3 rounded-xl border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]"><svg aria-hidden="true" class="w-5 h-5 text-foreground" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.03.555-3.885-1.425-3.885-1.425-.546-1.38-1.335-1.755-1.335-1.755-1.005-.69.075-.675.075-.675 1.11.075 1.695 1.14 1.695 1.14 1.005 1.725 2.64 1.23 3.285.945.105-.72.39-1.215.705-1.485-2.565-.285-5.265-1.29-5.265-5.73 0-1.26.45-2.295 1.185-3.09-.12-.285-.525-1.455.105-3.045 0 0 .96-.3 3.15 1.2A10.965 10.965 0 0 1 12 5.805c.9.015 1.785.12 2.64.24 2.19-1.5 3.15-1.2 3.15-1.2.63 1.59.225 2.76.105 3.045.735.795 1.185 1.83 1.185 3.09 0 4.455-2.715 5.43-5.295 5.715.39.345.735 1.02.735 2.055 0 1.485-.015 2.685-.015 3.045 0 .315.225.69.84.57C20.565 21.795 24 17.31 24 12c0-6.63-5.37-12-12-12"></path></svg><span class="text-sm font-semibold text-surface-950">GitHub</span></button></div><p class="mt-6 text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4">By signing in, you agree to our <a href="/legal/terms" class="text-primary font-bold hover:underline">Terms of Service</a> and <a href="/legal/privacy" class="text-primary font-bold hover:underline">Privacy Policy</a>.</p></div></div></div><script>(function(){var ALLOWED={'/v1/auth/login':['email','password','mfaCode','kiwi__token'],'/api/auth/login':['email','password','mfaCode','kiwi__token'],'/v1/auth/signup':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/register':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/forgot-password':['email','kiwi__token'],'/v1/auth/reset-password':['token','email','password','confirmPassword','kiwi__token']};function destFor(action){if(action.indexOf('/login')>-1)return '/dashboard';if(action.indexOf('/signup')>-1||action.indexOf('/register')>-1)return '/verify-email';if(action.indexOf('/forgot-password')>-1)return null;if(action.indexOf('/reset-password')>-1)return '/login?reset=1';return null;}function showError(form,msg){var box=form.querySelector('[data-error-key],[role="alert"]');if(!box){box=document.createElement('div');box.setAttribute('role','alert');box.className='text-sm text-warning-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Request failed. Please try again.';}function showSuccess(form,msg){var box=form.querySelector('[data-success]');if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold uppercase tracking-tight';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Done.';}function togglePassword(btn){var id=btn.getAttribute('data-password-toggle')||btn.getAttribute('aria-controls');var input=id?document.getElementById(id):null;if(!input)return;var showing=input.type==='text';input.type=showing?'password':'text';btn.setAttribute('aria-pressed',showing?'false':'true');btn.setAttribute('aria-label',showing?'Show password':'Hide password');btn.textContent=showing?'Show':'Hide';}function bindPasswordToggles(){document.querySelectorAll('[data-password-toggle]').forEach(function(btn){btn.dataset.passwordToggleBound='1';});if(document.documentElement.dataset.passwordTogglesBound==='1')return;document.documentElement.dataset.passwordTogglesBound='1';document.addEventListener('click',function(ev){var target=ev.target&&ev.target.closest?ev.target.closest('[data-password-toggle]'):null;if(!target)return;ev.preventDefault();togglePassword(target);});}async function submitForm(ev){var form=ev.currentTarget;var action=form.getAttribute('action')||'';if(action.indexOf('/v1/auth/')!==0&&action.indexOf('/api/auth/')!==0)return;ev.preventDefault();var btn=form.querySelector('button[type="submit"]');if(btn){btn.disabled=true;btn.dataset.originalLabel=btn.textContent;}var fd=new FormData(form);var allowed=ALLOWED[action]||null;var payload={};fd.forEach(function(v,k){if(k==='_csrf')return;if(allowed&&allowed.indexOf(k)===-1)return;payload[k]=v;});if(form.dataset.mfaToken&&payload.mfaCode){action=form.dataset.mfaOriginalAction.replace('/login','/mfa/verify');payload={challenge_token:form.dataset.mfaToken,mfa_code:payload.mfaCode};form.dataset.mfaToken='';}var headers={'Content-Type':'application/json','Accept':'application/json'};var csrf=fd.get('_csrf');if(csrf)headers['X-CSRF-Token']=csrf;try{var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-origin',body:JSON.stringify(payload)});var data=null;try{data=await res.json();}catch(_e){}if(res.ok){if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}else if(res.status===202&&data&&data.challengeToken){form.dataset.mfaToken=data.challengeToken;form.dataset.mfaOriginalAction=action;var mfaEl=form.querySelector('[data-mfa-section]');if(mfaEl){mfaEl.classList.remove('hidden');mfaEl.removeAttribute('aria-hidden');mfaEl.removeAttribute('inert');}var sbtn=form.querySelector('button[type=submit]');if(sbtn){sbtn.dataset.originalMfaLabel=sbtn.textContent;sbtn.textContent='Verify MFA';sbtn.disabled=false;}if(btn){btn.disabled=false;}
+</script><button type="submit" class="w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2"><span>Sign In</span><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><path d="M5 12h12m-4-4 4 4-4 4"></path></svg></button><div class="text-center text-xs font-medium text-surface-500">No account? <a href="/signup" class="text-primary font-bold hover:underline">Sign up</a></div><div id="login-mfa" data-mfa-section class="hidden" aria-hidden="true"><p class="text-[11px] font-bold text-surface-500">Additional verification required. Enter your MFA code.</p><input id="mfaCode" name="mfaCode" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="000000" class="flex h-11 w-full rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all" /></div><div id="login-form-errors" class="hidden" role="alert" aria-live="assertive" data-error-key="auth.error.rate_limited"></div></form><div class="px-8 pb-8 bg-white"><div class="relative mb-6"><div class="absolute inset-0 flex items-center"><div class="w-full border-t border-surface-200/60"></div></div><div class="relative flex justify-center text-[10px] uppercase font-bold tracking-[0.2em]"><span class="bg-white px-4 text-surface-400">Or continue with</span></div></div><div class="flex flex-col gap-3"><button type="button" aria-label="Continue with Google" class="flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]"><svg aria-hidden="true" class="w-5 h-5" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"></path><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"></path><path d="M5.84 14.17c-.22-.66-.35-1.36-.35-2.17s.13-1.51.35-2.17V7.69H2.18C.79 10.45 0 13.63 0 17c0 3.37.79 6.55 2.18 9.31l3.66-2.84z" fill="#FBBC05"></path><path d="M12 4.6c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 1.09 14.97 0 12 0 7.7 0 3.99 2.47 2.18 5.69l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"></path></svg><span class="text-sm font-semibold text-surface-950">Google</span></button><button type="button" aria-label="Continue with GitHub" class="flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]"><svg aria-hidden="true" class="w-5 h-5 text-foreground" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.03.555-3.885-1.425-3.885-1.425-.546-1.38-1.335-1.755-1.335-1.755-1.005-.69.075-.675.075-.675 1.11.075 1.695 1.14 1.695 1.14 1.005 1.725 2.64 1.23 3.285.945.105-.72.39-1.215.705-1.485-2.565-.285-5.265-1.29-5.265-5.73 0-1.26.45-2.295 1.185-3.09-.12-.285-.525-1.455.105-3.045 0 0 .96-.3 3.15 1.2A10.965 10.965 0 0 1 12 5.805c.9.015 1.785.12 2.64.24 2.19-1.5 3.15-1.2 3.15-1.2.63 1.59.225 2.76.105 3.045.735.795 1.185 1.83 1.185 3.09 0 4.455-2.715 5.43-5.295 5.715.39.345.735 1.02.735 2.055 0 1.485-.015 2.685-.015 3.045 0 .315.225.69.84.57C20.565 21.795 24 17.31 24 12c0-6.63-5.37-12-12-12"></path></svg><span class="text-sm font-semibold text-surface-950">GitHub</span></button></div><p class="mt-6 text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4">By signing in, you agree to our <a href="/legal/terms" class="text-primary font-bold hover:underline">Terms of Service</a> and <a href="/legal/privacy" class="text-primary font-bold hover:underline">Privacy Policy</a>.</p></div></div></div><script>(function(){var ALLOWED={'/v1/auth/login':['email','password','mfaCode','kiwi__token'],'/api/auth/login':['email','password','mfaCode','kiwi__token'],'/v1/auth/signup':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/register':['name','email','password','company_name','plan','kiwi__token'],'/v1/auth/forgot-password':['email','kiwi__token'],'/v1/auth/reset-password':['token','email','password','confirmPassword','kiwi__token']};function destFor(action){if(action.indexOf('/login')>-1)return '/dashboard';if(action.indexOf('/signup')>-1||action.indexOf('/register')>-1)return '/verify-email';if(action.indexOf('/forgot-password')>-1)return null;if(action.indexOf('/reset-password')>-1)return '/login?reset=1';return null;}function showError(form,msg){var box=form.querySelector('[data-error-key],[role="alert"]');if(!box){box=document.createElement('div');box.setAttribute('role','alert');box.className='text-sm text-warning-700 font-bold';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Request failed. Please try again.';}function showSuccess(form,msg){var box=form.querySelector('[data-success]');if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold';form.appendChild(box);}box.classList.remove('hidden');box.textContent=msg||'Done.';}function togglePassword(btn){var id=btn.getAttribute('data-password-toggle')||btn.getAttribute('aria-controls');var input=id?document.getElementById(id):null;if(!input)return;var showing=input.type==='text';input.type=showing?'password':'text';btn.setAttribute('aria-pressed',showing?'false':'true');btn.setAttribute('aria-label',showing?'Show password':'Hide password');btn.textContent=showing?'Show':'Hide';}function bindPasswordToggles(){document.querySelectorAll('[data-password-toggle]').forEach(function(btn){btn.dataset.passwordToggleBound='1';});if(document.documentElement.dataset.passwordTogglesBound==='1')return;document.documentElement.dataset.passwordTogglesBound='1';document.addEventListener('click',function(ev){var target=ev.target&&ev.target.closest?ev.target.closest('[data-password-toggle]'):null;if(!target)return;ev.preventDefault();togglePassword(target);});}async function submitForm(ev){var form=ev.currentTarget;var action=form.getAttribute('action')||'';if(action.indexOf('/v1/auth/')!==0&&action.indexOf('/api/auth/')!==0)return;ev.preventDefault();var btn=form.querySelector('button[type="submit"]');if(btn){btn.disabled=true;btn.dataset.originalLabel=btn.textContent;}var fd=new FormData(form);var allowed=ALLOWED[action]||null;var payload={};fd.forEach(function(v,k){if(k==='_csrf')return;if(allowed&&allowed.indexOf(k)===-1)return;payload[k]=v;});if(form.dataset.mfaToken&&payload.mfaCode){action=form.dataset.mfaOriginalAction.replace('/login','/mfa/verify');payload={challenge_token:form.dataset.mfaToken,mfa_code:payload.mfaCode};form.dataset.mfaToken='';}var headers={'Content-Type':'application/json','Accept':'application/json'};var csrf=fd.get('_csrf');if(csrf)headers['X-CSRF-Token']=csrf;try{var res=await fetch(action,{method:'POST',headers:headers,credentials:'same-origin',body:JSON.stringify(payload)});var data=null;try{data=await res.json();}catch(_e){}if(res.ok){if(action.indexOf('/forgot-password')>-1){showSuccess(form,(data&&data.message)||'If that account exists, a reset link is on the way.');}else if(res.status===202&&data&&data.challengeToken){form.dataset.mfaToken=data.challengeToken;form.dataset.mfaOriginalAction=action;var mfaEl=form.querySelector('[data-mfa-section]');if(mfaEl){mfaEl.classList.remove('hidden');mfaEl.removeAttribute('aria-hidden');mfaEl.removeAttribute('inert');}var sbtn=form.querySelector('button[type=submit]');if(sbtn){sbtn.dataset.originalMfaLabel=sbtn.textContent;sbtn.textContent='Verify MFA';sbtn.disabled=false;}if(btn){btn.disabled=false;}
 }else{var dest=destFor(action);if(dest){var qs='';if(action.indexOf('/signup')>-1&&payload.email){qs='?email='+encodeURIComponent(payload.email);}window.location.assign(dest+qs);}else{showSuccess(form,(data&&data.message)||'Done.');}}}else{var msg=(data&&data.error&&(data.error.message||data.error.code))||(data&&data.message)||('Request failed ('+res.status+').');showError(form,msg);delete form.dataset.mfaToken;if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}}catch(err){showError(form,'Network error. Please try again.');if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}}function bind(){bindPasswordToggles();document.querySelectorAll('form[action^="/v1/auth/"],form[action^="/api/auth/"]').forEach(function(f){if(f.dataset.authBound==='1')return;f.dataset.authBound='1';f.addEventListener('submit',submitForm);});}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind);}else{bind();}})();</script></main></main></body></html>

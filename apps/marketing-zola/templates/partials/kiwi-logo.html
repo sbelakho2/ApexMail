@@ -53,8 +53,25 @@
   {# text-surface-950 on "Mail" is auto-inverted in dark mode by the      #}
   {# html.dark { --surface-950: ... } override in input.css (the project's  #}
   {# documented dark-mode mechanism — no Tailwind dark: variant needed).   #}
-  {# Font-size scales proportionally with mark_size via em (0.625 * 32 = 20px). #}
-  <span class="font-bold tracking-tighter leading-none" style="font-size: 0.625em;">
-    <span class="text-brand-600">Apex</span><span class="text-surface-950">Mail</span>
-  </span>
+  {# Sized in SVG user units (font-size="20" inside a 40-unit-tall viewBox, #}
+  {# matching the kiwi_lockup pattern) so the type scales with the viewBox #}
+  {# instead of an inherited em. Rendered height = mark_size * 1.25, so    #}
+  {# the wordmark font-size resolves to 0.625 * mark_size px (20px at the  #}
+  {# default 32px mark) at every scale.                                    #}
+  {# Geometry: baseline y=27 with font-size 20 → Inter cap-height ≈ 0.727em #}
+  {# ≈ 14.5 units; cap band 12.5→27 centers at ≈19.7 ≈ viewBox mid (20),   #}
+  {# so the wordmark optically centers against the flex-centered mark, and #}
+  {# cap-height ≈ 14.5px ≈ 0.45 × the 32px mark ≈ half the mark height.    #}
+  <svg
+    class="apex-kiwi-wordmark shrink-0"
+    width="{{ mark_size * 3.125 }}"
+    height="{{ mark_size * 1.25 }}"
+    viewBox="0 0 100 40"
+    aria-hidden="true"
+    focusable="false"
+  >
+    <text x="0" y="27" font-family="'Inter Variable', Inter, system-ui, sans-serif" font-size="20" font-weight="700" letter-spacing="-0.02em" fill="currentColor">
+      <tspan class="text-brand-600">Apex</tspan><tspan class="text-surface-950">Mail</tspan>
+    </text>
+  </svg>
 </a>

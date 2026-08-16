@@ -132,11 +132,11 @@
     --font-display: 'Inter Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 
-    --radius: 0px;
-    --radius-sm: 0px;
-    --radius-md: 2px;
-    --radius-lg: 4px;
-    --radius-xl: 6px;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
     --radius-full: 9999px;
   }
 
@@ -251,7 +251,7 @@
 
 @layer components {
   .btn-primary {
-    @apply inline-flex items-center justify-center rounded-sm bg-primary px-5 py-3 text-sm font-bold uppercase text-white transition-all duration-200 ease-premium;
+    @apply inline-flex items-center justify-center rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-white transition-all duration-200 ease-premium;
     letter-spacing: 0;
   }
 
@@ -261,11 +261,11 @@
   }
 
   .apex-card {
-    @apply rounded-sm border border-surface-200 bg-white transition-all duration-300 ease-premium;
+    @apply rounded-lg border border-surface-200 bg-white transition-all duration-200 ease-premium;
   }
 
   .apex-card:hover {
-    @apply border-surface-950 shadow-premium;
+    @apply border-surface-300 shadow-premium;
   }
 
   .glass {
@@ -336,15 +336,6 @@
     border-right: 1px solid rgb(var(--border));
   }
 
-  .apex-console-sidebar::before,
-  .apex-cp-sidebar::before {
-    content: '';
-    position: absolute;
-    inset: 0 0 auto;
-    height: 3px;
-    background: rgb(var(--primary));
-  }
-
   .apex-logo-mark {
     background: rgb(var(--primary));
     color: #fff;
@@ -353,8 +344,7 @@
 
   .apex-sidebar-brand {
     color: rgb(var(--foreground));
-    text-transform: uppercase;
-    letter-spacing: 0;
+    letter-spacing: -0.01em;
   }
 
   .apex-console-sidebar .border-surface-100,
@@ -415,36 +405,16 @@
     gap: 2rem;
     min-height: 200px;
     overflow: hidden;
-    border: 1px solid #18181b;
-    /* Sculpted gradient instead of flat black so the hero feels engineered, not stamped. */
-    background:
-      radial-gradient(120% 80% at 0% 0%, rgba(255, 255, 255, 0.06), transparent 55%),
-      linear-gradient(135deg, #0b0b0e 0%, #09090b 55%, #050507 100%);
-    color: #fff;
+    border: 1px solid rgb(var(--border));
+    border-radius: var(--radius-lg);
+    /* Reference (Correct Design.png): one white hero card — flat surface, hairline
+       border, a single subtle ambient shadow. No gradient, no accent strip. */
+    background: #fff;
+    color: rgb(var(--foreground));
     padding: 2rem;
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.05),
-      0 24px 60px rgba(9, 9, 11, 0.18);
-  }
-
-  .apex-page-hero::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 6px;
-    background: rgb(var(--primary));
-  }
-
-  .apex-page-hero::after {
-    content: '';
-    position: absolute;
-    left: 2rem;
-    right: 2rem;
-    bottom: 1.25rem;
-    height: 1px;
-    background: rgba(255, 255, 255, 0.1);
+      0 1px 2px rgb(15 17 22 / 0.04),
+      0 6px 16px rgb(15 17 22 / 0.06);
   }
 
   .apex-eyebrow {
@@ -454,9 +424,9 @@
     color: rgb(var(--primary));
     font-size: 0.72rem;
     line-height: 1rem;
-    font-weight: 800;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.12em;
   }
 
   .apex-eyebrow::before {
@@ -476,16 +446,15 @@
     margin-top: 1rem;
     max-width: 720px;
     font-size: 2.25rem;
-    line-height: 0.98;
-    font-weight: 900;
-    text-transform: uppercase;
-    letter-spacing: -0.005em;
+    line-height: 1.05;
+    font-weight: 800;
+    letter-spacing: -0.01em;
   }
 
   .apex-hero-copy {
     margin-top: 1rem;
     max-width: 620px;
-    color: rgba(255, 255, 255, 0.68);
+    color: rgb(var(--surface-500));
     font-size: 0.98rem;
     line-height: 1.65;
   }
@@ -499,29 +468,28 @@
 
   .apex-hero-stat-grid div {
     min-height: 88px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgb(var(--border));
+    background: rgb(var(--surface-50));
     padding: 1rem;
   }
 
   .apex-hero-stat-grid span {
     display: block;
-    color: rgba(255, 255, 255, 0.48);
+    color: rgb(var(--surface-500));
     font-size: 0.64rem;
     line-height: 1rem;
-    font-weight: 800;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.12em;
   }
 
   .apex-hero-stat-grid strong {
     display: block;
     margin-top: 0.65rem;
-    color: #fff;
+    color: rgb(var(--foreground));
     font-size: 1.5rem;
     line-height: 1.2;
-    font-weight: 900;
-    text-transform: uppercase;
+    font-weight: 800;
   }
 
   .apex-card.apex-card,
@@ -531,27 +499,9 @@
     position: relative;
     border-color: rgba(9, 9, 11, 0.14);
     background: #fff;
-    box-shadow: 0 1px 0 rgba(9, 9, 11, 0.05), 0 18px 44px rgba(9, 9, 11, 0.06);
-  }
-
-  .apex-card.apex-card::before,
-  .apex-panel::before,
-  .apex-signal-card::before {
-    content: '';
-    position: absolute;
-    left: -1px;
-    top: -1px;
-    bottom: -1px;
-    width: 3px;
-    background: rgb(var(--primary));
-    opacity: 0;
-    transition: opacity 160ms ease-out;
-  }
-
-  .apex-card.apex-card:hover::before,
-  .apex-panel:hover::before,
-  .apex-signal-card:hover::before {
-    opacity: 1;
+    box-shadow:
+      0 1px 2px rgb(15 17 22 / 0.04),
+      0 6px 16px rgb(15 17 22 / 0.06);
   }
 
   .apex-card.apex-card h3,
@@ -576,12 +526,12 @@
   .apex-table thead,
   .apex-table thead tr,
   .apex-table thead th {
-    background: #09090b;
+    background: transparent;
   }
 
   .apex-table th {
-    color: rgba(255, 255, 255, 0.74);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    color: rgb(var(--surface-500));
+    border-bottom: 1px solid rgb(var(--border));
     text-transform: uppercase;
     letter-spacing: 0.12em;
   }
@@ -627,8 +577,8 @@
     color: rgb(var(--surface-950));
     font-size: 2rem;
     line-height: 1.05;
-    font-weight: 900;
-    text-transform: uppercase;
+    font-weight: 800;
+    letter-spacing: -0.01em;
   }
 
   .apex-ops-board p {
@@ -676,9 +626,10 @@
   .apex-lane-grid strong {
     margin-top: 1.25rem;
     color: rgb(var(--surface-950));
-    font-size: 0.95rem;
+    font-size: 0.75rem;
     line-height: 1.2;
-    font-weight: 900;
+    font-weight: 700;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
@@ -727,47 +678,29 @@
 
   /* ─── Premium upgrades (cards, tables, dashboard hero, chart frames) ────── */
 
-  /* Lift the apex-card / apex-panel / apex-signal-card with a layered surface,
-     a hairline accent strip on the side, and a sharper drop shadow. The accent
-     strip is always visible (low opacity), and intensifies on hover. */
+  /* Reference design: flat white surface, hairline border, one subtle ambient
+     shadow. No gradient, no accent strip, no heavy lift on hover — the border
+     darkens slightly instead. */
   .apex-card.apex-card,
   .apex-panel,
   .apex-signal-card,
   .apex-ops-board {
-    background:
-      linear-gradient(180deg, #ffffff 0%, #fbfbfa 100%);
+    background: #ffffff;
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.9),
-      0 1px 0 rgba(9, 9, 11, 0.04),
-      0 14px 38px rgba(9, 9, 11, 0.06),
-      0 2px 6px rgba(9, 9, 11, 0.03);
+      0 1px 2px rgb(15 17 22 / 0.04),
+      0 6px 16px rgb(15 17 22 / 0.06);
     transition:
       box-shadow 200ms cubic-bezier(0.23, 1, 0.32, 1),
-      border-color 200ms ease-out,
-      transform 200ms ease-out;
+      border-color 200ms ease-out;
   }
 
   .apex-card.apex-card:hover,
   .apex-panel:hover,
   .apex-signal-card:hover {
-    border-color: rgba(9, 9, 11, 0.22);
+    border-color: rgba(9, 9, 11, 0.16);
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.95),
-      0 1px 0 rgba(9, 9, 11, 0.06),
-      0 22px 52px rgba(9, 9, 11, 0.10),
-      0 4px 10px rgba(9, 9, 11, 0.05);
-  }
-
-  .apex-card.apex-card::before,
-  .apex-panel::before,
-  .apex-signal-card::before {
-    opacity: 0.18;
-  }
-
-  .apex-card.apex-card:hover::before,
-  .apex-panel:hover::before,
-  .apex-signal-card:hover::before {
-    opacity: 1;
+      0 1px 2px rgb(15 17 22 / 0.05),
+      0 10px 24px rgb(15 17 22 / 0.09);
   }
 
   .apex-signal-card {
@@ -787,26 +720,24 @@
     letter-spacing: -0.01em;
   }
 
-  /* Inventory panel — softer, more refined table head */
+  /* Inventory panel — table chassis stays a white card with a hairline border */
   .apex-table-wrap {
-    border: 0;
-    background: transparent;
+    border: 1px solid rgb(var(--border));
+    background: #fff;
   }
 
   .apex-table thead,
   .apex-table thead tr,
   .apex-table thead th {
-    background:
-      linear-gradient(180deg, #18181b 0%, #09090b 100%);
+    background: transparent;
   }
 
   .apex-table thead th {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: inset 0 -1px 0 rgb(var(--primary) / 0.45);
+    border-bottom: 1px solid rgb(var(--border));
   }
 
   .apex-table th {
-    color: rgba(255, 255, 255, 0.78);
+    color: rgb(var(--surface-500));
     text-transform: uppercase;
     letter-spacing: 0.14em;
     font-size: 0.66rem;
@@ -953,9 +884,9 @@
   }
 
   .apex-cp-stat-label {
-    font-size: 0.64rem;
-    font-weight: 800;
-    letter-spacing: 0.22em;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
     color: rgb(var(--surface-500));
   }
@@ -1155,7 +1086,7 @@
   }
 
   .apex-cp-sales table thead th {
-    border-bottom: 1px solid rgba(220, 38, 38, 0.35);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
     font-size: 0.65rem;
     font-weight: 800;
     letter-spacing: 0.18em;
@@ -1284,9 +1215,9 @@
   }
 
   .dark .apex-auth-notice[data-intent="info"] {
-    color: rgb(254 226 226) !important;
-    border-color: rgb(var(--brand-400) / 0.5) !important;
-    background-color: rgb(69 10 10 / 0.32) !important;
+    color: rgb(207 250 254) !important;
+    border-color: rgb(var(--info-500) / 0.5) !important;
+    background-color: rgb(8 51 68 / 0.32) !important;
   }
 
   .dark .text-surface-50,
@@ -1373,24 +1304,43 @@
   .dark .apex-panel,
   .dark .apex-signal-card,
   .dark .apex-ops-board {
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
-      rgb(var(--card));
+    background: rgb(var(--card));
     border-color: rgba(255, 255, 255, 0.1) !important;
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.06),
-      0 18px 44px rgba(0, 0, 0, 0.36),
-      0 2px 8px rgba(0, 0, 0, 0.24);
+      0 1px 2px rgb(0 0 0 / 0.24),
+      0 8px 20px rgb(0 0 0 / 0.3);
   }
 
   .dark .apex-card.apex-card:hover,
   .dark .apex-panel:hover,
   .dark .apex-signal-card:hover {
-    border-color: rgba(255, 255, 255, 0.18) !important;
+    border-color: rgba(255, 255, 255, 0.16) !important;
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.08),
-      0 24px 58px rgba(0, 0, 0, 0.44),
-      0 4px 12px rgba(0, 0, 0, 0.28);
+      0 1px 2px rgb(0 0 0 / 0.28),
+      0 12px 28px rgb(0 0 0 / 0.38);
+  }
+
+  .dark .apex-page-hero {
+    background: rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    box-shadow:
+      0 1px 2px rgb(0 0 0 / 0.24),
+      0 8px 20px rgb(0 0 0 / 0.3);
+  }
+
+  .dark .apex-hero-copy,
+  .dark .apex-hero-stat-grid span {
+    color: rgb(var(--surface-600));
+  }
+
+  .dark .apex-hero-stat-grid strong {
+    color: #fff;
+  }
+
+  .dark .apex-table-wrap {
+    background: rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.1);
   }
 
   .dark .apex-table thead,
@@ -1401,6 +1351,7 @@
 
   .dark .apex-table th {
     color: rgba(255, 255, 255, 0.78);
+    border-bottom-color: rgba(255, 255, 255, 0.08);
   }
 
   .dark .apex-table td {
@@ -1603,9 +1554,9 @@
     }
 
     :root:not(.light) .apex-auth-notice[data-intent="info"] {
-      color: rgb(254 226 226) !important;
-      border-color: rgb(var(--brand-400) / 0.5) !important;
-      background-color: rgb(69 10 10 / 0.32) !important;
+      color: rgb(207 250 254) !important;
+      border-color: rgb(var(--info-500) / 0.5) !important;
+      background-color: rgb(8 51 68 / 0.32) !important;
     }
 
     :root:not(.light) .text-surface-50,
@@ -1692,24 +1643,43 @@
     :root:not(.light) .apex-panel,
     :root:not(.light) .apex-signal-card,
     :root:not(.light) .apex-ops-board {
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
-        rgb(var(--card));
+      background: rgb(var(--card));
       border-color: rgba(255, 255, 255, 0.1) !important;
       box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.06),
-        0 18px 44px rgba(0, 0, 0, 0.36),
-        0 2px 8px rgba(0, 0, 0, 0.24);
+        0 1px 2px rgb(0 0 0 / 0.24),
+        0 8px 20px rgb(0 0 0 / 0.3);
     }
 
     :root:not(.light) .apex-card.apex-card:hover,
     :root:not(.light) .apex-panel:hover,
     :root:not(.light) .apex-signal-card:hover {
-      border-color: rgba(255, 255, 255, 0.18) !important;
+      border-color: rgba(255, 255, 255, 0.16) !important;
       box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.08),
-        0 24px 58px rgba(0, 0, 0, 0.44),
-        0 4px 12px rgba(0, 0, 0, 0.28);
+        0 1px 2px rgb(0 0 0 / 0.28),
+        0 12px 28px rgb(0 0 0 / 0.38);
+    }
+
+    :root:not(.light) .apex-page-hero {
+      background: rgb(var(--card));
+      border-color: rgba(255, 255, 255, 0.1);
+      color: #fff;
+      box-shadow:
+        0 1px 2px rgb(0 0 0 / 0.24),
+        0 8px 20px rgb(0 0 0 / 0.3);
+    }
+
+    :root:not(.light) .apex-hero-copy,
+    :root:not(.light) .apex-hero-stat-grid span {
+      color: rgb(var(--surface-600));
+    }
+
+    :root:not(.light) .apex-hero-stat-grid strong {
+      color: #fff;
+    }
+
+    :root:not(.light) .apex-table-wrap {
+      background: rgb(var(--card));
+      border-color: rgba(255, 255, 255, 0.1);
     }
 
     :root:not(.light) .apex-table thead,
@@ -1720,6 +1690,7 @@
 
     :root:not(.light) .apex-table th {
       color: rgba(255, 255, 255, 0.78);
+      border-bottom-color: rgba(255, 255, 255, 0.08);
     }
 
     :root:not(.light) .apex-table td {

@@ -267,16 +267,16 @@ html.dark .bg-white\/5 {
 }
 
 html.dark .bg-brand-50 {
-  background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.72)) !important;
+  background-color: rgb(30 27 75 / var(--tw-bg-opacity, 0.72)) !important;
 }
 html.dark .bg-brand-100 {
-  background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.82)) !important;
+  background-color: rgb(30 27 75 / var(--tw-bg-opacity, 0.82)) !important;
 }
 html.dark .bg-brand-50\/50 {
-  background-color: rgb(69 10 10 / 0.52) !important;
+  background-color: rgb(30 27 75 / 0.52) !important;
 }
 html.dark .bg-brand-50\/20 {
-  background-color: rgb(69 10 10 / 0.34) !important;
+  background-color: rgb(30 27 75 / 0.34) !important;
 }
 html.dark .bg-success-50 {
   background-color: rgb(20 83 45 / var(--tw-bg-opacity, 0.35)) !important;
@@ -307,8 +307,8 @@ html.dark .from-surface-100 {
   --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
 }
 html.dark .from-brand-50 {
-  --tw-gradient-from: rgb(69 10 10 / 0.62) var(--tw-gradient-from-position) !important;
-  --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
+  --tw-gradient-from: rgb(30 27 75 / 0.62) var(--tw-gradient-from-position) !important;
+  --tw-gradient-to: rgb(30 27 75 / 0) var(--tw-gradient-to-position) !important;
   --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
 }
 html.dark .via-white,
@@ -318,8 +318,8 @@ html.dark .via-surface-100 {
   --tw-gradient-stops: var(--tw-gradient-from), rgb(9 9 11 / 1) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
 }
 html.dark .via-brand-50 {
-  --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
-  --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
+  --tw-gradient-to: rgb(30 27 75 / 0) var(--tw-gradient-to-position) !important;
+  --tw-gradient-stops: var(--tw-gradient-from), rgb(30 27 75 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
 }
 html.dark .to-white,
 html.dark .to-surface-50,
@@ -327,7 +327,7 @@ html.dark .to-surface-100 {
   --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
 }
 html.dark .to-brand-50 {
-  --tw-gradient-to: rgb(69 10 10 / 0.42) var(--tw-gradient-to-position) !important;
+  --tw-gradient-to: rgb(30 27 75 / 0.42) var(--tw-gradient-to-position) !important;
 }
 
 html.dark .bg-surface-950 {
@@ -437,16 +437,16 @@ html.dark .cookie-consent-banner {
   }
 
   .bg-brand-50 {
-    background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.72)) !important;
+    background-color: rgb(30 27 75 / var(--tw-bg-opacity, 0.72)) !important;
   }
   .bg-brand-100 {
-    background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.82)) !important;
+    background-color: rgb(30 27 75 / var(--tw-bg-opacity, 0.82)) !important;
   }
   .bg-brand-50\/50 {
-    background-color: rgb(69 10 10 / 0.52) !important;
+    background-color: rgb(30 27 75 / 0.52) !important;
   }
   .bg-brand-50\/20 {
-    background-color: rgb(69 10 10 / 0.34) !important;
+    background-color: rgb(30 27 75 / 0.34) !important;
   }
   .bg-success-50 {
     background-color: rgb(20 83 45 / var(--tw-bg-opacity, 0.35)) !important;
@@ -477,8 +477,8 @@ html.dark .cookie-consent-banner {
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
   }
   .from-brand-50 {
-    --tw-gradient-from: rgb(69 10 10 / 0.62) var(--tw-gradient-from-position) !important;
-    --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-from: rgb(30 27 75 / 0.62) var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgb(30 27 75 / 0) var(--tw-gradient-to-position) !important;
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
   }
   .via-white,
@@ -488,8 +488,8 @@ html.dark .cookie-consent-banner {
     --tw-gradient-stops: var(--tw-gradient-from), rgb(9 9 11 / 1) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
   }
   .via-brand-50 {
-    --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
-    --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
+    --tw-gradient-to: rgb(30 27 75 / 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), rgb(30 27 75 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
   }
   .to-white,
   .to-surface-50,
@@ -497,7 +497,7 @@ html.dark .cookie-consent-banner {
     --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
   }
   .to-brand-50 {
-    --tw-gradient-to: rgb(69 10 10 / 0.42) var(--tw-gradient-to-position) !important;
+    --tw-gradient-to: rgb(30 27 75 / 0.42) var(--tw-gradient-to-position) !important;
   }
 
   .bg-surface-950 {

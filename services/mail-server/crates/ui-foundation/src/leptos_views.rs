@@ -137,12 +137,12 @@ pub fn web_home_page() -> String {
 <div class=\"grid gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center\">\
 <div class=\"max-w-3xl\">\
 <p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">ApexMail Application</p>\
-<h1 class=\"mt-5 text-5xl font-bold uppercase tracking-tighter text-surface-950 sm:text-6xl\">ApexMail</h1>\
+<h1 class=\"mt-5 text-5xl font-bold tracking-tighter text-surface-950 sm:text-6xl\">ApexMail</h1>\
 <p class=\"mt-5 max-w-2xl text-xl font-medium leading-8 text-surface-600\">Modern email infrastructure for developers</p>\
 <p class=\"mt-4 max-w-2xl text-sm leading-6 text-surface-500\">Open the product console to manage campaigns, domains, analytics, team access, and delivery operations from the same Rust-rendered surface used by the live app.</p>\
 <div class=\"mt-10 flex flex-col gap-3 sm:flex-row\">\
-<a href=\"/campaigns\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm bg-primary px-8 py-3 text-sm font-bold uppercase tracking-tight text-white shadow-premium transition-colors hover:bg-brand-700\">Go to Dashboard</a>\
-<a href=\"/login\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm border border-surface-300 bg-card px-8 py-3 text-sm font-bold uppercase tracking-tight text-surface-950 transition-colors hover:border-surface-950\">Sign In</a>\
+<a href=\"/campaigns\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm bg-primary px-8 py-3 text-sm font-bold text-white shadow-premium transition-colors hover:bg-brand-700\">Go to Dashboard</a>\
+<a href=\"/login\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm border border-surface-300 bg-card px-8 py-3 text-sm font-bold text-surface-950 transition-colors hover:border-surface-950\">Sign In</a>\
 </div></div>\
 <div class=\"border border-surface-200 bg-card shadow-premium\">\
 <div class=\"border-b border-surface-200 px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-[0.24em] text-surface-400\">Workspace Snapshot</p></div>\
@@ -158,9 +158,9 @@ pub fn web_home_page() -> String {
 pub fn web_not_found_page() -> String {
     "<main class=\"flex min-h-screen flex-col items-center justify-center bg-surface-50\">\
 <div class=\"text-center\">\
-<h1 class=\"text-8xl font-bold text-surface-950 uppercase tracking-tighter\">404</h1>\
+<h1 class=\"text-8xl font-bold text-surface-950 tracking-tighter\">404</h1>\
 <p class=\"mt-4 text-xl text-surface-600 font-medium\">Page not found</p>\
-<a href=\"/\" class=\"mt-10 inline-block rounded-sm bg-primary px-8 py-4 text-sm font-bold text-white hover:bg-brand-700 uppercase tracking-tight transition-all shadow-premium\">Go Home</a>\
+<a href=\"/\" class=\"mt-10 inline-block rounded-sm bg-primary px-8 py-4 text-sm font-bold text-white hover:bg-brand-700 transition-all shadow-premium\">Go Home</a>\
 </div></main>"
         .to_string()
 }
@@ -382,7 +382,7 @@ fn render_campaign_editor_page(
     .render_html();
 
     format!(
-        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-success/25 bg-success/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-success\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 uppercase tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Autosave keeps long campaign edits safe across accidental navigation and route changes.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div aria-live=\"polite\" data-autosave-status=\"saved\" class=\"flex items-center gap-2\">{autosave_badge}<span class=\"text-xs font-medium text-success\">Last saved just now</span></div><p class=\"text-xs text-muted-foreground\">Changes sync every 10 seconds and before navigation.</p></div></div></section><form class=\"space-y-6\" data-autosave-endpoint=\"/v1/campaigns/drafts\" data-autosave-interval-ms=\"10000\" data-dirty-guard=\"true\" data-api-form data-api-action=\"/v1/campaigns\" data-redirect=\"/campaigns\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Leaving the page before autosave completes will trigger a confirmation dialog instead of discarding your work.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}{schedule_button}</div></div></form><div hidden id=\"campaign-leave-guard\">{leave_dialog}</div></div>",
+        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-success/25 bg-success/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-success\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Autosave keeps long campaign edits safe across accidental navigation and route changes.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div aria-live=\"polite\" data-autosave-status=\"saved\" class=\"flex items-center gap-2\">{autosave_badge}<span class=\"text-xs font-medium text-success\">Last saved just now</span></div><p class=\"text-xs text-muted-foreground\">Changes sync every 10 seconds and before navigation.</p></div></div></section><form class=\"space-y-6\" data-autosave-endpoint=\"/v1/campaigns/drafts\" data-autosave-interval-ms=\"10000\" data-dirty-guard=\"true\" data-api-form data-api-action=\"/v1/campaigns\" data-redirect=\"/campaigns\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Leaving the page before autosave completes will trigger a confirmation dialog instead of discarding your work.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}{schedule_button}</div></div></form><div hidden id=\"campaign-leave-guard\">{leave_dialog}</div></div>",
         breadcrumbs = breadcrumbs,
         title = title,
         autosave_badge = autosave_badge,
@@ -414,9 +414,9 @@ pub fn web_campaigns_new_page() -> String {
 /// Pixel-identical reproduction of the dedicated-IP settings page contract.
 pub fn web_dedicated_ips_page() -> String {
     let header_html = "<div class=\"flex items-center justify-between mb-6\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Dedicated IPs</h1>\
+<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Dedicated IPs</h1>\
 <p class=\"text-sm text-surface-500 mt-1\">Manage your dedicated sending IP addresses</p></div>\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Provision New IP</button></div>";
+<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Provision New IP</button></div>";
 
     let table = Table {
         caption: Some("Dedicated IP addresses"),
@@ -469,7 +469,7 @@ pub fn control_plane_home_page() -> String {
         <div class="grid gap-0 lg:grid-cols-[1.25fr_0.75fr]">
             <div class="px-6 py-6 md:px-8 md:py-8">
                 <p class="text-[11px] font-bold uppercase tracking-[0.28em] text-primary">Operator Command Center</p>
-                <h1 class="mt-3 text-3xl font-bold uppercase tracking-tight text-surface-950 sm:text-4xl">Control Plane</h1>
+                <h1 class="mt-3 text-3xl font-bold tracking-tight text-surface-950 sm:text-4xl">Control Plane</h1>
                 <p class="mt-4 max-w-3xl text-sm leading-6 text-surface-600">ApexMail administration and monitoring across trust evidence, tenant readiness, incident response, and expansion pipeline. This command deck is tuned for fast escalation, not static reporting.</p>
                 <div class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
@@ -494,15 +494,15 @@ pub fn control_plane_home_page() -> String {
                     </article>
                 </div>
                 <div class="mt-6 flex flex-wrap gap-3">
-                    <a href="/sales" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-surface-950 px-5 py-3 text-xs font-bold uppercase tracking-tight text-white transition-colors hover:bg-surface-800">Open Sales Console</a>
-                    <a href="/alerts" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-5 py-3 text-xs font-bold uppercase tracking-tight text-white transition-colors hover:bg-brand-700">Open Incident Rail</a>
-                    <a href="/audit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold uppercase tracking-tight text-surface-950 transition-colors hover:border-surface-950">Review Trust Evidence</a>
-                    <a href="mailto:security@apexmail.ee" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold uppercase tracking-tight text-surface-950 transition-colors hover:border-surface-950">Contact Security</a>
+                    <a href="/sales" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-surface-950 px-5 py-3 text-xs font-bold text-white transition-colors hover:bg-surface-800">Open Sales Console</a>
+                    <a href="/alerts" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-5 py-3 text-xs font-bold text-white transition-colors hover:bg-brand-700">Open Incident Rail</a>
+                    <a href="/audit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold text-surface-950 transition-colors hover:border-surface-950">Review Trust Evidence</a>
+                    <a href="mailto:security@apexmail.ee" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold text-surface-950 transition-colors hover:border-surface-950">Contact Security</a>
                 </div>
             </div>
             <aside class="border-t border-surface-200 bg-surface-950 px-6 py-6 text-white lg:border-l lg:border-t-0 md:px-8 md:py-8">
                 <p class="text-[11px] font-bold uppercase tracking-[0.28em] text-white/60">Incident Rail</p>
-                <h2 class="mt-3 text-2xl font-bold uppercase tracking-tight">Active Escalations</h2>
+                <h2 class="mt-3 text-2xl font-bold tracking-tight">Active Escalations</h2>
                 <div class="mt-5 space-y-3 text-sm">
                     <article class="rounded-sm border border-warning-300/35 bg-warning-300/10 p-4">
                         <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-warning-100">SEV-2 · Queue pressure</p>
@@ -528,7 +528,7 @@ pub fn control_plane_home_page() -> String {
         <article class="rounded-sm border border-surface-200 bg-card shadow-premium">
             <div class="border-b border-surface-200 px-5 py-4">
                 <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Operational Lanes</p>
-                <h2 class="mt-1 text-lg font-bold uppercase tracking-tight text-surface-950">Enterprise readiness · Launch choreography</h2>
+                <h2 class="mt-1 text-lg font-bold tracking-tight text-surface-950">Enterprise readiness · Launch choreography</h2>
             </div>
             <div class="divide-y divide-surface-200">
                 <div class="px-5 py-5">
@@ -557,9 +557,9 @@ pub fn control_plane_home_page() -> String {
         <article class="rounded-sm border border-surface-200 bg-card shadow-premium">
             <div class="border-b border-surface-200 px-5 py-4">
                 <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Command Actions</p>
-                <h2 class="mt-1 text-lg font-bold uppercase tracking-tight text-surface-950">Shortcuts by desk</h2>
+                <h2 class="mt-1 text-lg font-bold tracking-tight text-surface-950">Shortcuts by desk</h2>
             </div>
-            <div class="grid gap-3 p-5 text-xs font-bold uppercase tracking-tight">
+            <div class="grid gap-3 p-5 text-xs font-bold">
                 <a href="/tenants" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Tenant Inventory</a>
                 <a href="/infrastructure" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Infrastructure Matrix</a>
                 <a href="/alerts/rules" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Alert Rulebook</a>
@@ -579,9 +579,9 @@ pub fn control_plane_home_page() -> String {
 pub fn control_plane_not_found_page() -> String {
     "<main class=\"flex min-h-screen flex-col items-center justify-center bg-surface-950 text-surface-100\">\
 <div class=\"text-center\">\
-<h1 class=\"text-6xl font-bold uppercase tracking-tighter\">404</h1>\
+<h1 class=\"text-6xl font-bold tracking-tighter\">404</h1>\
 <p class=\"mt-4 text-lg text-surface-400\">Page not found</p>\
-<a href=\"/\" class=\"mt-6 inline-block rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700 uppercase tracking-tight\">Go Home</a>\
+<a href=\"/\" class=\"mt-6 inline-block rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700\">Go Home</a>\
 </div></main>"
         .to_string()
 }
@@ -635,7 +635,7 @@ pub fn control_plane_audit_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"apex-page-heading flex flex-col gap-2\"><p class=\"apex-eyebrow\"><span>Control Plane Audit</span></p>\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Audit Logs</h1></div>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Audit Logs</h1></div>\
 <div class=\"flex items-center gap-3\">\
 {export_button}\
 </div>\
@@ -704,7 +704,7 @@ pub fn control_plane_sales_page() -> String {
                             <p class="text-xs uppercase tracking-[0.24em] text-surface-400">Session</p>
                             <h2 class="mt-2 text-xl font-bold text-white">Admin API session</h2>
                         </div>
-                        <button type="button" class="rounded-sm border border-white/15 px-3 py-2 text-xs font-bold uppercase tracking-[0.12em] text-white transition hover:border-white/30 hover:bg-white/10">Refresh</button>
+                        <button type="button" class="rounded-sm border border-white/15 px-3 py-2 text-xs font-bold text-white transition hover:border-white/30 hover:bg-white/10">Refresh</button>
                     </div>
                     <form class="mt-5 space-y-4">
                         <div class="space-y-2 text-sm">
@@ -730,7 +730,7 @@ pub fn control_plane_sales_page() -> String {
                     <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                         <div class="min-w-0">
                             <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Triage Queue</p>
-                            <h2 class="mt-2 text-2xl font-bold text-white uppercase tracking-tight">Lead inventory</h2>
+                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Lead inventory</h2>
                         </div>
                         <div class="grid w-full gap-3 md:w-auto md:grid-cols-[minmax(0,1fr)_minmax(8rem,11rem)]">
                             <input class="w-full min-w-0 rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" placeholder="Search company, owner, signal, or domain" />
@@ -843,7 +843,7 @@ pub fn control_plane_sales_page() -> String {
                     <div class="flex items-center justify-between">
                         <div>
                             <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Stage Flow</p>
-                            <h2 class="mt-2 text-2xl font-bold text-white uppercase tracking-tight">Outreach inventory</h2>
+                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Outreach inventory</h2>
                         </div>
                     </div>
                     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4 text-xs">
@@ -860,7 +860,7 @@ pub fn control_plane_sales_page() -> String {
                     <div class="flex items-center justify-between gap-3">
                         <div>
                             <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Approval loop</p>
-                            <h2 class="mt-2 text-2xl font-bold text-white uppercase tracking-tight">Autopilot loop</h2>
+                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Autopilot loop</h2>
                         </div>
                         <span class="rounded-sm bg-warning-300/15 px-3 py-1 text-xs font-bold text-warning-100">Safe mode</span>
                     </div>
@@ -874,7 +874,7 @@ pub fn control_plane_sales_page() -> String {
                 <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-[#11192a] p-6">
                     <div>
                         <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Discovery</p>
-                        <h2 class="mt-2 text-2xl font-bold text-white uppercase tracking-tight">Source intake</h2>
+                        <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Source intake</h2>
                         <p class="mt-2 text-xs text-surface-400">Import from enriched company cache</p>
                     </div>
                     <form class="mt-5 grid gap-4">
@@ -893,7 +893,7 @@ pub fn control_plane_sales_page() -> String {
                 <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-900 p-6">
                     <div>
                         <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Outreach Command</p>
-                        <h2 class="mt-2 text-2xl font-bold text-white uppercase tracking-tight">Launch campaign from selected leads</h2>
+                        <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Launch campaign from selected leads</h2>
                     </div>
                     <form class="mt-5 grid gap-4">
                         <div class="space-y-2 text-sm">
@@ -911,7 +911,7 @@ pub fn control_plane_sales_page() -> String {
                 <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-white/5 p-6">
                     <div>
                         <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Runtime Policy</p>
-                        <h2 class="mt-2 text-2xl font-bold text-white uppercase tracking-tight">Sales runtime configuration</h2>
+                        <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Sales runtime configuration</h2>
                     </div>
                     <div class="mt-5 rounded-sm border border-white/10 bg-black/15 p-4 text-xs text-surface-300">
                         Autopilot scoring, cadence windows, and approval safeguards are configured here after API connection.
@@ -991,8 +991,8 @@ fn web_auth_social_footer(agreement_prefix: &str) -> String {
 <div class=\"relative flex justify-center text-[10px] uppercase font-bold tracking-[0.2em]\"><span class=\"bg-white px-4 text-surface-400\">Or continue with</span></div>\
 </div>\
 <div class=\"flex flex-col gap-3\">\
-<button type=\"button\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-xl border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{google}<span class=\"text-sm font-semibold text-surface-950\">Google</span></button>\
-<button type=\"button\" aria-label=\"Continue with GitHub\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-xl border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{github}<span class=\"text-sm font-semibold text-surface-950\">GitHub</span></button>\
+<button type=\"button\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{google}<span class=\"text-sm font-semibold text-surface-950\">Google</span></button>\
+<button type=\"button\" aria-label=\"Continue with GitHub\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{github}<span class=\"text-sm font-semibold text-surface-950\">GitHub</span></button>\
 </div>\
 <p class=\"mt-6 text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">{agreement_prefix} <a href=\"/legal/terms\" class=\"text-primary font-bold hover:underline\">Terms of Service</a> and <a href=\"/legal/privacy\" class=\"text-primary font-bold hover:underline\">Privacy Policy</a>.</p></div>",
         google = web_auth_google_icon(),
@@ -1024,7 +1024,7 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
         "<main class=\"min-h-screen bg-[#f8f9fa] relative flex items-center justify-center p-6\">\
         <div class=\"absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid\"></div>\
         <div class=\"relative z-10 w-full max-w-[400px]\">\
-        <div class=\"bg-white rounded-2xl shadow-premium border border-surface-200/60 overflow-hidden\">\
+        <div class=\"bg-white rounded-xl shadow-premium border border-surface-200/60 overflow-hidden\">\
         {header}\
         {form_html}{footer_html}\
         </div>\
@@ -1060,13 +1060,13 @@ return null;\
 }\
 function showError(form,msg){\
 var box=form.querySelector('[data-error-key],[role=\"alert\"]');\
-if(!box){box=document.createElement('div');box.setAttribute('role','alert');box.className='text-sm text-warning-700 font-bold uppercase tracking-tight';form.appendChild(box);}\
+if(!box){box=document.createElement('div');box.setAttribute('role','alert');box.className='text-sm text-warning-700 font-bold';form.appendChild(box);}\
 box.classList.remove('hidden');\
 box.textContent=msg||'Request failed. Please try again.';\
 }\
 function showSuccess(form,msg){\
 var box=form.querySelector('[data-success]');\
-if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold uppercase tracking-tight';form.appendChild(box);}\
+if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold';form.appendChild(box);}\
 box.classList.remove('hidden');\
 box.textContent=msg||'Done.';\
 }\
@@ -1240,29 +1240,29 @@ pub fn web_signup_page(
 <div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-name\">Full name</label>\
-<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-company\">Company</label>\
-<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-email\">Email</label>\
-<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"signup-password\" aria-controls=\"signup-password\">Show</button>\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"signup-password\" aria-controls=\"signup-password\">Show</button>\
 </div>\
 {password_hint}\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Create Account</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Create Account</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
 </form>",
         csrf = csrf,
@@ -1291,10 +1291,10 @@ pub fn web_forgot_password_page(
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"reset-email\">Email</label>\
-<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
@@ -1361,20 +1361,20 @@ pub fn web_reset_password_page_with_state(
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"new-password\">New password</label>\
 <div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"new-password\" aria-controls=\"new-password\">Show</button>\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"new-password\" aria-controls=\"new-password\">Show</button>\
 </div>\
 {password_hint}\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"confirm-password\">Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"confirm-password\" aria-controls=\"confirm-password\">Show</button>\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"confirm-password\" aria-controls=\"confirm-password\">Show</button>\
 </div>\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2 disabled:opacity-50 disabled:cursor-not-allowed\"{submit_state}><span>Reset Password</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2 disabled:opacity-50 disabled:cursor-not-allowed\"{submit_state}><span>Reset Password</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Remembered your password? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
@@ -1417,7 +1417,7 @@ pub fn web_verify_email_page_with_state(
                 "Verification complete",
                 message.unwrap_or("Email verified successfully. You can now log in."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl bg-primary text-white font-bold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"/pricing\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl border border-surface-200 text-surface-700 font-bold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
+            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
             "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Need help getting started? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
         ),
         Some("error") => (
@@ -1428,7 +1428,7 @@ pub fn web_verify_email_page_with_state(
                 "Verification failed",
                 message.unwrap_or("Use the latest verification email or create a new account to receive a fresh link."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl bg-primary text-white font-bold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Create a new account</span></a><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl border border-surface-200 text-surface-700 font-bold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a></div>".to_string(),
+            "<div class=\"space-y-4\"><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Create a new account</span></a><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a></div>".to_string(),
             "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If you need a fresh verification link, <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">contact support</a>.</p></div>".to_string(),
         ),
         _ if token.is_some() => (
@@ -1442,7 +1442,7 @@ pub fn web_verify_email_page_with_state(
             format!(
                 "<form class=\"space-y-4\" action=\"/v1/auth/verify-email\" method=\"GET\">\
 {token_input}{email_input}\
-<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl bg-primary text-white font-bold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\">Verify Email</button>\
+<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\">Verify Email</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Need another path in? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div></form>",
                 token_input = web_auth_hidden_input("token", token_value),
                 email_input = web_auth_hidden_input("email", email_value),
@@ -1460,7 +1460,7 @@ pub fn web_verify_email_page_with_state(
                 "Verify your email",
                 "Activate your account to start sending with ApexMail.",
                 web_auth_notice("info", "Verification pending", &description),
-                "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl bg-primary text-white font-bold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-4 rounded-xl border border-surface-200 text-surface-700 font-bold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create another account</span></a></div>".to_string(),
+                "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create another account</span></a></div>".to_string(),
                 "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If the email does not arrive, check spam or <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
             )
         }
@@ -1511,7 +1511,7 @@ pub fn web_dashboard_page() -> String {
 <div class=\"px-8 py-24 flex flex-col items-center justify-center text-center\">\
 <p class=\"text-sm font-bold text-surface-950\">No sending activity recorded</p>\
 <p class=\"text-xs text-surface-500 mt-2 max-w-xs leading-relaxed\">Once you send your first campaign, detailed metrics and performance charts will appear here.</p>\
-<a href=\"/campaigns/new\" class=\"mt-6 inline-flex items-center justify-center px-6 py-2.5 rounded-xl bg-primary text-white text-xs font-bold uppercase tracking-widest hover:bg-brand-700 transition-all active:scale-[0.98]\">Create Campaign</a>\
+<a href=\"/campaigns/new\" class=\"mt-6 inline-flex items-center justify-center px-6 py-2.5 rounded-xl bg-primary text-white text-xs font-bold hover:bg-brand-700 transition-all active:scale-[0.98]\">Create Campaign</a>\
 </div>\
 </div>\
 <div class=\"grid grid-cols-1 md:grid-cols-2 gap-6\">\
@@ -1710,7 +1710,7 @@ pub fn web_campaigns_page() -> String {
     }
     .render_html();
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Keep campaign lists responsive, searchable, and resumable without losing your current page.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section><div hidden id=\"campaign-delete-confirmation\">{delete_dialog}</div></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Keep campaign lists responsive, searchable, and resumable without losing your current page.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New Campaign</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section><div hidden id=\"campaign-delete-confirmation\">{delete_dialog}</div></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "campaign-search",
@@ -1742,7 +1742,7 @@ pub fn web_campaign_detail_page() -> String {
     }
     .render_html();
     format!(
-        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><button type=\"button\" data-alert-dialog-target=\"campaign-detail-delete\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</button></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">8.6%</p></div></div><div hidden id=\"campaign-detail-delete\">{}</div></div>",
+        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><button type=\"button\" data-alert-dialog-target=\"campaign-detail-delete\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</button></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">8.6%</p></div></div><div hidden id=\"campaign-detail-delete\">{}</div></div>",
         CAMPAIGNS_RETURN_HREF,
         delete_dialog,
     )
@@ -1940,7 +1940,7 @@ pub fn web_contacts_page() -> String {
     );
     let breadcrumbs = render_page_breadcrumbs("Contacts");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Debounced filters, deterministic loading states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">Add Contact</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Debounced filters, deterministic loading states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">Add Contact</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "contact-search",
@@ -1966,7 +1966,7 @@ pub fn web_contacts_new_page() -> String {
 <li><a href=\"/contacts\" class=\"hover:text-surface-900 transition-colors\">Contacts</a></li>\
 <li class=\"text-surface-300\">/</li>\
 <li class=\"text-surface-900 font-medium\">New Contact</li></ol></nav>\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Add Contact</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Contact</h1>\
 <form class=\"space-y-6\" data-api-form data-api-action=\"/v1/contacts\" data-redirect=\"/contacts\">\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
@@ -2080,7 +2080,7 @@ pub fn web_lists_page() -> String {
     .render_html();
     let breadcrumbs = render_page_breadcrumbs("Lists");
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions now surface confirmation and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New List</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"list-delete-confirmation\">{delete_dialog}</div></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions now surface confirmation and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3 sm:w-auto\">New List</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"list-delete-confirmation\">{delete_dialog}</div></div>",
         breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "list-search",
@@ -2102,7 +2102,7 @@ pub fn web_lists_page() -> String {
 pub fn web_lists_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Create List</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Create List</h1>\
 <form class=\"space-y-6\" data-api-form data-api-action=\"/v1/lists\" data-redirect=\"/lists\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
@@ -2170,8 +2170,8 @@ pub fn web_templates_page() -> String {
     .render_html();
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Templates</h1>\
-<a href=\"/templates/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">New Template</a></div>\
+<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Templates</h1>\
+<a href=\"/templates/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">New Template</a></div>\
 {loading}<section data-view-state=\"ready\">{table}</section><section data-view-state=\"empty\" hidden>{empty}</section><section data-view-state=\"error\" hidden>{error_state}</section></div>",
         loading = render_table_loading_state("Loading templates", "api", 3),
         table = table.render_html(),
@@ -2184,7 +2184,7 @@ pub fn web_templates_page() -> String {
 pub fn web_templates_new_page() -> String {
     format!(
         "<div class=\"max-w-3xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Create Template</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Create Template</h1>\
 <form class=\"space-y-6\" data-api-form data-api-action=\"/v1/templates\" data-redirect=\"/templates\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{subject_label}{subject_input}</div>\
@@ -2206,13 +2206,13 @@ pub fn web_templates_new_page() -> String {
 pub fn web_reports_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Reports</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Reports</h1>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-3\">\
 {card_delivery}{card_engage}{card_bounce}\
 </div></div>",
-        card_delivery = format!("<article aria-label=\"Delivery Report – Track email delivery metrics\">{}</article>", Card { title: "Delivery Report", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Track email delivery metrics</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        card_engage = format!("<article aria-label=\"Engagement Report – Opens, clicks, and conversions\">{}</article>", Card { title: "Engagement Report", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Opens, clicks, and conversions</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        card_bounce = format!("<article aria-label=\"Bounce Report – Bounce reasons and trends\">{}</article>", Card { title: "Bounce Report", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Bounce reasons and trends</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        card_delivery = format!("<article aria-label=\"Delivery Report – Track email delivery metrics\">{}</article>", Card { title: "Delivery Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Track email delivery metrics</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        card_engage = format!("<article aria-label=\"Engagement Report – Opens, clicks, and conversions\">{}</article>", Card { title: "Engagement Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Opens, clicks, and conversions</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        card_bounce = format!("<article aria-label=\"Bounce Report – Bounce reasons and trends\">{}</article>", Card { title: "Bounce Report", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">View</p><p class=\"text-sm text-muted-foreground\">Bounce reasons and trends</p>", variant: "default", padding: "default", interactive: false }.render_html()),
     )
 }
 
@@ -2224,16 +2224,16 @@ pub fn web_reports_deliverability_page() -> String {
 <li><a href=\"/reports\" class=\"hover:text-surface-900 transition-colors\">Reports</a></li>\
 <li class=\"text-surface-300\">/</li>\
 <li class=\"text-surface-900 font-medium\">Deliverability</li></ol></nav>\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Deliverability Report</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Deliverability Report</h1>\
 <div class=\"grid gap-4 md:grid-cols-4\">\
 {inbox}{spam}{bounced}{deferred}\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Deliverability Trend</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
-        inbox = format!("<article aria-label=\"Inbox placement: 0%\">{}</article>", Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Inbox placement</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        spam = format!("<article aria-label=\"Spam folder rate: 0%\">{}</article>", Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Spam folder</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        bounced = format!("<article aria-label=\"Bounce rate: 0% hard and soft\">{}</article>", Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Hard + soft</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        deferred = format!("<article aria-label=\"Deferred in retry queue: 0\">{}</article>", Card { title: "Deferred", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Retry queue</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        inbox = format!("<article aria-label=\"Inbox placement: 0%\">{}</article>", Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Inbox placement</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        spam = format!("<article aria-label=\"Spam folder rate: 0%\">{}</article>", Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Spam folder</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        bounced = format!("<article aria-label=\"Bounce rate: 0% hard and soft\">{}</article>", Card { title: "Bounced", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Hard + soft</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        deferred = format!("<article aria-label=\"Deferred in retry queue: 0\">{}</article>", Card { title: "Deferred", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Retry queue</p>", variant: "default", padding: "default", interactive: false }.render_html()),
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
     )
 }
@@ -2250,7 +2250,7 @@ pub fn web_inbox_placement_page() -> String {
 <li class=\"text-surface-300\">/</li>\
 <li class=\"text-surface-900 font-medium\">Inbox Placement</li></ol></nav>\
 <div class=\"flex items-center justify-between\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Inbox Placement</h1>\
+<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Inbox Placement</h1>\
 <p class=\"text-sm text-surface-600\">Send a probe email to seed accounts at major mailbox providers and measure where your messages land.</p></div>\
 <a href=\"/inbox-placement/new\" class=\"inline-flex items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-brand-700 transition-colors\" data-cta=\"new-placement-test\">Run new test</a>\
 </div>\
@@ -2264,10 +2264,10 @@ pub fn web_inbox_placement_page() -> String {
 <tr data-empty-row><td class=\"px-6 py-12 text-center text-surface-500\" colspan=\"6\">No placement tests yet. <a href=\"/inbox-placement/new\" class=\"text-primary hover:underline\">Run your first test</a>.</td></tr>\
 </tbody></table></div></div>\
 </div>",
-        kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.total\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        kpi_inbox = format!("<article aria-label=\"Average inbox rate: — last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        kpi_spam = format!("<article aria-label=\"Average spam rate: — last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
-        kpi_recent = format!("<article aria-label=\"Last placement test: — most recent run\">{}</article>", Card { title: "Last test", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-metric=\"placement.last_run\">—</p><p class=\"text-sm text-muted-foreground\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        kpi_total = format!("<article aria-label=\"Total placement tests: 0 all time\">{}</article>", Card { title: "Total tests", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.total\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        kpi_inbox = format!("<article aria-label=\"Average inbox rate: — last 30 days\">{}</article>", Card { title: "Avg inbox rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        kpi_spam = format!("<article aria-label=\"Average spam rate: — last 30 days\">{}</article>", Card { title: "Avg spam rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Last 30 days</p>", variant: "default", padding: "default", interactive: false }.render_html()),
+        kpi_recent = format!("<article aria-label=\"Last placement test: — most recent run\">{}</article>", Card { title: "Last test", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-metric=\"placement.last_run\">—</p><p class=\"text-sm text-muted-foreground\">Most recent run</p>", variant: "default", padding: "default", interactive: false }.render_html()),
     )
 }
 
@@ -2279,7 +2279,7 @@ pub fn web_inbox_placement_new_page() -> String {
 <li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
 <li class=\"text-surface-300\">/</li>\
 <li class=\"text-surface-900 font-medium\">New test</li></ol></nav>\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Run a new placement test</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Run a new placement test</h1>\
 <p class=\"text-sm text-surface-600\">We'll send your message to active seed inboxes at the providers you select and report inbox vs. spam folder placement.</p>\
 {form}\
 </div>",
@@ -2328,7 +2328,7 @@ pub fn web_inbox_placement_detail_page() -> String {
 <li class=\"text-surface-300\">/</li>\
 <li class=\"text-surface-900 font-medium\" data-bind=\"placement.test_name\">Test detail</li></ol></nav>\
 <div class=\"flex flex-col md:flex-row md:items-center md:justify-between gap-4\">\
-<div><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-bind=\"placement.test_name\">Loading test…</h1>\
+<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.test_name\">Loading test…</h1>\
 <p class=\"text-sm text-surface-600\"><span data-bind=\"placement.subject\">—</span> · from <span data-bind=\"placement.from_email\">—</span></p></div>\
 <div class=\"flex items-center gap-3\">\
 <span class=\"inline-flex items-center rounded-sm px-3 py-1 text-xs font-bold bg-surface-100 text-surface-700\" data-bind=\"placement.status\">Pending</span>\
@@ -2348,10 +2348,10 @@ pub fn web_inbox_placement_detail_page() -> String {
 <ul class=\"space-y-2 text-sm text-surface-700\" data-bind-list=\"placement.recommendations\" data-empty-message=\"No recommendations available yet.\"><li class=\"text-surface-500\">Recommendations will appear once the test completes.</li></ul>\
 </div>\
 </div>",
-        kpi_score = Card { title: "Overall score", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-bind=\"placement.score\">—</p><p class=\"text-sm text-muted-foreground\">0–100</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_inbox = Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-bind=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_spam = Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-bind=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        kpi_missing = Card { title: "Missing", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\" data-bind=\"placement.missing_rate\">—</p><p class=\"text-sm text-muted-foreground\">Not delivered</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        kpi_score = Card { title: "Overall score", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.score\">—</p><p class=\"text-sm text-muted-foreground\">0–100</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        kpi_inbox = Card { title: "Inbox", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.inbox_rate\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        kpi_spam = Card { title: "Spam", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.spam_rate\">—</p><p class=\"text-sm text-muted-foreground\">Across providers</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        kpi_missing = Card { title: "Missing", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-bind=\"placement.missing_rate\">—</p><p class=\"text-sm text-muted-foreground\">Not delivered</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "Awaiting results" }.render_html(),
     )
 }
@@ -2378,16 +2378,16 @@ pub fn web_analytics_page() -> String {
     format!(
         "<div class=\"space-y-6\">{loading_state}\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Analytics</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Analytics</h1>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {card_sent}{card_opens}{card_clicks}{card_unsubs}\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Engagement Over Time</h3><div class=\"h-64\">{chart}</div></div>\
 </section>{error_state}<section data-view-state=\"empty\" hidden>{empty_state}</section></div>",
-        card_sent = Card { title: "Total Sent", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_opens = Card { title: "Unique Opens", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_clicks = Card { title: "Unique Clicks", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        card_unsubs = Card { title: "Unsubscribes", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_sent = Card { title: "Total Sent", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_opens = Card { title: "Unique Opens", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_clicks = Card { title: "Unique Clicks", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        card_unsubs = Card { title: "Unsubscribes", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         chart = ApexLineChart { title: None, description: None, last_updated_label: None, height: 256, series: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
         loading_state = loading_state,
         error_state = error_state,
@@ -2428,7 +2428,7 @@ pub fn web_events_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Events</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Events</h1>\
 {search}\
 {loading}\
 <section data-view-state=\"ready\">{table}</section>\
@@ -2484,8 +2484,8 @@ pub fn web_domains_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Domains</h1>\
-<a href=\"/domains/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Domain</a></div>\
+<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Domains</h1>\
+<a href=\"/domains/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Domain</a></div>\
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading domains", "api", 5),
         table = table.render_html(),
@@ -2497,7 +2497,7 @@ pub fn web_domains_page() -> String {
 pub fn web_domains_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Add Domain</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Domain</h1>\
 <form class=\"space-y-6\" data-api-form data-api-action=\"/v1/domains\" data-redirect=\"/domains\">\
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
@@ -2556,7 +2556,7 @@ pub fn web_settings_page() -> String {
     format!(
         "<div class=\"space-y-6\">{loading_state}\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Settings</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Settings</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
 <a href=\"/settings/api-keys\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">API Keys</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage your API keys</p></a>\
 <a href=\"/settings/team\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Team</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage team members and roles</p></a>\
@@ -2603,8 +2603,8 @@ pub fn web_settings_api_keys_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">API Keys</h1>\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button></div>\
+<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">API Keys</h1>\
+<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button></div>\
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading API keys", "api", 4),
         table = table.render_html(),
@@ -2638,8 +2638,8 @@ pub fn web_settings_team_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Team</h1>\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Invite Member</button></div>\
+<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Team</h1>\
+<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Invite Member</button></div>\
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading team members", "api", 4),
         table = table.render_html(),
@@ -2651,14 +2651,14 @@ pub fn web_settings_team_page() -> String {
 pub fn web_settings_billing_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Billing</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Billing</h1>\
 {loading}\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-lg font-bold mb-2\">Current Plan</h3>\
 <p class=\"text-sm text-muted-foreground\">Free Tier</p>\
 <p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-muted-foreground\">/month</span></p>\
-<button class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Upgrade Plan</button>\
+<button class=\"mt-4 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Upgrade Plan</button>\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-lg font-bold mb-4\">Payment Method</h3>\
@@ -2671,7 +2671,7 @@ pub fn web_settings_billing_page() -> String {
 <p class=\"text-xs text-surface-500\">Add a credit card or ACH to enable paid plans</p>\
 </div>\
 <div class=\"flex flex-col gap-2\">\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button>\
+<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button>\
 </div>\
 </div>\
 <div class=\"mt-4 rounded-sm border border-dashed border-surface-300 p-4\" data-payment-methods-list hidden>\
@@ -2727,8 +2727,8 @@ pub fn web_settings_webhooks_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Webhooks</h1>\
-<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold uppercase tracking-tight transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Webhook</button></div>\
+<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Webhooks</h1>\
+<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Webhook</button></div>\
 {loading}{table}{empty}</div>",
         loading = render_table_loading_state("Loading webhooks", "api", 4),
         table = table.render_html(),
@@ -2740,7 +2740,7 @@ pub fn web_settings_webhooks_page() -> String {
 pub fn web_settings_profile_page() -> String {
     format!(
         "<div class=\"max-w-2xl space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Profile</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Profile</h1>\
 <form class=\"space-y-6\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
@@ -2911,7 +2911,7 @@ pub fn control_plane_dashboard_page() -> String {
                 <div class="w-10 h-10 rounded-full bg-success-50 flex items-center justify-center mb-3">
                     <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-success-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
                 </div>
-                <p class="text-sm font-bold text-surface-950 uppercase tracking-tight">Protected</p>
+                <p class="text-sm font-bold text-surface-950 tracking-tight">Protected</p>
                 <p class="text-[11px] text-surface-500 mt-1 font-medium">No threats detected.</p>
             </div>
         </section>
@@ -2960,7 +2960,7 @@ fn render_cp_collection_page(
     let action_markup = action
         .map(|(label, href)| {
             format!(
-                "<a href=\"{}\" class=\"inline-flex items-center justify-center rounded-xl bg-primary px-6 py-2.5 text-xs font-bold uppercase tracking-widest text-white transition-all hover:bg-brand-700 active:scale-[0.98] shadow-sm shadow-primary/20\">{}</a>",
+                "<a href=\"{}\" class=\"inline-flex items-center justify-center rounded-xl bg-primary px-6 py-2.5 text-xs font-bold text-white transition-all hover:bg-brand-700 active:scale-[0.98] shadow-sm shadow-primary/20\">{}</a>",
                 href, label
             )
         })
@@ -3057,7 +3057,7 @@ pub fn control_plane_tenants_page() -> String {
 pub fn control_plane_tenants_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Add Tenant</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Tenant</h1>\
 <form class=\"space-y-6\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
@@ -3165,7 +3165,7 @@ pub fn control_plane_operators_page() -> String {
 pub fn control_plane_operators_new_page() -> String {
     format!(
         "<div class=\"max-w-2xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight mb-6\">Add Operator</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Operator</h1>\
 <form class=\"space-y-6\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
@@ -3234,16 +3234,16 @@ pub fn control_plane_operators_new_page() -> String {
 pub fn control_plane_analytics_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Analytics</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Analytics</h1>\
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {volume}{latency}{errors}{uptime}\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">System Volume</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
-        volume = Card { title: "Messages/hr", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Current</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        latency = Card { title: "P99 Latency", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0ms</p><p class=\"text-sm text-muted-foreground\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        errors = Card { title: "Error Rate", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
-        uptime = Card { title: "Uptime", body: "<p class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">100%</p><p class=\"text-sm text-muted-foreground\">30 days</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        volume = Card { title: "Messages/hr", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Current</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        latency = Card { title: "P99 Latency", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0ms</p><p class=\"text-sm text-muted-foreground\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        errors = Card { title: "Error Rate", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0%</p><p class=\"text-sm text-muted-foreground\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
+        uptime = Card { title: "Uptime", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">100%</p><p class=\"text-sm text-muted-foreground\">30 days</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         chart = ApexAreaChart { title: None, description: None, last_updated_label: None, height: 256, areas: vec![], data_count: 0, empty_state_reason: "No data" }.render_html(),
     )
 }
@@ -3251,7 +3251,7 @@ pub fn control_plane_analytics_page() -> String {
 /// Discovery page.
 pub fn control_plane_discovery_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Service Discovery</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Service Discovery</h1>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Registered Services</h3>\
 <div class=\"space-y-3\">\
@@ -3307,7 +3307,7 @@ pub fn control_plane_jobs_page() -> String {
 /// Infrastructure page.
 pub fn control_plane_infrastructure_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Infrastructure</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Infrastructure</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
 <a href=\"/infrastructure/nodes\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Nodes</h3><p class=\"text-sm text-muted-foreground mt-1\">View cluster nodes and health</p></a>\
 <a href=\"/infrastructure/queues\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Queues</h3><p class=\"text-sm text-muted-foreground mt-1\">Monitor message queues</p></a>\
@@ -3438,7 +3438,7 @@ pub fn control_plane_domains_page() -> String {
 /// CP billing page.
 pub fn control_plane_billing_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Billing</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Billing</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
 <a href=\"/billing/plans\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Plans</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage subscription plans</p></a>\
 </nav></div>".to_string()
@@ -3486,7 +3486,7 @@ pub fn control_plane_billing_plans_page() -> String {
 /// CP compliance page.
 pub fn control_plane_compliance_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Compliance</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Compliance</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
 <a href=\"/compliance/gdpr\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">GDPR</h3><p class=\"text-sm text-muted-foreground mt-1\">Data protection compliance</p></a>\
 </nav></div>".to_string()
@@ -3495,7 +3495,7 @@ pub fn control_plane_compliance_page() -> String {
 /// CP GDPR page.
 pub fn control_plane_gdpr_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">GDPR Compliance</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">GDPR Compliance</h1>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Data Subject Requests</h3>\
 <p class=\"text-sm text-muted-foreground\">Process data access, export, and deletion requests.</p>\
@@ -3584,7 +3584,7 @@ pub fn control_plane_alert_rules_page() -> String {
 /// CP settings page.
 pub fn control_plane_settings_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Settings</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Settings</h1>\
 <nav class=\"grid gap-4 md:grid-cols-2\">\
 <a href=\"/settings/security\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Security</h3><p class=\"text-sm text-muted-foreground mt-1\">Authentication and access control</p></a>\
 </nav></div>".to_string()
@@ -3593,7 +3593,7 @@ pub fn control_plane_settings_page() -> String {
 /// CP security settings page.
 pub fn control_plane_security_page() -> String {
     "<div class=\"space-y-6\">\
-<h1 class=\"text-2xl font-bold text-surface-950 uppercase tracking-tight\">Security Settings</h1>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Security Settings</h1>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">MFA Configuration</h3>\
 <div id=\"mfa-status\" class=\"mb-4\">\
@@ -3956,15 +3956,15 @@ pub fn web_login_page(
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Email</label>\
-<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"password\" aria-controls=\"password\">Show</button>\
+<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"password\" aria-controls=\"password\">Show</button>\
 </div>\
 </div>\
 <div class=\"flex items-center justify-between py-1\">\
@@ -3975,11 +3975,11 @@ pub fn web_login_page(
 <a href=\"/forgot-password\" class=\"text-xs font-bold text-primary hover:text-brand-700\">Forgot password?</a>\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
 <div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
-<p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
-<input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-12 w-full rounded-xl border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" />\
+<p class=\"text-[11px] font-bold text-surface-500\">Additional verification required. Enter your MFA code.</p>\
+<input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-11 w-full rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" />\
 </div>\
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
         csrf = csrf,
@@ -4010,15 +4010,15 @@ pub fn control_plane_login_page(
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Operator Identity</label>\
-<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
+<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-surface-400 bg-[#f8f9fa] text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-password\">Access Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"login-password\" aria-controls=\"login-password\">Show</button>\
+<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-[#f8f9fa] text-surface-950 pr-12\" />\
+<button type=\"button\" class=\"absolute right-3 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-lg px-2 py-1 text-xs font-bold text-surface-400 hover:text-surface-950 transition-colors\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"login-password\" aria-controls=\"login-password\">Show</button>\
 </div>\
 </div>\
 <div class=\"flex items-center gap-2 py-1\">\
@@ -4026,10 +4026,10 @@ pub fn control_plane_login_page(
 <label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium cursor-pointer\">Maintain session security</label>\
 </div>\
 {kiwi_html}\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-3 py-4 rounded-xl shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Authorize Access</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Authorize Access</span>{arrow}</button>\
 <div id=\"login-mfa\" data-mfa-section class=\"hidden\" aria-hidden=\"true\">\
-<p class=\"text-[11px] font-bold uppercase tracking-tight text-surface-500\">Additional verification required. Enter your MFA code.</p>\
-<input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-12 w-full rounded-xl border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" />\
+<p class=\"text-[11px] font-bold text-surface-500\">Additional verification required. Enter your MFA code.</p>\
+<input id=\"mfaCode\" name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"flex h-11 w-full rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary outline-none transition-all\" />\
 </div>\
 <div id=\"login-form-errors\" class=\"hidden\" role=\"alert\" aria-live=\"assertive\" data-error-key=\"auth.error.rate_limited\"></div></form>",
         csrf = csrf,

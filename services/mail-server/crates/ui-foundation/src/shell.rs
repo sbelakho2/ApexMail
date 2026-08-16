@@ -186,18 +186,18 @@ impl<'a> ShellHeader<'a> {
                 </div>\
                 <div class=\"flex items-center gap-4\">\
                     <div class=\"flex items-center gap-1 pr-4 border-r border-surface-100\">\
-                        <span class=\"text-[10px] font-bold uppercase tracking-widest text-surface-400\">Free Plan — 30K / mo</span>\
+                        <span class=\"text-[10px] font-semibold tracking-wide text-surface-400\">Free Plan — 30K / mo</span>\
                     </div>\
                     <button type=\"button\" aria-label=\"Toggle dark mode\" data-theme-toggle=\"true\" class=\"inline-flex h-9 w-9 items-center justify-center rounded-lg text-surface-400 hover:bg-surface-50 hover:text-surface-950 transition-colors\">\
                         {theme_icon}\
                     </button>\
                     <div class=\"flex items-center gap-3 pl-2\">\
                         <div class=\"text-right hidden sm:block\">\
-                            <p class=\"text-xs font-bold text-surface-950\">Engineering</p>\
+                            <p class=\"text-xs font-semibold text-surface-950\">Engineering</p>\
                             <p class=\"text-[10px] font-medium text-surface-500\">admin@apexmail.ee</p>\
                         </div>\
                         <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 rounded-full bg-primary/10 border border-primary/20 items-center justify-center\" role=\"button\" aria-label=\"User menu\" tabindex=\"0\">\
-                            <span class=\"text-primary font-bold text-xs tracking-tighter\">{avatar}</span>\
+                            <span class=\"text-primary font-semibold text-xs tracking-tighter\">{avatar}</span>\
                         </div>\
                     </div>\
                 </div>\
@@ -226,7 +226,7 @@ impl<'a> ImpersonationBanner<'a> {
             .end_session_error
             .map(|value| {
                 format!(
-                    "<span class=\"text-[11px] font-bold text-white uppercase tracking-tight\">{}</span>",
+                    "<span class=\"text-[11px] font-semibold text-white tracking-tight\">{}</span>",
                     html_escape(value)
                 )
             })
@@ -235,7 +235,7 @@ impl<'a> ImpersonationBanner<'a> {
         let safe_operator = html_escape(self.operator_name);
         let safe_time = html_escape(self.time_remaining);
         format!(
-            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-sm\"><span class=\"text-[10px] font-bold uppercase tracking-[0.2em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-bold uppercase tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-sm\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-bold uppercase tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-bold uppercase tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-sm\">{}</span></div><button class=\"px-3 py-1 bg-white text-primary rounded-sm text-[11px] font-bold uppercase tracking-widest hover:bg-surface-50 transition-colors\">{}</button></div></div></div></div>",
+            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-md\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-md\">{}</span></div><button class=\"px-3 py-1 bg-white text-primary rounded-md text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></div></div></div></div>",
             safe_tenant,
             safe_operator,
             error,
@@ -371,7 +371,7 @@ impl<'a> ControlPlaneShell<'a> {
             .iter()
             .map(|banner| {
                 format!(
-                    "<div class=\"px-6 py-2 text-[11px] font-bold uppercase tracking-tight border-b border-white/10 {}\">{}</div>",
+                    "<div class=\"px-6 py-2 text-[11px] font-semibold tracking-tight border-b border-white/10 {}\">{}</div>",
                     control_plane_banner_class(banner.tone),
                     html_escape(banner.message)
                 )
@@ -405,7 +405,7 @@ impl<'a> ControlPlaneShell<'a> {
                     <div class=\"flex items-center gap-6\">\
                         <div class=\"hidden lg:flex items-center gap-2 px-3 py-1 bg-surface-50 rounded-full border border-surface-200/60\">\
                             <span class=\"w-1.5 h-1.5 rounded-full bg-success-500 animate-pulse\"></span>\
-                            <span class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500\">Fleet Healthy</span>\
+                            <span class=\"text-[10px] font-semibold uppercase tracking-widest text-surface-500\">Fleet Healthy</span>\
                         </div>\
                         <div class=\"flex items-center gap-2 text-xs font-semibold text-surface-500\">\
                             <span class=\"opacity-50\">Role:</span>\
@@ -447,17 +447,17 @@ fn render_marketing_header() -> String {
          <nav class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
          <div class=\"flex items-center justify-between h-16 lg:h-20\">\
          <a href=\"/\" class=\"flex items-center gap-2 group\">\
-         <div class=\"w-8 h-8 rounded-sm bg-surface-950 flex items-center justify-center border border-surface-800\">\
+         <div class=\"w-8 h-8 rounded-md bg-surface-950 flex items-center justify-center border border-surface-800\">\
          <svg xmlns=\"http://www.w3.org/2000/svg\" class=\"w-5 h-5 text-white\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polygon points=\"13 2 3 14 12 14 11 22 21 10 12 10 13 2\"/></svg>\
-         </div><span class=\"text-xl font-bold text-surface-950 tracking-tighter uppercase\">ApexMail</span></a>\
+         </div><span class=\"text-xl font-bold text-surface-950 tracking-tighter\">ApexMail</span></a>\
          <div class=\"hidden lg:flex items-center gap-6\">\
-         <a href=\"/features\" class=\"text-xs font-bold uppercase tracking-widest text-surface-600 hover:text-surface-950\">Features</a>\
-         <a href=\"/pricing\" class=\"text-xs font-bold uppercase tracking-widest text-surface-600 hover:text-surface-950\">Pricing</a>\
-         <a href=\"/docs\" class=\"text-xs font-bold uppercase tracking-widest text-surface-600 hover:text-surface-950\">Docs</a>\
+         <a href=\"/features\" class=\"text-sm font-semibold text-surface-600 hover:text-surface-950\">Features</a>\
+         <a href=\"/pricing\" class=\"text-sm font-semibold text-surface-600 hover:text-surface-950\">Pricing</a>\
+         <a href=\"/docs\" class=\"text-sm font-semibold text-surface-600 hover:text-surface-950\">Docs</a>\
          </div>\
          <div class=\"flex items-center gap-3\">\
-         <a href=\"/login\" class=\"text-xs font-bold uppercase tracking-widest text-surface-600 px-3 py-2\">Login</a>\
-         <a href=\"/signup\" class=\"btn-primary px-4 py-2 text-xs\">Get Started</a>\
+         <a href=\"/login\" class=\"text-sm font-semibold text-surface-600 px-3 py-2\">Login</a>\
+         <a href=\"/signup\" class=\"btn-primary px-4 py-2 text-sm font-semibold\">Get Started</a>\
          </div></div></nav></header>"
         .to_string()
 }
@@ -466,11 +466,11 @@ fn render_marketing_footer() -> String {
     "<footer data-marketing-shell=\"footer\" class=\"bg-surface-950 text-white py-12\">\
          <div class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
          <div class=\"grid grid-cols-2 md:grid-cols-4 gap-8 mb-12\">\
-         <div><h4 class=\"text-xs font-bold uppercase tracking-widest mb-6 opacity-40\">Product</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/features\">Features</a></li><li><a href=\"/pricing\">Pricing</a></li></ul></div>\
-         <div><h4 class=\"text-xs font-bold uppercase tracking-widest mb-6 opacity-40\">Platform</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/docs\">API</a></li><li><a href=\"/status\">Status</a></li></ul></div>\
-         <div><h4 class=\"text-xs font-bold uppercase tracking-widest mb-6 opacity-40\">Legal</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/privacy\">Privacy</a></li><li><a href=\"/terms\">Terms</a></li></ul></div>\
-         <div><h4 class=\"text-xs font-bold uppercase tracking-widest mb-6 opacity-40\">Company</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/about\">About</a></li><li><a href=\"/contact\">Contact</a></li></ul></div>\
-         </div><div class=\"pt-8 border-t border-white/5 flex flex-col md:flex-row justify-between items-center gap-4 text-[11px] text-surface-500 font-bold uppercase tracking-widest\">\
+         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Product</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/features\">Features</a></li><li><a href=\"/pricing\">Pricing</a></li></ul></div>\
+         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Platform</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/docs\">API</a></li><li><a href=\"/status\">Status</a></li></ul></div>\
+         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Legal</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/privacy\">Privacy</a></li><li><a href=\"/terms\">Terms</a></li></ul></div>\
+         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Company</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/about\">About</a></li><li><a href=\"/contact\">Contact</a></li></ul></div>\
+         </div><div class=\"pt-8 border-t border-white/5 flex flex-col md:flex-row justify-between items-center gap-4 text-[11px] text-surface-500 font-medium\">\
          <p>© 2026 APEXMAIL TECH LTD. ALL RIGHTS RESERVED.</p><div class=\"flex gap-6\"><a href=\"#\">Twitter</a><a href=\"#\">GitHub</a></div>\
          </div></div></footer>"
         .to_string()
@@ -511,9 +511,9 @@ fn render_sidebar_content(
             let active_class = " aria-current=\"page\"";
             
             let classes = if is_active {
-                "flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-all rounded-lg bg-primary/5 text-primary"
+                "flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-all rounded-md bg-brand-50 text-primary"
             } else {
-                "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-lg text-surface-600 hover:text-surface-950 hover:bg-surface-50"
+                "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-md text-surface-600 hover:text-surface-950 hover:bg-surface-50"
             };
 
             let icon_color = if is_active { "text-primary" } else { "text-surface-400" };
@@ -560,7 +560,7 @@ fn render_web_sidebar(current_path: &str) -> String {
     let render_section = |title: &str, items: &[(&str, &str, &str)]| {
         format!(
             "<div class=\"space-y-1 mb-6\">\
-                <h3 class=\"px-6 text-[10px] font-bold uppercase tracking-[0.2em] text-surface-400 mb-2\">{}</h3>\
+                <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400 mb-2\">{}</h3>\
                 {}</div>",
             title,
             render_sidebar_content(items, "", current_path)
@@ -579,7 +579,7 @@ fn render_web_sidebar(current_path: &str) -> String {
          <div class=\"p-6 mb-4\"><div class=\"flex items-center gap-2\">\
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span></div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{}</nav>\
-         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/v1/auth/logout\" data-api-form data-api-action=\"/v1/auth/logout\" data-redirect=\"/login\"><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-xs font-bold uppercase tracking-widest text-surface-500 hover:text-surface-950 transition-colors\"><span>Sign Out</span></button></form></div></div>",
+         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/v1/auth/logout\" data-api-form data-api-action=\"/v1/auth/logout\" data-redirect=\"/login\"><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-md text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
         content
     )
 }
@@ -596,7 +596,7 @@ fn render_cp_sidebar(current_path: &str) -> String {
 
     let content = format!(
         "<div class=\"space-y-1 mb-6\">\
-            <h3 class=\"px-6 text-[10px] font-bold uppercase tracking-[0.2em] text-surface-400 mb-2\">Control Plane</h3>\
+            <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400 mb-2\">Control Plane</h3>\
             {}</div>",
         render_sidebar_content(&items, "", current_path)
     );
@@ -605,9 +605,9 @@ fn render_cp_sidebar(current_path: &str) -> String {
         "<div class=\"apex-cp-sidebar flex flex-col h-full bg-white text-surface-900 border-r border-surface-200/60 w-64\">\
          <div class=\"p-6 mb-4\"><div class=\"flex flex-col gap-0.5\">\
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
-         <span class=\"text-[10px] font-bold uppercase tracking-[0.2em] text-surface-400\">Operations</span></div></div>\
+         <span class=\"text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400\">Operations</span></div></div>\
          <nav class=\"flex-1 overflow-y-auto cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
-         <div class=\"p-6 border-t border-surface-100 text-[10px] text-surface-500 uppercase tracking-widest font-bold\">System v2.4.0-stable</div></div>",
+         <div class=\"p-6 border-t border-surface-100 text-[11px] text-surface-500 font-medium\">System v2.4.0-stable</div></div>",
         content
     )
 }
