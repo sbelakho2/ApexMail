@@ -1410,6 +1410,12 @@
           if (el.hasAttribute(attr) && !inner.hasAttribute(attr)) inner.setAttribute(attr, el.getAttribute(attr));
         });
         if (!inner.hasAttribute("data-kiwi-endpoint")) inner.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
+        // The driver reads the endpoint from the rendered container AND
+        // from its own ancestor chain — mirror the default onto the
+        // incumbent container so a page with NO explicit endpoint uses
+        // the bundle's same-origin prefix (round 26: the one-line
+        // migration contract relies on this default).
+        if (!el.hasAttribute("data-kiwi-endpoint")) el.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
       }
       var sitekey = (params && (params.sitekey || params["sitekey"])) || el.getAttribute("data-sitekey") || "";
       var cbs = compatReadCallbacks(el, params);
