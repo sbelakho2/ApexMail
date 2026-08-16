@@ -151,6 +151,30 @@ final class ChallengeRecord
     }
 
     /**
+     * Validates a wire hostname (round 26): a label string of at most
+     * MAX_STRING_BYTES with no whitespace/control characters, or null.
+     *
+     * @throws MalformedRecordException on structural violations
+     */
+    private static function validateHostname(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+        if (!\is_string($value) || $value === '') {
+            throw MalformedRecordException::wrongType('hostname', 'a non-empty string or null', $value);
+        }
+        if (\strlen($value) > self::MAX_STRING_BYTES) {
+            throw MalformedRecordException::oversized('hostname', \strlen($value));
+        }
+        if (preg_match('/[\x00-\x20\x7f]/', $value) === 1) {
+            throw MalformedRecordException::wrongType('hostname', 'a string without whitespace or control characters', $value);
+        }
+
+        return $value;
+    }
+
+    /**
      * Compatibility accessor for callers of the pre-v2 `ipHash` property:
      * the field now stores the nonce-bound binding tag
      * ({@see Issuer::bindingTag()}). For v1 records this is exactly the
@@ -366,6 +390,10 @@ final class ChallengeRecord
             requestBinding: $data['request_binding'] ?? null,
             issuer: $data['issuer'] ?? null,
             kid: $data['kid'] ?? 1,
+            // Round 26: server-owned issuance metadata — parsed, validated
+            // and passed through so a serialize -> Redis -> deserialize
+            // cycle preserves it (previously dropped in fromArray).
+            hostname: isset($data['hostname']) ? self::validateHostname($data['hostname']) : null,
         );
     }
 

@@ -725,7 +725,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $container->setDefinition(SiteVerifyController::class, (new Definition(SiteVerifyController::class, [
             new Reference('kiwi_captcha.verifier'),
             $config['secret_key'],
-            $riskConfig['siteverify_secret'],
+            // Round 26: map of siteverify secret -> expected scope; empty
+            // disables the endpoint.
+            $riskConfig['siteverify_secrets'],
             new Reference(StorageInterface::class),
         ]))->addTag('controller.service_arguments')->setPublic(true));
 

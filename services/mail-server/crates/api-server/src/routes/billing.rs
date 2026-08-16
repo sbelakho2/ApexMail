@@ -1547,7 +1547,18 @@ fn format_invoice_date(date: chrono::DateTime<Utc>) -> String {
 }
 
 fn format_invoice_currency_html(cents: i64) -> String {
-    format!("€{:.2}", cents as f64 / 100.0)
+    format_invoice_currency_with(cents, "EUR")
+}
+
+/// Format cents with the invoice's actual currency (the invoice carries a
+/// `currency` column; USD invoices were being rendered with a € symbol).
+fn format_invoice_currency_with(cents: i64, currency: &str) -> String {
+    let symbol = match currency.to_uppercase().as_str() {
+        "USD" => "$",
+        "GBP" => "£",
+        _ => "€", // EUR default
+    };
+    format!("{}{:.2}", symbol, cents as f64 / 100.0)
 }
 
 fn invoice_payment_terms_days(invoice: &LegacyInvoiceDto) -> i64 {
@@ -1630,9 +1641,9 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto) -> String {
             "\n        <tr>\n          <td>{}</td>\n          <td>{}</td>\n          <td class=\"amount\">{}</td>\n          <td class=\"amount\">{}%</td>\n          <td class=\"amount\">{}</td>\n        </tr>",
             escape_html(&item.description),
             item.quantity,
-            format_invoice_currency_html(item.unit_price),
+            format_invoice_currency_with(item.unit_price, &invoice.currency),
             item.vat_rate,
-            format_invoice_currency_html(item.amount),
+            format_invoice_currency_with(item.amount, &invoice.currency),
         ));
     }
 
@@ -1756,10 +1767,10 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto) -> String {
         vat_number = vat_number,
         bill_to_email = escape_html(&invoice.billing_address.email),
         line_items_html = line_items_html,
-        subtotal = format_invoice_currency_html(invoice.subtotal),
+        subtotal = format_invoice_currency_with(invoice.subtotal, &invoice.currency),
         vat_label = invoice_vat_label(invoice),
-        vat_total = format_invoice_currency_html(invoice.vat_total),
-        total = format_invoice_currency_html(invoice.total),
+        vat_total = format_invoice_currency_with(invoice.vat_total, &invoice.currency),
+        total = format_invoice_currency_with(invoice.total, &invoice.currency),
         reverse_charge_note = reverse_charge_note,
         notes = notes,
         payment_terms_days = invoice_payment_terms_days(invoice),
@@ -2110,8 +2121,13 @@ fn preview_plan_proration(
     } else {
         new_plan.price_monthly
     };
+    // Daily rate = price / days_in_period. For yearly plans price_yearly is
+    // the TOTAL yearly price (not per-month), so the daily rate is simply
+    // price_yearly / days_in_period(365). The previous code multiplied the
+    // divisor by 12 for yearly, understating proration credits by 12×.
+    let period_divisor = days_in_period as f64;
+    // Display-only: the monthly-equivalent rate for the explanation strings.
     let price_divisor = if is_yearly { 12.0 } else { 1.0 };
-    let period_divisor = days_in_period as f64 * price_divisor;
 
     let credit_amount =
         ((current_price_numerator as f64 * days_remaining as f64) / period_divisor).round() as i64;
@@ -2571,6 +2587,7 @@ async fn configure_usage_alerts(
     auth: AuthUser,
     Json(body): Json<UsageAlertThresholdsBody>,
 ) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
     if body.thresholds.is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -2637,6 +2654,7 @@ async fn create_checkout_session(
     auth: AuthUser,
     Json(body): Json<CheckoutSessionBody>,
 ) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
     if body.price_id.trim().is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -3024,6 +3042,7 @@ async fn cancel_subscription_request(
     auth: AuthUser,
     Json(body): Json<LegacyCancelBody>,
 ) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
     let subscription = match get_route_subscription(&state.db, &auth.tenant_id).await? {
         Some(subscription) => subscription,
         None => {

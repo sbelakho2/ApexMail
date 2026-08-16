@@ -757,9 +757,16 @@ final class ChallengeController
         }
 
         try {
-            // Round 24: the record carries the issuance Host as server-side
-            // metadata (Siteverify `hostname`); never signed, never sent.
-            $hostname = $request->getHost();
+            // Round 24/26: the record carries server-owned issuance metadata
+            // (Siteverify `hostname`); never signed, never sent. The value
+            // comes from the SERVER-CONFIGURED public_base_url — a forged
+            // Host header can never influence the reported hostname (the
+            // same trust rule as the Origin check, audit #78). Without
+            // public_base_url the hostname stays null rather than trusting
+            // the request Host.
+            $hostname = $this->publicBaseUrl !== null
+                ? parse_url($this->publicBaseUrl, PHP_URL_HOST) ?: null
+                : null;
             $challenge = $profile !== null
                 ? $this->issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
                 : $this->issuer->issue($scope, $clientIp, $requestBinding, $hostname);

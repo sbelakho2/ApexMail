@@ -76,6 +76,18 @@ final class KiwiCaptchaRouteLoader extends Loader
             [],
             ['GET'],
         ));
+        // Round 26 (P2): the compatibility loader links the stylesheet at
+        // {prefix}/widget.css — the production route must exist (the
+        // Playwright fixture previously hid its absence).
+        $routes->add('kiwicaptcha_widget_css', new Route(
+            $prefix.'/widget.css',
+            ['_controller' => [ApiJsController::class, 'widgetCss']],
+            [],
+            [],
+            '',
+            [],
+            ['GET'],
+        ));
 
         $routes->add('kiwicaptcha_challenge', new Route(
             $prefix.'/challenge',

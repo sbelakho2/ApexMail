@@ -280,8 +280,12 @@ async fn verify_domain(
     // Check SPF record
     let spf = match dns.lookup_spf(&row.name).await {
         Ok(Some(spf_record)) => {
-            // Verify our include is present
-            spf_record.raw.contains("include:spf.apexmail.io")
+            // Verify our include is present as an EXACT mechanism token —
+            // a bare `contains` would also accept `include:spf.apexmail.io.evil.com`.
+            spf_record
+                .raw
+                .split_whitespace()
+                .any(|token| token == "include:spf.apexmail.io")
         }
         Ok(None) => false,
         Err(e) => {
@@ -311,9 +315,12 @@ async fn verify_domain(
         }
     };
 
-    // Check return path (CNAME for bounces subdomain)
+    // Check return path (CNAME for bounces subdomain) — exact target match,
+    // not a bare contains (which would accept "apexmail.io.evil.com").
     let return_path = match dns.lookup_txt(&format!("bounces.{}", row.name)).await {
-        Ok(txts) => txts.iter().any(|t| t.contains("apexmail.io")),
+        Ok(txts) => txts
+            .iter()
+            .any(|t| t.split_whitespace().any(|token| token == "bounce.apexmail.io")),
         Err(_) => false,
     };
 
@@ -696,11 +703,11 @@ enum AuthKind {
 impl AuthKind {
     fn expected(self) -> &'static str {
         match self {
-            AuthKind::Spf => "TXT @  v=spf1 include:spf.apexmail.dev ~all",
-            AuthKind::Dkim => "CNAME apexmail._domainkey  dkim.apexmail.dev",
-            AuthKind::Dmarc => "TXT _dmarc  v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.dev",
-            AuthKind::Mx => "MX 10 inbound.apexmail.dev",
-            AuthKind::ReturnPath => "CNAME bounce  bounce.apexmail.dev",
+            AuthKind::Spf => "TXT @  v=spf1 include:spf.apexmail.io ~all",
+            AuthKind::Dkim => "CNAME apexmail._domainkey  dkim.apexmail.io",
+            AuthKind::Dmarc => "TXT _dmarc  v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io",
+            AuthKind::Mx => "MX 10 inbound.apexmail.io",
+            AuthKind::ReturnPath => "CNAME bounce  bounce.apexmail.io",
         }
     }
 
@@ -708,27 +715,27 @@ impl AuthKind {
         match self {
             AuthKind::Spf => {
                 "SPF misconfigured. At your DNS provider, add a TXT record at the apex \
-                 (host `@`) with value `v=spf1 include:spf.apexmail.dev ~all`. If you \
+                 (host `@`) with value `v=spf1 include:spf.apexmail.io ~all`. If you \
                  already have an SPF record, merge it — only one SPF TXT record is allowed \
                  per domain. Then call POST /v1/domains/{id}/verify."
             }
             AuthKind::Dkim => {
                 "DKIM misconfigured. Add a CNAME record at host `apexmail._domainkey` \
-                 pointing to `dkim.apexmail.dev`. Some DNS providers require you to omit \
+                 pointing to `dkim.apexmail.io`. Some DNS providers require you to omit \
                  the trailing dot. Wait up to 15 minutes, then re-verify."
             }
             AuthKind::Dmarc => {
                 "DMARC missing. Add a TXT record at host `_dmarc` with value \
-                 `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.dev`. Start with \
+                 `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io`. Start with \
                  `p=none` if you want monitoring before enforcement."
             }
             AuthKind::Mx => {
                 "MX missing for inbound mail (only required if you accept replies via \
-                 ApexMail). Add `MX 10 inbound.apexmail.dev` at the apex."
+                 ApexMail). Add `MX 10 inbound.apexmail.io` at the apex."
             }
             AuthKind::ReturnPath => {
                 "Return-Path / bounce subdomain not configured. Add a CNAME at host \
-                 `bounce` pointing to `bounce.apexmail.dev`. This improves SPF alignment \
+                 `bounce` pointing to `bounce.apexmail.io`. This improves SPF alignment \
                  and bounce processing."
             }
         }
@@ -776,7 +783,7 @@ mod tests_auth {
         // what the chatbot/mailbot training data quotes verbatim.
         assert!(AuthKind::Spf
             .fix_hint()
-            .contains("include:spf.apexmail.dev"));
+            .contains("include:spf.apexmail.io"));
         // DMARC hint must reference the policy directive we recommend.
         assert!(AuthKind::Dmarc.fix_hint().contains("p=quarantine"));
     }

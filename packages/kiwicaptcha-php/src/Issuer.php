@@ -267,7 +267,9 @@ final class Issuer
         );
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
-        return (new self($config, $this->storage, $nowFn, $this->region))->issue($scope, $clientIp, $requestBinding);
+        // Round 26: the hostname (server-owned issuance metadata) must
+        // survive the profile path — previously dropped before storage.
+        return (new self($config, $this->storage, $nowFn, $this->region))->issue($scope, $clientIp, $requestBinding, $hostname);
     }
 
     /**

@@ -1870,7 +1870,9 @@ A one-script migration surface (round 24):
   all share the ONE underlying Kiwi token.
 - `POST {prefix}/siteverify` — provider-shaped JSON (`success`,
   `challenge_ts`, `hostname`, `error-codes`) over the SAME atomic
-  verifier. Disabled unless `risk.siteverify_secret` is configured; the
+  verifier. Disabled unless `risk.siteverify_secrets` is configured (a
+  map of secret -> expected scope, so each backend's secret enforces its
+  own policy scope server-side); the
   secret authenticates server-to-server use, `remoteip` is honored only
   after the secret, and a replayed `response` resolves to the stored
   deterministic outcome (safe retries).

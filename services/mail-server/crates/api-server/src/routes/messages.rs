@@ -462,7 +462,7 @@ async fn send_message(
         if !idem_key.is_empty() && idem_key.len() <= 255 {
             let existing: Option<(String, String, DateTime<Utc>)> = sqlx::query_as(
                 "SELECT id::text AS id, status, created_at FROM messages
-                 WHERE tenant_id = $1 AND metadata->>'idempotency_key' = $2
+                 WHERE tenant_id = $1 AND idempotency_key = $2
                  LIMIT 1",
             )
             .bind(&auth.tenant_id)

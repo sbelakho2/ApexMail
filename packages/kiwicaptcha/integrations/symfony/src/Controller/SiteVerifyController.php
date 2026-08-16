@@ -39,10 +39,18 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final class SiteVerifyController
 {
+    /**
+     * @param array<string, string> $siteverifySecrets map of
+     *        server-to-server secret -> expected scope; EMPTY disables the
+     *        endpoint (round 26: a per-secret expected scope is REQUIRED —
+     *        no global-secret + expectedScope=null for multi-scope
+     *        deployments, so a weaker token can never satisfy a stronger
+     *        backend's secret)
+     */
     public function __construct(
         private readonly Verifier $verifier,
         private readonly string $secretKey,
-        private readonly ?string $siteverifySecret,
+        private readonly array $siteverifySecrets,
         private readonly ?StorageInterface $storage = null,
         private readonly ?LoggerInterface $logger = null,
     ) {
@@ -50,7 +58,7 @@ final class SiteVerifyController
 
     public function siteverify(Request $request): Response
     {
-        if ($this->siteverifySecret === null || $this->siteverifySecret === '') {
+        if ($this->siteverifySecrets === []) {
             return new JsonResponse(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
         }
 
@@ -65,8 +73,25 @@ final class SiteVerifyController
         if (!\is_string($response) || $response === '') {
             return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-response']]);
         }
-        if (!\is_string($secret) || !hash_equals($this->siteverifySecret, $secret)) {
-            // Constant-time comparison; the detail goes to the log only.
+
+        // Round 26: the presented secret authenticates the backend AND
+        // resolves the EXPECTED SCOPE the verifier must enforce. Constant-
+        // time comparisons; the detail goes to the log only. A secret not
+        // in the server-owned map is rejected — an attacker-invented
+        // secret can never reach the verifier.
+        $expectedScope = null;
+        if (!\is_string($secret)) {
+            $this->logger?->warning('kiwicaptcha siteverify: missing secret');
+
+            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
+        }
+        foreach ($this->siteverifySecrets as $configuredSecret => $scope) {
+            if (hash_equals($configuredSecret, $secret)) {
+                $expectedScope = $scope;
+                break;
+            }
+        }
+        if ($expectedScope === null) {
             $this->logger?->warning('kiwicaptcha siteverify: invalid secret');
 
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
@@ -77,19 +102,34 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
         }
 
-        // The SAME atomic verifier as the native path. `remoteip` is only
-        // honored because the caller proved possession of the compatibility
-        // secret above; when absent, bound challenges still fail closed
-        // (the verifier reports MissingClientIp) — mirroring the incumbent
-        // providers, which also require the end-user IP for bound tokens.
+        // The SAME atomic verifier as the native path, WITH the expected
+        // scope resolved from the secret (round 26): a weaker login token
+        // presented to the financial secret is rejected (WrongScope) — the
+        // sitekey-allowlist mapping is enforced end to end. `remoteip` is
+        // only honored because the caller proved possession of a valid
+        // secret above; when absent, bound challenges still fail closed.
         $outcome = $this->verifier->verify(
             $response,
             $this->secretKey,
-            null,            // siteverify accepts any issued scope
-            $remoteIp,       // end-user IP supplied by the trusted backend
+            $expectedScope,
+            $remoteIp,
             null,            // region expectation is application policy
             false,           // telemetry is never authoritative here
         );
+
+        // Round 26 (P1): the compatibility boundary distinguishes the FIRST
+        // redemption from replays. The native deterministic-result retry
+        // machinery stays inside the verifier, but a REPEATED Siteverify
+        // redemption of the same nonce must NOT report success again — it
+        // returns the provider vocabulary for a consumed token.
+        if ($outcome->isOk() && $outcome->fromStoredResult) {
+            return new JsonResponse([
+                'success' => false,
+                'challenge_ts' => null,
+                'hostname' => null,
+                'error-codes' => ['timeout-or-duplicate'],
+            ]);
+        }
 
         if ($outcome->isOk()) {
             // The consumed record is RETAINED until TTL (the consumed-state
