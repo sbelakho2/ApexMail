@@ -367,9 +367,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     if let Some(hostname) = record.hostname.as_deref() {
         if hostname.is_empty()
             || hostname.len() > 4096
-            || hostname
-                .bytes()
-                .any(|b| b <= 0x20 || b == 0x7f)
+            || hostname.bytes().any(|b| b <= 0x20 || b == 0x7f)
         {
             return Err(VerifyError::MalformedRecord);
         }
