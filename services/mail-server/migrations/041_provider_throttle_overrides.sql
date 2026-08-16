@@ -18,9 +18,14 @@ CREATE TABLE IF NOT EXISTS outbound_provider_throttle_overrides (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_throttle_overrides_lookup
+-- NOW() is STABLE, not IMMUTABLE — invalid in an index predicate.
+-- Split into two immutable partial indexes instead.
+CREATE INDEX IF NOT EXISTS idx_throttle_overrides_lookup_noexpiry
     ON outbound_provider_throttle_overrides (provider, tenant_id)
-    WHERE expires_at IS NULL OR expires_at > NOW();
+    WHERE expires_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_throttle_overrides_lookup_active
+    ON outbound_provider_throttle_overrides (provider, tenant_id, expires_at)
+    WHERE expires_at IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_throttle_overrides_active
     ON outbound_provider_throttle_overrides (expires_at)

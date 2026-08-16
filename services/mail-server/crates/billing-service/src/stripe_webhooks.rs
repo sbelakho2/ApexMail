@@ -18,7 +18,7 @@ use sha2::Sha256;
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
-use crate::routes::append_audit_log;
+use crate::routes::{append_audit_log, generate_audit_log_id};
 use crate::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -29,6 +29,11 @@ const DEADLETTER_RETENTION_SECONDS: usize = 35 * 24 * 60 * 60;
 const DEADLETTER_RETENTION_MS: i64 = (DEADLETTER_RETENTION_SECONDS as i64) * 1000;
 const DEADLETTER_RETRY_INDEX_KEY: &str = "stripe:deadletter:retry:index";
 const DEADLETTER_MAX_RETRIES: u32 = 5;
+/// Maximum stored webhook body size (4 KiB). Larger bodies are truncated
+/// before the Redis SET so a single oversized Stripe payload cannot bloat
+/// every deadletter entry. Truncated bodies are kept for debugging but are
+/// never replayed — the retry scheduler skips entries whose body was cut.
+const DEADLETTER_MAX_BODY_BYTES: usize = 4 * 1024;
 /// Poll interval for the deadletter retry worker.
 const DEADLETTER_RETRY_POLL_INTERVAL_SECS: u64 = 60;
 /// Exponential backoff schedule in seconds: 5 min, 15 min, 30 min, 1 hour, 2 hours (max 5 attempts).
@@ -183,6 +188,23 @@ async fn record_deadletter(
     }
 }
 
+/// Cap `text` at `max_bytes`, cutting at a UTF-8 char boundary and marking
+/// the result as truncated. Used for the deadletter body cap.
+fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut truncated = text[..end].to_string();
+    truncated.push_str("...(truncated)");
+    truncated
+}
+
 fn prepare_deadletter(
     entry: DeadletterEntry,
     body: Option<&[u8]>,
@@ -194,7 +216,17 @@ fn prepare_deadletter(
         .occurred_at
         .clone()
         .unwrap_or_else(|| now.to_rfc3339());
-    let body_str = body.map(|b| String::from_utf8_lossy(b).to_string());
+    let (body_str, body_truncated) = match body {
+        Some(bytes) => {
+            let text = String::from_utf8_lossy(bytes);
+            let truncated = text.len() > DEADLETTER_MAX_BODY_BYTES;
+            (
+                Some(truncate_at_char_boundary(&text, DEADLETTER_MAX_BODY_BYTES)),
+                truncated,
+            )
+        }
+        None => (None, false),
+    };
     let sig_str = signature.map(str::to_string);
     let event_key = format!(
         "{}{}:{}",
@@ -202,8 +234,11 @@ fn prepare_deadletter(
         sanitize_event_id(entry.event_id.as_deref()),
         now_ms
     );
+    // A truncated body cannot be replayed (the stored JSON is incomplete),
+    // so only schedule a retry when the full body was preserved.
     let retry_at_ms = (entry.reason == "processing_failed"
         && body_str.is_some()
+        && !body_truncated
         && sig_str.is_some()
         && entry.retry_count < entry.max_retries)
         .then_some(now_ms + DEADLETTER_RETRY_BACKOFF_SECONDS[0] * 1000);
@@ -495,21 +530,11 @@ fn classify_webhook_claim(row: Option<WebhookEventClaimRow>) -> WebhookEventClai
     }
 }
 
-fn verify_and_parse_event(
-    state: &AppState,
-    payload: &[u8],
-    signature: &str,
-) -> Result<StripeEventPayload, String> {
-    let secret = state.config.stripe_webhook_secret.trim();
-    if secret.is_empty() {
-        return Err("Stripe webhook secret is not configured".into());
-    }
-
+/// Verify the HMAC-SHA256 signature header over `payload` (the timestamp
+/// segment participates in the MAC). Shared by live delivery verification
+/// and deadletter replay re-verification.
+fn verify_signature_hmac(secret: &str, payload: &[u8], signature: &str) -> Result<(), String> {
     let (timestamp, signatures) = parse_signature_header(signature)?;
-    if (Utc::now().timestamp() - timestamp).abs() > STRIPE_WEBHOOK_TOLERANCE_SECONDS {
-        return Err("Invalid webhook signature".into());
-    }
-
     let timestamp_value = timestamp.to_string();
     let verified = signatures
         .into_iter()
@@ -523,9 +548,29 @@ fn verify_and_parse_event(
             mac.verify_slice(&expected).is_ok()
         });
 
-    if !verified {
+    if verified {
+        Ok(())
+    } else {
+        Err("Invalid webhook signature".into())
+    }
+}
+
+fn verify_and_parse_event(
+    state: &AppState,
+    payload: &[u8],
+    signature: &str,
+) -> Result<StripeEventPayload, String> {
+    let secret = state.config.stripe_webhook_secret.trim();
+    if secret.is_empty() {
+        return Err("Stripe webhook secret is not configured".into());
+    }
+
+    let (timestamp, _) = parse_signature_header(signature)?;
+    if (Utc::now().timestamp() - timestamp).abs() > STRIPE_WEBHOOK_TOLERANCE_SECONDS {
         return Err("Invalid webhook signature".into());
     }
+
+    verify_signature_hmac(secret, payload, signature)?;
 
     serde_json::from_slice(payload)
         .map_err(|error| format!("Failed to decode Stripe event payload: {error}"))
@@ -698,6 +743,32 @@ async fn handle_subscription_change(
     .map_err(|error| format!("Failed to resolve plan for Stripe price {price_id}: {error}"))?
     .ok_or_else(|| format!("Unknown Stripe price ID: {price_id}"))?;
 
+    // Run the upsert inside a transaction that first deactivates any other
+    // active subscription rows for the tenant. Migration 078 added a partial
+    // unique index on (tenant_id) WHERE status = 'active', so inserting a
+    // second active row for the tenant (e.g. a renewed Stripe subscription
+    // id after an upgrade) would abort the ON CONFLICT upsert.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin subscription upsert transaction: {error}"))?;
+
+    sqlx::query(
+        r#"
+        UPDATE stripe_subscriptions
+        SET status = 'canceled', updated_at = NOW()
+        WHERE tenant_id = $1
+          AND status = 'active'
+          AND stripe_subscription_id <> $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&subscription.id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to deactivate superseded subscriptions: {error}"))?;
+
     sqlx::query(
         r#"
         WITH upsert_subscription AS (
@@ -742,9 +813,13 @@ async fn handle_subscription_change(
     .bind(subscription.canceled_at)
     .bind(subscription.trial_end)
     .bind(&plan_name)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert Stripe subscription: {error}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit Stripe subscription upsert: {error}"))?;
 
     info!(
         tenant_id = %tenant_id,
@@ -803,7 +878,7 @@ async fn auto_provision_dedicated_ips_background(
         r#"
         SELECT COUNT(*)::bigint
         FROM dedicated_ips
-        WHERE tenant_id = $1::uuid AND status NOT IN ('retired', 'releasing')
+        WHERE tenant_id = $1 AND status NOT IN ('retired', 'releasing')
         "#,
     )
     .bind(tenant_id)
@@ -1037,6 +1112,37 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
 
     result.map_err(|error| format!("Failed to mark invoice as paid: {error}"))?;
 
+    // If a previously-dunning invoice was settled, clear the tenant's dunning
+    // state (healthy again), release queued messages and drop the cached
+    // status — mirrors the auto-pay recovery path in maintenance.rs.
+    // (Control flow guarantees at least one of metadata tenant_id /
+    // subscription_id is present here; the both-None case returned above.)
+    let recovered_tenant: Option<String> = match metadata_tenant_id.as_deref() {
+        Some(tenant_id) => Some(tenant_id.to_string()),
+        None => {
+            let sub_id = subscription_id
+                .as_deref()
+                .expect("subscription id is present when metadata tenant id is absent");
+            sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT tenant_id
+                FROM stripe_subscriptions
+                WHERE stripe_subscription_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(sub_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|error| format!("Failed to resolve tenant for payment recovery: {error}"))?
+        }
+    };
+
+    if let Some(tenant_id) = recovered_tenant {
+        crate::maintenance::mark_payment_recovered(state, &tenant_id).await?;
+    }
+
     info!(
         invoice_id = %invoice.id,
         "stripe invoice marked as paid"
@@ -1176,6 +1282,11 @@ async fn record_failed_payment(
         }
     }
 
+    // dunning_records.id is VARCHAR(26) (migrations 087/093) — a 36-char
+    // gen_random_uuid() string would overflow the column. Generate the id
+    // in Rust with the shared 26-char generator instead.
+    let dunning_record_id = generate_audit_log_id();
+
     sqlx::query(
         r#"
         WITH upsert_dunning AS (
@@ -1184,7 +1295,7 @@ async fn record_failed_payment(
                 last_failed_at, next_retry_at, suspended_at, grace_period_ends_at,
                 created_at, updated_at
             )
-            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+            VALUES ($11, $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
             ON CONFLICT (tenant_id) DO UPDATE SET
                 status = $2,
                 failed_payment_count = $3,
@@ -1221,6 +1332,7 @@ async fn record_failed_payment(
     .bind(grace_period_ends_at)
     .bind(invoice_id)
     .bind(new_status == "hard_suspended")
+    .bind(&dunning_record_id)
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert dunning state: {error}"))?;
@@ -1702,13 +1814,32 @@ struct DunningResult {
     next_retry_at: Option<DateTime<Utc>>,
 }
 
-/// Replay a deadletter entry by parsing the stored body, claiming the event in
-/// the database (idempotent via `ON CONFLICT`), and calling `handle_stripe_event`.
+/// Replay a deadletter entry by re-verifying the stored signature, parsing the
+/// stored body, claiming the event in the database (idempotent via
+/// `ON CONFLICT`), and calling `handle_stripe_event`.
 async fn replay_deadletter(state: &AppState, entry: &DeadletterEntry) -> Result<(), String> {
     let body = entry
         .body
         .as_deref()
         .ok_or_else(|| "No body stored for retry".to_string())?;
+    let signature = entry
+        .signature
+        .as_deref()
+        .ok_or_else(|| "No signature stored for retry".to_string())?;
+
+    // Re-verify the stored HMAC before processing: the body+signature live in
+    // Redis between the original failure and this replay, so integrity must be
+    // re-checked against the secret instead of trusting the stored payload.
+    // The timestamp segment is part of the MAC (so it is verified implicitly);
+    // the original 5-minute freshness window is deliberately NOT re-enforced —
+    // the entry already passed it on first receipt and retries run on a
+    // minutes-to-hours backoff schedule.
+    let secret = state.config.stripe_webhook_secret.trim();
+    if secret.is_empty() {
+        return Err("Stripe webhook secret is not configured".into());
+    }
+    verify_signature_hmac(secret, body.as_bytes(), signature)?;
+
     let event: StripeEventPayload = serde_json::from_str(body)
         .map_err(|e| format!("Failed to parse stored webhook body: {e}"))?;
 
@@ -2163,6 +2294,73 @@ mod tests {
         assert_eq!(entry.reason, "processing_failed");
         assert_eq!(entry.body.as_deref(), Some(r#"{"id":"evt_retry"}"#));
         assert_eq!(entry.signature.as_deref(), Some("t=123,v1=abc"));
+    }
+
+    #[test]
+    fn prepare_deadletter_caps_body_to_4kb_and_skips_retry() {
+        // A body larger than the 4 KiB cap must be truncated before the Redis
+        // SET, and — because the stored JSON is incomplete — no retry may be
+        // scheduled for it.
+        let oversized_body = format!(
+            r#"{{"id":"evt_big","data":"{}"}}"#,
+            "x".repeat(DEADLETTER_MAX_BODY_BYTES)
+        );
+        let oversized_bytes = oversized_body.as_bytes();
+        assert!(oversized_bytes.len() > DEADLETTER_MAX_BODY_BYTES);
+
+        let prepared = prepare_deadletter(
+            DeadletterEntry {
+                reason: "processing_failed".into(),
+                event_id: Some("evt_big".into()),
+                error: Some("boom".into()),
+                ..Default::default()
+            },
+            Some(oversized_bytes),
+            Some("t=123,v1=abc"),
+            Utc::now(),
+        )
+        .expect("prepare deadletter");
+
+        assert_eq!(prepared.retry_at_ms, None, "truncated bodies must not replay");
+
+        let entry: DeadletterEntry = serde_json::from_str(&prepared.payload).expect("payload json");
+        let stored_body = entry.body.as_deref().expect("body stored");
+        assert!(
+            stored_body.len() <= DEADLETTER_MAX_BODY_BYTES + "...(truncated)".len(),
+            "stored body must be capped at ~4 KiB, got {}",
+            stored_body.len()
+        );
+        assert!(stored_body.ends_with("...(truncated)"));
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_respects_multibyte_chars() {
+        assert_eq!(truncate_at_char_boundary("short", 100), "short");
+
+        // é is 2 bytes — the cut must back off to the previous char boundary.
+        let truncated = truncate_at_char_boundary(&"é".repeat(100), 11);
+        assert!(truncated.len() <= 11 + "...(truncated)".len());
+        assert!(truncated.ends_with("...(truncated)"));
+    }
+
+    #[test]
+    fn verify_signature_hmac_accepts_valid_and_rejects_tampered() {
+        let secret = "whsec_test_secret";
+        let payload = br#"{"id":"evt_1","type":"invoice.paid"}"#;
+        let timestamp = 1_711_234_567_i64.to_string();
+
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(b".");
+        mac.update(payload);
+        let signature = format!("t={timestamp},v1={}", hex::encode(mac.finalize().into_bytes()));
+
+        assert!(verify_signature_hmac(secret, payload, &signature).is_ok());
+
+        // Tampered body → HMAC mismatch.
+        assert!(verify_signature_hmac(secret, b"{\"id\":\"evt_2\"}", &signature).is_err());
+        // Wrong secret → mismatch.
+        assert!(verify_signature_hmac("whsec_other", payload, &signature).is_err());
     }
 
     #[test]

@@ -43,7 +43,9 @@ mod simulation {
 
         for lead in &created {
             if lead.score >= 30 {
-                crm.update_lead_status(lead.id, LeadStatus::Qualified, tenant_id).unwrap();
+                // New → Qualified is a valid transition in the lifecycle
+                // state machine.
+                crm.update_lead_status(&lead.id, LeadStatus::Qualified, tenant_id).unwrap();
             }
         }
 
@@ -52,7 +54,7 @@ mod simulation {
 
         // Cross-tenant isolation
         assert!(matches!(
-            crm.get_lead(created[0].id, "other_tenant"),
+            crm.get_lead(&created[0].id, "other_tenant"),
             Err(SalesError::LeadNotFound(_))
         ));
 
@@ -81,11 +83,11 @@ mod simulation {
             "t".into(), "a@a.com".into(), "A".into(), "A Inc".into(),
             "CEO".into(), "manual".into(),
         );
-        let updated = crm.update_lead_status(lead.id, LeadStatus::Contacted, "t").unwrap();
+        let updated = crm.update_lead_status(&lead.id, LeadStatus::Contacted, "t").unwrap();
         assert_eq!(updated.status, LeadStatus::Contacted);
-        let updated = crm.update_lead_status(lead.id, LeadStatus::Qualified, "t").unwrap();
+        let updated = crm.update_lead_status(&lead.id, LeadStatus::Qualified, "t").unwrap();
         assert_eq!(updated.status, LeadStatus::Qualified);
-        let updated = crm.update_lead_status(lead.id, LeadStatus::Converted, "t").unwrap();
+        let updated = crm.update_lead_status(&lead.id, LeadStatus::Converted, "t").unwrap();
         assert_eq!(updated.status, LeadStatus::Converted);
     }
 

@@ -54,11 +54,12 @@ impl TemplateRenderer {
             None
         };
 
-        // Resolve subject placeholders
+        // Resolve subject placeholders (plain text — no HTML escaping; the
+        // subject is a header value, not markup).
         let subject = options
             .subject
             .as_ref()
-            .map(|s| transpiler::resolve_placeholders(s, &options.props));
+            .map(|s| transpiler::resolve_placeholders_plain(s, &options.props));
 
         let elapsed = start.elapsed();
 
@@ -85,12 +86,28 @@ impl TemplateRenderer {
         // #191:Hash the props JSON for a stable cache key regardless of key ordering.
         // serde_json::Value Display can produce different strings for logically-equal JSON.
         use sha2::{Digest, Sha256};
-        let props_hash = {
-            let canonical = serde_json::to_string(&options.props).unwrap_or_default();
-            let hash = Sha256::digest(canonical.as_bytes());
+        let hash_short = |input: &str| -> String {
+            let hash = Sha256::digest(input.as_bytes());
             hex::encode(&hash[..16]) // 128-bit hash is sufficient for cache keys
         };
-        let cache_key = format!("{}:{}", template_id, props_hash);
+        let props_hash = hash_short(&serde_json::to_string(&options.props).unwrap_or_default());
+        // The cache key must cover EVERYTHING that affects the output:
+        // tenant (scope), template, props, subject, minify and plaintext
+        // generation. A key missing any of these serves one tenant another
+        // tenant's render or returns output with the wrong options.
+        let cache_key = format!(
+            "{}:{}:{}:{}:{}:{}",
+            tenant_id,
+            template_id,
+            props_hash,
+            options.minify as u8,
+            options.generate_plaintext as u8,
+            options
+                .subject
+                .as_deref()
+                .map(hash_short)
+                .unwrap_or_else(|| "-".to_string()),
+        );
 
         // Check cache
         if let Some(cached) = self.cache.get(&cache_key) {
@@ -279,8 +296,9 @@ mod tests {
         let result = sandbox.execute(source, &opts).unwrap();
         assert_eq!(result.html, "<p>Hi</p>");
 
-        // Verify subject resolution
-        let resolved_subject = transpiler::resolve_placeholders("Hello {{ name }}!", &opts.props);
+        // Verify subject resolution (plain-text — no HTML escaping)
+        let resolved_subject =
+            transpiler::resolve_placeholders_plain("Hello {{ name }}!", &opts.props);
         assert_eq!(resolved_subject, "Hello Alice!");
     }
 

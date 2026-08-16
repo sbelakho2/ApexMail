@@ -24,7 +24,7 @@ jobs:
       - name: Build Zola site
         working-directory: apps/marketing-zola
         run: |
-          curl -sSL "https://github.com/getzola/zola/releases/download/v0.19.1/zola-v0.19.1-x86_64-unknown-linux-gnu.tar.gz" | tar xz
+          curl -sSL "https://github.com/getzola/zola/releases/download/v0.22.1/zola-v0.22.1-x86_64-unknown-linux-gnu.tar.gz" | tar xz
           ./zola build
       - name: Verify build output
         run: test -f apps/marketing-zola/public/index.html && echo "Build OK"
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Rust lint check
         working-directory: services/mail-server
-        run: cargo clippy --all-targets -- -D warnings || echo "Clippy warnings present — review required"
+        run: cargo clippy --all-targets -- -D warnings
       - name: Forbidden pattern gate
         run: bash tools/check-forbidden-patterns.sh
 

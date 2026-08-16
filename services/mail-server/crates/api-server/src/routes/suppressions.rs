@@ -191,7 +191,7 @@ async fn list_suppressions(
     require_scopes(&auth, &["suppressions:read"])?;
     let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, SuppressionRow>(
-        "SELECT id, email, type AS reason, source, created_at
+        "SELECT id, email, reason, source, created_at
          FROM suppressions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(&auth.tenant_id)

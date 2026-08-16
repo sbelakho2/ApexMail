@@ -3,6 +3,17 @@
 //! Each function returns an inline SVG string that can be embedded
 //! directly in SSR HTML without any JavaScript dependency.
 
+/// Truncate a chart axis label to at most `max_chars` Unicode scalar values,
+/// appending an ellipsis when something was cut. Char-boundary-safe: slicing
+/// `&label[..n]` on multibyte labels (Estonian, Japanese, emoji) would panic.
+fn truncate_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+    let truncated: String = label.chars().take(max_chars).collect();
+    format!("{truncated}\u{2026}")
+}
+
 /// Renders a vertical bar chart as inline SVG.
 pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> String {
     if data.is_empty() {
@@ -58,8 +69,10 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         let x = padding_left + i as f64 * (bar_w + bar_gap);
         let y = padding_top + chart_h - bar_h;
         let color = bar_color(i);
+        // `var()` never resolves in SVG presentation attributes — route
+        // theme colors through a `style` attribute instead.
         svg.push_str(&format!(
-            r##"<rect x="{x:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h:.1}" fill="{color}" rx="2" opacity="0.88"><title>{val}</title></rect>"##,
+            r##"<rect x="{x:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h:.1}" style="fill: {color}" rx="2" opacity="0.88"><title>{val}</title></rect>"##,
         ));
 
         // Value label above bar
@@ -79,11 +92,7 @@ pub fn render_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
     // X-axis labels
     for (i, (label, _)) in data.iter().enumerate() {
         let x = padding_left + i as f64 * (bar_w + bar_gap) + bar_w / 2.0;
-        let display_label = if label.len() > 10 {
-            format!("{}...", &label[..8])
-        } else {
-            label.clone()
-        };
+        let display_label = truncate_label(label, 8);
         let ty = padding_top + chart_h + 18.0;
         svg.push_str(&build_svg_text_center(x, ty, 10, &html_escape_svg(&display_label), "rgb(var(--muted-foreground))", "400"));
     }
@@ -145,14 +154,14 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
         let dot_color = "rgb(var(--primary))";
         let dot_stroke = "white";
         points_coords.push_str(&format!(
-            r##"<circle cx="{x:.1}" cy="{y:.1}" r="3" fill="{dot_color}" stroke="{dot_stroke}" stroke-width="1.5" />"##,
+            r##"<circle cx="{x:.1}" cy="{y:.1}" r="3" style="fill: {dot_color}" stroke="{dot_stroke}" stroke-width="1.5" />"##,
         ));
     }
 
     // Line path
     let line_color = "rgb(var(--primary))";
     svg.push_str(&format!(
-        r##"<path d="{path_coords}" fill="none" stroke="{line_color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />"##,
+        r##"<path d="{path_coords}" fill="none" style="stroke: {line_color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />"##,
     ));
 
     // Area fill
@@ -161,7 +170,7 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
         let x_first = padding_left;
         let area_fill_color = "rgb(var(--primary))";
         svg.push_str(&format!(
-            r##"<path d="{path_coords} L{x_first:.1},{y_bottom:.1} Z" fill="{area_fill_color}" fill-opacity="0.08" />"##,
+            r##"<path d="{path_coords} L{x_first:.1},{y_bottom:.1} Z" style="fill: {area_fill_color}" fill-opacity="0.08" />"##,
         ));
     }
 
@@ -181,11 +190,7 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
             continue;
         }
         let x = padding_left + chart_w * (i as f64 / (n as f64 - 1.0).max(1.0));
-        let display_label = if label.len() > 8 {
-            format!("{}...", &label[..6])
-        } else {
-            label.clone()
-        };
+        let display_label = truncate_label(label, 6);
         let ty = padding_top + chart_h + 18.0;
         svg.push_str(&build_svg_text_center(x, ty, 10, &html_escape_svg(&display_label), "rgb(var(--muted-foreground))", "400"));
     }
@@ -201,7 +206,7 @@ pub fn render_sparkline(values: &[f64], width: u32, height: u32, color: &str) ->
         let border_color = "rgb(var(--border))";
         let text_color = "rgb(var(--muted-foreground))";
         return format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-hidden="true"><line x1="0" y1="{h2}" x2="{width}" y2="{h2}" stroke="{border_color}" stroke-opacity="0.3" /><text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" font-size="10" fill="{text_color}">—</text></svg>"##,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-hidden="true"><line x1="0" y1="{h2}" x2="{width}" y2="{h2}" style="stroke: {border_color}" stroke-opacity="0.3" /><text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" font-size="10" style="fill: {text_color}">—</text></svg>"##,
         );
     }
 
@@ -231,7 +236,7 @@ pub fn render_sparkline(values: &[f64], width: u32, height: u32, color: &str) ->
     let last_x = padding + chart_w;
 
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-hidden="true"><path d="{path} L{last_x:.1},{bottom:.1} L{padding:.1},{bottom:.1} Z" fill="{color}" fill-opacity="0.12" /><path d="{path}" fill="none" stroke="{color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-hidden="true"><path d="{path} L{last_x:.1},{bottom:.1} L{padding:.1},{bottom:.1} Z" style="fill: {color}" fill-opacity="0.12" /><path d="{path}" fill="none" style="stroke: {color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>"##,
     )
 }
 
@@ -284,11 +289,11 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
 
         if slice_angle >= 2.0 * std::f64::consts::PI - 0.001 {
             svg.push_str(&format!(
-                r##"<circle cx="{cx}" cy="{cy}" r="{outer_r}" fill="{color}" opacity="0.85" />"##,
+                r##"<circle cx="{cx}" cy="{cy}" r="{outer_r}" style="fill: {color}" opacity="0.85" />"##,
             ));
             if inner_r > 0.0 {
                 svg.push_str(&format!(
-                    r##"<circle cx="{cx}" cy="{cy}" r="{inner_r}" fill="var(--card-color,white)" />"##,
+                    r##"<circle cx="{cx}" cy="{cy}" r="{inner_r}" style="fill: var(--card-color,white)" />"##,
                 ));
             }
         } else {
@@ -301,7 +306,7 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
                 "M{x1:.2},{y1:.2} A{outer_r},{outer_r} 0 {large_arc},1 {x2:.2},{y2:.2} L{ix2:.2},{iy2:.2} A{inner_r},{inner_r} 0 {large_arc},0 {ix1:.2},{iy1:.2} Z",
             );
             svg.push_str(&format!(
-                r##"<path d="{d}" fill="{color}" opacity="0.86" stroke="{separator_color}" stroke-width="1.5" />"##,
+                r##"<path d="{d}" style="fill: {color}" opacity="0.86" stroke="{separator_color}" stroke-width="1.5" />"##,
             ));
         }
 
@@ -374,20 +379,20 @@ pub fn render_gauge(value: f64, max: f64, width: u32, height: u32) -> String {
     let bg_d = arc_path(cx, cy, (outer_r + inner_r) / 2.0, start_angle, end_angle);
     let track_w = outer_r - inner_r;
     svg.push_str(&format!(
-        r##"<path d="{bg_d}" fill="none" stroke="{bg_color}" stroke-opacity="0.25" stroke-width="{track_w:.0}" stroke-linecap="butt" />"##,
+        r##"<path d="{bg_d}" fill="none" style="stroke: {bg_color}" stroke-opacity="0.25" stroke-width="{track_w:.0}" stroke-linecap="butt" />"##,
     ));
 
     // Filled portion
     let fill_d = arc_path(cx, cy, (outer_r + inner_r) / 2.0, start_angle, fill_angle);
     svg.push_str(&format!(
-        r##"<path d="{fill_d}" fill="none" stroke="{color}" stroke-opacity="0.9" stroke-width="{track_w:.0}" stroke-linecap="butt" />"##,
+        r##"<path d="{fill_d}" fill="none" style="stroke: {color}" stroke-opacity="0.9" stroke-width="{track_w:.0}" stroke-linecap="butt" />"##,
     ));
 
     // Value text in center
     let pct_str = format!("{:.1}%", pct * 100.0);
     let text_color = "rgb(var(--foreground))";
     svg.push_str(&format!(
-        r##"<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="central" font-size="22" font-family="system-ui,sans-serif" font-weight="800" fill="{text_color}">{pct_str}</text>"##,
+        r##"<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="central" font-size="22" font-family="system-ui,sans-serif" font-weight="800" style="fill: {text_color}">{pct_str}</text>"##,
     ));
 
     // Tick marks
@@ -401,7 +406,7 @@ pub fn render_gauge(value: f64, max: f64, width: u32, height: u32) -> String {
         let tx2 = cx + a.cos() * tick_inner;
         let ty2 = cy + a.sin() * tick_inner;
         svg.push_str(&format!(
-            r##"<line x1="{tx1:.1}" y1="{ty1:.1}" x2="{tx2:.1}" y2="{ty2:.1}" stroke="{tick_color}" stroke-opacity="0.5" stroke-width="1" />"##,
+            r##"<line x1="{tx1:.1}" y1="{ty1:.1}" x2="{tx2:.1}" y2="{ty2:.1}" style="stroke: {tick_color}" stroke-opacity="0.5" stroke-width="1" />"##,
         ));
     }
 
@@ -437,22 +442,18 @@ pub fn render_horizontal_bar_chart(
         let color = bar_color(i);
 
         // Label
-        let display_label = if label.len() > 18 {
-            format!("{}...", &label[..16])
-        } else {
-            label.clone()
-        };
+        let display_label = truncate_label(label, 16);
         let label_y = y + bar_h * 0.6;
         let label_color = "rgb(var(--foreground))";
         svg.push_str(&format!(
-            r##"<text x="8" y="{label_y:.1}" text-anchor="start" font-size="12" font-family="system-ui,sans-serif" font-weight="500" fill="{label_color}">{}</text>"##,
+            r##"<text x="8" y="{label_y:.1}" text-anchor="start" font-size="12" font-family="system-ui,sans-serif" font-weight="500" style="fill: {label_color}">{}</text>"##,
             html_escape_svg(&display_label),
         ));
 
         // Bar
         let lx = label_w + 4.0;
         svg.push_str(&format!(
-            r##"<rect x="{lx:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h}" fill="{color}" rx="2" opacity="0.85" />"##,
+            r##"<rect x="{lx:.1}" y="{y:.1}" width="{bar_w:.1}" height="{bar_h}" style="fill: {color}" rx="2" opacity="0.85" />"##,
         ));
 
         // Value label
@@ -460,7 +461,7 @@ pub fn render_horizontal_bar_chart(
         let vy = y + bar_h * 0.6;
         let val_color = "rgb(var(--muted-foreground))";
         svg.push_str(&format!(
-            r##"<text x="{vx:.1}" y="{vy:.1}" text-anchor="start" font-size="11" font-family="system-ui,sans-serif" font-weight="600" fill="{val_color}">{}</text>"##,
+            r##"<text x="{vx:.1}" y="{vy:.1}" text-anchor="start" font-size="11" font-family="system-ui,sans-serif" font-weight="600" style="fill: {val_color}">{}</text>"##,
             format_y_axis(*val),
         ));
     }
@@ -484,20 +485,20 @@ fn build_svg_rect(width: u32, height: u32) -> String {
 fn build_svg_line_h(x1: f64, x2: f64, y: f64) -> String {
     let border_color = "rgb(var(--border))";
     format!(
-        r##"<line x1="{x1:.1}" y1="{y:.1}" x2="{x2:.1}" y2="{y:.1}" stroke="{border_color}" stroke-opacity="0.25" stroke-dasharray="3 3" />"##,
+        r##"<line x1="{x1:.1}" y1="{y:.1}" x2="{x2:.1}" y2="{y:.1}" style="stroke: {border_color}" stroke-opacity="0.25" stroke-dasharray="3 3" />"##,
     )
 }
 
 fn build_svg_y_label(x: f64, y: f64, text: &str) -> String {
     let color = "rgb(var(--muted-foreground))";
     format!(
-        r##"<text x="{x:.1}" y="{y:.1}" text-anchor="end" font-size="11" font-family="system-ui,sans-serif" fill="{color}">{text}</text>"##,
+        r##"<text x="{x:.1}" y="{y:.1}" text-anchor="end" font-size="11" font-family="system-ui,sans-serif" style="fill: {color}">{text}</text>"##,
     )
 }
 
 fn build_svg_text_center(x: f64, y: f64, font_size: u8, text: &str, fill: &str, weight: &str) -> String {
     format!(
-        r##"<text x="{x:.1}" y="{y:.1}" text-anchor="middle" font-size="{font_size}" font-family="system-ui,sans-serif" font-weight="{weight}" fill="{fill}">{text}</text>"##,
+        r##"<text x="{x:.1}" y="{y:.1}" text-anchor="middle" font-size="{font_size}" font-family="system-ui,sans-serif" font-weight="{weight}" style="fill: {fill}">{text}</text>"##,
     )
 }
 
@@ -549,7 +550,7 @@ fn html_escape_svg(s: &str) -> String {
 fn render_empty_chart(width: u32, height: u32, reason: &str) -> String {
     let text_color = "rgb(var(--muted-foreground))";
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Empty chart"><rect width="100%" height="100%" fill="transparent" rx="2" /><text x="50%" y="45%" text-anchor="middle" dominant-baseline="central" font-size="13" font-family="system-ui,sans-serif" fill="{text_color}" opacity="0.6">{reason}</text></svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Empty chart"><rect width="100%" height="100%" fill="transparent" rx="2" /><text x="50%" y="45%" text-anchor="middle" dominant-baseline="central" font-size="13" font-family="system-ui,sans-serif" style="fill: {text_color}" opacity="0.6">{reason}</text></svg>"##,
     )
 }
 
@@ -639,5 +640,76 @@ mod tests {
         assert!(svg.contains("<svg"));
         assert!(svg.contains("domain.com"));
         assert!(svg.contains("5.0K"));
+    }
+
+    // ── Multibyte label truncation (char-boundary safety) ────────
+
+    #[test]
+    fn multibyte_labels_do_not_panic_and_truncate_on_char_boundaries() {
+        // Each of these previously panicked on `&label[..8]` / `&label[..6]`
+        // / `&label[..16]` because byte slicing landed mid-codepoint.
+        let labels = [
+            "Ülemiste järve kampaania",
+            "日本語テスト",
+            "🎉🚀 emoji campaign labels",
+        ];
+
+        for label in labels {
+            let bar = render_bar_chart(&[(label.to_string(), 10.0)], 400, 250);
+            assert!(bar.contains("<svg"), "bar chart panicked or empty for {label}");
+
+            let line = render_line_chart(&[(label.to_string(), 5.0)], 400, 250);
+            assert!(line.contains("<svg"), "line chart panicked or empty for {label}");
+
+            let horizontal =
+                render_horizontal_bar_chart(&[(label.to_string(), 7.0)], 400, 200);
+            assert!(
+                horizontal.contains("<svg"),
+                "horizontal chart panicked or empty for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_labels_end_with_unicode_ellipsis() {
+        let svg = render_bar_chart(&[("Ülemiste järve kampaania".to_string(), 1.0)], 400, 250);
+        assert!(svg.contains("Ülemiste\u{2026}"), "expected char-safe truncation with ellipsis, got: {svg}");
+
+        // Short labels pass through untouched.
+        let svg = render_bar_chart(&[("Feb".to_string(), 1.0)], 400, 250);
+        assert!(svg.contains(">Feb<"));
+    }
+
+    // ── Theme colors resolve via style attributes ────────────────
+
+    #[test]
+    fn theme_colors_use_style_attributes_not_presentation_attributes() {
+        // `var()` in an SVG presentation attribute (fill="...") never
+        // resolves — CSS custom properties only work in style attributes.
+        let charts = [
+            render_bar_chart(&[("Jan".to_string(), 1.0)], 200, 100),
+            render_line_chart(&[("Jan".to_string(), 1.0)], 200, 100),
+            render_pie_chart(&[("SES".to_string(), 60.0)], 200, 200),
+            render_gauge(75.0, 100.0, 200, 180),
+            render_horizontal_bar_chart(&[("d.io".to_string(), 3.0)], 200, 100),
+            render_sparkline(&[1.0, 2.0], 100, 32, "var(--cp-blue,#3b82f6)"),
+            render_empty_chart(200, 100, "No data"),
+        ];
+        for svg in &charts {
+            assert!(
+                !svg.contains("fill=\"rgb(var("),
+                "fill presentation attribute carries var(): {svg}"
+            );
+            assert!(
+                !svg.contains("stroke=\"rgb(var("),
+                "stroke presentation attribute carries var(): {svg}"
+            );
+            assert!(
+                svg.contains("style=\"fill: rgb(var(")
+                    || svg.contains("style=\"stroke: rgb(var(")
+                    || svg.contains("style=\"fill: var("),
+                "expected a style attribute carrying the theme color: {svg}"
+            );
+        }
     }
 }

@@ -36,6 +36,7 @@ build step. The namespace (`ghcr.io/<owner>/<repo>`) is derived from
 | `observability`       | `ghcr.io/<ns>/observability`                 | `observability`              | `observability`   |
 | `marketing`           | `ghcr.io/<ns>/marketing`                     | (apps/marketing-zola)        | nginx static      |
 | `status-server`       | `ghcr.io/<ns>/status-server`                 | `auth-server`                | `auth-server`     |
+| `billing-service`     | `ghcr.io/<ns>/billing-service`               | `billing-service`            | `billing-service` |
 
 Notes:
 
@@ -53,6 +54,12 @@ Notes:
   `status-server`, matching its compose service key and the nginx upstream
   name. The stage is not renamed to avoid touching the `auth-server` crate
   references; only the image name is canonical.
+- `billing-service` binds `0.0.0.0:4100` (no host port mapping — it is
+  service-auth protected and only reachable on the internal Docker networks).
+  Its production Stripe credentials come from the Docker secrets
+  `stripe_secret_key` / `stripe_webhook_secret` (`PROD_STRIPE_SECRET_KEY_FILE`
+  / `PROD_STRIPE_WEBHOOK_SECRET_FILE` in the deployment `.env`); the webhook
+  secret is mandatory — the binary fail-fasts at startup without it.
 - The dev `docker-compose.yml` builds the `mta` service from the **`mta`**
   target (same stage as production). There is no separate dev edge listener;
   the legacy `smtp-edge` crate/stage was removed.

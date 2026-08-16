@@ -202,11 +202,15 @@ pub fn truncate_payload(payload: &serde_json::Value, max_bytes: usize) -> serde_
                 for (key, val) in obj {
                     let new_val = if let serde_json::Value::String(s) = val {
                         if LARGE_FIELD_KEYS.contains(&key.as_str()) && s.len() > threshold {
-                            let truncated = format!(
-                                "{}{}",
-                                &s[..threshold.min(s.len() / 2)],
-                                TRUNCATION_NOTICE
-                            );
+                            // Char-boundary-safe truncation: slicing with
+                            // `&s[..n]` panics on multi-byte UTF-8 (webhook
+                            // payloads routinely contain non-ASCII). Take
+                            // `threshold` CHARACTERS instead (same pattern as
+                            // reply_handler::classifier).
+                            let truncated: String =
+                                s.chars().take(threshold.min(s.len() / 2)).collect();
+                            let truncated =
+                                format!("{}{}", truncated, TRUNCATION_NOTICE);
                             serde_json::Value::String(truncated)
                         } else {
                             val.clone()
@@ -236,5 +240,33 @@ pub fn truncate_payload(payload: &serde_json::Value, max_bytes: usize) -> serde_
         truncate_value(&truncated, 256)
     } else {
         truncated
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_payload;
+    use serde_json::json;
+
+    #[test]
+    fn truncate_payload_handles_multibyte_utf8_without_panic() {
+        // 4-byte emoji + CJK, repeated past the 256-byte large-field
+        // threshold: `&s[..n]` byte-slicing would panic when the cut lands
+        // mid-codepoint (which it does — every char here is multibyte).
+        let unit = "🎉🎉中文"; // 4+4+3+3 = 14 bytes
+        let body = unit.repeat(96); // 1344 bytes > 1024 first-pass threshold
+        let payload = json!({ "body": body });
+        let truncated = truncate_payload(&payload, 1024);
+        let s = truncated.get("body").unwrap().as_str().unwrap();
+        assert!(s.contains("[truncated"));
+        // The cut must land on a char boundary (this iteration panics if not).
+        assert!(s.chars().count() > 0);
+    }
+
+    #[test]
+    fn truncate_payload_leaves_small_payloads_untouched() {
+        let payload = json!({ "body": "small", "nested": { "text": "also small" } });
+        let out = truncate_payload(&payload, 1024);
+        assert_eq!(out, payload);
     }
 }

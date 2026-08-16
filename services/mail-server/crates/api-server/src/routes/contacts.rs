@@ -113,29 +113,43 @@ async fn create_contact(
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
     }
 
+    // Normalise to lowercase so the case-sensitive unique index on
+    // (tenant_id, email) cannot be bypassed by varying case.
+    let email = body.email.to_lowercase();
     let id = Uuid::new_v4();
     let now = Utc::now();
     let tags = body.tags.as_ref().map(|t| serde_json::json!(t));
 
-    sqlx::query(
+    let insert_result = sqlx::query(
         "INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$7)",
     )
     .bind(id)
     .bind(&auth.tenant_id)
-    .bind(&body.email)
+    .bind(&email)
     .bind(&body.name)
     .bind(&tags)
     .bind(&body.metadata)
     .bind(now)
     .execute(&state.db)
-    .await?;
+    .await;
+
+    // Map a unique-constraint violation on (tenant_id, email) to 409 Conflict
+    // instead of letting it propagate as a 500 Internal Server Error.
+    if let Err(sqlx::Error::Database(db_err)) = &insert_result {
+        if db_err.code().as_deref() == Some("23505") {
+            return Err(ApiError::Conflict(
+                "a contact with this email already exists".into(),
+            ));
+        }
+    }
+    insert_result?;
 
     Ok((
         StatusCode::CREATED,
         Json(ContactResponse {
             id: id.to_string(),
-            email: body.email,
+            email,
             name: body.name,
             tags,
             metadata: body.metadata,
@@ -315,6 +329,9 @@ async fn bulk_import(
             continue;
         }
 
+        // Normalise to lowercase so the case-sensitive unique index on
+        // (tenant_id, email) dedupes consistently with create_contact.
+        let email = contact.email.to_lowercase();
         let tags = contact.tags.as_ref().map(|t| serde_json::json!(t));
         // xmax = 0 means a fresh insert; non-zero means update.
         let res: Result<Option<i64>, _> = sqlx::query_scalar(
@@ -329,7 +346,7 @@ async fn bulk_import(
         )
         .bind(Uuid::new_v4())
         .bind(&auth.tenant_id)
-        .bind(&contact.email)
+        .bind(&email)
         .bind(&contact.name)
         .bind(&tags)
         .bind(&contact.metadata)
@@ -606,15 +623,18 @@ async fn import_contacts(
     let mut skipped = 0i64;
     let mut errors = Vec::new();
 
-    for (idx, (email, name)) in rows.iter().enumerate() {
-        let email = email.trim();
+    for (idx, (raw_email, name)) in rows.iter().enumerate() {
+        let email = raw_email.trim();
 
-        if email.is_empty() || !email.contains('@') {
+        if email.is_empty() || !apexmail_lib::validation::is_valid_email(email) {
             errors.push(format!("Row {}: invalid email", idx + 1));
             skipped += 1;
             continue;
         }
 
+        // Normalise to lowercase so rows are deduped against the
+        // case-sensitive unique index consistently with create_contact.
+        let email = email.to_lowercase();
         let id = Uuid::new_v4();
         let result = sqlx::query(
             "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
@@ -625,7 +645,7 @@ async fn import_contacts(
         )
         .bind(id)
         .bind(auth.tenant_id.to_string())
-        .bind(email)
+        .bind(&email)
         .bind(name.as_deref())
         .execute(&state.db)
         .await;

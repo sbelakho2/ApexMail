@@ -128,6 +128,7 @@ async fn get_dashboard_stats(
     auth: AuthUser,
 ) -> Result<Json<DashboardStats>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     // Check cache
     {
@@ -227,13 +228,13 @@ async fn get_dashboard_stats(
     // Risk / health
     let (mut risk_alerts, mut critical_tenants) = (0i64, 0i64);
     let mut critical_alert_count = 0i64;
-    let mut high_alert_count = 0i64;
+    let mut warning_alert_count = 0i64;
 
     if has_system_alerts {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT severity, COUNT(*)::bigint
              FROM system_alerts
-             WHERE acknowledged = false AND severity IN ('high', 'critical')
+             WHERE acknowledged = false AND severity IN ('warning', 'critical')
              GROUP BY severity",
         )
         .fetch_all(db)
@@ -244,15 +245,15 @@ async fn get_dashboard_stats(
             if severity == "critical" {
                 critical_alert_count += count;
                 critical_tenants += count;
-            } else if severity == "high" {
-                high_alert_count += count;
+            } else if severity == "warning" {
+                warning_alert_count += count;
             }
         }
     }
 
     let health_status = if critical_alert_count >= 5 {
         "down"
-    } else if critical_alert_count > 0 || high_alert_count > 0 {
+    } else if critical_alert_count > 0 || warning_alert_count > 0 {
         "degraded"
     } else {
         "healthy"

@@ -34,6 +34,7 @@ readonly REPORT_FILE="${SCRIPT_DIR}/.contrast-check-report.json"
 readonly WORK_DIR="${TMPDIR:-/tmp}/apexmail-contrast-check"
 
 : "${BASE_URL:=https://apexmail.ee}"
+: "${BUILD_DIR:=../apps/marketing-zola/public}"
 : "${TEST_PAGES:=/ /pricing/ /docs/ /features/ /security/ /compliance/}"
 
 CRITICAL=0
@@ -385,7 +386,22 @@ analyze_css() {
 check_contrast() {
     local page="$1" url="${BASE_URL}${page}" html css_file link
     echo "  Checking: $url"
-    html="$(curl -fsSL --max-time 30 "$url" 2>/dev/null || true)"
+    # Prefer the local build artifact over the live production site; only
+    # fall back to the network when the page is not in BUILD_DIR.
+    local local_page="" candidate
+    for candidate in "${BUILD_DIR}${page}index.html" \
+                     "${BUILD_DIR}${page%/}/index.html" \
+                     "${BUILD_DIR}${page}.html"; do
+        if [[ -f "$candidate" ]]; then
+            local_page="$candidate"
+            break
+        fi
+    done
+    if [[ -n "$local_page" ]]; then
+        html="$(cat "$local_page")"
+    else
+        html="$(curl -fsSL --max-time 30 "$url" 2>/dev/null || true)"
+    fi
     if [[ -z "$html" ]]; then
         echo "    WARN: page unreachable"
         add_issue "$page" "page" "warning" "Page unreachable"
@@ -400,16 +416,34 @@ check_contrast() {
     f { print }
     l ~ /<\/style>/ && f { f = 0 }
     ' >> "$css_file" 2>/dev/null || true
-    # linked stylesheets
+    # linked stylesheets — resolve site-relative links against BUILD_DIR
+    # first; only fetch over the network when no local file matches.
     while IFS= read -r link; do
         [[ -n "$link" ]] || continue
+        local local_css=""
         case "$link" in
             http://*|https://*) ;;
             //*) link="https:${link}" ;;
-            /*) link="${BASE_URL}${link}" ;;
-            *) link="${BASE_URL}/${link}" ;;
+            /*)
+                if [[ -f "${BUILD_DIR}${link}" ]]; then
+                    local_css="${BUILD_DIR}${link}"
+                else
+                    link="${BASE_URL}${link}"
+                fi
+                ;;
+            *)
+                if [[ -f "${BUILD_DIR}/${link}" ]]; then
+                    local_css="${BUILD_DIR}/${link}"
+                else
+                    link="${BASE_URL}/${link}"
+                fi
+                ;;
         esac
-        curl -fsSL --max-time 30 "$link" >> "$css_file" 2>/dev/null || true
+        if [[ -n "$local_css" ]]; then
+            cat "$local_css" >> "$css_file" 2>/dev/null || true
+        else
+            curl -fsSL --max-time 30 "$link" >> "$css_file" 2>/dev/null || true
+        fi
     done < <(printf '%s' "$html" | grep -oE 'href="[^"]+\.css[^"]*"' | sed -E 's/^href="([^"]*)"/\1/')
 
     while IFS='|' read -r element msg; do
@@ -454,7 +488,7 @@ main() {
 
     echo ""
     echo "=== CSS Color Audit ==="
-    check_css_contrast "${BUILD_DIR:-apps/marketing-zola/public}"
+    check_css_contrast "$BUILD_DIR"
 
     jq -n --argjson issues "$ISSUES" \
         --arg checked_at "$TIMESTAMP" \

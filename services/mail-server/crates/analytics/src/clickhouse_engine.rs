@@ -455,6 +455,7 @@ impl ClickHouseEngine {
 
         // Allowlist stages to prevent SQL injection (#178)
         const ALLOWED_STAGES: &[&str] = &[
+            "queued",
             "sent",
             "delivered",
             "bounced",

@@ -25,6 +25,10 @@ const MAX_AGGREGATION_BUFFER_SIZE: usize = 10_000;
 /// has elapsed). Prevents tiny flushes that waste ClickHouse write throughput.
 const MIN_FLUSH_BATCH_SIZE: usize = 50;
 
+/// Maximum age of the oldest buffered event before a flush is forced even
+/// below MIN_FLUSH_BATCH_SIZE — low-volume tenants must not wait forever.
+const MAX_BUFFER_AGE: Duration = Duration::from_secs(30);
+
 /// Analytics processor for event aggregation and real-time stats.
 pub struct AnalyticsProcessor {
     db: PgPool,
@@ -34,6 +38,10 @@ pub struct AnalyticsProcessor {
     active_jobs: AtomicUsize,
     event_buffer: Arc<RwLock<Vec<AnalyticsEvent>>>,
     aggregation_buffer: Arc<RwLock<HashMap<String, AggregatedStats>>>,
+    /// Wall-clock time when the event buffer last went from empty to
+    /// non-empty — drives the age-based flush. `None` while the buffer is
+    /// empty.
+    oldest_buffered_at: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     is_flushing: AtomicBool,
     shutdown_notify: Arc<Notify>,
 }
@@ -49,6 +57,7 @@ impl AnalyticsProcessor {
             active_jobs: AtomicUsize::new(0),
             event_buffer: Arc::new(RwLock::new(Vec::new())),
             aggregation_buffer: Arc::new(RwLock::new(HashMap::new())),
+            oldest_buffered_at: Arc::new(std::sync::Mutex::new(None)),
             is_flushing: AtomicBool::new(false),
             shutdown_notify: Arc::new(Notify::new()),
         }
@@ -138,13 +147,21 @@ impl AnalyticsProcessor {
     }
 
     /// Fetch events from the queue with FOR UPDATE SKIP LOCKED.
+    ///
+    /// Rows claimed (`processing = true`) by a worker that died before the
+    /// flush completed are reclaimed once their claim is 10 minutes old, so
+    /// events can never be stranded in `processing` forever.
     async fn fetch_events(&self, limit: usize) -> ProcessorResult<Vec<AnalyticsEvent>> {
         let events = sqlx::query_as::<_, AnalyticsEvent>(
             r#"
             WITH claimed AS (
                 SELECT id
                 FROM analytics_queue
-                WHERE processed = false AND processing = false
+                WHERE processed = false
+                  AND (
+                      processing = false
+                      OR processing_at < NOW() - interval '10 minutes'
+                  )
                 ORDER BY timestamp ASC
                 LIMIT $1
                 FOR UPDATE SKIP LOCKED
@@ -226,13 +243,24 @@ impl AnalyticsProcessor {
     }
 
     /// Inner processing logic (separated for borrow checker).
+    ///
+    /// Events are only marked `processed` AFTER a flush that included them
+    /// has written to the DB (see `flush_buffers_inner`) — never here. Until
+    /// then they stay claimed in `analytics_queue` and owned by the in-memory
+    /// buffer, so a write failure cannot lose or double-count them.
     async fn process_events_inner(&self, events: Vec<AnalyticsEvent>) -> ProcessorResult<()> {
-        let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
-
-        // Add to event buffer (sync operation)
+        // Add to event buffer (sync operation). Ids already present are
+        // skipped — a restored flush buffer can overlap with re-claimed rows.
         let should_flush = {
             let mut buffer = self.event_buffer.write().unwrap_or_else(|e| e.into_inner());
-            buffer.extend(events.iter().cloned());
+            let was_empty = buffer.is_empty();
+            let known: std::collections::HashSet<String> =
+                buffer.iter().map(|e| e.id.clone()).collect();
+            for event in &events {
+                if !known.contains(&event.id) {
+                    buffer.push(event.clone());
+                }
+            }
 
             // Enforce buffer size cap
             if buffer.len() > MAX_EVENT_BUFFER_SIZE {
@@ -245,6 +273,14 @@ impl AnalyticsProcessor {
                 );
             }
 
+            if was_empty && !buffer.is_empty() {
+                // Start the age-based flush clock.
+                *self
+                    .oldest_buffered_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+            }
+
             buffer.len() >= self.config.base.batch_size
         };
 
@@ -253,13 +289,16 @@ impl AnalyticsProcessor {
             self.update_aggregation(event);
         }
 
-        // Flush if buffer is full (async operation, lock already released)
+        // Flush if buffer is full (async operation, lock already released).
+        // Flush errors do NOT fail this batch: the buffer is restored by
+        // flush_buffers_inner and retried by the flush loop, and the events
+        // remain claimed (not re-fetched), so nothing is lost or
+        // double-counted.
         if should_flush {
-            self.flush_buffers().await?;
+            if let Err(e) = self.flush_buffers().await {
+                error!(error = %e, "Buffer flush failed; events retained for retry");
+            }
         }
-
-        // Mark events as processed
-        self.mark_events_processed(&event_ids).await?;
 
         Ok(())
     }
@@ -366,7 +405,10 @@ impl AnalyticsProcessor {
 
     /// Periodic flush loop — flushes when either:
     /// 1. The flush interval has elapsed AND there are MIN_FLUSH_BATCH_SIZE events, OR
-    /// 2. The buffer exceeds the configured batch_size (size-based trigger, see process_events_inner).
+    /// 2. The buffer exceeds the configured batch_size (size-based trigger, see process_events_inner), OR
+    /// 3. The oldest buffered event is older than MAX_BUFFER_AGE (age-based
+    ///    trigger — low-volume tenants must not have events stuck in a
+    ///    too-small batch indefinitely).
     ///
     /// This prevents tiny flushes that waste ClickHouse write throughput while still
     /// ensuring timely delivery during low-volume periods.
@@ -377,11 +419,18 @@ impl AnalyticsProcessor {
         while self.is_running.load(Ordering::SeqCst) {
             tokio::select! {
                 _ = flush_interval.tick() => {
-                    // Only flush if the buffer has enough events to justify a batch.
+                    // Only flush if the buffer justifies a batch by size...
                     let buffer_len = self.event_buffer.read()
                         .map(|b| b.len())
                         .unwrap_or(0);
-                    if buffer_len >= MIN_FLUSH_BATCH_SIZE {
+                    // ...or the oldest event has been waiting too long.
+                    let oldest_age = self
+                        .oldest_buffered_at
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .map(|at| at.elapsed());
+                    let age_flush = oldest_age.is_some_and(|age| age > MAX_BUFFER_AGE);
+                    if buffer_len >= MIN_FLUSH_BATCH_SIZE || age_flush {
                         if let Err(e) = self.flush_buffers().await {
                             error!("Flush error: {}", e);
                         }
@@ -389,7 +438,8 @@ impl AnalyticsProcessor {
                         debug!(
                             buffer_len = buffer_len,
                             min_flush = MIN_FLUSH_BATCH_SIZE,
-                            "Skipping flush — buffer below minimum batch size"
+                            oldest_age = ?oldest_age,
+                            "Skipping flush — buffer below minimum batch size and age"
                         );
                     }
                 }
@@ -417,7 +467,7 @@ impl AnalyticsProcessor {
     }
 
     async fn flush_buffers_inner(&self) -> ProcessorResult<()> {
-        let (events, _event_ids): (Vec<AnalyticsEvent>, Vec<String>) = {
+        let (events, event_ids): (Vec<AnalyticsEvent>, Vec<String>) = {
             let mut buffer = self.event_buffer.write().unwrap_or_else(|e| e.into_inner());
             let ids: Vec<_> = buffer.iter().map(|e| e.id.clone()).collect();
             let events = std::mem::take(&mut *buffer);
@@ -436,14 +486,27 @@ impl AnalyticsProcessor {
             return Ok(());
         }
 
+        // The buffers were drained — reset the age-based flush clock; it is
+        // restarted by restore_buffers() on failure or by the next buffered
+        // event.
+        *self
+            .oldest_buffered_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+
         debug!(
             events = events.len(),
             aggregations = aggregations.len(),
             "Flushing analytics buffers"
         );
 
-        // Write aggregations to DB.
-        self.write_aggregations(&aggregations).await?;
+        // Write aggregations to DB. On failure the drained buffers are
+        // RESTORED so the flush loop retries them — events are never lost.
+        if let Err(e) = self.write_aggregations(&aggregations).await {
+            error!(error = %e, "Aggregation write failed; restoring buffers for retry");
+            self.restore_buffers(events, aggregations);
+            return Err(e);
+        }
 
         // Update Redis counters (failure here won't cause double-counting)
         if let Err(e) = self.update_redis_counters(&events).await {
@@ -451,15 +514,62 @@ impl AnalyticsProcessor {
             tracing::warn!(error = %e, "Failed to update Redis counters; will retry on next flush");
         }
 
-        // Event buffer already drained via mem::take above - no need to remove individually.
+        // Mark the flushed events processed ONLY AFTER the DB write
+        // succeeded. A marking failure is logged but not restored — the
+        // aggregations were already persisted and restoring would double-write.
+        if let Err(e) = self.mark_events_processed(&event_ids).await {
+            error!(
+                error = %e,
+                count = event_ids.len(),
+                "Failed to mark flushed events processed; they may be re-claimed and re-written"
+            );
+        }
 
         debug!(
-            events = events.len(),
+            events = event_ids.len(),
             aggregations = aggregations.len(),
             "Buffers flushed successfully"
         );
 
         Ok(())
+    }
+
+    /// Restore drained buffers after a failed flush (no event loss).
+    ///
+    /// Events are appended back (skipping ids that were buffered meanwhile)
+    /// and aggregation entries are counter-merged into any entries created
+    /// while the flush was in flight.
+    fn restore_buffers(
+        &self,
+        events: Vec<AnalyticsEvent>,
+        aggregations: HashMap<String, AggregatedStats>,
+    ) {
+        {
+            let mut buffer = self.event_buffer.write().unwrap_or_else(|e| e.into_inner());
+            let was_empty = buffer.is_empty();
+            let known: std::collections::HashSet<String> =
+                buffer.iter().map(|e| e.id.clone()).collect();
+            for event in events {
+                if !known.contains(&event.id) {
+                    buffer.push(event);
+                }
+            }
+            if was_empty && !buffer.is_empty() {
+                *self
+                    .oldest_buffered_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+            }
+        }
+        let mut agg = self
+            .aggregation_buffer
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        for (key, stats) in aggregations {
+            agg.entry(key)
+                .and_modify(|existing| existing.merge_from(stats.clone()))
+                .or_insert(stats);
+        }
     }
 
     /// Write aggregations to analytics_hourly table.

@@ -126,7 +126,7 @@ async fn render_handler(
             let subject = opts
                 .subject
                 .as_ref()
-                .map(|s| transpiler::resolve_placeholders(s, &opts.props));
+                .map(|s| transpiler::resolve_placeholders_plain(s, &opts.props));
 
             let render_result = RenderResult {
                 html: result.html.clone(),

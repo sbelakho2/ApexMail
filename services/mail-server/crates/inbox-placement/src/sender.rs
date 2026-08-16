@@ -6,163 +6,103 @@ use lettre::{
 };
 use uuid::Uuid;
 
-use crate::types::SeedAccount;
+use crate::config::PlacementConfig;
 
-/// Extract the domain portion from an email address.
+/// Send a placement test email to a seed account via the platform's own SMTP
+/// relay (`PLACEMENT_SMTP_HOST`, default `mta:25`).
 ///
-/// Returns `None` if the address does not contain an `@` symbol.
-fn extract_domain(email: &str) -> Option<String> {
-    let at_idx = email.rfind('@')?;
-    let domain = email[at_idx + 1..].to_lowercase();
-    if domain.is_empty() {
-        return None;
-    }
-    Some(domain)
-}
-
-/// Build the SMTP hostname for a given email domain.
+/// The message is sent **from** the tenant-configured sender (`from_email`)
+/// **to** the seed account address, so the receiving provider evaluates the
+/// platform's real authentication (SPF/DKIM/DMARC) and reputation — the thing
+/// a placement test is meant to measure. Sending from the seed account itself
+/// (previous behaviour) measured nothing: providers always trust self-mail.
 ///
-/// Convention: `smtp.{domain}` (e.g. `smtp.gmail.com`).
-fn smtp_hostname(domain: &str) -> String {
-    format!("smtp.{}", domain)
-}
-
-/// Send a test email through the seed account's SMTP server.
-///
-/// This is a self-delivery test: the email is sent **from** the seed account
-/// email address **to** the same address.  The message includes a unique
-/// subject line with the [`test_id`] so the IMAP poller can later find it.
+/// The subject embeds the unique [`test_id`] so the IMAP poller can locate the
+/// message later.
 ///
 /// # Parameters
-/// - `account` – The seed account (provides email, optional SMTP credentials).
-/// - `password` – The account password for SMTP authentication.
+/// - `config`   – Placement config carrying the relay host/port/credentials.
+/// - `from_email` – Tenant-configured sender address (`test.from_email`).
+/// - `account`  – The seed account (recipient address).
 /// - `test_id`  – Unique test identifier included in the subject.
 ///
 /// # Returns
 /// `Ok(())` on success, `Err(String)` with a human-readable description on
 /// failure.
 pub async fn send_test_email(
-    account: &SeedAccount,
-    password: &str,
+    config: &PlacementConfig,
+    from_email: &str,
+    account_email: &str,
     test_id: Uuid,
 ) -> Result<(), String> {
-    let domain = extract_domain(&account.email)
-        .ok_or_else(|| format!("invalid email: {}", account.email))?;
-    let hostname = smtp_hostname(&domain);
-
-    // Build the message (self-delivery: From == To == seed account email).
     let subject = format!("ApexMail Inbox Placement Test {}", test_id);
     let body_text = format!(
         "This is an automated inbox placement test.\n\n\
-         Test ID: {}\nAccount: {}\n\n\
+         Test ID: {}\nFrom: {}\nTo: {}\n\n\
          Please do not interact with this message.",
-        test_id, account.email
+        test_id, from_email, account_email
     );
     let body_html = format!(
         "<html><body><p>This is an automated inbox placement test.</p>\
          <p>Test ID: <strong>{}</strong></p>\
-         <p>Account: {}</p>\
+         <p>From: {}</p><p>To: {}</p>\
          <p><em>Please do not interact with this message.</em></p></body></html>",
-        test_id, account.email
+        test_id, from_email, account_email
     );
 
     let email = Message::builder()
-        .from(
-            account
-                .email
-                .parse()
-                .map_err(|e: lettre::address::AddressError| {
-                    format!("invalid from address '{}': {}", account.email, e)
-                })?,
-        )
-        .to(account
-            .email
+        .from(from_email
             .parse()
             .map_err(|e: lettre::address::AddressError| {
-                format!("invalid to address '{}': {}", account.email, e)
+                format!("invalid from address '{}': {}", from_email, e)
+            })?)
+        .to(account_email
+            .parse()
+            .map_err(|e: lettre::address::AddressError| {
+                format!("invalid to address '{}': {}", account_email, e)
             })?)
         .subject(&subject)
-        .multipart(
-            lettre::message::MultiPart::alternative()
-                .singlepart(lettre::message::SinglePart::plain(body_text.clone()))
-                .singlepart(lettre::message::SinglePart::html(body_html.clone())),
-        )
+        .multipart(lettre::message::MultiPart::alternative().singlepart(
+            lettre::message::SinglePart::plain(body_text.clone()),
+        ).singlepart(lettre::message::SinglePart::html(body_html.clone())))
         .map_err(|e| format!("failed to build message: {}", e))?;
 
-    // Try STARTTLS on port 587 first; fall back to direct TLS on 465.
-    let creds = Credentials::new(account.email.clone(), password.to_owned());
+    // Relay through the platform MTA. When credentials are configured we use
+    // STARTTLS + AUTH; otherwise plain internal delivery on the relay port
+    // (default `mta:25` on the compose backend network).
+    let mut transport = if let (Some(user), Some(pass)) = (&config.smtp_user, &config.smtp_pass) {
+        let t = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
+            .map_err(|e| format!("relay builder error for {}: {}", config.smtp_host, e))?;
+        t.credentials(Credentials::new(user.clone(), pass.clone()))
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_host)
+    };
 
-    // Attempt STARTTLS (port 587)
-    let starttls_sender = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&hostname)
-        .map_err(|e| format!("STARTTLS relay builder error for {}: {}", hostname, e))?;
-    let starttls_result = starttls_sender
-        .credentials(creds.clone())
-        .timeout(Some(Duration::from_secs(30)))
+    transport = transport
+        .port(config.smtp_port)
+        .timeout(Some(Duration::from_secs(30)));
+
+    transport
         .build()
-        .send(email.clone())
+        .send(email)
         .await
-        .map_err(|e| format!("STARTTLS send error for {}: {}", hostname, e));
+        .map_err(|e| {
+            format!(
+                "placement send via {}:{} failed: {}",
+                config.smtp_host, config.smtp_port, e
+            )
+        })?;
 
-    match starttls_result {
-        Ok(_) => {
-            tracing::debug!(
-                test_id = %test_id,
-                account = %account.email,
-                "Test email sent via STARTTLS on port 587"
-            );
-            Ok(())
-        }
-        Err(starttls_err) => {
-            // Fall back to direct TLS on port 465
-            tracing::warn!(
-                test_id = %test_id,
-                account = %account.email,
-                starttls_error = %starttls_err,
-                "Falling back to direct TLS on port 465"
-            );
+    tracing::debug!(
+        test_id = %test_id,
+        from = from_email,
+        to = account_email,
+        relay = %config.smtp_host,
+        port = config.smtp_port,
+        "Placement test email submitted to platform relay"
+    );
 
-            let email_clone = Message::builder()
-                .from(
-                    account
-                        .email
-                        .parse()
-                        .map_err(|e: lettre::address::AddressError| {
-                            format!("invalid from address '{}': {}", account.email, e)
-                        })?,
-                )
-                .to(account
-                    .email
-                    .parse()
-                    .map_err(|e: lettre::address::AddressError| {
-                        format!("invalid to address '{}': {}", account.email, e)
-                    })?)
-                .subject(&subject)
-                .multipart(
-                    lettre::message::MultiPart::alternative()
-                        .singlepart(lettre::message::SinglePart::plain(body_text))
-                        .singlepart(lettre::message::SinglePart::html(body_html)),
-                )
-                .map_err(|e| format!("failed to build message: {}", e))?;
-
-            let direct_sender = AsyncSmtpTransport::<Tokio1Executor>::relay(&hostname)
-                .map_err(|e| format!("direct TLS relay builder error for {}: {}", hostname, e))?;
-            direct_sender
-                .credentials(creds)
-                .port(465)
-                .timeout(Some(Duration::from_secs(30)))
-                .build()
-                .send(email_clone)
-                .await
-                .map_err(|e| format!("direct TLS send error for {}: {}", hostname, e))?;
-
-            tracing::debug!(
-                test_id = %test_id,
-                account = %account.email,
-                "Test email sent via direct TLS on port 465"
-            );
-            Ok(())
-        }
-    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -170,19 +110,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_domain() {
-        assert_eq!(extract_domain("user@gmail.com"), Some("gmail.com".into()));
-        assert_eq!(
-            extract_domain("test@outlook.com"),
-            Some("outlook.com".into())
-        );
-        assert_eq!(extract_domain("noatsign"), None);
-        assert_eq!(extract_domain("a@"), None);
-    }
-
-    #[test]
-    fn test_smtp_hostname() {
-        assert_eq!(smtp_hostname("gmail.com"), "smtp.gmail.com");
-        assert_eq!(smtp_hostname("outlook.com"), "smtp.outlook.com");
+    fn default_config_targets_platform_mta() {
+        let config = PlacementConfig::default();
+        assert_eq!(config.smtp_host, "mta");
+        assert_eq!(config.smtp_port, 25);
+        assert!(config.smtp_user.is_none());
+        assert!(config.smtp_pass.is_none());
     }
 }

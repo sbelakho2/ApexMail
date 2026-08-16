@@ -229,6 +229,7 @@ async fn audit_search(
     Query(params): Query<AuditSearchQuery>,
 ) -> Result<Json<AuditSearchResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let (search_sql, search_binds) = build_search_query(&params)?;
     let (count_sql, count_binds) = build_count_query(&params)?;
@@ -373,6 +374,7 @@ async fn audit_export(
     Json(body): Json<AuditExportRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let now = Utc::now();
     let window_end = body

@@ -171,6 +171,30 @@ pub fn delivery_category(folder: &InboxFolder) -> &'static str {
     }
 }
 
+/// Classify an IMAP folder name into the placement value stored per message.
+///
+/// Deterministic rules first, provider classifier as fallback:
+/// 1. `INBOX` under any casing → `"inbox"` (RFC 3501 interprets INBOX
+///    case-insensitively).
+/// 2. Folders matching `(?i)spam|junk|bulk|promotions` → `"spam"`.
+/// 3. Anything else → [`classify_folder`] + [`delivery_category`] for the
+///    provider (e.g. Gmail Social/Updates tabs, Archive, custom folders).
+pub fn placement_from_folder(folder_name: &str, provider: &ProviderName) -> String {
+    if folder_name.eq_ignore_ascii_case("inbox") {
+        return "inbox".to_string();
+    }
+    let lower = folder_name.to_lowercase();
+    if lower.contains("spam")
+        || lower.contains("junk")
+        || lower.contains("bulk")
+        || lower.contains("promotions")
+    {
+        return "spam".to_string();
+    }
+    let folder = classify_folder(folder_name, provider);
+    delivery_category(&folder).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +356,54 @@ mod tests {
     #[test]
     fn test_delivery_category_absent() {
         assert_eq!(delivery_category(&InboxFolder::Other("x".into())), "absent");
+    }
+
+    // ── placement_from_folder ────────────────────────────────────
+
+    #[test]
+    fn test_placement_from_folder_inbox_any_case() {
+        for name in ["INBOX", "Inbox", "inbox"] {
+            assert_eq!(
+                placement_from_folder(name, &ProviderName::Gmail),
+                "inbox",
+                "folder {name} should classify as inbox"
+            );
+        }
+    }
+
+    #[test]
+    fn test_placement_from_folder_spam_conventions() {
+        for name in [
+            "[Gmail]/Spam",
+            "Junk",
+            "JUNK",
+            "Bulk Mail",
+            "[Gmail]/Promotions",
+        ] {
+            assert_eq!(
+                placement_from_folder(name, &ProviderName::Other("prov".into())),
+                "spam",
+                "folder {name} should classify as spam"
+            );
+        }
+    }
+
+    #[test]
+    fn test_placement_from_folder_other_uses_classifier_fallback() {
+        // Gmail tabs fall back to the provider classifier ("promotions").
+        assert_eq!(
+            placement_from_folder("[Gmail]/Social", &ProviderName::Gmail),
+            "promotions"
+        );
+        // Archive falls back to "inbox" via the classifier.
+        assert_eq!(
+            placement_from_folder("Archive", &ProviderName::Gmail),
+            "inbox"
+        );
+        // Unknown custom folders fall back to "absent".
+        assert_eq!(
+            placement_from_folder("MyFolder", &ProviderName::Gmail),
+            "absent"
+        );
     }
 }

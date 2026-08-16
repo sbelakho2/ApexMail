@@ -143,18 +143,20 @@ CMD ["--listen", "0.0.0.0:3000"]
 # =============================================================================
 # Billing Service
 # =============================================================================
+# Binds 0.0.0.0:4100 (crates/billing-service/src/bin/server.rs default via
+# BILLING_LISTEN_ADDR). GET /health is the unauthenticated liveness probe.
 FROM runtime-base AS billing-service
 
 COPY --from=builder /app/target/release/billing-service /usr/local/bin/
 
 USER apexmail
-EXPOSE 3001
+EXPOSE 4100
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3001"]
+    CMD ["sh", "-c", "nc -z 127.0.0.1 4100"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "billing-service"]
-CMD ["--listen", "0.0.0.0:3001"]
+CMD ["--listen", "0.0.0.0:4100"]
 
 # =============================================================================
 # Analytics Worker
@@ -315,22 +317,6 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
     CMD ["sh", "-c", "nc -z 127.0.0.1 3000"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "auth-server"]
-
-# =============================================================================
-# Ops Service
-# =============================================================================
-FROM runtime-base AS ops
-
-COPY --from=builder /app/target/release/ops-service /usr/local/bin/
-
-USER apexmail
-EXPOSE 3011
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3011"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "ops-service"]
-CMD ["--listen", "0.0.0.0:3011"]
 
 # =============================================================================
 # HA Server

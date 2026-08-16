@@ -364,18 +364,26 @@ async fn complete_sso_login(
     let email_lower = email.to_lowercase();
 
     // Look up existing user
-    let existing: Option<(uuid::Uuid, uuid::Uuid, String, Option<String>, String, String)> =
+    let existing: Option<(uuid::Uuid, uuid::Uuid, String, Option<String>, String, String, bool)> =
         sqlx::query_as(
-            "SELECT id::text, tenant_id, email, name, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+            "SELECT id::text, tenant_id, email, name, role, status, mfa_enabled FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
         )
         .bind(&email_lower)
         .fetch_optional(&state.db)
         .await?;
 
     let (user_id, tenant_id, role) = match existing {
-        Some((id, tid, _email, _name, role, status)) => {
+        Some((id, tid, _email, _name, role, status, mfa_enabled)) => {
             if status != "active" {
                 return Ok(Redirect::to("/login?error=account_inactive").into_response());
+            }
+            // MFA gate: a user who has enrolled MFA (or whose role mandates
+            // it) must not be able to bypass the second factor by signing in
+            // through SSO — otherwise the password+MFA flow is decorative.
+            // Direct them through the password login, which issues an MFA
+            // challenge. (Apple/Microsoft SSO already enforce this gate.)
+            if mfa_enabled || super::auth::role_requires_mfa(&role) {
+                return Ok(Redirect::to("/login?error=mfa_required").into_response());
             }
             // Update SSO metadata
             sqlx::query(
@@ -496,6 +504,7 @@ async fn complete_sso_login(
         exp: exp.timestamp(),
         iat: now.timestamp(),
         jti: Uuid::new_v4().to_string(),
+        typ: Some("session".into()),
     };
 
     let token = encode(

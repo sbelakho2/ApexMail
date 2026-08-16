@@ -23,28 +23,52 @@
 -- =============================================================================
 
 -- email_queue.subject: RFC 5321 maximum of 998 characters per header line
-ALTER TABLE email_queue 
-    ADD CONSTRAINT chk_email_queue_subject_length 
-    CHECK (char_length(subject) <= 998)
-    NOT VALID;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_email_queue_subject_length') THEN
+        ALTER TABLE email_queue
+            ADD CONSTRAINT chk_email_queue_subject_length
+            CHECK (char_length(subject) <= 998)
+            NOT VALID;
+    END IF;
+END
+$$;
 
 -- mail_messages.subject: RFC 5321 maximum of 998 characters per header line
-ALTER TABLE mail_messages 
-    ADD CONSTRAINT chk_mail_messages_subject_length 
-    CHECK (char_length(subject) <= 998)
-    NOT VALID;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_mail_messages_subject_length') THEN
+        ALTER TABLE mail_messages
+            ADD CONSTRAINT chk_mail_messages_subject_length
+            CHECK (char_length(subject) <= 998)
+            NOT VALID;
+    END IF;
+END
+$$;
 
 -- mail_accounts.email: RFC 5321 maximum of 320 characters (64@255)
-ALTER TABLE mail_accounts 
-    ADD CONSTRAINT chk_mail_accounts_email_length 
-    CHECK (char_length(email) <= 320)
-    NOT VALID;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_mail_accounts_email_length') THEN
+        ALTER TABLE mail_accounts
+            ADD CONSTRAINT chk_mail_accounts_email_length
+            CHECK (char_length(email) <= 320)
+            NOT VALID;
+    END IF;
+END
+$$;
 
 -- mail_accounts.display_name: Common convention, 255 characters
-ALTER TABLE mail_accounts 
-    ADD CONSTRAINT chk_mail_accounts_display_name_length 
-    CHECK (char_length(display_name) <= 255)
-    NOT VALID;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_mail_accounts_display_name_length') THEN
+        ALTER TABLE mail_accounts
+            ADD CONSTRAINT chk_mail_accounts_display_name_length
+            CHECK (char_length(display_name) <= 255)
+            NOT VALID;
+    END IF;
+END
+$$;
 
 -- =============================================================================
 -- Step 2: Validate constraints (SHARE UPDATE EXCLUSIVE lock, non-blocking)

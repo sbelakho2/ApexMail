@@ -30,6 +30,61 @@ pub struct SSOConfiguration {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+/// Sanitized SSO configuration for HTTP responses.
+///
+/// Contains everything a settings UI needs while omitting all secret
+/// material (`certificate`, `private_key_encrypted`,
+/// `oidc_client_secret_encrypted`). The full [`SSOConfiguration`] remains
+/// available server-side for the SSO login flows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SSOPublicConfig {
+    pub id: Uuid,
+    pub tenant_id: String,
+    pub provider_type: String,
+    pub enabled: bool,
+    pub domain: String,
+    pub metadata_url: Option<String>,
+    pub entity_id: Option<String>,
+    pub sso_url: Option<String>,
+    pub slo_url: Option<String>,
+    pub oidc_client_id: Option<String>,
+    pub oidc_issuer: Option<String>,
+    pub oidc_redirect_uri: Option<String>,
+    pub oidc_scopes: Option<String>,
+    pub attribute_mapping: Option<serde_json::Value>,
+    pub enforce_sso: bool,
+    pub allow_idp_initiated: bool,
+    pub session_duration_hours: i32,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl From<SSOConfiguration> for SSOPublicConfig {
+    fn from(c: SSOConfiguration) -> Self {
+        Self {
+            id: c.id,
+            tenant_id: c.tenant_id,
+            provider_type: c.provider_type,
+            enabled: c.enabled,
+            domain: c.domain,
+            metadata_url: c.metadata_url,
+            entity_id: c.entity_id,
+            sso_url: c.sso_url,
+            slo_url: c.slo_url,
+            oidc_client_id: c.oidc_client_id,
+            oidc_issuer: c.oidc_issuer,
+            oidc_redirect_uri: c.oidc_redirect_uri,
+            oidc_scopes: c.oidc_scopes,
+            attribute_mapping: c.attribute_mapping,
+            enforce_sso: c.enforce_sso,
+            allow_idp_initiated: c.allow_idp_initiated,
+            session_duration_hours: c.session_duration_hours,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SSOSession {
     pub id: Uuid,

@@ -531,36 +531,44 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     format!("ses_soft_bounce:{bounce_sub_type}")
                 };
 
-                // Auto-suppress hard bounces
+                // Auto-suppress hard bounces (canonical `suppressions` table).
+                // `tenant_id` is NOT NULL with an FK to tenants, so a bounce
+                // without the X-ApexMail-TenantId header cannot be suppressed.
                 if is_permanent {
-                    if let Err(e) = sqlx::query(
-                        "INSERT INTO suppression_list (id, tenant_id, email, reason, created_at)
-                         VALUES (gen_random_uuid(), $1, $2, $3, NOW())
-                         ON CONFLICT DO NOTHING",
-                    )
-                    .bind(tenant_id.as_deref())
-                    .bind(email)
-                    .bind(&reason)
-                    .execute(&state.db)
-                    .await
-                    {
-                        warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress bounced address");
-                    } else {
-                        info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed hard-bounced address");
+                    if let Some(tid) = tenant_id.as_deref() {
+                        let suppression_id = apexmail_lib::id::generate_id("sup", 22);
+                        if let Err(e) = sqlx::query(
+                            "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+                             VALUES ($1, $2, $3, $4, $5, NOW())
+                             ON CONFLICT (tenant_id, email) DO NOTHING",
+                        )
+                        .bind(&suppression_id)
+                        .bind(tid)
+                        .bind(email)
+                        .bind(&reason)
+                        .bind("ses")
+                        .execute(&state.db)
+                        .await
+                        {
+                            warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress bounced address");
+                        } else {
+                            info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed hard-bounced address");
+                        }
                     }
                 }
 
                 // Update message status if we have the internal ID
-                if let Some(ref msg_id) = apexmail_message_id {
+                if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
                     let status = if is_permanent { "bounced" } else { "deferred" };
                     // Strip any "msg_" prefix from the message ID before matching
                     let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
                     if let Err(e) = sqlx::query(
                         "UPDATE messages SET status = $1, updated_at = NOW()
-                         WHERE id = $2::uuid",
+                         WHERE id = $2::uuid AND tenant_id = $3",
                     )
                     .bind(status)
                     .bind(db_id)
+                    .bind(tid)
                     .execute(&state.db)
                     .await
                     {
@@ -619,32 +627,39 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
             if let Some(email) = &recipient.email_address {
                 let reason = format!("ses_complaint:{feedback_type}");
 
-                // Always suppress — complaints are serious
-                if let Err(e) = sqlx::query(
-                    "INSERT INTO suppression_list (id, tenant_id, email, reason, created_at)
-                     VALUES (gen_random_uuid(), $1, $2, $3, NOW())
-                     ON CONFLICT DO NOTHING",
-                )
-                .bind(tenant_id.as_deref())
-                .bind(email)
-                .bind(&reason)
-                .execute(&state.db)
-                .await
-                {
-                    warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress complained address");
-                } else {
-                    info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed complained address");
+                // Always suppress — complaints are serious (canonical
+                // `suppressions` table; tenant_id is NOT NULL with an FK).
+                if let Some(tid) = tenant_id.as_deref() {
+                    let suppression_id = apexmail_lib::id::generate_id("sup", 22);
+                    if let Err(e) = sqlx::query(
+                        "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+                         VALUES ($1, $2, $3, $4, $5, NOW())
+                         ON CONFLICT (tenant_id, email) DO NOTHING",
+                    )
+                    .bind(&suppression_id)
+                    .bind(tid)
+                    .bind(email)
+                    .bind(&reason)
+                    .bind("ses")
+                    .execute(&state.db)
+                    .await
+                    {
+                        warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress complained address");
+                    } else {
+                        info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed complained address");
+                    }
                 }
 
                 // Update message status
-                if let Some(ref msg_id) = apexmail_message_id {
+                if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
                     // Strip any "msg_" prefix from the message ID before matching
                     let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
                     if let Err(e) = sqlx::query(
                         "UPDATE messages SET status = 'complained', updated_at = NOW()
-                         WHERE id = $1::uuid",
+                         WHERE id = $1::uuid AND tenant_id = $2",
                     )
                     .bind(db_id)
+                    .bind(tid)
                     .execute(&state.db)
                     .await
                     {
@@ -690,14 +705,15 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
     );
 
     // Update message status to 'delivered'
-    if let Some(ref msg_id) = apexmail_message_id {
+    if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
         // Strip any "msg_" prefix from the message ID before matching
         let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
         if let Err(e) = sqlx::query(
             "UPDATE messages SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
-             WHERE id = $1::uuid AND status != 'delivered'",
+             WHERE id = $1::uuid AND tenant_id = $2 AND status != 'delivered'",
         )
         .bind(db_id)
+        .bind(tid)
         .execute(&state.db)
         .await
         {

@@ -435,7 +435,11 @@ fn comparison_differences(
 async fn get_current_plan(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TenantIdQuery>,
+    Extension(scope): Extension<TenantAuthScope>,
 ) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let plan = plans::get_plan_for_tenant(&state.db, &q.tenant_id).await?;
     match plan {
         Some(plan) => Ok(Json(to_json_value(LegacyPlanLimitsDto::from(&plan))?).into_response()),
@@ -478,8 +482,9 @@ async fn get_plan_features(
 async fn get_plan_limits(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TenantIdQuery>,
+    Extension(scope): Extension<TenantAuthScope>,
 ) -> Result<Response, ApiError> {
-    get_current_plan(State(state), Query(q)).await
+    get_current_plan(State(state), Query(q), Extension(scope)).await
 }
 
 async fn compare_plans(
@@ -534,8 +539,12 @@ async fn compare_plans(
 
 async fn create_plan(
     State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<LegacyPlanCreateBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
     let plan = plans::upsert_plan_input(
         &state.db,
         &plans::PlanUpsertInput {
@@ -564,8 +573,12 @@ async fn create_plan(
 async fn update_plan(
     State(state): State<Arc<AppState>>,
     Path(plan_id): Path<String>,
+    Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<LegacyPlanPatchBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
     let existing = plans::get_plan_by_name(&state.db, &plan_id).await?;
     let Some(existing) = existing else {
         return Ok(error_response(
@@ -608,7 +621,13 @@ async fn update_plan(
     Ok(Json(to_json_value(LegacyPlanDto::from(updated))?).into_response())
 }
 
-async fn seed_plans(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
+async fn seed_plans(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
     for plan in plans::default_plans() {
         plans::upsert_plan(&state.db, &plan).await?;
     }
@@ -1018,7 +1037,9 @@ fn preview_plan_proration(
 
 // Replaced by billing_common::proration::build_proration_explanation
 
-fn generate_audit_log_id() -> String {
+/// Generate a 26-character identifier matching the VARCHAR(26) primary-key
+/// convention used by tenants/audit/dunning tables (migration 064/087/093).
+pub(crate) fn generate_audit_log_id() -> String {
     Uuid::new_v4()
         .simple()
         .to_string()
@@ -1652,8 +1673,12 @@ fn safe_export_date(value: &str) -> String {
 
 async fn get_revenue_report(
     State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
     let (Some(start_date), Some(end_date)) =
         (query.start_date.as_deref(), query.end_date.as_deref())
     else {
@@ -1680,9 +1705,9 @@ async fn get_revenue_report(
         FROM (
             SELECT
                 DATE_TRUNC('day', COALESCE(paid_at, created_at)) as date,
-                SUM(amount_cents) as total_revenue,
+                SUM(COALESCE(total, amount)) as total_revenue,
                 COUNT(*) as invoice_count,
-                0::bigint as total_tax,
+                SUM(COALESCE(vat_total, 0)) as total_tax,
                 currency
             FROM invoices
             WHERE status = 'paid' AND COALESCE(paid_at, created_at) >= $1 AND COALESCE(paid_at, created_at) < $2
@@ -1700,7 +1725,13 @@ async fn get_revenue_report(
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
 
-async fn get_mrr_report(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
+async fn get_mrr_report(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
     let report: serde_json::Value = sqlx::query_scalar(
         r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
@@ -1731,7 +1762,13 @@ async fn get_mrr_report(State(state): State<Arc<AppState>>) -> Result<Response, 
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
 
-async fn get_churn_report(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
+async fn get_churn_report(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
     let report: serde_json::Value = sqlx::query_scalar(
         r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
@@ -1780,7 +1817,13 @@ async fn get_churn_report(State(state): State<Arc<AppState>>) -> Result<Response
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
 
-async fn get_dunning_report(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
+async fn get_dunning_report(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
     let report: serde_json::Value = sqlx::query_scalar(
         r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.dunning_state), '[]'::json)
@@ -1804,8 +1847,12 @@ async fn get_dunning_report(State(state): State<Arc<AppState>>) -> Result<Respon
 
 async fn get_cost_report(
     State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
     let (Some(start_date), Some(end_date)) =
         (query.start_date.as_deref(), query.end_date.as_deref())
     else {
@@ -1857,8 +1904,12 @@ async fn get_cost_report(
 
 async fn export_billing_data(
     State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
     Query(query): Query<BillingExportQuery>,
 ) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
     let (Some(export_type), Some(start_date), Some(end_date)) = (
         query.export_type.as_deref(),
         query.start_date.as_deref(),
@@ -1888,14 +1939,14 @@ async fn export_billing_data(
             FROM (
                 SELECT
                     i.invoice_number, i.tenant_id, t.name as tenant_name,
-                    NULL::bigint as subtotal,
-                    NULL::bigint as tax_amount,
-                    i.amount_cents as total,
+                    COALESCE(i.subtotal, i.amount) as subtotal,
+                    COALESCE(i.vat_total, 0) as tax_amount,
+                    COALESCE(i.total, i.amount) as total,
                     i.currency,
                     i.status,
-                    i.created_at as issued_at,
+                    COALESCE(i.issued_at, i.created_at) as issued_at,
                     i.paid_at,
-                    i.due_date
+                    i.due_at
                 FROM invoices i
                 JOIN tenants t ON i.tenant_id = t.id
                 WHERE i.created_at >= $1 AND i.created_at < $2
@@ -2231,6 +2282,11 @@ impl IntoResponse for ApiError {
                 ErrorCode::ServiceUnavailable,
                 "billing cache unavailable".to_string(),
             ),
+            ApiError::Usage(usage::UsageError::InvalidQuantity(quantity)) => (
+                StatusCode::BAD_REQUEST,
+                ErrorCode::ValidationError,
+                format!("quantity must be a positive integer, got {quantity}"),
+            ),
             ApiError::Usage(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::InternalError,
@@ -2344,17 +2400,34 @@ fn check_tenant_access(scope: &TenantAuthScope, tenant_id: &str) -> Result<(), R
     match scope {
         TenantAuthScope::Any => Ok(()),
         TenantAuthScope::Scoped(scoped) if scoped == tenant_id => Ok(()),
-        _ => Err((
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": {
-                    "code": "FORBIDDEN",
-                    "message": "not authorized for this tenant"
-                }
-            })),
-        )
-            .into_response()),
+        _ => Err(forbidden_response("not authorized for this tenant")),
     }
+}
+
+/// Require a full-access (`Any`) service token. Plan administration, billing
+/// reports and exports operate across all tenants, so a tenant-scoped token
+/// must not reach them even when it names its own tenant.
+#[allow(clippy::result_large_err)]
+fn require_any_scope(scope: &TenantAuthScope) -> Result<(), Response> {
+    match scope {
+        TenantAuthScope::Any => Ok(()),
+        TenantAuthScope::Scoped(_) => Err(forbidden_response(
+            "tenant-scoped tokens cannot access platform-wide billing endpoints",
+        )),
+    }
+}
+
+fn forbidden_response(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": {
+                "code": "FORBIDDEN",
+                "message": message
+            }
+        })),
+    )
+        .into_response()
 }
 
 async fn require_service_auth(

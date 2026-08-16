@@ -12,6 +12,8 @@ use chrono::{DateTime, Utc};
 use deadpool_redis::redis::{self, AsyncCommands};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, TokenData, Validation};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 
 use crate::error::ApiError;
 use crate::routes::{
@@ -63,6 +65,12 @@ pub struct JwtClaims {
     pub exp: i64,
     pub iat: i64,
     pub jti: String, // session ID (UUID)
+    /// Token type discriminator. Session tokens carry `typ = "session"`;
+    /// stream tokens (see routes/stream_tokens.rs) declare `typ = "stream"`.
+    /// Legacy tokens issued before this field existed carry no `typ` at all
+    /// and remain valid (None ⇒ not a stream token ⇒ accepted).
+    #[serde(default)]
+    pub typ: Option<String>,
 }
 
 // ─── Constants ─────────────────────────────────────────────────
@@ -411,6 +419,24 @@ async fn authenticate_api_key(
 /// Fallback authentication for Argon2id-hashed API keys.
 /// Loads all active keys, tries Argon2id verification against each,
 /// and re-hashes to HMAC-SHA256 for fast future lookups.
+///
+/// # DoS cap
+/// Each fallback run performs memory-hard Argon2id verification against
+/// EVERY active key, so unbounded concurrency lets an attacker pin N cores
+/// with N cheap invalid-key requests. The scan is therefore gated by a
+/// semaphore (mirroring `ARGON2_VERIFY_SEMAPHORE` in routes/auth.rs). Unlike
+/// the captcha path we use `try_acquire`: when permits are exhausted the
+/// fallback is skipped and the caller gets a normal "invalid API key"
+/// failure — this path is a best-effort bridge for legacy keys, never worth
+/// queueing requests behind.
+static API_KEY_ARGON2_FALLBACK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+const API_KEY_ARGON2_FALLBACK_MAX_CONCURRENT: usize = 2;
+/// Upper bound on rows examined per fallback run. The scan is a best-effort
+/// bridge for legacy Argon2id keys; on tenants with more keys than this the
+/// newest entries simply fall back to the normal "invalid API key" failure
+/// until the owner re-issues the key (ordered by creation for determinism).
+const API_KEY_ARGON2_FALLBACK_SCAN_LIMIT: i32 = 500;
+
 async fn authenticate_api_key_argon2_fallback(
     key: &str,
     db: &sqlx::PgPool,
@@ -419,10 +445,30 @@ async fn authenticate_api_key_argon2_fallback(
 ) -> Result<AuthUser, ApiError> {
     use apexmail_lib::detect_api_key_hash_version;
 
-    // Scan all active keys (limited scope — only runs when HMAC lookup fails)
+    let semaphore = API_KEY_ARGON2_FALLBACK_SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(API_KEY_ARGON2_FALLBACK_MAX_CONCURRENT)))
+        .clone();
+    let _argon2_permit = match semaphore.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            tracing::warn!(
+                "api key argon2 fallback capacity reached; skipping memory-hash scan"
+            );
+            return Err(ApiError::Unauthorized("invalid API key".into()));
+        }
+    };
+
+    // Scan active keys (limited scope — only runs when HMAC lookup fails,
+    // capped at SCAN_LIMIT rows so a large api_keys table cannot turn each
+    // unauthenticated request into a full-table Argon2id grind).
     let rows = sqlx::query_as::<_, ApiKeyRow>(
-        "SELECT id::text AS id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE expires_at IS NULL OR expires_at > NOW()",
+        "SELECT id::text AS id, tenant_id, key_hash, scopes, expires_at
+         FROM api_keys
+         WHERE expires_at IS NULL OR expires_at > NOW()
+         ORDER BY created_at DESC NULLS LAST
+         LIMIT $1",
     )
+    .bind(API_KEY_ARGON2_FALLBACK_SCAN_LIMIT)
     .fetch_all(db)
     .await
     .map_err(|e| {
@@ -808,6 +854,18 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
 
     let claims = token_data.claims;
 
+    // Token-type discrimination: a stream token (typ = "stream", issued by
+    // POST /v1/stream/token for the tracking-service SSE endpoint) must never
+    // authenticate a regular API session. Tokens without a `typ` claim are
+    // pre-discrimination session tokens and stay valid — hard-requiring the
+    // claim would invalidate every live session.
+    if let Some(typ) = claims.typ.as_deref() {
+        if typ != "session" {
+            tracing::warn!(token_type = %typ, "rejecting non-session token used as session");
+            return Err(ApiError::Unauthorized("invalid token type".into()));
+        }
+    }
+
     let user_id = claims.sub.clone();
     let tenant_id = claims.tenant_id.clone();
 
@@ -964,6 +1022,41 @@ pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError
         }
     }
     Ok(())
+}
+
+/// Helper that rejects any caller whose tenant is not the `system` (control-plane) tenant.
+///
+/// The wildcard scope `"*"` is intentionally granted to every tenant's
+/// admin/owner role so they can manage their *own* tenant's resources on
+/// customer routes. That same scope must NOT grant access to control-plane
+/// (`/v1/admin/*`) routes, otherwise any tenant administrator could operate the
+/// entire platform. This helper is the system-tenant gate that, combined with
+/// the `"*"` scope check performed by [`require_scopes`], ensures only platform
+/// staff reach control-plane handlers.
+pub fn require_system_tenant(auth: &AuthUser) -> Result<(), ApiError> {
+    if auth.tenant_id != "system" {
+        return Err(ApiError::Forbidden(
+            "control-plane access requires system tenant".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Middleware enforcing that the caller belongs to the `system` tenant.
+///
+/// Must be layered AFTER [`require_auth`] so that an [`AuthUser`] is already
+/// present in request extensions. Intended for the control-plane (`/v1/admin/*`)
+/// router so the tenant-admin wildcard scope `"*"` cannot be used to reach
+/// platform administration endpoints.
+pub async fn require_system_tenant_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    let auth_user = req.extensions().get::<AuthUser>().cloned().ok_or_else(|| {
+        ApiError::Unauthorized("authentication required for control-plane access".into())
+    })?;
+    require_system_tenant(&auth_user)?;
+    Ok(next.run(req).await)
 }
 
 // ─── Header-based tenant binding enforcement ───────────────────
@@ -1130,6 +1223,7 @@ mod tests {
             exp: 9999999999,
             iat: 1000000000,
             jti: "sess_test_roundtrip_001".into(),
+            typ: Some("session".into()),
         };
         let json = serde_json::to_string(&claims).unwrap();
         let decoded: JwtClaims = serde_json::from_str(&json).unwrap();

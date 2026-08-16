@@ -38,14 +38,14 @@ jobs:
         working-directory: apps/marketing-zola
         run: |
           if command -v zola &>/dev/null; then zola build; else
-            curl -sSL "https://github.com/getzola/zola/releases/download/v0.19.1/zola-v0.19.1-x86_64-unknown-linux-gnu.tar.gz" | tar xz && ./zola build; fi
+            curl -sSL "https://github.com/getzola/zola/releases/download/v0.22.1/zola-v0.22.1-x86_64-unknown-linux-gnu.tar.gz" | tar xz && ./zola build; fi
       - name: Run SEO validator
         run: |
           chmod +x deploy/tests/seo-validate.sh
           BUILD_DIR=apps/marketing-zola/public bash deploy/tests/seo-validate.sh
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@fe9530cd28e02193eced3282e22f38e03d99fa02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: seo-audit-report
           path: deploy/tests/.seo-validation-report.json

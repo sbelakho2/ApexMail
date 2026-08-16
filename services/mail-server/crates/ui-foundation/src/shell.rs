@@ -279,14 +279,22 @@ impl<'a> WebDashboardShell<'a> {
         } else {
             "w-64"
         };
-        let mobile_overlay = if self.mobile_menu_open {
-            format!(
-                "<div class=\"fixed inset-0 z-40 bg-black/50 md:hidden\" aria-hidden=\"true\" data-close-on-escape=\"true\"></div>\
-                <div id=\"mobile-sidebar\" role=\"navigation\" aria-label=\"Mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"fixed inset-y-0 left-0 z-50 w-[min(20rem,calc(100vw-2rem))] md:hidden\">{}</div>",
-                render_web_sidebar(self.current_path)
-            )
+        // Backdrop only exists while the menu is open; the mobile sidebar
+        // itself is ALWAYS in the DOM (mirroring the control-plane shell) —
+        // closed state is expressed with `-translate-x-full` so the burger
+        // button and mobile_menu_script() can toggle it client-side. Rendering
+        // it only when open meant SSR pages (which always render closed)
+        // shipped no mobile navigation at all.
+        let mobile_backdrop = if self.mobile_menu_open {
+            "<div class=\"fixed inset-0 z-40 bg-black/50 md:hidden\" aria-hidden=\"true\" data-close-on-escape=\"true\"></div>"
+                .to_string()
         } else {
             String::new()
+        };
+        let mobile_sidebar_translate = if self.mobile_menu_open {
+            ""
+        } else {
+            " -translate-x-full"
         };
         let banner = self
             .impersonation_banner
@@ -301,14 +309,17 @@ impl<'a> WebDashboardShell<'a> {
             .unwrap_or_default();
         let sidebar_content = render_web_sidebar(self.current_path);
         let mobile_script = mobile_menu_script();
-        
+        let mobile_sidebar = format!(
+            "<div id=\"mobile-sidebar\" role=\"navigation\" aria-label=\"Mobile navigation\" data-mobile-menu-breakpoint=\"md\" data-close-on-escape=\"true\" tabindex=\"-1\" class=\"fixed inset-y-0 left-0 z-50 w-[min(20rem,calc(100vw-2rem))] md:hidden transition-transform duration-300{mobile_sidebar_translate}\"><aside class=\"h-full bg-white\">{sidebar_content}</aside></div>"
+        );
+
         format!(
             "<div class=\"apex-console-shell min-h-screen bg-[#fcfcfc] flex\" data-theme-mode=\"system\" data-theme-storage-key=\"{theme_key}\">\
             {banner}{shortcut_contract}\
             <aside class=\"hidden md:flex flex-col fixed left-0 top-0 h-screen {sidebar_width} z-30 transition-all duration-300\" data-sidebar-storage-key=\"{sidebar_key}\" aria-label=\"Primary sidebar navigation\">\
                 {sidebar_content}\
             </aside>\
-            {mobile_overlay}\
+            {mobile_backdrop}{mobile_sidebar}\
             <div class=\"flex-1 flex flex-col min-h-screen transition-all duration-300 ml-0 md:ml-{ml_val}\">\
                 {header}\
                 <main class=\"apex-console-main relative p-6 lg:p-10 flex-1\">\
@@ -325,7 +336,8 @@ impl<'a> WebDashboardShell<'a> {
             sidebar_width = sidebar_width,
             sidebar_key = ui_store_persistence_key(),
             sidebar_content = sidebar_content,
-            mobile_overlay = mobile_overlay,
+            mobile_backdrop = mobile_backdrop,
+            mobile_sidebar = mobile_sidebar,
             ml_val = if self.sidebar_collapsed { "20" } else { "64" },
             header = self.header.render_html(),
             child_html = self.child_html,
@@ -567,7 +579,7 @@ fn render_web_sidebar(current_path: &str) -> String {
          <div class=\"p-6 mb-4\"><div class=\"flex items-center gap-2\">\
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span></div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{}</nav>\
-         <div class=\"p-4 border-t border-surface-100\"><a href=\"/logout\" class=\"flex items-center gap-3 px-4 py-2 text-xs font-bold uppercase tracking-widest text-surface-500 hover:text-surface-950 transition-colors\"><span>Sign Out</span></a></div></div>",
+         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/v1/auth/logout\" data-api-form data-api-action=\"/v1/auth/logout\" data-redirect=\"/login\"><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-xs font-bold uppercase tracking-widest text-surface-500 hover:text-surface-950 transition-colors\"><span>Sign Out</span></button></form></div></div>",
         content
     )
 }
@@ -901,5 +913,95 @@ mod tests {
             html_escape("<script>alert('xss')</script>"),
             "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
         );
+    }
+
+    // ── Mobile sidebar presence ─────────────────────────────────
+
+    #[test]
+    fn web_shell_keeps_mobile_sidebar_in_dom_when_closed() {
+        // SSR always renders the dashboard with the menu closed; the mobile
+        // sidebar must still be in the DOM (translated off-canvas) so the
+        // burger button and mobile_menu_script() can open it. Previously the
+        // container only existed when mobile_menu_open was true, so shipped
+        // pages had no mobile navigation at all.
+        let web = WebDashboardShell {
+            sidebar_collapsed: false,
+            mobile_menu_open: false,
+            child_html: "<section>Dashboard</section>",
+            header: ShellHeader {
+                search_query: "",
+                unread_count: 0,
+                avatar_fallback: "AM",
+                mobile_menu_open: false,
+            },
+            impersonation_banner: None,
+            toast_surface: None,
+            current_path: "/dashboard",
+        }
+        .render_html();
+
+        assert!(web.contains("id=\"mobile-sidebar\""));
+        assert!(
+            web.contains(
+                "md:hidden transition-transform duration-300 -translate-x-full"
+            ),
+            "closed mobile sidebar must be translated off-canvas"
+        );
+        // No backdrop while closed.
+        assert!(!web.contains("bg-black/50"));
+
+        let open = WebDashboardShell {
+            mobile_menu_open: true,
+            header: ShellHeader {
+                search_query: "",
+                unread_count: 0,
+                avatar_fallback: "AM",
+                mobile_menu_open: true,
+            },
+            impersonation_banner: None,
+            toast_surface: None,
+            ..web_shell_reference()
+        }
+        .render_html();
+        assert!(open.contains("bg-black/50"));
+        assert!(
+            open.contains("md:hidden transition-transform duration-300\"><aside"),
+            "open mobile sidebar must not carry -translate-x-full"
+        );
+    }
+
+    fn web_shell_reference() -> WebDashboardShell<'static> {
+        WebDashboardShell {
+            sidebar_collapsed: false,
+            mobile_menu_open: false,
+            child_html: "",
+            header: ShellHeader {
+                search_query: "",
+                unread_count: 0,
+                avatar_fallback: "AM",
+                mobile_menu_open: false,
+            },
+            impersonation_banner: None,
+            toast_surface: None,
+            current_path: "/dashboard",
+        }
+    }
+
+    // ── Logout wiring ───────────────────────────────────────────
+
+    #[test]
+    fn web_sidebar_logout_posts_to_api_with_csrf() {
+        // A plain GET link to /logout 404s (the endpoint is POST-only) and a
+        // bare form POST would fail the session CSRF check. The sidebar must
+        // use the data-api-form bridge, which sends X-CSRF-Token from the
+        // csrf_token cookie and redirects to /login on success.
+        let web = web_shell_reference().render_html();
+        assert!(
+            !web.contains("href=\"/logout\""),
+            "logout must not be a plain GET link"
+        );
+        assert!(web.contains("action=\"/v1/auth/logout\""));
+        assert!(web.contains("data-api-action=\"/v1/auth/logout\""));
+        assert!(web.contains("data-redirect=\"/login\""));
     }
 }

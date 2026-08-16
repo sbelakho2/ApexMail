@@ -2,12 +2,14 @@
 # =============================================================================
 # ApexMail — Hetzner host bootstrap (one-time, idempotent)
 # =============================================================================
-# Run this ONCE on a fresh Hetzner host (37.27.119.181) as root after the
-# hetzner-db-mac.pub SSH key has been installed in /root/.ssh/authorized_keys.
+# Run this ONCE on the production Hetzner host (95.216.226.51 — matches the
+# Makefile SERVER_HOST and the DNS A records in ARCHITECTURE.md; the CI
+# workflow takes the host from the HETZNER_SSH_HOST secret) as root after
+# the hetzner-db-mac.pub SSH key has been installed in /root/.ssh/authorized_keys.
 #
 # Local usage:
-#   scp deploy/scripts/hetzner-bootstrap.sh root@37.27.119.181:/root/
-#   ssh root@37.27.119.181 'bash /root/hetzner-bootstrap.sh'
+#   scp deploy/scripts/hetzner-bootstrap.sh root@95.216.226.51:/root/
+#   ssh root@95.216.226.51 'bash /root/hetzner-bootstrap.sh'
 #
 # Idempotent: safe to re-run.
 # =============================================================================
@@ -75,7 +77,7 @@ install_baseline_tools() {
 
 configure_firewall() {
   if ! command -v ufw >/dev/null 2>&1; then return; fi
-  log "Configuring UFW (allow 22, 80, 443, 25, 587, 465)"
+  log "Configuring UFW (allow 22, 80, 443, 25, 587, 465, 993, 2525, 2526)"
   ufw --force reset >/dev/null
   ufw default deny incoming
   ufw default allow outgoing
@@ -85,6 +87,12 @@ configure_firewall() {
   ufw allow 25/tcp
   ufw allow 587/tcp
   ufw allow 465/tcp
+  # IMAPS (imap-server publishes 993; 143 is intentionally closed — SSL-only)
+  ufw allow 993/tcp
+  # Bounce (VERP/DSN) and FBL (abuse/complaint) SMTP endpoints published by
+  # the production mta service (docker-compose.prod.yml).
+  ufw allow 2525/tcp
+  ufw allow 2526/tcp
   ufw --force enable
   ufw status verbose
 }

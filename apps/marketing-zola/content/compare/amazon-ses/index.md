@@ -13,180 +13,75 @@ methodology = "Public AWS SES documentation at docs.aws.amazon.com/ses reviewed 
 volume_assumption = "100,000 emails/month"
 billing_period = "monthly"
 currency_note = "EUR for ApexMail; USD for SES (SES prices in USD). Prices exclude VAT."
+# Feature comparison counts — update when capabilities change.
+apexmail_wins = 5
+competitor_wins = 4
 verdict_title = "How ApexMail differs from Amazon SES"
 verdict_points = ["Managed email infrastructure with API, events, and support included vs raw capacity billing", "Per-message delivery diagnostics dashboard vs self-assembled CloudWatch + SNS", "Idempotency keys on all plans vs not natively supported", "EU-hosted by default (Germany/Finland) vs multiple regions requiring explicit configuration", "Dedicated tenancy managed service vs self-managed on AWS"]
 
+# Comparison data (audit 3.3): rendered by partials/compare/table.html via a
+# single loop, so design changes to the row/winner markup happen in ONE place.
+# Cell values are raw HTML (rendered with | safe) to preserve color-emphasis
+# spans, inline <code>, and <sup><a href="#src-sesN"> citations. Winner is one
+# of: apexmail | competitor | tie | none. Bare "—" winner cells normalize to
+# "none" (the winner_badge macro renders them as a spanned em-dash).
+comparison_sections = [
+  { title = "EEA DATA PROCESSING", rows = [
+    { feature = "Primary hosting region", apex = 'EU (Hetzner, Germany &amp; Finland)', comp = 'Multiple regions including EU (Ireland eu-west-1, Frankfurt eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
+    { feature = "EEA data processing default", apex = 'Yes — all customer data in Germany/Finland', comp = 'Available — must be explicitly configured; region selection required per sending domain<sup><a href="#src-ses1">1</a></sup>', winner = "apexmail" },
+    { feature = "DPA availability", apex = 'Business plan and above — incorporates Subprocessor Register by reference', comp = 'Available — AWS DPA (Artifact) with SCCs<sup><a href="#src-ses2">2</a></sup>', winner = "none" }
+  ]},
+  { title = "SENDING CAPABILITIES", rows = [
+    { feature = "REST API", apex = 'Yes — native <code>POST /v1/messages</code> (ApexMail API)', comp = 'Yes — AWS SDK (multiple languages) via <code>SendEmail</code>, <code>SendBulkEmail</code><sup><a href="#src-ses3">3</a></sup>', winner = "none" },
+    { feature = "SMTP relay", apex = 'Yes — smtp.apexmail.ee:587 (STARTTLS)', comp = 'Yes — email-smtp.{region}.amazonaws.com:587 (STARTTLS)<sup><a href="#src-ses3">3</a></sup>', winner = "none" },
+    { feature = "Idempotency keys", apex = 'Yes (all plans) — <code>Idempotency-Key</code> header', comp = 'Not natively supported — AWS recommends application-level message deduplication<sup><a href="#src-ses3">3</a></sup>', winner = "apexmail" },
+    { feature = "Message event tracking", apex = 'Per-message delivery diagnostics dashboard with 7-step timeline', comp = 'CloudWatch metrics (send, bounce, complaint, delivery) + SNS notifications for events — self-assembly required<sup><a href="#src-ses4">4</a></sup>', winner = "apexmail" },
+    { feature = "Inbound email", apex = 'Pro plan and above', comp = 'Yes — SES receipt rules with S3, Lambda, SNS, SQS actions<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
+  ]},
+  { title = "DEPLOYMENT MODELS", rows = [
+    { feature = "Shared cloud", apex = 'Yes (all plans) — managed multi-tenant on Hetzner', comp = 'Yes (all accounts) — shared IP pool by default<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Dedicated IP", apex = '€30/mo add-on (Pro tier); Growth includes 1 managed dedicated IP', comp = 'Yes — $24.95/mo per dedicated IP; IP pool management available<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Dedicated tenancy", apex = 'Yes — Dedicated Tenant from €4,000/mo (12-month minimum, fully managed)', comp = 'Self-managed — customer architects dedicated tenancy on AWS using SES as a service component<sup><a href="#src-ses6">6</a></sup>', winner = "apexmail" },
+    { feature = "BYOC / private deployment", apex = 'Yes — BYOC from €6,500/mo (fully managed in customer cloud)', comp = 'Inherent — customer runs on own AWS account; SES is an AWS service<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
+  ]},
+  { title = "ENTERPRISE CONTROLS", rows = [
+    { feature = "SAML SSO", apex = 'Business plan and above (built-in)', comp = 'Via AWS IAM Identity Center — requires AWS Organization setup and IAM configuration<sup><a href="#src-ses7">7</a></sup>', winner = "apexmail" },
+    { feature = "Subaccounts / isolation", apex = 'Growth (5), Business (25), Enterprise (50) — managed, hierarchical', comp = 'Via AWS Organizations with separate account per environment — self-managed<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
+    { feature = "Managed support", apex = 'Yes — plan-specific response targets (Developer: 2 days; Pro: 1 day; Business: 4 hours for high severity)', comp = 'AWS Support plans (Developer, Business, Enterprise) — separate purchase from SES usage<sup><a href="#src-ses8">8</a></sup>', winner = "none" },
+    { feature = "HIPAA BAA", apex = 'Enterprise plan — BAA review eligibility', comp = 'Yes — AWS BAA available; SES is an eligible HIPAA service<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }
+  ]},
+  { title = "PRICING AT 100K/MO (verified 2026-07-29)", rows = [
+    { feature = "Plan compared", apex = 'Pro: €89/mo (150,000 emails included, managed infrastructure)', comp = 'Pay-as-you-go: ~$10/100K emails (raw sending, no management included)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
+    { feature = "Pricing model distinction", apex = 'Managed email infrastructure: API, event storage, webhook delivery, support, analytics included', comp = 'Raw capacity billing: IaaS — pay per send, plus additional AWS costs (EC2, S3, CloudWatch, SNS, support)<sup><a href="#src-ses10">10</a></sup>', winner = "none" },
+    { feature = "Free tier", apex = '30,000 emails/month (no credit card, no time limit)', comp = '62,000 emails/month when sending from EC2 (first 12 months); 3,000/month otherwise<sup><a href="#src-ses10">10</a></sup>', winner = "none" }
+  ]},
+  { title = "AREAS WHERE AMAZON SES IS STRONGER", rows = [
+    { feature = "Raw cost per email", apex = '€0.60/1,000 overage (Pro); €0.22/1,000 at Enterprise volume', comp = '$0.10/1,000 emails — lowest per-message cost among major providers<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
+    { feature = "AWS ecosystem integration", apex = 'Standalone platform with API integration', comp = 'Deep integration with AWS services: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup>', winner = "competitor" },
+    { feature = "Maximum sending volume", apex = 'Up to billions/month on Dedicated Tenant / BYOC', comp = 'Virtually unlimited — constrained by account sending limits which auto-scale with reputation<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Global regions", apex = 'Germany &amp; Finland (EEA focus)', comp = '22+ AWS regions globally including US, EU, APAC, South America<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
+  ]}
+]
+
+# Trailing footnote sources (rendered via macros::sources_block). Each source
+# {ref, n, label, url} maps a <sup id="src-sesN"> definition. ref is the anchor
+# suffix so the macro emits id="src-{{ref}}", matching the inline #src-sesN refs.
+sources = [
+  { ref = "ses1", n = 1, label = "AWS SES Regional Endpoints", url = "https://docs.aws.amazon.com/general/latest/gr/ses.html" },
+  { ref = "ses2", n = 2, label = "AWS GDPR Center and DPA", url = "https://aws.amazon.com/compliance/gdpr-center/" },
+  { ref = "ses3", n = 3, label = "AWS SES v2 SendEmail API reference", url = "https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html" },
+  { ref = "ses4", n = 4, label = "AWS SES Monitoring documentation", url = "https://docs.aws.amazon.com/ses/latest/dg/monitor-sending-activity.html" },
+  { ref = "ses5", n = 5, label = "AWS SES Receiving Email documentation", url = "https://docs.aws.amazon.com/ses/latest/dg/receiving-email.html" },
+  { ref = "ses6", n = 6, label = "AWS SES Dedicated IPs documentation", url = "https://docs.aws.amazon.com/ses/latest/dg/dedicated-ip.html" },
+  { ref = "ses7", n = 7, label = "AWS IAM Identity Center (SSO) documentation", url = "https://docs.aws.amazon.com/singlesignon/latest/userguide/" },
+  { ref = "ses8", n = 8, label = "AWS Support Plans", url = "https://aws.amazon.com/premiumsupport/plans/" },
+  { ref = "ses9", n = 9, label = "AWS HIPAA Compliance and BAA information", url = "https://aws.amazon.com/compliance/hipaa-compliance/" },
+  { ref = "ses10", n = 10, label = "AWS SES Pricing page", url = "https://aws.amazon.com/ses/pricing/" }
+]
+sources_disclaimer = "Last verified: 2026-07-29. Volume assumption: 100,000 emails/month, monthly billing. EUR for ApexMail; USD for SES. Prices exclude VAT. ApexMail is priced as managed email infrastructure; Amazon SES is priced as raw email sending capacity. Reviewed by: ApexMail marketing engineering."
 +++
 
-<tbody>
-  <tr class="section-row"><td colspan="4">EEA DATA PROCESSING</td></tr>
-  <tr>
-    <td>Primary hosting region</td>
-    <td class="text-center">EU (Hetzner, Germany &amp; Finland)</td>
-    <td class="text-center">Multiple regions including EU (Ireland eu-west-1, Frankfurt eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>EEA data processing default</td>
-    <td class="text-center">Yes — all customer data in Germany/Finland</td>
-    <td class="text-center">Available — must be explicitly configured; region selection required per sending domain<sup><a href="#src-ses1">1</a></sup></td>
-    <td class="text-center"><span class="text-brand-600 font-semibold">ApexMail</span></td>
-  </tr>
-  <tr>
-    <td>DPA availability</td>
-    <td class="text-center">Business plan and above — incorporates Subprocessor Register by reference</td>
-    <td class="text-center">Available — AWS DPA (Artifact) with SCCs<sup><a href="#src-ses2">2</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-</tbody>
-<tbody>
-  <tr class="section-row"><td colspan="4">SENDING CAPABILITIES</td></tr>
-  <tr>
-    <td>REST API</td>
-    <td class="text-center">Yes — native <code>POST /v1/messages</code> (ApexMail API)</td>
-    <td class="text-center">Yes — AWS SDK (multiple languages) via <code>SendEmail</code>, <code>SendBulkEmail</code><sup><a href="#src-ses3">3</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>SMTP relay</td>
-    <td class="text-center">Yes — smtp.apexmail.ee:587 (STARTTLS)</td>
-    <td class="text-center">Yes — email-smtp.{region}.amazonaws.com:587 (STARTTLS)<sup><a href="#src-ses3">3</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>Idempotency keys</td>
-    <td class="text-center">Yes (all plans) — <code>Idempotency-Key</code> header</td>
-    <td class="text-center">Not natively supported — AWS recommends application-level message deduplication<sup><a href="#src-ses3">3</a></sup></td>
-    <td class="text-center"><span class="text-brand-600 font-semibold">ApexMail</span></td>
-  </tr>
-  <tr>
-    <td>Message event tracking</td>
-    <td class="text-center">Per-message delivery diagnostics dashboard with 7-step timeline</td>
-    <td class="text-center">CloudWatch metrics (send, bounce, complaint, delivery) + SNS notifications for events — self-assembly required<sup><a href="#src-ses4">4</a></sup></td>
-    <td class="text-center"><span class="text-brand-600 font-semibold">ApexMail</span></td>
-  </tr>
-  <tr>
-    <td>Inbound email</td>
-    <td class="text-center">Pro plan and above</td>
-    <td class="text-center">Yes — SES receipt rules with S3, Lambda, SNS, SQS actions<sup><a href="#src-ses5">5</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-</tbody>
-<tbody>
-  <tr class="section-row"><td colspan="4">DEPLOYMENT MODELS</td></tr>
-  <tr>
-    <td>Shared cloud</td>
-    <td class="text-center">Yes (all plans) — managed multi-tenant on Hetzner</td>
-    <td class="text-center">Yes (all accounts) — shared IP pool by default<sup><a href="#src-ses6">6</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>Dedicated IP</td>
-    <td class="text-center">€30/mo add-on (Pro tier); Growth includes 1 managed dedicated IP</td>
-    <td class="text-center">Yes — $24.95/mo per dedicated IP; IP pool management available<sup><a href="#src-ses6">6</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>Dedicated tenancy</td>
-    <td class="text-center">Yes — Dedicated Tenant from €4,000/mo (12-month minimum, fully managed)</td>
-    <td class="text-center">Self-managed — customer architects dedicated tenancy on AWS using SES as a service component<sup><a href="#src-ses6">6</a></sup></td>
-    <td class="text-center"><span class="text-brand-600 font-semibold">ApexMail</span></td>
-  </tr>
-  <tr>
-    <td>BYOC / private deployment</td>
-    <td class="text-center">Yes — BYOC from €6,500/mo (fully managed in customer cloud)</td>
-    <td class="text-center">Inherent — customer runs on own AWS account; SES is an AWS service<sup><a href="#src-ses6">6</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-</tbody>
-<tbody>
-  <tr class="section-row"><td colspan="4">ENTERPRISE CONTROLS</td></tr>
-  <tr>
-    <td>SAML SSO</td>
-    <td class="text-center">Business plan and above (built-in)</td>
-    <td class="text-center">Via AWS IAM Identity Center — requires AWS Organization setup and IAM configuration<sup><a href="#src-ses7">7</a></sup></td>
-    <td class="text-center"><span class="text-brand-600 font-semibold">ApexMail</span></td>
-  </tr>
-  <tr>
-    <td>Subaccounts / isolation</td>
-    <td class="text-center">Growth (5), Business (25), Enterprise (50) — managed, hierarchical</td>
-    <td class="text-center">Via AWS Organizations with separate account per environment — self-managed<sup><a href="#src-ses7">7</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>Managed support</td>
-    <td class="text-center">Yes — plan-specific response targets (Developer: 2 days; Pro: 1 day; Business: 4 hours for high severity)</td>
-    <td class="text-center">AWS Support plans (Developer, Business, Enterprise) — separate purchase from SES usage<sup><a href="#src-ses8">8</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>HIPAA BAA</td>
-    <td class="text-center">Enterprise plan — BAA review eligibility</td>
-    <td class="text-center">Yes — AWS BAA available; SES is an eligible HIPAA service<sup><a href="#src-ses9">9</a></sup></td>
-    <td class="text-center"><span class="text-brand-600 font-semibold">Amazon SES</span></td>
-  </tr>
-</tbody>
-<tbody>
-  <tr class="section-row"><td colspan="4">PRICING AT 100K/MO (verified 2026-07-29)</td></tr>
-  <tr>
-    <td>Plan compared</td>
-    <td class="text-center">Pro: €89/mo (150,000 emails included, managed infrastructure)</td>
-    <td class="text-center">Pay-as-you-go: ~$10/100K emails (raw sending, no management included)<sup><a href="#src-ses10">10</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>Pricing model distinction</td>
-    <td class="text-center">Managed email infrastructure: API, event storage, webhook delivery, support, analytics included</td>
-    <td class="text-center">Raw capacity billing: IaaS — pay per send, plus additional AWS costs (EC2, S3, CloudWatch, SNS, support)<sup><a href="#src-ses10">10</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>Free tier</td>
-    <td class="text-center">30,000 emails/month (no credit card, no time limit)</td>
-    <td class="text-center">62,000 emails/month when sending from EC2 (first 12 months); 3,000/month otherwise<sup><a href="#src-ses10">10</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-</tbody>
-<tbody>
-  <tr class="section-row"><td colspan="4">AREAS WHERE AMAZON SES IS STRONGER</td></tr>
-  <tr>
-    <td>Raw cost per email</td>
-    <td class="text-center">€0.60/1,000 overage (Pro); €0.22/1,000 at Enterprise volume</td>
-    <td class="text-center">$0.10/1,000 emails — lowest per-message cost among major providers<sup><a href="#src-ses10">10</a></sup></td>
-    <td class="text-center"><span class="text-brand-600 font-semibold">Amazon SES</span></td>
-  </tr>
-  <tr>
-    <td>AWS ecosystem integration</td>
-    <td class="text-center">Standalone platform with API integration</td>
-    <td class="text-center">Deep integration with AWS services: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup></td>
-    <td class="text-center"><span class="text-brand-600 font-semibold">Amazon SES</span></td>
-  </tr>
-  <tr>
-    <td>Maximum sending volume</td>
-    <td class="text-center">Up to billions/month on Dedicated Tenant / BYOC</td>
-    <td class="text-center">Virtually unlimited — constrained by account sending limits which auto-scale with reputation<sup><a href="#src-ses6">6</a></sup></td>
-    <td class="text-center">—</td>
-  </tr>
-  <tr>
-    <td>Global regions</td>
-    <td class="text-center">Germany &amp; Finland (EEA focus)</td>
-    <td class="text-center">22+ AWS regions globally including US, EU, APAC, South America<sup><a href="#src-ses1">1</a></sup></td>
-    <td class="text-center"><span class="text-brand-600 font-semibold">Amazon SES</span></td>
-  </tr>
-</tbody>
-
-<p class="text-xs text-surface-400 mt-10 pt-4 border-t border-surface-200">
-  <strong>Sources (all accessed 2026-07-29):</strong><br>
-  <sup id="src-ses1">1</sup> <a href="https://docs.aws.amazon.com/general/latest/gr/ses.html" class="text-brand-500 underline">AWS SES Regional Endpoints</a><br>
-  <sup id="src-ses2">2</sup> <a href="https://aws.amazon.com/compliance/gdpr-center/" class="text-brand-500 underline">AWS GDPR Center and DPA</a><br>
-  <sup id="src-ses3">3</sup> <a href="https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html" class="text-brand-500 underline">AWS SES v2 SendEmail API reference</a><br>
-  <sup id="src-ses4">4</sup> <a href="https://docs.aws.amazon.com/ses/latest/dg/monitor-sending-activity.html" class="text-brand-500 underline">AWS SES Monitoring documentation</a><br>
-  <sup id="src-ses5">5</sup> <a href="https://docs.aws.amazon.com/ses/latest/dg/receiving-email.html" class="text-brand-500 underline">AWS SES Receiving Email documentation</a><br>
-  <sup id="src-ses6">6</sup> <a href="https://docs.aws.amazon.com/ses/latest/dg/dedicated-ip.html" class="text-brand-500 underline">AWS SES Dedicated IPs documentation</a><br>
-  <sup id="src-ses7">7</sup> <a href="https://docs.aws.amazon.com/singlesignon/latest/userguide/" class="text-brand-500 underline">AWS IAM Identity Center (SSO) documentation</a><br>
-  <sup id="src-ses8">8</sup> <a href="https://aws.amazon.com/premiumsupport/plans/" class="text-brand-500 underline">AWS Support Plans</a><br>
-  <sup id="src-ses9">9</sup> <a href="https://aws.amazon.com/compliance/hipaa-compliance/" class="text-brand-500 underline">AWS HIPAA Compliance and BAA information</a><br>
-  <sup id="src-ses10">10</sup> <a href="https://aws.amazon.com/ses/pricing/" class="text-brand-500 underline">AWS SES Pricing page</a><br>
-  <br>
-  Last verified: 2026-07-29. Volume assumption: 100,000 emails/month, monthly billing. EUR for ApexMail; USD for SES. Prices exclude VAT. ApexMail is priced as managed email infrastructure; Amazon SES is priced as raw email sending capacity. Reviewed by: ApexMail marketing engineering.
-</p>
+<!-- Comparison rows and footnote sources are rendered from the
+     [extra].comparison_sections, [extra].sources, and
+     [extra].sources_disclaimer fields by partials/compare/table.html
+     (which calls macros::sources_block). This body is intentionally empty. -->

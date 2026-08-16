@@ -60,8 +60,8 @@ async fn dashboard_stats(
             COUNT(*) FILTER (WHERE status = 'delivered')::bigint AS delivered,
             COUNT(*) FILTER (WHERE status = 'bounced')::bigint AS bounced,
             COUNT(*) FILTER (WHERE status = 'complained')::bigint AS complained,
-            COUNT(*) FILTER (WHERE opened_at IS NOT NULL)::bigint AS opened,
-            COUNT(*) FILTER (WHERE clicked_at IS NOT NULL)::bigint AS clicked
+            COUNT(*) FILTER (WHERE first_opened_at IS NOT NULL)::bigint AS opened,
+            COUNT(*) FILTER (WHERE first_clicked_at IS NOT NULL)::bigint AS clicked
            FROM messages
            WHERE tenant_id = $1
              AND created_at >= NOW() - INTERVAL '30 days'"#,

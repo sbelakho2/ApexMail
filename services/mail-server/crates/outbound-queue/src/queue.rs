@@ -6,13 +6,12 @@
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use futures::stream::StreamExt;
-use governor::{DefaultKeyedRateLimiter, Quota};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::num::NonZeroU32;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
@@ -163,6 +162,88 @@ impl QueueConfig {
     }
 }
 
+/// Pure (non-consuming) sliding-second rate window.
+///
+/// The governor crate (0.6) only offers CONSUMING checks (`check_key`),
+/// which is why rate limiting used to live at enqueue time: every enqueued
+/// email drained a token, so a 1000-mail bulk at a 10/s domain quota
+/// exhausted the bucket after ~10 entries and permanently failed the rest
+/// of the batch.
+///
+/// Admission checks at ENQUEUE time are now DRY-RUNS: [`RateWindow::check`]
+/// computes the remaining quota in the current 1s window from the SENDS
+/// recorded via [`RateWindow::record`] (called at delivery time in
+/// [`EmailQueue::process_email`]) without committing anything. Bulk
+/// enqueues therefore never drain quota, while the per-second pace is
+/// still enforced against actual outbound sends.
+#[derive(Debug, Default)]
+struct RateWindow {
+    /// Maximum events per sliding 1-second window. 0 = unlimited.
+    limit: u64,
+    /// Per-key send timestamps inside the current window.
+    events: Mutex<HashMap<String, VecDeque<Instant>>>,
+}
+
+/// Width of the sliding admission window.
+const RATE_WINDOW: Duration = Duration::from_secs(1);
+/// Bound the key map so a pathological number of distinct keys cannot grow
+/// memory without limit (stale keys are pruned past this size).
+const RATE_WINDOW_MAX_KEYS: usize = 10_000;
+
+impl RateWindow {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            events: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_unlimited(&self) -> bool {
+        self.limit == 0
+    }
+
+    fn conforming_count(queue: Option<&VecDeque<Instant>>, now: Instant) -> u64 {
+        queue
+            .map(|q| {
+                q.iter()
+                    .filter(|t| now.duration_since(**t) < RATE_WINDOW)
+                    .count() as u64
+            })
+            .unwrap_or(0)
+    }
+
+    /// Pure quota check: would ONE more event still conform in the current
+    /// window? Never records anything — callers may probe freely.
+    fn check(&self, key: &str) -> bool {
+        if self.is_unlimited() {
+            return true;
+        }
+        let now = Instant::now();
+        let events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        Self::conforming_count(events.get(key), now) < self.limit
+    }
+
+    /// Record an actual send against the window (delivery-time consumption).
+    fn record(&self, key: &str) {
+        if self.is_unlimited() {
+            return;
+        }
+        let now = Instant::now();
+        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        if events.len() >= RATE_WINDOW_MAX_KEYS && !events.contains_key(key) {
+            events.retain(|_, q| Self::conforming_count(Some(q), now) > 0);
+        }
+        let queue = events.entry(key.to_string()).or_default();
+        queue.push_back(now);
+        while queue
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= RATE_WINDOW)
+        {
+            queue.pop_front();
+        }
+    }
+}
+
 /// Email queue manager
 pub struct EmailQueue {
     pool: PgPool,
@@ -170,12 +251,12 @@ pub struct EmailQueue {
     /// SMTP sender no longer behind Mutex since send is &self (#114/#115)
     smtp_sender: SmtpSender,
     dkim_signer: Option<DkimSigner>,
-    /// Global rate limiter (messages per second across all domains/tenants).
-    global_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
-    /// Per-domain rate limiter (messages per second per recipient domain).
-    domain_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
-    /// Per-tenant rate limiter (messages per second per tenant).
-    tenant_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
+    /// Global send-rate window (messages per second across all domains/tenants).
+    global_window: RateWindow,
+    /// Per-domain send-rate window (messages per second per recipient domain).
+    domain_window: RateWindow,
+    /// Per-tenant send-rate window (messages per second per tenant).
+    tenant_window: RateWindow,
     /// Per-provider reputation-driven throttle.  Optional so tests can omit.
     provider_throttle: Option<Arc<ProviderThrottle>>,
 }
@@ -197,44 +278,20 @@ pub enum RateLimitDecision {
 impl EmailQueue {
     /// Create a new email queue
     pub fn new(pool: PgPool, config: QueueConfig, smtp_sender: SmtpSender) -> Self {
-        let global_limiter = if config.global_rate_per_second > 0 {
-            let quota = Quota::per_second(
-                NonZeroU32::new(config.global_rate_per_second as u32)
-                    .expect("global_rate_per_second > 0 confirmed"),
-            );
-            Some(Arc::new(DefaultKeyedRateLimiter::keyed(quota)))
-        } else {
-            None
-        };
-
-        let domain_limiter = if config.domain_rate_per_second > 0 {
-            let quota = Quota::per_second(
-                NonZeroU32::new(config.domain_rate_per_second as u32)
-                    .expect("domain_rate_per_second > 0 confirmed"),
-            );
-            Some(Arc::new(DefaultKeyedRateLimiter::keyed(quota)))
-        } else {
-            None
-        };
-
-        let tenant_limiter = if config.tenant_rate_per_second > 0 {
-            let quota = Quota::per_second(
-                NonZeroU32::new(config.tenant_rate_per_second as u32)
-                    .expect("tenant_rate_per_second > 0 confirmed"),
-            );
-            Some(Arc::new(DefaultKeyedRateLimiter::keyed(quota)))
-        } else {
-            None
-        };
+        // Rate windows are pure admission probes against recorded SENDS —
+        // nothing is consumed at enqueue time (bulk-safe). 0 = unlimited.
+        let global_window = RateWindow::new(config.global_rate_per_second);
+        let domain_window = RateWindow::new(config.domain_rate_per_second);
+        let tenant_window = RateWindow::new(config.tenant_rate_per_second);
 
         Self {
             pool,
             config,
             smtp_sender,
             dkim_signer: None,
-            global_limiter,
-            domain_limiter,
-            tenant_limiter,
+            global_window,
+            domain_window,
+            tenant_window,
             provider_throttle: None,
         }
     }
@@ -270,6 +327,29 @@ impl EmailQueue {
         addr.rsplit('@').next().unwrap_or("unknown").to_lowercase()
     }
 
+    /// Classify a send error as temporary (retryable with backoff) or
+    /// permanent. Case-insensitive: real SMTP/IO error strings vary widely
+    /// ("Timed out", "Connection refused", "451 4.3.1 Please try again").
+    fn is_temporary_error(error_str: &str) -> bool {
+        let lower = error_str.to_lowercase();
+        if lower.contains("timed out")
+            || lower.contains("timeout")
+            || lower.contains("connection refused")
+            || lower.contains("temporarily")
+            || lower.contains("421")
+            || lower.contains("450")
+            || lower.contains("451")
+        {
+            return true;
+        }
+        // Generic SMTP 4xx reply codes (e.g. "452 4.3.1 try later later")
+        // as standalone 3-digit tokens anywhere in the message.
+        lower
+            .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .filter(|token| token.len() == 3)
+            .any(|token| token.starts_with('4'))
+    }
+
     /// Deterministic advisory-lock key for a tenant (RS-H-05).
     /// Used to serialize concurrent enqueue operations for the same tenant
     /// within a PostgreSQL transaction, eliminating the TOCTOU window between
@@ -284,6 +364,10 @@ impl EmailQueue {
     /// Check whether sending to the given recipient domains and tenant
     /// should be rate-limited. Returns [`RateLimitDecision::Allowed`] if the
     /// request may proceed, or the specific exceeded variant otherwise.
+    ///
+    /// This is a DRY-RUN: it never consumes quota (the governor token
+    /// buckets previously drained here, breaking bulk enqueues). Quota is
+    /// only consumed by actual sends recorded in [`EmailQueue::process_email`].
     fn check_rate_limits(
         &self,
         to_addresses: &[String],
@@ -298,30 +382,35 @@ impl EmailQueue {
         domains.dedup();
 
         // Check global rate limit (keyed by "__global__")
-        if let Some(ref limiter) = self.global_limiter {
-            if limiter.check_key(&"__global__".to_string()).is_err() {
-                return RateLimitDecision::GlobalExceeded;
-            }
+        if !self.global_window.check("__global__") {
+            return RateLimitDecision::GlobalExceeded;
         }
 
         // Check per-domain rate limits
-        if let Some(ref limiter) = self.domain_limiter {
-            for domain in &domains {
-                if limiter.check_key(domain).is_err() {
-                    return RateLimitDecision::DomainExceeded(domain.clone());
-                }
+        for domain in &domains {
+            if !self.domain_window.check(domain) {
+                return RateLimitDecision::DomainExceeded(domain.clone());
             }
         }
 
         // Check per-tenant rate limit
-        if let Some(ref limiter) = self.tenant_limiter {
-            let tenant_key = tenant_id.unwrap_or("__no_tenant__").to_string();
-            if limiter.check_key(&tenant_key).is_err() {
-                return RateLimitDecision::TenantExceeded;
-            }
+        let tenant_key = tenant_id.unwrap_or("__no_tenant__");
+        if !self.tenant_window.check(tenant_key) {
+            return RateLimitDecision::TenantExceeded;
         }
 
         RateLimitDecision::Allowed
+    }
+
+    /// Record a delivery against the rate windows (send-time consumption).
+    /// Called once per message the processor actually attempts to send.
+    fn record_send_rate(&self, to_addresses: &[String], tenant_id: Option<&str>) {
+        self.global_window.record("__global__");
+        for domain in to_addresses {
+            self.domain_window.record(&Self::extract_domain(domain));
+        }
+        self.tenant_window
+            .record(tenant_id.unwrap_or("__no_tenant__"));
     }
 
     /// Initialize queue tables
@@ -640,16 +729,28 @@ impl EmailQueue {
     }
 
     /// Fetch pending emails for processing
+    ///
+    /// Rows are claimed by flipping them to 'processing' and taking a
+    /// visibility-timeout lease (`locked_until = NOW() + 10 minutes`). Rows
+    /// whose lease has expired (e.g. a worker crashed mid-batch) are
+    /// reclaimed automatically, so they can never be stuck in 'processing'
+    /// forever. [`reap_expired_processing`] runs as a background safety net
+    /// for the same rows.
     pub async fn fetch_pending(&self, limit: i64) -> Result<Vec<QueuedEmail>> {
         let rows = timeout(
             Duration::from_secs(30),
             sqlx::query(
                 r#"
                 UPDATE email_queue
-                SET status = 'processing', updated_at = NOW()
+                SET status = 'processing',
+                    updated_at = NOW(),
+                    locked_until = NOW() + interval '10 minutes'
                 WHERE id IN (
                     SELECT id FROM email_queue
-                    WHERE status IN ('pending', 'deferred')
+                    WHERE (
+                        status IN ('pending', 'deferred')
+                        OR (status = 'processing' AND locked_until < NOW())
+                    )
                     AND (next_retry_at IS NULL OR next_retry_at <= NOW())
                     ORDER BY priority DESC, created_at ASC
                     LIMIT $1
@@ -1086,6 +1187,10 @@ impl EmailQueue {
             }
         }
 
+        // Consume send-rate quota at DELIVERY time (not enqueue time) so
+        // bulk enqueues never drain the windows.
+        self.record_send_rate(&email.to_addresses, email.tenant_id.as_deref());
+
         // Extract custom headers from JSON
         let headers: Option<std::collections::HashMap<String, String>> =
             email.headers.as_object().map(|obj| {
@@ -1095,7 +1200,8 @@ impl EmailQueue {
             });
 
         // Send via SMTP — no Mutex needed, send is &self (#114/#115)
-        self.smtp_sender
+        let result = self
+            .smtp_sender
             .send(
                 &email.from_address,
                 &email.to_addresses,
@@ -1105,6 +1211,27 @@ impl EmailQueue {
                 headers,
             )
             .await?;
+
+        // `send()` returns Ok even when every recipient was rejected (RCPT TO
+        // refusals, null-MX domains, ...). Treat that as a failure so the row
+        // is NOT marked sent — it goes through mark_failed with the rejected
+        // recipients in the error message.
+        if !(result.success && !result.accepted.is_empty()) {
+            let rejected = if result.rejected.is_empty() {
+                email.to_addresses.join(", ")
+            } else {
+                result.rejected.join(", ")
+            };
+            return Err(anyhow::anyhow!(
+                "all recipients rejected: {} (response: {})",
+                rejected,
+                if result.response.is_empty() {
+                    "none"
+                } else {
+                    &result.response
+                }
+            ));
+        }
 
         Ok(())
     }
@@ -1275,21 +1402,41 @@ impl EmailQueue {
         for (email_id, result) in results {
             match result {
                 Ok(()) => {
-                    self.mark_sent(&email_id).await?;
+                    // A failure marking ONE email as sent must not abort the
+                    // whole results loop (which would strand every remaining
+                    // row of the batch in 'processing' until lease expiry).
+                    if let Err(e) = self.mark_sent(&email_id).await {
+                        error!(
+                            email_id = %email_id,
+                            error = %e,
+                            "Failed to mark email as sent (lease/reaper will recover the row)"
+                        );
+                    }
                 }
                 Err(e) => {
                     let error_str = e.to_string();
                     // Provider-throttle defers do not count against max_attempts.
                     if error_str.starts_with("provider_throttle:") {
-                        self.mark_throttled(&email_id, &error_str).await?;
+                        if let Err(mark_err) = self.mark_throttled(&email_id, &error_str).await {
+                            error!(
+                                email_id = %email_id,
+                                error = %mark_err,
+                                "Failed to mark email as throttled"
+                            );
+                        }
                         continue;
                     }
-                    let is_temporary = error_str.contains("timeout")
-                        || error_str.contains("connection refused")
-                        || error_str.contains("temporarily");
+                    let is_temporary = Self::is_temporary_error(&error_str);
 
-                    self.mark_failed(&email_id, &error_str, is_temporary)
-                        .await?;
+                    if let Err(mark_err) =
+                        self.mark_failed(&email_id, &error_str, is_temporary).await
+                    {
+                        error!(
+                            email_id = %email_id,
+                            error = %mark_err,
+                            "Failed to mark email as failed"
+                        );
+                    }
                 }
             }
         }
@@ -1420,9 +1567,60 @@ fn detect_bounce_type(from_address: &str, subject: &str) -> String {
     }
 }
 
+/// Append one VALUES row for a pending email insert.
+///
+/// The `email_queue` insert lists 14 columns:
+/// `id, from_address, to_addresses, subject, text_body, html_body, headers,
+/// status, max_attempts, campaign_id, sequence_id, contact_id, priority,
+/// tenant_id`.
+/// `status` is the literal `'pending'`, so each row must emit exactly 13
+/// placeholders (`base ..= base+12`) — 13 placeholders + 1 literal = 14
+/// expressions, matching the 14 columns and the 13 bound parameters per row.
+/// Reap rows stuck in 'processing' whose visibility lease has expired.
+///
+/// `fetch_pending` already reclaims expired leases inline, but a row can be
+/// orphaned in 'processing' if a worker died between claiming and sending.
+/// This reaper flips such rows back to 'pending' so they are retried. It is
+/// intended to be called on a periodic interval (60s) from the service main
+/// loop. Returns the number of reaped rows.
+pub async fn reap_expired_processing(pool: &PgPool) -> u64 {
+    let result = timeout(
+        Duration::from_secs(30),
+        sqlx::query(
+            r#"
+            UPDATE email_queue
+            SET status = 'pending', locked_until = NULL
+            WHERE status = 'processing' AND locked_until < NOW()
+        "#,
+        )
+        .execute(pool),
+    )
+    .await;
+    match result {
+        Ok(Ok(res)) => {
+            let count = res.rows_affected();
+            if count > 0 {
+                warn!(
+                    count,
+                    "Reaped expired 'processing' email_queue rows back to 'pending'"
+                );
+            }
+            count
+        }
+        Ok(Err(e)) => {
+            error!(error = %e, "Failed to reap expired 'processing' rows");
+            0
+        }
+        Err(_) => {
+            error!("Reap expired 'processing' rows query timed out after 30s");
+            0
+        }
+    }
+}
+
 fn push_pending_insert_row_sql(sql: &mut String, base: usize) {
     sql.push_str(&format!(
-        "(${}, ${}, ${}, ${}, ${}, ${}, ${}, 'pending', ${}, ${}, ${}, ${}, ${})",
+        "(${}, ${}, ${}, ${}, ${}, ${}, ${}, 'pending', ${}, ${}, ${}, ${}, ${}, ${})",
         base,
         base + 1,
         base + 2,
@@ -1435,6 +1633,7 @@ fn push_pending_insert_row_sql(sql: &mut String, base: usize) {
         base + 9,
         base + 10,
         base + 11,
+        base + 12,
     ));
 }
 
@@ -1708,15 +1907,20 @@ mod tests {
     // Batch INSERT SQL builder validation
     // -----------------------------------------------------------------------
 
+    /// Number of bound parameters per row in the batch INSERT (status is a
+    /// literal `'pending'`, not a bind).
+    const ROW_BIND_PARAMS: usize = 13;
+
     /// Validates that the multi-row INSERT SQL builder produces correct
-    /// parameter numbering for N rows.
+    /// parameter numbering for N rows. Uses the real 14-column list that
+    /// `enqueue_batch` inserts into (including `tenant_id`).
     fn validate_batch_sql(count: usize) -> String {
-        let cols = 12;
+        let cols = ROW_BIND_PARAMS;
         let mut sql = String::from(
             "INSERT INTO email_queue (
                 id, from_address, to_addresses, subject, text_body, html_body,
                 headers, status, max_attempts, campaign_id, sequence_id,
-                contact_id, priority
+                contact_id, priority, tenant_id
             ) VALUES ",
         );
 
@@ -1734,43 +1938,46 @@ mod tests {
     #[test]
     fn batch_sql_single_row() {
         let sql = validate_batch_sql(1);
-        assert!(sql.contains("($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12)"));
+        // 14 columns = 13 placeholders + 'pending' literal.
+        assert!(
+            sql.contains("($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13)")
+        );
         assert!(sql.contains("RETURNING id"));
         // Should not have a second row
-        assert!(!sql.contains("$13"));
+        assert!(!sql.contains("$14"));
     }
 
     #[test]
     fn batch_sql_two_rows() {
         let sql = validate_batch_sql(2);
         assert!(sql.contains("$1,"));
-        assert!(sql.contains("$12)"));
-        assert!(sql.contains("$13,"));
-        assert!(sql.contains("$24)"));
-        assert!(!sql.contains("$25"));
+        assert!(sql.contains("$13)"));
+        assert!(sql.contains("$14,"));
+        assert!(sql.contains("$26)"));
+        assert!(!sql.contains("$27"));
     }
 
     #[test]
     fn batch_sql_ten_rows() {
         let sql = validate_batch_sql(10);
-        // Last row starts at $109 (9 * 12 + 1), ends at $120
-        assert!(sql.contains("$109,"));
-        assert!(sql.contains("$120)"));
-        assert!(!sql.contains("$121"));
+        // Last row starts at $118 (9 * 13 + 1), ends at $130
+        assert!(sql.contains("$118,"));
+        assert!(sql.contains("$130)"));
+        assert!(!sql.contains("$131"));
     }
 
     #[test]
     fn batch_sql_hundred_rows() {
         let sql = validate_batch_sql(100);
-        // Last row:base = 99 * 12 + 1 = 1189, ends at $1200
-        assert!(sql.contains("$1189,"));
-        assert!(sql.contains("$1200)"));
+        // Last row: base = 99 * 13 + 1 = 1288, ends at $1300
+        assert!(sql.contains("$1288,"));
+        assert!(sql.contains("$1300)"));
     }
 
     #[test]
     fn batch_sql_no_duplicate_params() {
         let sql = validate_batch_sql(5);
-        let cols = 12;
+        let cols = ROW_BIND_PARAMS;
         let total_params = 5 * cols;
         for p in 1..=total_params {
             let needle = format!("${}", p);
@@ -1779,5 +1986,92 @@ mod tests {
             // $10, $11, etc. so we check with trailing comma/paren)
             assert!(count >= 1, "Parameter {} should appear at least once", p);
         }
+    }
+
+    #[test]
+    fn batch_sql_expressions_match_column_count() {
+        // The insert column list has 14 columns; each VALUES row must have
+        // 14 expressions (13 placeholders + the 'pending' literal).
+        let sql = validate_batch_sql(3);
+        for row in sql.split("VALUES ").nth(1).unwrap().split("), (") {
+            let exprs = row
+                .trim_start_matches('(')
+                .trim_end_matches(") RETURNING id")
+                .trim_end_matches(')');
+            assert_eq!(
+                exprs.split(',').count(),
+                14,
+                "row '{exprs}' must have 14 expressions"
+            );
+            assert_eq!(exprs.matches("'pending'").count(), 1);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Temporary-error classification
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn temporary_error_matches_transient_patterns_case_insensitively() {
+        assert!(EmailQueue::is_temporary_error(
+            "Timed out acquiring pooled connection for mx.example.com"
+        ));
+        assert!(EmailQueue::is_temporary_error("SMTP response timeout"));
+        assert!(EmailQueue::is_temporary_error(
+            "Connection refused (os error 111)"
+        ));
+        assert!(EmailQueue::is_temporary_error(
+            "Resources temporarily unavailable"
+        ));
+        assert!(EmailQueue::is_temporary_error(
+            "421 4.7.0 Try again later"
+        ));
+        assert!(EmailQueue::is_temporary_error("MAIL FROM failed: 450 mailbox busy"));
+        assert!(EmailQueue::is_temporary_error("DATA failed: 451 4.3.0 queue full"));
+        // Generic 4xx reply code as a standalone token.
+        assert!(EmailQueue::is_temporary_error("Message rejected: 452 out of memory"));
+    }
+
+    #[test]
+    fn temporary_error_rejects_permanent_patterns() {
+        assert!(!EmailQueue::is_temporary_error(
+            "all recipients rejected: a@b.com (response: 550 no such user)"
+        ));
+        assert!(!EmailQueue::is_temporary_error(
+            "MAIL FROM failed: 550 5.7.1 spf reject"
+        ));
+        assert!(!EmailQueue::is_temporary_error("Invalid recipient: no-at-sign"));
+        // 5xx codes must not be misclassified even with a stray 4 in a token
+        // longer than 3 digits.
+        assert!(!EmailQueue::is_temporary_error("550 5.1.1 user unknown (14 tries)"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Pure (non-consuming) rate windows
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rate_window_check_never_consumes_quota() {
+        let window = RateWindow::new(2);
+        // Any number of dry-run checks must keep passing — bulk enqueue
+        // cannot drain the window (the old governor check_key consumed).
+        for _ in 0..100 {
+            assert!(window.check("example.com"));
+        }
+        // Quota is only consumed by recorded sends.
+        window.record("example.com");
+        window.record("example.com");
+        assert!(!window.check("example.com"), "2 recorded sends exhaust a 2/s quota");
+        assert!(window.check("other.com"), "per-domain windows are independent");
+    }
+
+    #[test]
+    fn rate_window_zero_limit_is_unlimited() {
+        let window = RateWindow::new(0);
+        for _ in 0..1000 {
+            window.record("k");
+        }
+        assert!(window.is_unlimited());
+        assert!(window.check("k"));
     }
 }

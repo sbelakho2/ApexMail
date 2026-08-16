@@ -42,12 +42,20 @@ DO $$
 BEGIN
     IF to_regclass('public.tenants') IS NOT NULL THEN
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'notification_queue_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE notification_queue ADD CONSTRAINT notification_queue_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE notification_queue ADD CONSTRAINT notification_queue_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK notification_queue_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'usage_alert_configs_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE usage_alert_configs ADD CONSTRAINT usage_alert_configs_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE usage_alert_configs ADD CONSTRAINT usage_alert_configs_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK usage_alert_configs_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
     ELSE
         RAISE WARNING 'Migration 024: tenants table does not exist — skipping FK constraints.';

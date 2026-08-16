@@ -90,8 +90,8 @@ enum AuditFilterColumn {
     Action,
     TenantId,
     UserId,
-    ResourceType,
-    Status,
+    Resource,
+    Outcome,
 }
 
 impl AuditFilterColumn {
@@ -100,8 +100,11 @@ impl AuditFilterColumn {
             Self::Action => format!("action = ${param_idx}"),
             Self::TenantId => format!("tenant_id = ${param_idx}"),
             Self::UserId => format!("user_id = ${param_idx}"),
-            Self::ResourceType => format!("resource_type = ${param_idx}"),
-            Self::Status => format!("COALESCE(metadata->>'status', 'success') = ${param_idx}"),
+            // audit_logs (migration 038) stores the affected entity in the
+            // `resource` column and the result in `outcome` — the old
+            // resource_type/metadata predicates targeted nonexistent columns.
+            Self::Resource => format!("resource = ${param_idx}"),
+            Self::Outcome => format!("outcome = ${param_idx}"),
         }
     }
 }
@@ -163,7 +166,7 @@ fn build_audit_query_plan(
             &mut conditions,
             &mut bind_values,
             &mut param_idx,
-            AuditFilterColumn::ResourceType,
+            AuditFilterColumn::Resource,
             resource_type,
         );
     }
@@ -172,7 +175,7 @@ fn build_audit_query_plan(
             &mut conditions,
             &mut bind_values,
             &mut param_idx,
-            AuditFilterColumn::Status,
+            AuditFilterColumn::Outcome,
             status,
         );
     }
@@ -221,6 +224,7 @@ async fn list_audit_logs(
     Query(params): Query<AuditListQuery>,
 ) -> Result<Json<Vec<AuditLogEntry>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let query_plan = build_audit_query_plan(&params, Utc::now())?;
 
@@ -338,13 +342,10 @@ mod tests {
         assert_eq!(AuditFilterColumn::TenantId.predicate(4), "tenant_id = $4");
         assert_eq!(AuditFilterColumn::UserId.predicate(5), "user_id = $5");
         assert_eq!(
-            AuditFilterColumn::ResourceType.predicate(6),
-            "resource_type = $6"
+            AuditFilterColumn::Resource.predicate(6),
+            "resource = $6"
         );
-        assert_eq!(
-            AuditFilterColumn::Status.predicate(7),
-            "COALESCE(metadata->>'status', 'success') = $7"
-        );
+        assert_eq!(AuditFilterColumn::Outcome.predicate(7), "outcome = $7");
     }
 
     #[test]
@@ -367,10 +368,8 @@ mod tests {
         assert!(plan.sql.contains("action = $3"));
         assert!(plan.sql.contains("tenant_id = $4"));
         assert!(plan.sql.contains("user_id = $5"));
-        assert!(plan.sql.contains("resource_type = $6"));
-        assert!(plan
-            .sql
-            .contains("COALESCE(metadata->>'status', 'success') = $7"));
+        assert!(plan.sql.contains("resource = $6"));
+        assert!(plan.sql.contains("outcome = $7"));
         assert!(plan.sql.contains("LIMIT $8 OFFSET $9"));
         assert!(!plan.sql.contains("login' OR true --"));
         assert_eq!(

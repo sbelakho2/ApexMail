@@ -15,7 +15,7 @@ use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sqlx::PgPool;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
+use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
@@ -24,7 +24,11 @@ use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
 use super::bounce::{append_data_line, connection_allowed, ConnGuard};
+use super::util::{read_line_capped, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE};
 use crate::config::FeedbackConfig;
+
+/// Per-line timeout while receiving ARF complaint DATA.
+const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
 
 // #148:Shared DNS resolver – avoids creating a new one per rDNS verification call
 static FBL_RESOLVER: LazyLock<TokioAsyncResolver> =
@@ -185,13 +189,16 @@ impl FeedbackLoopServer {
             line.clear();
             match tokio::time::timeout(
                 std::time::Duration::from_secs(120),
-                stream.read_line(&mut line),
+                read_line_capped(&mut stream, MAX_COMMAND_LINE),
             )
             .await
             {
-                Ok(Ok(0)) | Err(_) => break,
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) => break,
+                Ok(Ok(LineRead::Eof)) | Err(_) | Ok(Err(_)) => break,
+                Ok(Ok(LineRead::TooLong)) => {
+                    let _ = write_line(&mut stream, "500 5.5.2 Line too long\r\n").await;
+                    continue;
+                }
+                Ok(Ok(LineRead::Line(l))) => line = l,
             }
 
             let cmd = line.trim().to_uppercase();
@@ -237,24 +244,57 @@ impl FeedbackLoopServer {
                 let _ = write_line(&mut stream, "354 Go ahead\r\n").await;
                 let mut message = BytesMut::new();
                 let mut too_large = false;
+                // A report is only complete when the client sent the
+                // <CRLF>.<CRLF> terminator; EOF/read-error mid-DATA yields a
+                // truncated payload that must never be processed.
+                let mut terminated = false;
+                let mut timed_out = false;
                 loop {
                     line.clear();
-                    match stream.read_line(&mut line).await {
-                        Ok(0) => break,
-                        Ok(_) => {
+                    match tokio::time::timeout(
+                        DATA_LINE_TIMEOUT,
+                        read_line_capped(&mut stream, MAX_DATA_LINE),
+                    )
+                    .await
+                    {
+                        Err(_) => {
+                            timed_out = true;
+                            break;
+                        }
+                        Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
+                        Ok(Ok(LineRead::TooLong)) => {
+                            // A single line over the per-line cap cannot be
+                            // part of a payload we are willing to store.
+                            too_large = true;
+                        }
+                        Ok(Ok(LineRead::Line(l))) => {
+                            line = l;
                             if line.trim() == "." {
+                                terminated = true;
                                 break;
                             }
                             // M57: enforce max_arf_size *while* reading so the
                             // payload is never fully buffered before rejection.
-                            if !append_data_line(&mut message, &line, self.config.max_arf_size) {
+                            if !too_large
+                                && !append_data_line(&mut message, &line, self.config.max_arf_size)
+                            {
                                 too_large = true;
                                 loop {
                                     line.clear();
-                                    match stream.read_line(&mut line).await {
-                                        Ok(0) | Err(_) => break,
-                                        Ok(_) => {
-                                            if line.trim() == "." {
+                                    match tokio::time::timeout(
+                                        DATA_LINE_TIMEOUT,
+                                        read_line_capped(&mut stream, MAX_DATA_LINE),
+                                    )
+                                    .await
+                                    {
+                                        Err(_) => {
+                                            timed_out = true;
+                                            break;
+                                        }
+                                        Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
+                                        Ok(Ok(LineRead::TooLong)) => {}
+                                        Ok(Ok(LineRead::Line(dl))) => {
+                                            if dl.trim() == "." {
                                                 break;
                                             }
                                         }
@@ -263,13 +303,16 @@ impl FeedbackLoopServer {
                                 break;
                             }
                         }
-                        Err(_) => break,
                     }
                 }
 
-                if too_large {
+                if timed_out {
+                    // Slow/stalled client mid-DATA: refuse rather than wait
+                    // forever (and never accept the partial payload).
+                    let _ = write_line(&mut stream, "421 4.4.2 Data timeout exceeded\r\n").await;
+                } else if too_large {
                     let _ = write_line(&mut stream, "552 5.3.4 Message size exceeds fixed limit\r\n").await;
-                } else {
+                } else if terminated {
                     match self.process_complaint(ip, &message).await {
                         Ok(id) => {
                             let _ = write_line(&mut stream, &format!("250 OK id={id}\r\n")).await;
@@ -374,7 +417,9 @@ impl FeedbackLoopServer {
     // ── complaint processing ───────────────────────────────────────────────────
 
     async fn process_complaint(&self, source_ip: IpAddr, raw: &[u8]) -> anyhow::Result<String> {
-        let complaint_id = Uuid::new_v4().to_string();
+        // complaint_events.id is a UUID column (migration 093) — bind the
+        // Uuid itself, not its String form.
+        let complaint_id = Uuid::new_v4();
 
         // O-1.5:Reject oversized ARF payloads (also enforced while reading).
         if raw.len() > self.config.max_arf_size {
@@ -398,6 +443,19 @@ impl FeedbackLoopServer {
         // Match to original message
         let original_id = complaint.original_message_id.clone();
 
+        // complaint_events.arrival_date is TIMESTAMPTZ (migration 093) — the
+        // raw ARF header string (RFC 5322 date) must be parsed before binding.
+        // Unparseable dates are stored as NULL rather than failing the insert.
+        let arrival_date: Option<chrono::DateTime<chrono::Utc>> = complaint
+            .arrival_date
+            .as_deref()
+            .and_then(|s| {
+                chrono::DateTime::parse_from_rfc2822(s)
+                    .or_else(|_| chrono::DateTime::parse_from_rfc3339(s))
+                    .ok()
+            })
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+
         // Record complaint event. The unique index on
         // (source_ip, original_message_id, original_recipient) makes retries
         // and replays idempotent: only a freshly inserted row may run side
@@ -412,14 +470,14 @@ impl FeedbackLoopServer {
             WHERE original_message_id IS NOT NULL AND original_recipient IS NOT NULL
             DO NOTHING"#,
         )
-        .bind(&complaint_id)
+        .bind(complaint_id)
         .bind(&original_id)
         .bind(&complaint.original_recipient)
         .bind(&complaint.feedback_type)
         .bind(source_ip.to_string())
         .bind(&complaint.reporting_mta)
         .bind(&complaint.user_agent)
-        .bind(&complaint.arrival_date)
+        .bind(arrival_date)
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -431,7 +489,7 @@ impl FeedbackLoopServer {
                 dedup_key = ?complaint_dedup_key(&complaint, source_ip),
                 "Duplicate complaint event, skipping side effects"
             );
-            return Ok(complaint_id);
+            return Ok(complaint_id.to_string());
         }
 
         // Only act on complaints referencing a message this system sent:
@@ -505,7 +563,7 @@ impl FeedbackLoopServer {
             "Complaint processed"
         );
 
-        Ok(complaint_id)
+        Ok(complaint_id.to_string())
     }
 
     /// Resolve the tenant and recipient of a message this system sent.
@@ -704,7 +762,9 @@ impl FeedbackLoopServer {
                 "INSERT INTO alert_webhook_deliveries (webhook_id, alert_type, payload, success, status_code, error_message, delivered_at)
                  VALUES ($1, 'complaint_rate', $2, $3, $4, $5, NOW())"
             )
-                .bind(webhook_id)
+                // alert_webhook_deliveries.webhook_id is TEXT (migration 093);
+                // bind the UUID's string form, not the Uuid itself.
+                .bind(webhook_id.to_string())
                 .bind(&payload)
                 .bind(success)
                 .bind(status_code)
@@ -806,10 +866,11 @@ fn extract_value(line: &str) -> String {
 }
 
 fn extract_addr(line: &str) -> String {
-    if let Some(start) = line.find('<') {
-        if let Some(end) = line.find('>') {
-            return line[start + 1..end].to_string();
-        }
+    // Shared panic-safe helper: search for '>' only AFTER the '<'. Searching
+    // the whole line could find a '>' before the '<' and slice out of bounds
+    // (remote panic on malformed commands like "RCPT TO:x> <a@b>").
+    if let Some(addr) = super::util::extract_addr_safe(line) {
+        return addr.to_string();
     }
     line.split_whitespace().last().unwrap_or("").to_string()
 }

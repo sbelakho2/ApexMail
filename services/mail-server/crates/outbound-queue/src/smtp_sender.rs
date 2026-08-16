@@ -403,94 +403,119 @@ impl SmtpSender {
         for (domain, recipients, message) in domain_payloads {
             let message_id = message_id.clone();
             let sender_domain = sender_domain.clone();
+            // Kept outside the delivery future so recipients of a failed
+            // domain can still be reported as not-delivered (see below).
+            let recipients_on_error = recipients.clone();
             deliveries.push(async move {
-                // MI-010: Null MX check (RFC 7505) — if the domain has a single
-                // MX record with preference 0 pointing to ".", it cannot receive
-                // email and we should not attempt delivery.
-                if self.is_null_mx_domain(&domain).await? {
-                    warn!(
-                        domain = %domain,
-                        "Null MX (RFC 7505) — domain cannot receive email; skipping delivery"
-                    );
-                    OUTBOUND_METRICS.record_null_mx(&domain);
-                    return Ok::<(Vec<String>, Vec<String>, String), anyhow::Error>((
-                        Vec::new(),
-                        recipients,
-                        String::new(),
-                    ));
-                }
+                let outcome: Result<(Vec<String>, Vec<String>, String), anyhow::Error> = async {
+                    // MI-010: Null MX check (RFC 7505) — if the domain has a single
+                    // MX record with preference 0 pointing to ".", it cannot receive
+                    // email and we should not attempt delivery.
+                    if self.is_null_mx_domain(&domain).await? {
+                        warn!(
+                            domain = %domain,
+                            "Null MX (RFC 7505) — domain cannot receive email; skipping delivery"
+                        );
+                        OUTBOUND_METRICS.record_null_mx(&domain);
+                        return Ok((Vec::new(), recipients, String::new()));
+                    }
 
-                let mx_servers = self.lookup_mx(&domain).await?;
-                if mx_servers.is_empty() {
-                    warn!(domain = %domain, "No MX records found");
-                    return Ok::<(Vec<String>, Vec<String>, String), anyhow::Error>((
-                        Vec::new(),
-                        recipients,
-                        String::new(),
-                    ));
-                }
+                    let mx_servers = self.lookup_mx(&domain).await?;
+                    if mx_servers.is_empty() {
+                        warn!(domain = %domain, "No MX records found");
+                        return Ok((Vec::new(), recipients, String::new()));
+                    }
 
-                let mut sent = false;
-                let mut accepted = Vec::with_capacity(recipients.len());
-                let mut rejected = Vec::with_capacity(recipients.len());
-                let mut response = String::new();
-                for mx_host in &mx_servers {
-                    match self
-                        .send_to_mx(mx_host, from, &recipients, &message, &message_id)
-                        .await
-                    {
-                        Ok(result) => {
-                            accepted.extend(result.accepted);
-                            rejected.extend(result.rejected);
-                            response = result.response;
-                            sent = true;
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(mx = %mx_host, error = %e, "MX delivery failed, trying next");
+                    let mut sent = false;
+                    let mut accepted = Vec::with_capacity(recipients.len());
+                    let mut rejected = Vec::with_capacity(recipients.len());
+                    let mut response = String::new();
+                    for mx_host in &mx_servers {
+                        match self
+                            .send_to_mx(mx_host, from, &recipients, &message, &message_id)
+                            .await
+                        {
+                            Ok(result) => {
+                                accepted.extend(result.accepted);
+                                rejected.extend(result.rejected);
+                                response = result.response;
+                                sent = true;
+                                break;
+                            }
+                            Err(e) => {
+                                warn!(mx = %mx_host, error = %e, "MX delivery failed, trying next");
+                            }
                         }
                     }
-                }
 
-                if !sent {
-                    rejected.extend(recipients);
-                }
+                    if !sent {
+                        rejected.extend(recipients);
+                    }
 
-                // Parse the remote SMTP response for auth-failure markers.
-                // Receiving MTAs commonly include enhanced-status codes 5.7.x
-                // and human-readable phrases when rejecting on SPF/DKIM/DMARC.
-                if !response.is_empty() && !sender_domain.is_empty() {
-                    let lower = response.to_ascii_lowercase();
-                    if lower.contains("5.7.23") || lower.contains("spf") {
-                        OUTBOUND_METRICS.record_spf_failure(&sender_domain);
+                    // Parse the remote SMTP response for auth-failure markers.
+                    // Receiving MTAs commonly include enhanced-status codes 5.7.x
+                    // and human-readable phrases when rejecting on SPF/DKIM/DMARC.
+                    if !response.is_empty() && !sender_domain.is_empty() {
+                        let lower = response.to_ascii_lowercase();
+                        if lower.contains("5.7.23") || lower.contains("spf") {
+                            OUTBOUND_METRICS.record_spf_failure(&sender_domain);
+                        }
+                        if lower.contains("5.7.20")
+                            || lower.contains("5.7.21")
+                            || lower.contains("dkim")
+                        {
+                            OUTBOUND_METRICS.record_dkim_failure(&sender_domain);
+                        }
+                        if lower.contains("5.7.1 dmarc")
+                            || lower.contains("dmarc")
+                            || lower.contains("5.7.26")
+                        {
+                            OUTBOUND_METRICS.record_dmarc_failure(&sender_domain);
+                        }
                     }
-                    if lower.contains("5.7.20")
-                        || lower.contains("5.7.21")
-                        || lower.contains("dkim")
-                    {
-                        OUTBOUND_METRICS.record_dkim_failure(&sender_domain);
-                    }
-                    if lower.contains("5.7.1 dmarc")
-                        || lower.contains("dmarc")
-                        || lower.contains("5.7.26")
-                    {
-                        OUTBOUND_METRICS.record_dmarc_failure(&sender_domain);
-                    }
-                }
 
-                Ok::<(Vec<String>, Vec<String>, String), anyhow::Error>((
-                    accepted, rejected, response,
-                ))
+                    Ok((accepted, rejected, response))
+                }
+                .await;
+                (recipients_on_error, outcome)
             });
         }
 
-        while let Some(result) = deliveries.next().await {
-            let (accepted, rejected, response) = result?;
-            all_accepted.extend(accepted);
-            all_rejected.extend(rejected);
-            if !response.is_empty() {
-                last_response = Some(response);
+        // Collect per-domain outcomes. A failure delivering to ONE domain
+        // must not abort the collection loop: domains that already delivered
+        // keep their results (previously `?` here duplicated sends — the row
+        // was retried for ALL recipients, re-delivering to every domain that
+        // had already succeeded).
+        let mut total_domains = 0usize;
+        let mut domain_errors: Vec<anyhow::Error> = Vec::new();
+        while let Some((recipients_on_error, result)) = deliveries.next().await {
+            total_domains += 1;
+            match result {
+                Ok((accepted, rejected, response)) => {
+                    all_accepted.extend(accepted);
+                    all_rejected.extend(rejected);
+                    if !response.is_empty() {
+                        last_response = Some(response);
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Per-domain delivery failed");
+                    // These recipients were not delivered — report them as
+                    // rejected so callers can see the full picture.
+                    all_rejected.extend(recipients_on_error);
+                    domain_errors.push(e);
+                }
             }
+        }
+
+        // Every domain failed outright → hard error so the queue retries.
+        // Only SOME domains failed → partial success: return the successful
+        // accepted list and let the caller decide (see process_email).
+        if total_domains > 0 && domain_errors.len() == total_domains {
+            return Err(domain_errors
+                .into_iter()
+                .next()
+                .expect("domain_errors is non-empty when all domains failed"));
         }
 
         let success = !all_accepted.is_empty();

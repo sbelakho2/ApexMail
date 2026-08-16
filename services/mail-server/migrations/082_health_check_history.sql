@@ -19,6 +19,6 @@ CREATE TABLE IF NOT EXISTS health_check_history (
 CREATE INDEX IF NOT EXISTS idx_health_check_history_time
     ON health_check_history (checked_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_health_check_history_recent
-    ON health_check_history (checked_at DESC)
-    WHERE checked_at > NOW() - INTERVAL '7 days';
+-- NOW() is STABLE — invalid in an index predicate; plain (DESC) index
+-- already created above serves the recent-window scan.
+-- (recent partial variant dropped for immutability.)

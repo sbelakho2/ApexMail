@@ -10,8 +10,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
 use crate::error::ApiError;
-use crate::middleware::auth::{require_scopes, AuthUser};
+use crate::middleware::auth::{require_scopes, require_system_tenant, AuthUser};
 use crate::state::AppState;
+
+/// Only these roles may be assigned to a control-plane operator.
+const VALID_OPERATOR_ROLES: &[&str] = &["admin", "owner"];
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -40,6 +43,7 @@ async fn list_operators(
     auth: AuthUser,
 ) -> Result<Json<Vec<OperatorRow>>, ApiError> {
     require_scopes(&auth, &["*"])?;
+    require_system_tenant(&auth)?;
     let rows = sqlx::query_as::<_, OperatorRow>(
         "SELECT id, email, role, \
          COALESCE(mfa_enabled, false) AS mfa_enabled, created_at \
@@ -57,7 +61,14 @@ async fn create_operator(
     Json(body): Json<CreateOperatorRequest>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["*"])?;
+    require_system_tenant(&auth)?;
     let role = body.role.as_deref().unwrap_or("admin");
+    // Reject arbitrary role strings — only admin/owner may be assigned.
+    if !VALID_OPERATOR_ROLES.contains(&role) {
+        return Err(ApiError::Validation(vec![format!(
+            "invalid role: {role} (allowed: admin, owner)"
+        )]));
+    }
     let id = apexmail_lib::id::generate_id("usr", 16);
     let temp_password = apexmail_lib::id::generate_id("tmp", 24);
     let password_hash =
@@ -85,9 +96,12 @@ async fn delete_operator(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["*"])?;
-    let result = sqlx::query("DELETE FROM users WHERE id = $1::uuid AND role IN ('admin', 'owner')")
-        .bind(&id)
-        .execute(&state.db)
+    require_system_tenant(&auth)?;
+    // users.id is VARCHAR(26) (ULID-like), not UUID — bind as text, no ::uuid cast.
+    let result =
+        sqlx::query("DELETE FROM users WHERE id = $1 AND role IN ('admin', 'owner')")
+            .bind(&id)
+            .execute(&state.db)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to delete operator: {e}")))?;
     if result.rows_affected() == 0 {

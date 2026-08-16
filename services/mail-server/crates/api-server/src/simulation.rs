@@ -165,6 +165,7 @@ mod simulation {
             exp: 9999999999,
             iat: 1000000000,
             jti: "sess_jwt_001".into(),
+            typ: Some("session".into()),
         };
 
         let json = serde_json::to_string(&claims).expect("serialize");

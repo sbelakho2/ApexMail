@@ -3,7 +3,7 @@
   "surfaces": [
     {
       "id": "web",
-      "routeCount": 30,
+      "routeCount": 33,
       "routes": [
         { "path": "/", "name": "Home", "category": "public", "authRequired": false },
         { "path": "/login", "name": "Login", "category": "auth", "authRequired": false },
@@ -25,6 +25,9 @@
         { "path": "/reports", "name": "Reports", "category": "dashboard", "authRequired": true },
         { "path": "/reports/deliverability", "name": "Deliverability Report", "category": "dashboard", "authRequired": true },
         { "path": "/analytics", "name": "Analytics", "category": "dashboard", "authRequired": true },
+        { "path": "/inbox-placement", "name": "Inbox Placement", "category": "dashboard", "authRequired": true },
+        { "path": "/inbox-placement/new", "name": "New Placement Test", "category": "dashboard", "authRequired": true },
+        { "path": "/inbox-placement/t_1", "name": "Placement Test Detail", "category": "dashboard", "authRequired": true, "canonicalPattern": "/inbox-placement/[id]" },
         { "path": "/events", "name": "Events", "category": "dashboard", "authRequired": true },
         { "path": "/domains", "name": "Domains", "category": "dashboard", "authRequired": true },
         { "path": "/domains/new", "name": "New Domain", "category": "dashboard", "authRequired": true },
@@ -39,7 +42,7 @@
     },
     {
       "id": "control-plane",
-      "routeCount": 24,
+      "routeCount": 30,
       "routes": [
         { "path": "/login", "name": "Login", "category": "auth", "authRequired": false },
         { "path": "/", "name": "Home", "category": "admin", "authRequired": true },
@@ -64,7 +67,13 @@
         { "path": "/alerts", "name": "Alerts", "category": "admin", "authRequired": true },
         { "path": "/alerts/rules", "name": "Alert Rules", "category": "admin", "authRequired": true },
         { "path": "/settings", "name": "Settings", "category": "admin", "authRequired": true },
-        { "path": "/settings/security", "name": "Security", "category": "admin", "authRequired": true }
+        { "path": "/settings/security", "name": "Security", "category": "admin", "authRequired": true },
+        { "path": "/cp", "name": "Control Plane Dashboard", "category": "admin", "authRequired": true },
+        { "path": "/cp/tenants", "name": "Control Plane Tenants", "category": "admin", "authRequired": true },
+        { "path": "/cp/audit", "name": "Control Plane Audit", "category": "admin", "authRequired": true },
+        { "path": "/cp/sales", "name": "Control Plane Sales", "category": "admin", "authRequired": true },
+        { "path": "/cp/infrastructure", "name": "Control Plane Infrastructure", "category": "admin", "authRequired": true },
+        { "path": "/cp/security", "name": "Control Plane Security", "category": "admin", "authRequired": true }
       ]
     },
     {

@@ -10,9 +10,10 @@
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 lg:py-20">
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-8 lg:gap-12">
       <div class="col-span-2 md:col-span-3 lg:col-span-1">
-        <a href="/" class="flex items-center gap-2 mb-8">
-          <span class="text-xl font-bold tracking-tighter"><span class="text-brand-500">Apex</span><span class="text-surface-950">Mail</span></span>
-        </a>
+        <div class="mb-8">
+          {# Kiwi brand lockup (footer variant) #}
+          {% include "partials/kiwi-logo.html" %}
+        </div>
         <p class="text-surface-500 text-sm mb-6 max-w-xs leading-relaxed">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["tagline"] %}{{ i18n_data[l]["footer"]["tagline"] }}{% else %}Enterprise email infrastructure that keeps you compliant and your emails delivered.{% endif %}
         </p>
@@ -57,7 +58,7 @@
           <li><a href="/case-studies/" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["use_cases"] %}{{ i18n_data[l]["footer"]["use_cases"] }}{% else %}Use Cases{% endif %}</a></li>
           <li><a href="/compare/" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["compare"] %}{{ i18n_data[l]["footer"]["compare"] }}{% else %}Compare{% endif %}</a></li>
           <li><a href="/contact/" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["contact"] %}{{ i18n_data[l]["footer"]["contact"] }}{% else %}Contact{% endif %}</a></li>
-          <li><a href="https://app.apexmail.ee" target="_blank" rel="noopener noreferrer" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["log_in"] %}{{ i18n_data[l]["footer"]["log_in"] }}{% else %}Log In{% endif %}</a></li>
+          <li><a href="{{ config.extra.app_url }}" target="_blank" rel="noopener noreferrer" class="text-[13px] font-bold text-surface-600 hover:text-brand-500 transition-colors tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["log_in"] %}{{ i18n_data[l]["footer"]["log_in"] }}{% else %}Log In{% endif %}</a></li>
         </ul>
       </div>
       <div>
@@ -75,7 +76,7 @@
       <div class="flex flex-col md:flex-row justify-between items-center gap-8">
         <div class="text-xs text-surface-500 font-bold tracking-widest">
           <p>&copy; {{ now() | date(format="%Y") }} {{ config.extra.company.copyright_entity }}. {% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["copyright"] %}{{ i18n_data[l]["footer"]["copyright"] }}{% else %}All rights reserved.{% endif %}</p>
-          <p class="mt-1">Apex Style v1.0</p>
+          <p class="mt-1">{{ config.extra.site_name }} &middot; build {{ config.extra.build_id }}</p>
         </div>
         <div class="text-xs text-surface-400 font-bold tracking-widest md:text-right">
           <p>{{ config.extra.company.address }}</p>
@@ -91,7 +92,7 @@
             <span class="footer-status-dot w-1.5 h-1.5 inline-block bg-surface-400 status-unknown" aria-hidden="true"></span>
             <span class="footer-status-text">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["status_unavailable"] %}{{ i18n_data[l]["footer"]["status_unavailable"] }}{% else %}Status unavailable{% endif %}</span>
             <span class="text-surface-400">&middot;</span>
-            <a href="https://status.apexmail.ee" class="hover:text-brand-500 transition-colors">Live status at status.apexmail.ee</a>
+            <a href="{{ config.extra.status_url }}" class="hover:text-brand-500 transition-colors">Live status at {{ config.extra.status_url | replace(from="https://", to="") }}</a>
           </span>
         </div>
       </div>
@@ -100,7 +101,7 @@
         var dot = document.querySelector('.footer-status-dot');
         var text = document.querySelector('.footer-status-text');
         var container = document.getElementById('footer-status-container');
-        var STATUS_API = 'https://apexmail.ee/api/status-data';
+        var STATUS_API = '{{ config.extra.status_api_url }}';
 
         function setStatus(cls, label, linkHint) {
           if (dot) { dot.className = 'footer-status-dot w-1.5 h-1.5 inline-block ' + cls; }
@@ -117,11 +118,11 @@
             .then(function(data) {
               var status = (data && data.status) ? data.status : null;
               if (status === 'operational') {
-                setStatus('status-ok bg-green-500', 'Operational', 'All systems operational');
+                setStatus('status-ok bg-success-500', 'Operational', 'All systems operational');
               } else if (status === 'degraded') {
-                setStatus('status-degraded bg-amber-500', 'Degraded', 'Some systems degraded');
+                setStatus('status-degraded bg-warning-500', 'Degraded', 'Some systems degraded');
               } else if (status === 'outage') {
-                setStatus('status-down bg-red-500', 'Service disruption', 'Active service disruption');
+                setStatus('status-down bg-danger-500', 'Service disruption', 'Active service disruption');
               } else {
                 setStatus('status-unknown bg-surface-400', 'Status unavailable', 'Live status data could not be interpreted');
               }

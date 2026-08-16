@@ -23,11 +23,16 @@ fn build_inbox_audit_metadata(body: &UpdateInboxMessage) -> serde_json::Value {
     })
 }
 
-async fn log_inbox_audit(db: &sqlx::PgPool, message_id: &str, metadata: serde_json::Value) {
+async fn log_inbox_audit(
+    db: &sqlx::PgPool,
+    auth: &AuthUser,
+    message_id: &str,
+    metadata: serde_json::Value,
+) {
     crate::audit_log::insert_audit_log_best_effort(
         db,
-        None,
-        None,
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
         "control_plane.inbox.updated",
         "autopilot_inbox_message",
         Some(message_id),
@@ -39,7 +44,6 @@ async fn log_inbox_audit(db: &sqlx::PgPool, message_id: &str, metadata: serde_js
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InboxQuery {
     pub classification: Option<String>,
     pub archived: Option<bool>,
@@ -258,7 +262,7 @@ async fn update_message(
         return Err(ApiError::NotFound("message not found".into()));
     }
 
-    log_inbox_audit(&state.db, &body.id, build_inbox_audit_metadata(&body)).await;
+    log_inbox_audit(&state.db, &auth, &body.id, build_inbox_audit_metadata(&body)).await;
 
     Ok(Json(serde_json::json!({ "success": true })))
 }

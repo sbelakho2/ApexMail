@@ -169,6 +169,10 @@ services:
       - "127.0.0.1:50051:50051"  # gRPC
     environment:
       - RUST_LOG=info
+      # Container deployments must bind all interfaces so the port mapping and
+      # sibling services (imap-server) can reach the mailstore over the
+      # internal network. Bare-metal/dev runs keep the safe 127.0.0.1 default.
+      - MAILSTORE_BIND_ADDR=0.0.0.0:50051
     entrypoint:
       - /bin/sh
       - -c
@@ -278,7 +282,7 @@ services:
       dockerfile: services/mail-server/Dockerfile
       target: worker
     ports:
-      - "127.0.0.1:3006:3006"
+      - "127.0.0.1:9090:9090"
     environment:
       - RUST_LOG=info
       - HEALTH_PORT=9090
@@ -302,7 +306,8 @@ services:
       - apexmail
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "3006"]
+      # The worker binary serves /health on HEALTH_PORT (9090), not 3006.
+      test: ["CMD", "nc", "-z", "localhost", "9090"]
       interval: 30s
       timeout: 10s
       retries: 3

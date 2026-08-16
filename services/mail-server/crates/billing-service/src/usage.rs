@@ -20,7 +20,8 @@ use crate::types::{MeterEventType, UsageSummary};
 ///
 /// KEYS[1] = dedup key
 /// KEYS[2] = counter key
-/// ARGV[1] = dedup TTL in seconds (86400)
+/// ARGV[1] = dedup TTL in seconds (40 days — matches the counter TTL below
+///           so retries outside a 24h window still dedup)
 /// ARGV[2] = quantity to increment by
 /// ARGV[3] = counter TTL in seconds (40*86400)
 ///
@@ -34,6 +35,11 @@ const RECORD_USAGE_LUA: &str = r#"
     redis.call('EXPIRE', KEYS[2], ARGV[3])
     return 1
 "#;
+
+/// Dedup key TTL in seconds. Matches the 40-day counter TTL so a duplicate
+/// event is still recognized across the whole retention window of the
+/// real-time counters it would have incremented.
+const DEDUP_TTL_SECS: i64 = 40 * 86_400;
 
 pub(crate) fn build_metering_audit_metadata(
     event_type: &str,
@@ -67,6 +73,10 @@ pub async fn record_usage(
     event_id: Option<Uuid>,
     metadata: Option<serde_json::Value>,
 ) -> Result<bool, UsageError> {
+    if quantity <= 0 {
+        return Err(UsageError::InvalidQuantity(quantity));
+    }
+
     let id = event_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
@@ -129,7 +139,7 @@ pub async fn record_usage(
         .arg(2) // number of keys
         .arg(&dedup_key)
         .arg(&period_key)
-        .arg(86_400i64) // dedup TTL (24h)
+        .arg(DEDUP_TTL_SECS) // dedup TTL (40 days)
         .arg(quantity)
         .arg(40i64 * 86_400i64) // counter TTL (40 days)
         .query_async(&mut conn)
@@ -510,6 +520,10 @@ pub async fn record_with_quota_check(
     event_id: Option<Uuid>,
     metadata: Option<serde_json::Value>,
 ) -> Result<QuotaRecordResult, UsageError> {
+    if quantity <= 0 {
+        return Err(UsageError::InvalidQuantity(quantity));
+    }
+
     let id = event_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
@@ -521,7 +535,7 @@ pub async fn record_with_quota_check(
         .arg(&dedup_key)
         .arg("1")
         .arg("EX")
-        .arg(86_400i64)
+        .arg(DEDUP_TTL_SECS)
         .arg("NX")
         .query_async(&mut conn)
         .await
@@ -818,6 +832,8 @@ pub enum UsageError {
     Redis(#[from] deadpool_redis::PoolError),
     #[error("redis command error: {0}")]
     RedisCmd(#[from] redis::RedisError),
+    #[error("quantity must be positive, got {0}")]
+    InvalidQuantity(i64),
 }
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,6 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
@@ -104,14 +103,16 @@ async fn create_template(
         ]));
     }
 
-    let id = Uuid::new_v4();
+    // templates.id is VARCHAR(26) — generate a 26-char text id (not a UUID,
+    // whose 36-char hyphenated form overflows the column).
+    let id = apexmail_lib::id::generate_id("", 26);
     let now = Utc::now();
 
     sqlx::query(
         "INSERT INTO templates (id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,1,'active',$7,$7)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .bind(&body.name)
     .bind(&body.subject)
@@ -124,7 +125,7 @@ async fn create_template(
     Ok((
         StatusCode::CREATED,
         Json(TemplateResponse {
-            id: id.to_string(),
+            id,
             name: body.name,
             subject: body.subject,
             html_body: body.html_body,
@@ -218,7 +219,7 @@ async fn delete_template(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
-    let result = sqlx::query("DELETE FROM templates WHERE id = $1::uuid AND tenant_id = $2")
+    let result = sqlx::query("DELETE FROM templates WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(&auth.tenant_id)
         .execute(&state.db)
@@ -351,7 +352,7 @@ async fn fetch_template(
 ) -> Result<TemplateRow, ApiError> {
     sqlx::query_as::<_, TemplateRow>(
         "SELECT id, name, subject, html_body, text_body, version, status, created_at, updated_at
-         FROM templates WHERE id = $1::uuid AND tenant_id = $2",
+         FROM templates WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
     .bind(tenant_id)
@@ -372,16 +373,16 @@ async fn duplicate_template(
     // Fetch original
     let original = fetch_template(&state, &auth.tenant_id, id.clone()).await?;
 
-    let new_id = Uuid::new_v4();
+    let new_id = apexmail_lib::id::generate_id("", 26);
     let now = chrono::Utc::now();
     let new_name = format!("{} (copy)", original.name);
 
     sqlx::query(
         "INSERT INTO templates (id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at)
          SELECT $1, tenant_id, $3, subject, html_body, text_body, 1, 'draft', $4, $4
-         FROM templates WHERE id = $2::uuid AND tenant_id = $5",
+         FROM templates WHERE id = $2 AND tenant_id = $5",
     )
-    .bind(new_id.to_string())
+    .bind(&new_id)
     .bind(id)
     .bind(new_name)
     .bind(now)
@@ -389,7 +390,7 @@ async fn duplicate_template(
     .execute(&state.db)
     .await?;
 
-    let row = fetch_template(&state, &auth.tenant_id, new_id.to_string()).await?;
+    let row = fetch_template(&state, &auth.tenant_id, new_id).await?;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
 
@@ -416,8 +417,8 @@ async fn rollback_template(
             version = tv.version,
             updated_at = NOW()
          FROM template_versions tv
-         WHERE templates.id = $1::uuid AND templates.tenant_id = $2
-           AND tv.template_id = $1::uuid AND tv.version = $3",
+         WHERE templates.id = $1 AND templates.tenant_id = $2
+           AND tv.template_id = $1 AND tv.version = $3",
     )
     .bind(&id)
     .bind(auth.tenant_id.to_string())

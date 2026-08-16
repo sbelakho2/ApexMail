@@ -30,6 +30,12 @@ const SUPPRESSION_CACHE_MAX_SIZE: u64 = 10_000;
 /// Suppression cache TTL.
 const SUPPRESSION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
+/// Sentinel reason used by [`EmailProcessor::batch_suppression_check`] when
+/// the suppression DB query itself failed (as opposed to a genuine
+/// suppression). Recipients carrying this marker are REQUEUED, not
+/// suppressed — a DB blip must not permanently suppress the batch.
+const SUPPRESSION_CHECK_FAILED: &str = "suppression_check_failed";
+
 /// Error rate window size.
 const ERROR_WINDOW_SIZE: usize = 20;
 
@@ -73,12 +79,15 @@ struct QueuedEmailRow {
 
 /// FIX-8: expand one queued row into one [`EmailJob`] per recipient. When
 /// `to_addresses` is present and non-empty, a send unit is created for EVERY
-/// address (previously only the first recipient was used). When it is empty
-/// or NULL, the legacy single-recipient `to` fallback is preserved.
+/// address (previously only the first recipient was used). An EXPLICIT empty
+/// array means "nothing left to send" (all recipients of a multi-recipient
+/// row were already delivered — see `metadata.pending_recipients`) and yields
+/// no jobs; only a NULL column (genuinely legacy row) falls back to the
+/// single-recipient `to` column.
 fn queued_row_to_jobs(row: QueuedEmailRow) -> Vec<EmailJob> {
-    let recipients: Vec<String> = match row.to_addresses.as_deref() {
-        Some(addrs) if !addrs.is_empty() => addrs.to_vec(),
-        _ => vec![row.to.clone()],
+    let recipients: Vec<String> = match row.to_addresses {
+        Some(addrs) => addrs,
+        None => vec![row.to.clone()],
     };
     recipients
         .into_iter()
@@ -294,6 +303,25 @@ impl EmailProcessor {
                         let suppression =
                             suppressions.get(&format!("{}:{}", job.tenant_id, job.to));
                         if let Some(reason) = suppression {
+                            if reason == SUPPRESSION_CHECK_FAILED {
+                                // The suppression CHECK itself failed (DB
+                                // error). Requeue for a later retry instead of
+                                // permanently suppressing the recipient.
+                                warn!(
+                                    job_id = %job.id,
+                                    recipient = %job.to,
+                                    "Suppression check failed — requeueing job instead of suppressing"
+                                );
+                                if let Err(e) = self.requeue_job(&job, SUPPRESSION_CHECK_FAILED).await
+                                {
+                                    error!(
+                                        job_id = %job.id,
+                                        error = %e,
+                                        "Failed to requeue job after suppression-check failure"
+                                    );
+                                }
+                                continue;
+                            }
                             // Skip suppressed recipients
                             if let Err(e) = self.handle_suppressed(&job, reason).await {
                                 error!(
@@ -348,9 +376,13 @@ impl EmailProcessor {
             WHERE id IN (
                 SELECT id
                 FROM email_queue
-                WHERE status = 'pending'
+                WHERE (
+                    status = 'pending'
+                    -- Reclaim rows orphaned in 'processing' by a crashed
+                    -- worker whose visibility lease has expired.
+                    OR (status = 'processing' AND locked_until < NOW())
+                )
                   AND (scheduled_at IS NULL OR scheduled_at <= NOW())
-                  AND (locked_until IS NULL OR locked_until < NOW())
                 ORDER BY priority DESC, created_at ASC
                 LIMIT $2
                 FOR UPDATE SKIP LOCKED
@@ -362,7 +394,13 @@ impl EmailProcessor {
                 COALESCE(domain_id::text, '') as "domainId",
                 COALESCE("from", from_address) as "from",
                 COALESCE("to", to_addresses[1], '') as "to",
-                to_addresses as "toAddresses",
+                CASE
+                    WHEN metadata->'pending_recipients' IS NOT NULL
+                    THEN ARRAY(
+                        SELECT jsonb_array_elements_text(metadata->'pending_recipients')
+                    )
+                    ELSE to_addresses
+                END as "toAddresses",
                 subject, html, text, headers, attachments,
                 campaign_id::text as "campaignId", tags, metadata, scheduled_at as "scheduledAt",
                 attempt, created_at as "createdAt"
@@ -427,11 +465,15 @@ impl EmailProcessor {
                     Ok(rows) => rows,
                     Err(e) => {
                         tracing::error!(tenant_id = %tenant_id, error = %e,
-                            "Failed to check suppressions; treating all as suppressed for safety");
-                        // Fail safe:treat all uncached emails as suppressed
+                            "Failed to check suppressions; flagging for requeue (not suppression)");
+                        // The check FAILED (distinct from "actually
+                        // suppressed"): mark these recipients with the
+                        // sentinel so poll_loop requeues them instead of
+                        // permanently suppressing the batch. Nothing is
+                        // cached — the next poll retries the query.
                         for email in &uncached {
                             let cache_key = format!("{}:{}", tenant_id, email);
-                            result.insert(cache_key, "suppression_check_failed".to_string());
+                            result.insert(cache_key, SUPPRESSION_CHECK_FAILED.to_string());
                         }
                         continue;
                     }
@@ -655,9 +697,15 @@ impl EmailProcessor {
         let domain = sqlx::query_as::<_, Domain>(
             r#"
             SELECT
-                id::text, tenant_id, name AS domain, NULL::text AS dkim_selector,
-                NULL::text AS dkim_private_key, false AS warmup_enabled,
-                0 AS warmup_day, NULL::text AS return_path
+                id::text, tenant_id, name AS domain,
+                dkim_selector,
+                dkim_private_key,
+                -- Per-domain IP warmup lives on dedicated_ips/ip_pool_addresses,
+                -- not on domains (see migrations 071/093); no warmup at the
+                -- domain level yet.
+                false AS warmup_enabled,
+                0 AS warmup_day,
+                NULL::text AS return_path
             FROM domains
             WHERE id = $1::uuid AND tenant_id = $2
             "#,
@@ -793,16 +841,58 @@ impl EmailProcessor {
     }
 
     /// Handle successful send.
+    ///
+    /// A queue row can carry MULTIPLE recipients (FIX-8 expands it into one
+    /// send unit per recipient), so a single recipient's success must not
+    /// flip the whole row to 'sent' while other recipients are still owed a
+    /// delivery. The row tracks the outstanding recipient set in
+    /// `metadata.pending_recipients` (seeded lazily from `to_addresses` /
+    /// the legacy `"to"` column); each success removes its recipient and the
+    /// row only becomes 'sent' when the set is empty. Requeue paths
+    /// (`handle_soft_bounce`) retry only this remaining set, so an
+    /// already-delivered recipient is never re-sent.
     async fn handle_success(&self, job: &EmailJob, result: &SendResult) -> ProcessorResult<()> {
         sqlx::query(
             r#"
             UPDATE email_queue
-            SET status = 'sent', sent_at = NOW(), smtp_message_id = $1
+            SET metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{pending_recipients}',
+                    COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    ) - $3::text
+                ),
+                status = CASE WHEN COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    ) - $3::text = '[]'::jsonb
+                    THEN 'sent' ELSE status END,
+                sent_at = CASE WHEN COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    ) - $3::text = '[]'::jsonb
+                    THEN NOW() ELSE sent_at END,
+                smtp_message_id = $1,
+                updated_at = NOW()
             WHERE id = $2::uuid
             "#,
         )
         .bind(&result.smtp_message_id)
         .bind(&job.id)
+        .bind(&job.to)
         .execute(&self.db)
         .await?;
 
@@ -906,11 +996,40 @@ impl EmailProcessor {
                 (self.config.base.retry_delay.as_secs() as i64).saturating_mul(backoff_multiplier),
             );
 
+        // Requeue only the recipients still owed a delivery (partial-failure
+        // duplicate fix). `metadata.pending_recipients` is seeded here if it
+        // does not exist yet (from the row's full recipient list) — successes
+        // recorded by the OTHER recipients of this row subtract from it, and
+        // the retry fetch expands only this set. If nothing remains, the row
+        // is simply marked sent.
         sqlx::query(
             r#"
             UPDATE email_queue
-            SET status = 'pending', attempt = $1, scheduled_at = $2,
-                error_message = $3, locked_until = NULL
+            SET status = CASE WHEN COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    ) = '[]'::jsonb
+                    THEN 'sent' ELSE 'pending' END,
+                attempt = $1,
+                scheduled_at = $2,
+                error_message = $3,
+                locked_until = NULL,
+                metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{pending_recipients}',
+                    COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    )
+                )
             WHERE id = $4::uuid
             "#,
         )
@@ -1076,12 +1195,16 @@ impl EmailProcessor {
 
     /// Load DKIM keys from database.
     async fn load_dkim_keys(&self) -> ProcessorResult<()> {
+        // Real columns added by migrations 093/094: only domains with signing
+        // actually enabled AND complete key material are eligible. (This used
+        // to be `WHERE false`, which disabled per-domain DKIM signing.)
         let keys: Vec<(String, String, String, String)> = sqlx::query_as(
             r#"
-            SELECT id, name AS domain, NULL::text AS dkim_selector,
-                   NULL::text AS dkim_private_key
+            SELECT id::text, name AS domain, dkim_selector, dkim_private_key
             FROM domains
-            WHERE false
+            WHERE dkim_enabled = true
+              AND dkim_private_key IS NOT NULL
+              AND dkim_selector IS NOT NULL
             "#,
         )
         .fetch_all(&self.db)
@@ -1750,12 +1873,13 @@ mod tests {
     }
 
     #[test]
-    fn test_queued_row_empty_to_addresses_falls_back_to_legacy_to() {
-        // Empty array → fall back to the legacy single-recipient "to".
+    fn test_queued_row_empty_to_addresses_yields_no_jobs() {
+        // An explicit empty array means every recipient of the row was
+        // already delivered (metadata.pending_recipients = []) — expanding to
+        // the legacy `to` would DUPLICATE that recipient.
         let row = queued_row("legacy@example.com", Some(vec![]));
         let jobs = queued_row_to_jobs(row);
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].to, "legacy@example.com");
+        assert!(jobs.is_empty(), "no send units for a fully-delivered row");
     }
 
     #[test]

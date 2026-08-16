@@ -94,6 +94,20 @@ async fn create_campaign(
     };
     let template_id = body.template_id.clone();
 
+    // Verify the referenced template exists and belongs to this tenant before
+    // creating the campaign (prevents cross-tenant template_id references).
+    if let Some(ref tid) = template_id {
+        let exists: Option<bool> =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM templates WHERE id = $1 AND tenant_id = $2)")
+                .bind(tid)
+                .bind(&auth.tenant_id)
+                .fetch_one(&state.db)
+                .await?;
+        if !exists.unwrap_or(false) {
+            return Err(ApiError::NotFound("template not found".into()));
+        }
+    }
+
     sqlx::query(
         "INSERT INTO campaigns (id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5::uuid,$6,$7,0,$8,$8)",
@@ -272,17 +286,26 @@ async fn update_campaign_status_validated(
         )]));
     }
 
+    // Atomically guard the transition against TOCTOU races: the UPDATE only
+    // fires if the status is still one of the allowed values. If 0 rows are
+    // affected, the status changed between the SELECT and the UPDATE.
+    let allowed: Vec<&str> = valid_current_states.to_vec();
     let result = sqlx::query(
-        "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2::uuid AND tenant_id = $3",
+        "UPDATE campaigns SET status = $1, updated_at = NOW()
+         WHERE id = $2::uuid AND tenant_id = $3 AND status = ANY($4)",
     )
     .bind(new_status)
     .bind(&id)
     .bind(tenant_id)
+    .bind(&allowed)
     .execute(&state.db)
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound("campaign not found".into()));
+        return Err(ApiError::Conflict(format!(
+            "campaign '{}' status changed before update; cannot transition to '{}'",
+            id, new_status
+        )));
     }
 
     let row = fetch_campaign(state, tenant_id, id).await?;
@@ -363,10 +386,11 @@ async fn resend_campaign(
     }
 
     // Create a new send job for failed/unsent recipients
+    // job_type is NOT NULL with no default, so it must be supplied explicitly.
     let new_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO campaign_jobs (id, campaign_id, tenant_id, status, created_at)
-         VALUES ($1, $2, $3, 'queued', NOW())",
+        "INSERT INTO campaign_jobs (id, campaign_id, tenant_id, job_type, status, created_at)
+         VALUES ($1, $2, $3, 'resend', 'queued', NOW())",
     )
     .bind(new_id)
     .bind(id)

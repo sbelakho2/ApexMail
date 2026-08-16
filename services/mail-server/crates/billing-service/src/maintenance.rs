@@ -1345,10 +1345,34 @@ struct RetryCandidateRow {
     stripe_customer_id: String,
 }
 
+/// Whether the scheduled auto-pay job may charge tenants' saved Stripe
+/// payment methods for open invoices. Default: disabled — auto-charging is
+/// financially sensitive and must be opted into explicitly via
+/// `AUTO_PAY_OPEN_INVOICES=true` (or `1`).
+fn auto_pay_open_invoices_enabled() -> bool {
+    std::env::var("AUTO_PAY_OPEN_INVOICES")
+        .map(|value| value.trim().eq_ignore_ascii_case("true") || value.trim() == "1")
+        .unwrap_or(false)
+}
+
 async fn process_scheduled_retries(
     state: &AppState,
     client: &Client,
 ) -> Result<RetryResult, String> {
+    // Config gate: charging saved payment methods without an explicit
+    // user-initiated flow must be opt-in. When disabled we log + skip so
+    // dunning retries remain visible in logs without moving money.
+    if !auto_pay_open_invoices_enabled() {
+        info!(
+            "AUTO_PAY_OPEN_INVOICES disabled — skipping scheduled Stripe auto-pay retries \
+             (set AUTO_PAY_OPEN_INVOICES=true to enable)"
+        );
+        return Ok(RetryResult {
+            attempted: 0,
+            succeeded: 0,
+        });
+    }
+
     let rows = sqlx::query_as::<_, RetryCandidateRow>(
         r#"
         SELECT d.tenant_id, s.stripe_subscription_id, s.stripe_customer_id
@@ -1773,7 +1797,7 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
 
         let invoice_amount_cents: i64 = sqlx::query_scalar(
             r#"
-            SELECT COALESCE(SUM(amount_cents), 0)::bigint
+            SELECT COALESCE(SUM(COALESCE(total, amount)), 0)::bigint
             FROM invoices
             WHERE tenant_id = $1
               AND period_start >= $2
@@ -2352,6 +2376,12 @@ async fn create_cost_margin_alert(
     Ok(())
 }
 
+// TODO(cost-throttling): the keys written here — `cost:throttle:<tenant>` and
+// `rate:limit:<tenant>:throttled` — are currently read by NOTHING. The
+// api-server rate limiter does not consult them, so this throttle has no
+// runtime effect beyond Redis state. Intentionally left in place: wire a
+// reader into the rate limiter (or remove this function) when the
+// cost-margin feature is revisited.
 async fn apply_cost_throttling(state: &AppState, tenant_id: &str) {
     match state.redis.get().await {
         Ok(mut conn) => {
@@ -2497,7 +2527,7 @@ struct ExpiredWalletReservationRow {
     released_count: i64,
 }
 
-async fn mark_payment_recovered(state: &AppState, tenant_id: &str) -> Result<(), String> {
+pub(crate) async fn mark_payment_recovered(state: &AppState, tenant_id: &str) -> Result<(), String> {
     sqlx::query(
         r#"
         WITH update_dunning AS (

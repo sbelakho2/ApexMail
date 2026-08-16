@@ -105,13 +105,19 @@ pub fn build_router(state: AppState) -> Router {
 
 // ── IP extraction ─────────────────────────────────────────────────────────────
 
-/// Extract the real client IP, trusting `X-Forwarded-For` only when the
-/// direct connecting address is a trusted proxy (CIDR match).
-/// Algorithm:/// 1. Get socket IP from `ConnectInfo<SocketAddr>`.
-/// 2. If the socket IP is NOT in any trusted-proxy CIDR → return it.
-/// 3. If it IS trusted → walk `X-Forwarded-For` IPs left-to-right, return
-/// the first IP that is NOT a trusted proxy itself.
-/// 4. Fall back to `X-Real-IP`.
+/// Extract the real client IP using the rightmost-untrusted XFF algorithm.
+///
+/// Algorithm:
+/// 1. Get socket IP from `ConnectInfo<SocketAddr>` (normalised).
+/// 2. If trusted proxies ARE configured and the socket IP is NOT one of them,
+///    the peer is the client itself → return the socket IP.
+/// 3. Otherwise walk `X-Forwarded-For` **right-to-left**, skipping IPs that
+///    are trusted proxies; the first untrusted IP is the client. The
+///    rightmost entries are appended by our own infrastructure, so they are
+///    trustworthy — leftmost entries are client-supplied and spoofable.
+///    (When no trusted proxies are configured this naturally selects the
+///    LAST XFF entry, i.e. the one appended by the nearest proxy.)
+/// 4. Fall back to a validated `X-Real-IP`.
 /// 5. Fall back to the socket IP.
 pub fn extract_client_ip(
     headers: &HeaderMap,
@@ -123,13 +129,14 @@ pub fn extract_client_ip(
     // Normalise IPv4-mapped IPv6 (::ffff:a.b.c.d → a.b.c.d)
     let socket_ip = normalise_ip(socket_ip);
 
-    if !is_in_trusted(socket_ip, trusted) {
+    if !trusted.is_empty() && !is_in_trusted(socket_ip, trusted) {
         return socket_ip.to_string();
     }
 
-    // Connecting address is a trusted proxy — read forwarded header.
+    // Connecting address is a trusted proxy (or no proxies are configured) —
+    // read the forwarded header right-to-left.
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        for part in xff.split(',').map(str::trim) {
+        for part in xff.split(',').map(str::trim).rev() {
             if let Ok(ip) = part.parse::<std::net::IpAddr>() {
                 let ip = normalise_ip(ip);
                 if !is_in_trusted(ip, trusted) {
@@ -137,6 +144,7 @@ pub fn extract_client_ip(
                 }
             }
         }
+        // Every XFF entry is itself a trusted proxy — fall through.
     }
 
     // #188:Validate X-Real-IP as a valid IP address before trusting it

@@ -9,7 +9,7 @@ use axum::{
     http::{header::AUTHORIZATION, StatusCode},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use metrics::{counter, gauge};
@@ -216,6 +216,14 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
 
+    // Send ledger for campaign recipients (see CampaignManager::get_recipients):
+    // `sent_at` is stamped after a successful dispatch so that pausing and
+    // re-starting a campaign does not re-dispatch the entire recipient list.
+    sqlx::query("ALTER TABLE sales_campaign_recipients ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ")
+        .execute(db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
     // ── Calendar events ────────────────────────────────────────────────
     sqlx::query(
         r#"
@@ -243,6 +251,33 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_sales_calendar_events_start_at ON sales_calendar_events(start_at)",
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    // Race-free double-booking prevention: a GiST exclusion constraint on
+    // (tenant_id, [start_at, end_at)) makes overlapping inserts impossible
+    // even when two concurrent requests both pass the COUNT pre-check in
+    // CalendarService::create_event (the pre-check remains as a friendly
+    // fast path; violations surface as SalesError::SlotUnavailable).
+    // btree_gist provides the `=` operator for the scalar tenant_id column
+    // inside a GiST index. The DO block drops any existing constraint first
+    // so re-running this migration is idempotent.
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS btree_gist")
+        .execute(db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    sqlx::query(
+        r#"
+            DO $$
+            BEGIN
+                ALTER TABLE sales_calendar_events DROP CONSTRAINT IF EXISTS no_overlapping_events;
+                ALTER TABLE sales_calendar_events ADD CONSTRAINT no_overlapping_events
+                    EXCLUDE USING gist (tenant_id WITH =, tsrange(start_at, end_at) WITH &&);
+            END $$;
+        "#,
     )
     .execute(db)
     .await
@@ -330,6 +365,10 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
 }
 
 /// Build the axum `Router` with all sales-autopilot routes.
+///
+/// Note: this workspace resolves to axum 0.7 (matchit 0.7), whose path
+/// parameter syntax is `:param`. Curly-brace segments (`{param}`) would be
+/// treated as literals and never match.
 pub fn router(state: AppState) -> Router {
     let shared = Arc::new(state);
     Router::new()
@@ -337,15 +376,19 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         // Authenticated routes
         .route("/leads", get(list_leads).post(create_lead))
-        .route("/leads/{id}", get(get_lead))
+        .route("/leads/:id", get(get_lead))
         .route("/companies", get(list_companies))
         .route("/enrich", post(enrich))
         .route("/campaigns", get(list_campaigns).post(create_campaign))
-        .route("/campaigns/{id}/recipients", post(add_campaign_recipients))
-        .route("/campaigns/{id}/start", post(start_campaign))
-        .route("/campaigns/{id}/pause", post(pause_campaign))
+        .route("/campaigns/:id/recipients", post(add_campaign_recipients))
+        .route("/campaigns/:id/start", post(start_campaign))
+        .route("/campaigns/:id/pause", post(pause_campaign))
         .route("/calendar", get(list_calendar))
+        .route("/calendar/events", post(create_calendar_event))
+        .route("/calendar/events/:id", delete(cancel_calendar_event))
+        .route("/calendar/slots", get(find_calendar_slots))
         .route("/inbox", get(list_inbox))
+        .route("/inbox/:id/reply", post(reply_inbox_message))
         // Conversion tracking (SALES-03)
         .route("/conversions", get(list_conversions).post(create_conversion))
         .with_state(shared.clone())
@@ -429,7 +472,9 @@ fn normalize_pagination(
 }
 
 /// Redis-backed enrichment rate limiter: 30 req / 60 s per tenant.
-/// Uses INCR + EXPIRE for atomicity across process instances.
+/// Uses a Lua script so the INCR and the window EXPIRE happen atomically —
+/// a crash between separate INCR and EXPIRE calls would otherwise leave a
+/// key with no TTL that permanently rate-limits the tenant.
 /// When Redis is unavailable, falls back to an in-memory rate limiter
 /// (provided via `fallback`) so that rate limiting is not completely
 /// degraded on Redis outage.
@@ -451,28 +496,25 @@ async fn enforce_enrichment_rate_limit(
 
     let key = format!("{RATE_LIMITER_REDIS_PREFIX}{tenant_id}");
 
-    // Atomic INCR — the first request in each window creates the key at count=1
-    let count: u64 = redis::cmd("INCR")
-        .arg(&key)
-        .query_async(&mut *conn)
+    // Atomically increment the counter and set the TTL on the first request
+    // of each window, in a single Redis round trip. (redis-rs's Script API
+    // places the key into KEYS[1] with the correct numkeys argument.)
+    let rate_limit_script = redis::Script::new(
+        r"local c = redis.call('INCR', KEYS[1]) if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end return c",
+    );
+    let count: u64 = rate_limit_script
+        .key(&key)
+        .arg(ENRICH_RATE_LIMIT_WINDOW_SECS)
+        .invoke_async(&mut *conn)
         .await
-        .map_err(|e| SalesError::Internal(anyhow::anyhow!("redis INCR error: {}", e)))?;
+        .map_err(|e| SalesError::Internal(anyhow::anyhow!("redis rate-limit EVAL error: {e}")))?;
 
-    // Set expiry on the first request of each window
-    if count == 1 {
-        let _: Result<(), _> = redis::cmd("EXPIRE")
-            .arg(&key)
-            .arg(ENRICH_RATE_LIMIT_WINDOW_SECS)
-            .query_async(&mut *conn)
-            .await;
-    }
-
-    // Emit metrics for observability
-    counter!("sales_autopilot_rate_limit_hits_total", "tenant" => tenant_id.to_string())
-        .increment(1);
+    // Emit aggregate metrics for observability. The raw tenant_id is
+    // deliberately NOT used as a label: unbounded label cardinality would
+    // explode the Prometheus time series count.
+    counter!("sales_autopilot_rate_limit_hits_total").increment(1);
     let remaining = (ENRICH_RATE_LIMIT_MAX_REQUESTS as u64).saturating_sub(count);
-    gauge!("sales_autopilot_rate_limit_remaining", "tenant" => tenant_id.to_string())
-        .set(remaining as f64);
+    gauge!("sales_autopilot_rate_limit_remaining").set(remaining as f64);
 
     if count > ENRICH_RATE_LIMIT_MAX_REQUESTS as u64 {
         warn!(
@@ -621,7 +663,7 @@ async fn create_lead(
         // configured), we compute a minimal default score of 10 so the
         // scoring pipeline is live and observable.
         let score = compute_lead_score(&state.enrichment, &lead.email, &lead.company, &state.config).await;
-        if let Err(e) = state.crm.set_lead_score(lead.id, score, &tenant_id).await {
+        if let Err(e) = state.crm.set_lead_score(&lead.id, score, &tenant_id).await {
             tracing::warn!(error = %e, lead_id = %lead.id, "failed to set lead score (non-fatal)");
         }
         let mut enriched_lead = lead;
@@ -740,12 +782,15 @@ async fn list_leads(
 async fn get_lead(
     State(state): State<Arc<AppState>>,
     tenant_id: TenantId,
-    Path(id): Path<Uuid>,
+    // `sales_leads.id` is TEXT and lead ids are not necessarily UUIDs
+    // (api-server uses "lead_<timestamp>", other services nanoid/ULID),
+    // so the path parameter is taken as a raw string.
+    Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     let tenant_id = tenant_id.0;
     let span = tracing::info_span!("get_lead", tenant_id = %tenant_id, lead_id = %id, operation = "get_lead");
     async move {
-        let lead = state.crm.get_lead(id, &tenant_id).await?;
+        let lead = state.crm.get_lead(&id, &tenant_id).await?;
         json_response(&lead)
     }
     .instrument(span)
@@ -977,17 +1022,20 @@ async fn create_conversion(
         }
 
         // Verify the lead exists and belongs to this tenant
+        // `sales_leads.id` is TEXT (lead ids use several formats), so the
+        // Uuid must be bound as its string form — binding the raw Uuid
+        // produced `operator does not exist: text = uuid` (HTTP 500).
         let lead_exists: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM sales_leads WHERE id = $1 AND tenant_id = $2",
         )
-        .bind(body.lead_id)
+        .bind(body.lead_id.to_string())
         .bind(&tenant_id)
         .fetch_one(&state.db)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?
             > 0;
         if !lead_exists {
-            return Err(SalesError::LeadNotFound(body.lead_id));
+            return Err(SalesError::LeadNotFound(body.lead_id.to_string()));
         }
 
         let conversion_id = Uuid::new_v4();
@@ -1005,8 +1053,14 @@ async fn create_conversion(
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        // Update the lead status to Converted
-        let _ = state.crm.update_lead_status(body.lead_id, LeadStatus::Converted, &tenant_id).await;
+        // Update the lead status to Converted. This is best-effort: the lead
+        // lifecycle state machine only allows Qualified → Converted, so a lead
+        // that was never qualified keeps its current status (the conversion
+        // record itself is unaffected).
+        let _ = state
+            .crm
+            .update_lead_status(&body.lead_id.to_string(), LeadStatus::Converted, &tenant_id)
+            .await;
 
         let conversion = Conversion {
             id: conversion_id,
@@ -1028,7 +1082,7 @@ async fn list_conversions(
     tenant_id: TenantId,
     Query(q): Query<ConversionQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let tenant_id = tenant_id.0;
+    let tenant_id = required_tenant_id(&tenant_id.0, q.tenant_id.as_deref())?;
     let (limit, offset) = normalize_pagination(q.limit, q.offset, 100, 500);
     let span = tracing::info_span!("list_conversions", tenant_id = %tenant_id, operation = "list_conversions");
     async move {
@@ -1149,7 +1203,7 @@ async fn list_campaigns(
         let campaigns = state
             .campaigns
             .list_campaigns(&tenant_id, limit, offset)
-            .await;
+            .await?;
         json_response(&campaigns)
     }
     .instrument(span)
@@ -1248,7 +1302,7 @@ async fn list_calendar(
         let events = state
             .calendar
             .list_events(&tenant_id, from, to, limit, offset)
-            .await;
+            .await?;
         json_response(&events)
     }
     .instrument(span)
@@ -1288,11 +1342,136 @@ async fn list_inbox(
             state
                 .inbox
                 .list_by_category(&tenant_id, c, limit, offset)
-                .await
+                .await?
         } else {
-            state.inbox.list_all(&tenant_id, limit, offset).await
+            state.inbox.list_all(&tenant_id, limit, offset).await?
         };
         json_response(&msgs)
+    }
+    .instrument(span)
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateCalendarEventBody {
+    title: String,
+    #[serde(default)]
+    attendees: Vec<String>,
+    start_at: chrono::DateTime<chrono::Utc>,
+    end_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    meeting_link: Option<String>,
+    #[serde(default)]
+    tenant_id: Option<String>,
+}
+
+async fn create_calendar_event(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Json(body): Json<CreateCalendarEventBody>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = required_tenant_id(&tenant_id.0, body.tenant_id.as_deref())?;
+    let span = tracing::info_span!(
+        "create_calendar_event",
+        tenant_id = %tenant_id,
+        operation = "create_calendar_event"
+    );
+    async move {
+        let event = state
+            .calendar
+            .create_event(
+                tenant_id,
+                body.title,
+                body.attendees,
+                body.start_at,
+                body.end_at,
+                body.meeting_link,
+            )
+            .await?;
+        json_response(&event)
+    }
+    .instrument(span)
+    .await
+}
+
+async fn cancel_calendar_event(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "cancel_calendar_event",
+        tenant_id = %tenant_id,
+        event_id = %id,
+        operation = "cancel_calendar_event"
+    );
+    async move {
+        state.calendar.cancel_event(id, &tenant_id).await?;
+        json_response(&serde_json::json!({ "id": id, "cancelled": true }))
+    }
+    .instrument(span)
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SlotQuery {
+    date: Option<String>,
+    #[serde(default)]
+    tenant_id: Option<String>,
+}
+
+async fn find_calendar_slots(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Query(q): Query<SlotQuery>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = required_tenant_id(&tenant_id.0, q.tenant_id.as_deref())?;
+    let span = tracing::info_span!(
+        "find_calendar_slots",
+        tenant_id = %tenant_id,
+        operation = "find_calendar_slots"
+    );
+    async move {
+        // An unparseable date is rejected instead of silently falling back
+        // to "today".
+        let date = match q.date {
+            Some(raw) => raw.parse::<chrono::DateTime<chrono::Utc>>().map_err(|_| {
+                SalesError::InvalidInput("date must be an RFC 3339 timestamp".into())
+            })?,
+            None => chrono::Utc::now(),
+        };
+        let slots = state
+            .calendar
+            .find_available_slots(&tenant_id, date)
+            .await?;
+        let slots: Vec<serde_json::Value> = slots
+            .into_iter()
+            .map(|(start, end)| serde_json::json!({ "start": start, "end": end }))
+            .collect();
+        json_response(&slots)
+    }
+    .instrument(span)
+    .await
+}
+
+async fn reply_inbox_message(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "reply_inbox_message",
+        tenant_id = %tenant_id,
+        message_id = %id,
+        operation = "reply_inbox_message"
+    );
+    async move {
+        state.inbox.mark_replied(&tenant_id, id).await?;
+        json_response(&serde_json::json!({ "id": id, "replied": true }))
     }
     .instrument(span)
     .await

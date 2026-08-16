@@ -151,7 +151,17 @@ CREATE TABLE IF NOT EXISTS domains (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
+DO $$
+BEGIN
+    -- 070 renames domain→name on the second run; index whichever exists.
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='domains' AND column_name='domain') THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
+    ELSIF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='domains' AND column_name='name') THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_domains_domain ON domains(name);
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_domains_tenant ON domains(tenant_id);
 
 -- =============================================================================

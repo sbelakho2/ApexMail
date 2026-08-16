@@ -86,6 +86,18 @@ pub async fn handle_unsub_post(
         .await
         .unwrap_or_else(|| new_id("msg"));
 
+    // Dedup per (tenant, recipient) within 24 h: mail clients and MUA
+    // auto-retries can fire the one-click POST repeatedly; only the first is
+    // recorded (suppression + event + webhook).
+    if !try_mark_unsub_dedup(&state, &data.tenant_id, &data.recipient).await {
+        info!("One-click unsubscribe duplicate within 24h window — skipping");
+        return axum::http::Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"success":true}"#))
+            .unwrap_or_default();
+    }
+
     if let Err(e) = state
         .processor
         .record_unsubscribe(UnsubscribeData {
@@ -150,6 +162,12 @@ pub async fn handle_unsub_get(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         let ip = extract_client_ip(&headers, addr.ip(), &state);
+
+        // Dedup per (tenant, recipient) within 24 h (double-clicks, retries).
+        if !try_mark_unsub_dedup(&state, &data.tenant_id, &data.recipient).await {
+            info!("Unsubscribe confirm duplicate within 24h window — skipping");
+            return Html(render_success_page(&data.recipient)).into_response();
+        }
 
         let message_id = find_latest_message_id(&state, &data.tenant_id, &data.recipient)
             .await
@@ -441,6 +459,42 @@ pub async fn handle_prefs_post(
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
+
+/// Mark an unsubscribe as seen for (tenant, recipient) using Redis
+/// `SET NX EX 86400`. Returns `true` when this is the FIRST unsubscribe in
+/// the 24 h window (the caller should record the event / webhook), `false`
+/// when it is a duplicate. Fails open on Redis errors — losing dedup is
+/// preferable to losing an unsubscribe (compliance-critical).
+async fn try_mark_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str) -> bool {
+    let recipient_lc = recipient.to_lowercase();
+    let key = format!("unsub:dedup:{tenant_id}:{recipient_lc}");
+    match state.redis.get().await {
+        Ok(mut conn) => {
+            match redis::cmd("SET")
+                .arg(&key)
+                .arg("1")
+                .arg("EX")
+                .arg(86_400u64)
+                .arg("NX")
+                .query_async::<Option<String>>(&mut *conn)
+                .await
+            {
+                // Key newly set → first unsubscribe in the window.
+                Ok(Some(_)) => true,
+                // Key existed → duplicate within 24 h.
+                Ok(None) => false,
+                Err(e) => {
+                    warn!(error = %e, "Unsubscribe dedup check failed — recording anyway");
+                    true
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Unsubscribe dedup Redis pool error — recording anyway");
+            true
+        }
+    }
+}
 
 async fn find_latest_message_id(
     state: &AppState,

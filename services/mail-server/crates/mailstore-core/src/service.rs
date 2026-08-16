@@ -11,7 +11,7 @@ use rand::rngs::OsRng;
 use rand::TryRngCore;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
@@ -23,7 +23,7 @@ use crate::models::{
     EmailAddress as StoredEmailAddress, Mailbox as StoredMailbox,
     MessageFlags as StoredMessageFlags, MessageQuery, StoredMessage,
 };
-use crate::storage::MessageStorage;
+use crate::storage::{MessageStorage, QuotaExceeded};
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use mail_proto::generated::{
@@ -47,9 +47,33 @@ pub struct MailstoreServiceImpl {
     rate_limiter: GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>,
 }
 
+/// A dummy Argon2 password hash used to equalize timing on the
+/// "account not found" and "stored hash unparseable" paths of
+/// `authenticate_account`. Burning the same verification cost either way
+/// removes the latency oracle that would otherwise reveal whether an account
+/// exists.
+static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
+    SaltString::encode_b64(&[0x41u8; 16])
+        .ok()
+        .and_then(|salt| {
+            Argon2::default()
+                .hash_password(b"apexmail-timing-equalizer", salt.as_salt())
+                .ok()
+                .map(|hash| hash.to_string())
+        })
+        .unwrap_or_default()
+});
+
+/// Pay the Argon2 verification cost against a throwaway hash so failure
+/// responses take the same time as a real wrong-password attempt.
+fn dummy_verify_password(password: &[u8]) {
+    if let Ok(parsed) = PasswordHash::new(&DUMMY_PASSWORD_HASH) {
+        let _ = Argon2::default().verify_password(password, &parsed);
+    }
+}
+
 #[derive(Debug)]
-struct ParsedMessageMetadata {
-    message_id: String,
+struct ParsedMessageMetadata {    message_id: String,
     from_address: String,
     from_name: Option<String>,
     to_addresses: Vec<StoredEmailAddress>,
@@ -206,6 +230,16 @@ fn header_value(headers: &serde_json::Value, name: &str) -> Option<String> {
             serde_json::Value::Array(values) => values.first()?.as_str().map(str::to_string),
             _ => None,
         })
+}
+
+/// Map a storage-layer error to a gRPC status, distinguishing quota
+/// exhaustion (`ResourceExhausted`) from internal failures.
+fn map_storage_error(context: &str, e: anyhow::Error) -> Status {
+    if e.downcast_ref::<QuotaExceeded>().is_some() {
+        Status::resource_exhausted("Quota exceeded")
+    } else {
+        Status::internal(format!("{}: {}", context, e))
+    }
 }
 
 impl MailstoreServiceImpl {
@@ -459,7 +493,7 @@ impl MailstoreService for MailstoreServiceImpl {
             .storage
             .store_message(&stored)
             .await
-            .map_err(|e| Status::internal(format!("Failed to store message: {}", e)))?;
+            .map_err(|e| map_storage_error("Failed to store message", e))?;
 
         let blob_hash = format!("{:x}", md5::compute(&req.raw_message));
         let message_id = stored.id.to_string();
@@ -806,7 +840,7 @@ impl MailstoreService for MailstoreServiceImpl {
                 .storage
                 .store_message(&cloned)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to copy message: {}", e)))?;
+                .map_err(|e| map_storage_error("Failed to copy message", e))?;
             uid_mapping.insert(old_uid, new_uid.max(0) as u64);
         }
 
@@ -980,6 +1014,10 @@ impl MailstoreService for MailstoreServiceImpl {
     }
 
     /// Expunge deleted messages
+    ///
+    /// When `req.uids` is set (UID EXPUNGE, RFC 4315 §2.2.2), only the
+    /// intersection of `\Deleted` and those UIDs is expunged; when empty,
+    /// every `\Deleted` message in the mailbox is expunged.
     async fn expunge(
         &self,
         request: Request<ExpungeRequest>,
@@ -991,11 +1029,24 @@ impl MailstoreService for MailstoreServiceImpl {
             .resolve_account_mailbox(&req.account_id, &req.mailbox)
             .await?;
 
-        let expunged = self
-            .storage
-            .expunge_deleted_messages(&account_id, &mailbox.id)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to expunge messages: {}", e)))?;
+        let expunged = if req.uids.is_empty() {
+            self.storage
+                .expunge_deleted_messages(&account_id, &mailbox.id)
+                .await
+        } else {
+            let uids: Vec<i64> = req
+                .uids
+                .iter()
+                .map(|uid| {
+                    i64::try_from(*uid)
+                        .map_err(|_| Status::invalid_argument("UID exceeds valid range"))
+                })
+                .collect::<Result<_, _>>()?;
+            self.storage
+                .expunge_deleted_messages_for_uids(&account_id, &mailbox.id, &uids)
+                .await
+        }
+        .map_err(|e| Status::internal(format!("Failed to expunge messages: {}", e)))?;
 
         let expunged_uids: Vec<u64> = expunged.into_iter().map(|uid| uid.max(0) as u64).collect();
 
@@ -1117,22 +1168,26 @@ impl MailstoreService for MailstoreServiceImpl {
         let account = match account {
             Some(account) => account,
             None => {
+                // Equalize timing with the wrong-password path so the
+                // response latency cannot reveal account existence.
+                dummy_verify_password(req.password.as_bytes());
                 return Ok(Response::new(AuthenticateResponse {
                     success: false,
                     account_id: String::new(),
                     error: "Invalid credentials".to_string(),
-                }))
+                }));
             }
         };
 
         let parsed = match PasswordHash::new(&account.password_hash) {
             Ok(parsed) => parsed,
             Err(_) => {
+                dummy_verify_password(req.password.as_bytes());
                 return Ok(Response::new(AuthenticateResponse {
                     success: false,
                     account_id: String::new(),
                     error: "Invalid credentials".to_string(),
-                }))
+                }));
             }
         };
 

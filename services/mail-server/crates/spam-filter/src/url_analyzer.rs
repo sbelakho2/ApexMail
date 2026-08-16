@@ -82,40 +82,64 @@ fn is_url_shortener_in_config(host: &str, shorteners: &[String]) -> bool {
     shorteners.iter().any(|s| s.eq_ignore_ascii_case(host))
 }
 
+/// Find the first occurrence of an ASCII `needle` in `haystack[from..]`,
+/// comparing case-insensitively, and return the byte offset relative to the
+/// start of `haystack`.
+///
+/// Because the needle is pure ASCII, a match can only start and end on UTF-8
+/// char boundaries (continuation bytes are >= 0x80 and never match ASCII), so
+/// the returned offset is always safe for slicing `haystack`.
+fn find_ignore_ascii_case(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    let last_start = h.len() - n.len();
+    let mut i = from;
+    while i <= last_start {
+        if h[i..i + n.len()].eq_ignore_ascii_case(n) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Extract URLs from text (simple extraction, not a full parser).
 ///
-/// Uses a lowercased copy internally so that scheme prefixes such as
-/// `HTTP://` and `HTTPS://` are not missed — email clients routinely
-/// render mixed-case schemes as clickable links.
+/// Scheme prefixes such as `HTTP://` and `HTTPS://` are matched
+/// case-insensitively — email clients routinely render mixed-case schemes as
+/// clickable links. The match is performed directly on the original text (no
+/// lowercased copy), so all byte offsets share a single coordinate system and
+/// remain valid even when the text contains characters whose lowercased form
+/// has a different UTF-8 length (e.g. `ẞ` U+1E9E → `ß`, or `İ` U+0130).
+/// The extracted URL preserves the original casing for downstream analysis.
 pub fn extract_urls(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
-    // Use a lowercased copy for case-insensitive scheme detection while
-    // extracting the original-case URL from `text` so that any
-    // case-based obfuscation is preserved for downstream analysis.
-    let lower = text.to_lowercase();
     let mut offset = 0;
     loop {
-        let remaining = &lower[offset..];
-        let http_pos = remaining.find("http://");
-        let https_pos = remaining.find("https://");
+        // Case-insensitive scheme detection on the ORIGINAL text — never mix
+        // offsets computed against a transformed copy with slices of `text`.
+        let http_pos = find_ignore_ascii_case(text, "http://", offset);
+        let https_pos = find_ignore_ascii_case(text, "https://", offset);
         let start = match (http_pos, https_pos) {
             (Some(a), Some(b)) => a.min(b),
             (Some(a), None) => a,
             (None, Some(b)) => b,
             (None, None) => break,
         };
-        let abs_start = offset + start;
-        let url_remaining = &lower[abs_start..];
+        let url_remaining = &text[start..];
         let end = url_remaining
             .find(|c: char| {
                 c.is_whitespace() || c == '"' || c == '\'' || c == '>' || c == ')' || c == ']'
             })
             .unwrap_or(url_remaining.len());
-        let url = &text[abs_start..abs_start + end];
+        let url = &text[start..start + end];
         if url.len() > 10 {
             urls.push(url.to_string());
         }
-        offset = abs_start + end;
+        offset = start + end;
         if offset >= text.len() {
             break;
         }
@@ -541,6 +565,43 @@ mod tests {
         assert_eq!(urls.len(), 2);
         assert!(urls[0].contains("example.com"));
         assert!(urls[1].contains("evil.tk"));
+    }
+
+    /// Regression: `to_lowercase()` changes byte lengths for some characters
+    /// (ẞ U+1E9E → ß shrinks 3→2 bytes). The old implementation computed
+    /// offsets on the lowercased copy and used them to slice the original
+    /// text, which panicked. Extraction must work entirely in original-text
+    /// coordinates.
+    #[test]
+    fn test_extract_urls_after_shrinking_lowercase_chars() {
+        let urls = extract_urls("ẞáhttps://example.com/x");
+        assert_eq!(urls, vec!["https://example.com/x".to_string()]);
+    }
+
+    /// Regression: İ U+0130 lowercases to `i` + combining dot (2→3 bytes),
+    /// which skewed offsets the other way.
+    #[test]
+    fn test_extract_urls_after_expanding_lowercase_chars() {
+        let urls = extract_urls("İhttps://x.com");
+        assert_eq!(urls, vec!["https://x.com".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_urls_uppercase_scheme_preserved() {
+        let urls = extract_urls("URL HTTPS://EXAMPLE.COM");
+        assert_eq!(urls, vec!["HTTPS://EXAMPLE.COM".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_urls_after_multibyte_emoji() {
+        let urls = extract_urls("🎉🎊 https://example.com/party and 🚀http://foo.bar/x");
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/party".to_string(),
+                "http://foo.bar/x".to_string(),
+            ]
+        );
     }
 
     #[test]

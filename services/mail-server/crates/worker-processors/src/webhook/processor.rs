@@ -48,6 +48,11 @@ impl WebhookProcessor {
         let client = Client::builder()
             .timeout(config.request_timeout)
             .user_agent("ApexMail-Webhook/1.0")
+            // SSRF: never follow redirects. The target URL passed the SSRF
+            // validator, but a 3xx could bounce the delivery to an arbitrary
+            // host (e.g. cloud metadata). A 3xx is treated as a delivery
+            // failure instead.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ProcessorError::Job(format!("Failed to create HTTP client: {}", e)))?;
 
@@ -561,6 +566,10 @@ impl WebhookProcessor {
                 .timeout(self.config.request_timeout)
                 .user_agent("ApexMail-Webhook/1.0")
                 .resolve_to_addrs(resolved_target.host.as_str(), &socket_addrs)
+                // SSRF: no redirect following on the pinned client either —
+                // a 3xx must not re-target the delivery to an unvalidated
+                // host (see the shared client builder above).
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
             {
                 Ok(client) => client,
@@ -628,6 +637,19 @@ impl WebhookProcessor {
 
                 if (200..300).contains(&status) {
                     WebhookDeliveryResult::success(status, response_time, response_body)
+                } else if (300..400).contains(&status) {
+                    // Redirects are refused (Policy::none) — the destination
+                    // has not passed SSRF validation, so a 3xx is a failure.
+                    WebhookDeliveryResult::failure(
+                        Some(status),
+                        response_time,
+                        format!(
+                            "HTTP {} — redirect refused (webhook endpoint must not redirect)",
+                            status
+                        ),
+                        response_body,
+                        retry_after_ms,
+                    )
                 } else {
                     WebhookDeliveryResult::failure(
                         Some(status),

@@ -282,73 +282,129 @@ BEGIN
     IF to_regclass('public.tenants') IS NOT NULL THEN
         -- enterprise_contracts
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'enterprise_contracts_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE enterprise_contracts ADD CONSTRAINT enterprise_contracts_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE enterprise_contracts ADD CONSTRAINT enterprise_contracts_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK enterprise_contracts_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- contract_signatures
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contract_signatures_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE contract_signatures ADD CONSTRAINT contract_signatures_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE contract_signatures ADD CONSTRAINT contract_signatures_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK contract_signatures_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- contract_amendments
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contract_amendments_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE contract_amendments ADD CONSTRAINT contract_amendments_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE contract_amendments ADD CONSTRAINT contract_amendments_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK contract_amendments_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- purchase_orders
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'purchase_orders_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE purchase_orders ADD CONSTRAINT purchase_orders_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE purchase_orders ADD CONSTRAINT purchase_orders_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK purchase_orders_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- dunning_states
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dunning_states_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE dunning_states ADD CONSTRAINT dunning_states_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE dunning_states ADD CONSTRAINT dunning_states_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK dunning_states_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- dunning_history
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dunning_history_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE dunning_history ADD CONSTRAINT dunning_history_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE dunning_history ADD CONSTRAINT dunning_history_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK dunning_history_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- sla_metrics
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sla_metrics_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE sla_metrics ADD CONSTRAINT sla_metrics_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE sla_metrics ADD CONSTRAINT sla_metrics_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK sla_metrics_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- sla_credits
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sla_credits_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE sla_credits ADD CONSTRAINT sla_credits_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE sla_credits ADD CONSTRAINT sla_credits_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK sla_credits_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- wallets
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'wallets_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE wallets ADD CONSTRAINT wallets_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE wallets ADD CONSTRAINT wallets_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK wallets_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- wallet_transactions
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'wallet_transactions_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE wallet_transactions ADD CONSTRAINT wallet_transactions_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE wallet_transactions ADD CONSTRAINT wallet_transactions_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK wallet_transactions_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- wallet_reservations
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'wallet_reservations_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE wallet_reservations ADD CONSTRAINT wallet_reservations_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE wallet_reservations ADD CONSTRAINT wallet_reservations_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK wallet_reservations_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- tenant_costs
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tenant_costs_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE tenant_costs ADD CONSTRAINT tenant_costs_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE tenant_costs ADD CONSTRAINT tenant_costs_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK tenant_costs_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- cost_alerts
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cost_alerts_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE cost_alerts ADD CONSTRAINT cost_alerts_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE cost_alerts ADD CONSTRAINT cost_alerts_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK cost_alerts_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- billing_audit_log
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'billing_audit_log_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE billing_audit_log ADD CONSTRAINT billing_audit_log_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE billing_audit_log ADD CONSTRAINT billing_audit_log_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE SET NULL';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK billing_audit_log_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
     ELSE
         RAISE WARNING 'Migration 022: tenants table does not exist — skipping FK constraints.';
@@ -360,8 +416,12 @@ DO $$
 BEGIN
     IF to_regclass('public.invoices') IS NOT NULL THEN
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sla_credits_invoice_id_fkey') THEN
-            EXECUTE 'ALTER TABLE sla_credits ADD CONSTRAINT sla_credits_invoice_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE sla_credits ADD CONSTRAINT sla_credits_invoice_id_fkey
                 FOREIGN KEY (invoice_id) REFERENCES invoices(id)';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'C-02: FK sla_credits_invoice_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
     ELSE
         RAISE WARNING 'Migration 022: invoices table does not exist — skipping FK on sla_credits.invoice_id.';

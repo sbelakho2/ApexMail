@@ -19,6 +19,53 @@ use observability_service::trace_collector::TraceCollector;
 use observability_service::types::AlertSeverity;
 use tracing_subscriber::EnvFilter;
 
+/// Strip credentials (e.g. the Redis password) from a URL, keeping only
+/// `scheme://host:port/path`. Used whenever a connection URL is logged.
+fn redact_url_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<redacted-url>".to_string();
+    };
+    // Credentials live only inside the authority component (before the
+    // first '/'), separated from host:port by '@'.
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, after)| after)
+        .unwrap_or(authority);
+    format!("{scheme}://{host_port}{path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_url_credentials;
+
+    #[test]
+    fn redacts_password_from_redis_url() {
+        assert_eq!(
+            redact_url_credentials("redis://:p%40ss%3Aw@redis:6379/0"),
+            "redis://redis:6379/0"
+        );
+    }
+
+    #[test]
+    fn redacts_user_and_password() {
+        assert_eq!(
+            redact_url_credentials("postgres://user:secret@db:5432/apexmail"),
+            "postgres://db:5432/apexmail"
+        );
+    }
+
+    #[test]
+    fn keeps_credential_free_urls_untouched() {
+        assert_eq!(redact_url_credentials("redis://127.0.0.1:6379/0"), "redis://127.0.0.1:6379/0");
+        assert_eq!(
+            redact_url_credentials("http://otel-collector:4317/path"),
+            "http://otel-collector:4317/path"
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let config = match ObservabilityConfig::from_env() {
@@ -84,7 +131,13 @@ async fn main() {
     let redis_pool = match redis_cfg.create_pool(Some(Runtime::Tokio1)) {
         Ok(pool) => Arc::new(pool),
         Err(err) => {
-            tracing::error!(error = %err, redis_url = %redis_url, "failed to create Redis pool");
+            // Never log the full URL — it embeds the percent-encoded Redis
+            // password. Log only the scheme://host:port/db part.
+            tracing::error!(
+                error = %err,
+                redis_url = %redact_url_credentials(&redis_url),
+                "failed to create Redis pool"
+            );
             std::process::exit(1);
         }
     };
@@ -132,7 +185,16 @@ async fn main() {
             severity: AlertSeverity::Critical,
             cooldown_secs: 600,
         });
-        tracing::info!(rules = state.alerts.list_rules().len(), "Defined default alert rules");
+        // Fired alerts are POSTed as JSON to every configured webhook
+        // (ALERT_WEBHOOKS, comma-separated). Empty list disables dispatch.
+        state
+            .alerts
+            .set_webhook_urls(config.alerting.webhook_urls.clone());
+        tracing::info!(
+            rules = state.alerts.list_rules().len(),
+            webhooks = config.alerting.webhook_urls.len(),
+            "Defined default alert rules"
+        );
     }
 
     // ── Redis key eviction monitor ─────────────────────────────────────
@@ -212,7 +274,7 @@ async fn main() {
 
             if alerting_enabled {
                 let fired = eval_state.alerts.evaluate_all(&collector.get_summary());
-                for alert in fired {
+                for alert in &fired {
                     tracing::warn!(
                         rule = %alert.rule_name,
                         severity = %alert.severity,
@@ -220,6 +282,11 @@ async fn main() {
                         threshold = alert.threshold,
                         "ALERT FIRED"
                     );
+                }
+                if !fired.is_empty() {
+                    // Fire-and-forget webhook dispatch (errors are logged
+                    // inside; dispatch must never break the eval loop).
+                    eval_state.alerts.dispatch_alerts(&fired).await;
                 }
             }
         }

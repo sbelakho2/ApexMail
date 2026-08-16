@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 
 use crate::icons::{render_icon, IconRenderOptions};
+use crate::shell::html_escape;
 
 // Keep a small embedded baseline so ui-foundation can compile even when
 // ephemeral testing artifacts have been pruned from the workspace.
@@ -433,7 +434,7 @@ impl<'a> MarketingApiConsole<'a> {
         let request_editor = if endpoint.method == "POST" {
             format!(
                 "<div class=\"px-4 py-3 border-b border-surface-700 bg-surface-800/20\"><div class=\"text-xs font-bold text-surface-400 mb-2\">Request Body</div><textarea class=\"w-full bg-surface-900 text-surface-200 font-mono text-xs rounded-sm p-3 border border-surface-700 focus:border-primary focus:outline-none resize-none\" rows=\"4\" spellcheck=\"false\">{}</textarea></div>",
-                self.request_body,
+                html_escape(self.request_body),
             )
         } else {
             String::new()
@@ -443,7 +444,7 @@ impl<'a> MarketingApiConsole<'a> {
         } else if let Some(response) = self.response {
             format!(
                 "<pre class=\"text-xs text-success-400 font-mono bg-surface-800/50 rounded-sm p-3 overflow-auto max-h-60\">{}</pre>",
-                response,
+                html_escape(response),
             )
         } else {
             "<p class=\"text-sm text-surface-400 italic\">Click \"Send\" to execute the request.</p>"
@@ -451,7 +452,7 @@ impl<'a> MarketingApiConsole<'a> {
         };
         format!(
             "<div class=\"rounded-sm border border-surface-700 bg-surface-900 overflow-hidden\" data-csrf-token=\"{}\"><div class=\"flex border-b border-surface-700\"><div class=\"w-56 border-r border-surface-700 bg-surface-800/50 hidden sm:block\"><div class=\"p-3 text-xs font-bold text-surface-400 uppercase tracking-wider\">Endpoints</div>{}</div><div class=\"flex-1 flex flex-col min-h-[24rem]\"><div class=\"flex items-center gap-2 px-4 py-3 border-b border-surface-700 bg-surface-800/30\"><span class=\"font-mono text-sm font-bold {}\">{}</span><span class=\"font-mono text-sm text-surface-300\">{}</span><button class=\"ml-auto px-4 py-1.5 rounded-sm bg-primary text-white text-sm font-bold hover:bg-primary transition-colors disabled:opacity-50\">{}</button></div>{}<div class=\"flex-1 px-4 py-3\"><div class=\"text-xs font-bold text-surface-400 mb-2\">Response</div>{}</div></div></div></div>",
-            self.csrf_token,
+            html_escape(self.csrf_token),
             sidebar,
             method_color(endpoint.method),
             endpoint.method,
@@ -596,5 +597,25 @@ mod tests {
         assert!(api_console.contains("Endpoints"));
         assert!(api_console.contains("/v1/messages"));
         assert!(api_console.contains("queued"));
+    }
+
+    #[test]
+    fn api_console_escapes_request_response_and_csrf() {
+        let console = MarketingApiConsole {
+            selected_idx: 0,
+            loading: false,
+            request_body: "</textarea><script>alert(1)</script>",
+            response: Some("</pre><img src=x onerror=alert(2)>"),
+            csrf_token: "\"><script>alert(3)</script>",
+        }
+        .render_html();
+
+        assert!(!console.contains("<script>"), "raw script leaked");
+        assert!(!console.contains("<img src=x onerror"));
+        assert!(!console.contains("</textarea><script>"), "textarea breakout");
+        assert!(console.contains("&lt;/textarea&gt;"));
+        assert!(console.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        // CSRF token stays inside its attribute (no `">` breakout).
+        assert!(console.contains("data-csrf-token=\"&quot;&gt;&lt;script&gt;"));
     }
 }

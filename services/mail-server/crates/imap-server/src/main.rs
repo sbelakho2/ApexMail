@@ -6,6 +6,7 @@
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use clap::Parser;
+use futures::StreamExt;
 use mail_proto::mailstore_service_client::MailstoreServiceClient;
 use mail_proto::{
     CopyMessageRequest, CreateMailboxRequest, DeleteMailboxRequest, ExpungeRequest,
@@ -14,7 +15,7 @@ use mail_proto::{
     SearchMessagesRequest, SetFlagsRequest, StoreMessageRequest, SubscribeMailboxRequest,
 };
 use rustls::ServerConfig;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -67,15 +68,17 @@ struct ImapSession {
     permanent_flags: Vec<String>,
     uid_map: Vec<u64>,
     read_only: bool,
-    client: MailstoreServiceClient<Channel>,
+    client: MailstoreClient,
     tag: String,
     idle: bool,
     tls_active: bool,
     allow_insecure_auth: bool,
+    /// Remote peer IP for brute-force throttling of LOGIN/AUTHENTICATE.
+    peer_ip: String,
 }
 
 impl ImapSession {
-    fn new(client: MailstoreServiceClient<Channel>) -> Self {
+    fn new(client: MailstoreClient) -> Self {
         Self {
             state: SessionState::NotAuthenticated,
             account_id: String::new(),
@@ -98,6 +101,7 @@ impl ImapSession {
             idle: false,
             tls_active: false,
             allow_insecure_auth: false,
+            peer_ip: String::new(),
         }
     }
 
@@ -118,6 +122,50 @@ impl ImapSession {
 type SubscriptionTable = HashMap<String, HashSet<String>>;
 static SUBSCRIPTIONS: LazyLock<Arc<Mutex<SubscriptionTable>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+// ── Internal service token ──────────────────────────────────────────────────
+//
+// When the mailstore enables shared-token authentication
+// (INTERNAL_SERVICE_TOKEN on the mailstore side), the IMAP server attaches the
+// same secret to every gRPC call as `authorization: Bearer <token>`.
+
+static INTERNAL_SERVICE_TOKEN: LazyLock<String> =
+    LazyLock::new(|| std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default());
+
+/// gRPC client interceptor that attaches the internal service token when one
+/// is configured (no-op otherwise, so the client type is uniform).
+#[derive(Clone, Debug)]
+struct MailstoreAuthInterceptor {
+    token: Arc<str>,
+}
+
+impl tonic::service::Interceptor for MailstoreAuthInterceptor {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        if !self.token.is_empty() {
+            if let Ok(value) = format!("Bearer {}", self.token).parse() {
+                request.metadata_mut().insert("authorization", value);
+            }
+        }
+        Ok(request)
+    }
+}
+
+type MailstoreClient =
+    MailstoreServiceClient<tonic::service::interceptor::InterceptedService<Channel, MailstoreAuthInterceptor>>;
+
+/// Build the mailstore client (with the internal service token attached when
+/// configured).
+fn build_mailstore_client(channel: Channel) -> MailstoreClient {
+    MailstoreServiceClient::with_interceptor(
+        channel,
+        MailstoreAuthInterceptor {
+            token: Arc::from(INTERNAL_SERVICE_TOKEN.as_str()),
+        },
+    )
+}
 
 async fn subscribe_mailbox(account_id: &str, mailbox: &str) {
     let mut table = SUBSCRIPTIONS.lock().await;
@@ -156,6 +204,59 @@ async fn subscribed_mailboxes(account_id: &str) -> HashSet<String> {
     table.get(account_id).cloned().unwrap_or_default()
 }
 
+// ── LOGIN/AUTHENTICATE brute-force throttling ───────────────────────────────
+//
+// Tracks failed authentication attempts per (client IP, username). Once five
+// failures accumulate inside the lockout window, further attempts for that
+// pair are rejected immediately — before any credential check, with no
+// artificial delay, so the response leaks nothing about the account.
+
+const AUTH_FAILURE_LIMIT: usize = 5;
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+type AuthFailureTable = HashMap<(String, String), VecDeque<std::time::Instant>>;
+static AUTH_FAILURES: LazyLock<Arc<Mutex<AuthFailureTable>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+fn prune_stale(failures: &mut VecDeque<std::time::Instant>, now: std::time::Instant) {
+    failures.retain(|t| now.duration_since(*t) < AUTH_FAILURE_WINDOW);
+}
+
+/// Returns `true` when (ip, username) is currently locked out.
+async fn auth_is_locked(ip: &str, username: &str) -> bool {
+    let mut table = AUTH_FAILURES.lock().await;
+    match table.get_mut(&(ip.to_string(), username.to_string())) {
+        Some(failures) => {
+            prune_stale(failures, std::time::Instant::now());
+            failures.len() >= AUTH_FAILURE_LIMIT
+        }
+        None => false,
+    }
+}
+
+/// Record a failed attempt. Once the limit is reached within the window the
+/// pair stays locked until the oldest failure ages out.
+async fn auth_record_failure(ip: &str, username: &str) {
+    let mut table = AUTH_FAILURES.lock().await;
+    let now = std::time::Instant::now();
+    // Opportunistically drop fully-expired keys so the table cannot grow
+    // without bound when an attacker sprays many username variants.
+    table.retain(|_, failures| {
+        prune_stale(failures, now);
+        !failures.is_empty()
+    });
+    let failures = table
+        .entry((ip.to_string(), username.to_string()))
+        .or_default();
+    failures.push_back(now);
+}
+
+/// Clear the failure history after a successful login.
+async fn auth_clear_failures(ip: &str, username: &str) {
+    let mut table = AUTH_FAILURES.lock().await;
+    table.remove(&(ip.to_string(), username.to_string()));
+}
+
 // ── Sequence set parser ──────────────────────────────────────────────────────
 //
 // Sequence sets are parsed into inclusive (start, end) u64 intervals.
@@ -191,11 +292,11 @@ fn parse_sequence_set(input: &str) -> Result<Vec<(u64, u64)>> {
             };
             if start == u64::MAX && end == u64::MAX {
                 intervals.push((u64::MAX, u64::MAX));
-            } else if start > end {
-                // RFC 3501: an empty (descending) range must be ignored.
-                continue;
             } else {
-                intervals.push((start, end));
+                // RFC 3501 §9: a range may be given in either order
+                // (5:2 == 2:5, *:4 == 4:*); normalize by swapping so the
+                // range stays inclusive.
+                intervals.push((start.min(end), start.max(end)));
             }
         } else if part == "*" {
             intervals.push((u64::MAX, u64::MAX));
@@ -228,6 +329,13 @@ fn resolve_intervals(
         for &(s, e) in intervals {
             let lo = if s == u64::MAX { max_uid } else { s };
             let hi = if e == u64::MAX { max_uid } else { e };
+            // RFC 3501 §9: `n:*` always includes the last message, even when
+            // n exceeds the mailbox's maximum UID.
+            let lo = if (s == u64::MAX || e == u64::MAX) && max_uid > 0 {
+                lo.min(max_uid)
+            } else {
+                lo
+            };
             if lo == 0 || lo > hi {
                 continue;
             }
@@ -247,6 +355,13 @@ fn resolve_intervals(
             // upper bound is truncated to the last message (RFC 3501 §6.4.8).
             let lo = if s == u64::MAX { len } else { s };
             let hi = if e == u64::MAX { len } else { e.min(len) };
+            // RFC 3501 §9: `n:*` always includes the last message, even when
+            // n exceeds the number of messages in the mailbox.
+            let lo = if (s == u64::MAX || e == u64::MAX) && lo > len {
+                len
+            } else {
+                lo
+            };
             if lo == 0 || lo > len || lo > hi {
                 continue;
             }
@@ -989,7 +1104,7 @@ async fn handle_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         "UNSUBSCRIBE" => handle_unsubscribe(session, tag, args, literals, writer).await,
         "STATUS" => handle_status(session, tag, args, literals, writer).await,
         "APPEND" => handle_append(session, tag, args, literals, writer).await,
-        "EXPUNGE" => handle_expunge(session, tag, args, writer).await,
+        "EXPUNGE" => handle_expunge(session, tag, None, writer).await,
         "IDLE" => handle_idle(session, tag, writer).await,
         "NOOP" => handle_noop(session, tag, writer).await,
         "CHECK" => handle_noop(session, tag, writer).await,
@@ -1023,7 +1138,7 @@ async fn handle_uid_command<W: AsyncWrite + Unpin>(
         "SEARCH" => handle_search(session, tag, &sub_args, true, literals, writer).await,
         "COPY" => handle_copy(session, tag, &sub_args, true, literals, writer).await,
         "MOVE" => handle_move(session, tag, &sub_args, true, literals, writer).await,
-        "EXPUNGE" => handle_expunge(session, tag, &sub_args, writer).await,
+        "EXPUNGE" => handle_expunge(session, tag, Some(&sub_args), writer).await,
         _ => {
             write_line(
                 writer,
@@ -1144,6 +1259,20 @@ async fn handle_login<W: AsyncWrite + Unpin>(
         }
     };
 
+    // Brute-force throttling: locked-out pairs are rejected immediately,
+    // before any credential work (no timing leak).
+    if auth_is_locked(&session.peer_ip, &user).await {
+        warn!(
+            "LOGIN throttled for {} from {} (too many failures)",
+            user, session.peer_ip
+        );
+        return write_line(
+            writer,
+            &tagged_no(tag, "[AUTHORIZATIONFAILED] Too many failed attempts; try again later"),
+        )
+        .await;
+    }
+
     let mut client = session.client.clone();
     let request = mail_proto::AuthenticateRequest {
         email: user.clone(),
@@ -1157,11 +1286,13 @@ async fn handle_login<W: AsyncWrite + Unpin>(
     let resp = resp.into_inner();
 
     if resp.success {
+        auth_clear_failures(&session.peer_ip, &user).await;
         session.state = SessionState::Authenticated;
         session.account_id = resp.account_id.clone();
         info!("User {} authenticated via LOGIN", user);
         write_line(writer, &tagged_ok(tag, "LOGIN succeeded")).await
     } else {
+        auth_record_failure(&session.peer_ip, &user).await;
         let error_msg = resp.error;
         warn!("LOGIN failed for {}: {}", user, error_msg);
         write_line(writer, &tagged_no(tag, &format!("LOGIN failed: {}", error_msg))).await
@@ -1226,13 +1357,13 @@ async fn handle_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     // Step 1: send the continuation prompt.
     write_line(writer, "+ \r\n").await?;
 
-    // Step 2: read the base64 continuation line from the client.
-    let mut line = String::new();
-    match reader.read_line(&mut line).await {
-        Ok(0) => bail!("Client disconnected during AUTHENTICATE"),
-        Ok(_) => {}
+    // Step 2: read the base64 continuation line from the client (bounded so a
+    // client that never sends a newline cannot exhaust memory).
+    let line = match read_line_limited(reader).await {
+        Ok(None) => bail!("Client disconnected during AUTHENTICATE"),
+        Ok(Some(l)) => l,
         Err(e) => bail!("Read error during AUTHENTICATE: {}", e),
-    }
+    };
     let line = line.trim();
     if line.is_empty() || line == "*" {
         // RFC 3501: "*" cancels the authentication exchange.
@@ -1261,6 +1392,23 @@ async fn handle_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let user = String::from_utf8_lossy(authcid).to_string();
     let password = String::from_utf8_lossy(passwd).to_string();
 
+    // Brute-force throttling: locked-out pairs are rejected immediately,
+    // before any credential work (no timing leak).
+    if auth_is_locked(&session.peer_ip, &user).await {
+        warn!(
+            "AUTHENTICATE throttled for {} from {} (too many failures)",
+            user, session.peer_ip
+        );
+        return write_line(
+            writer,
+            &tagged_no(
+                tag,
+                "[AUTHORIZATIONFAILED] Too many failed attempts; try again later",
+            ),
+        )
+        .await;
+    }
+
     let mut client = session.client.clone();
     let request = mail_proto::AuthenticateRequest {
         email: user.clone(),
@@ -1274,11 +1422,13 @@ async fn handle_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let resp = resp.into_inner();
 
     if resp.success {
+        auth_clear_failures(&session.peer_ip, &user).await;
         session.state = SessionState::Authenticated;
         session.account_id = resp.account_id.clone();
         info!("User {} authenticated via AUTHENTICATE PLAIN", user);
         write_line(writer, &tagged_ok(tag, "AUTHENTICATE succeeded")).await
     } else {
+        auth_record_failure(&session.peer_ip, &user).await;
         let error_msg = resp.error;
         warn!("AUTHENTICATE PLAIN failed for {}: {}", user, error_msg);
         write_line(
@@ -1552,10 +1702,13 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
             });
         }
     }
+    // Fetch message bodies with bounded concurrency (8 in flight). Results
+    // are keyed by UID, and responses below are emitted in sequence-number
+    // order, so completing out of order does not affect the FETCH response.
+    const FETCH_CONCURRENCY: usize = 8;
     let body_results: HashMap<u64, Result<GetMessageBody>> =
-        futures::future::join_all(body_futures)
-            .await
-            .into_iter()
+        futures::stream::iter(body_futures)
+            .buffer_unordered(FETCH_CONCURRENCY)
             .map(|(uid, r)| {
                 let parsed = r
                     .map(|resp| {
@@ -1565,7 +1718,8 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                     .map_err(|e| anyhow::anyhow!("{}", e));
                 (uid, parsed)
             })
-            .collect();
+            .collect()
+            .await;
 
     // Fire \Seen flag updates for non-peek BODY fetches on unread messages.
     let mut seen_futures = Vec::new();
@@ -1717,7 +1871,9 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         writer.write_all(b")\r\n").await?;
     }
 
-    futures::future::join_all(seen_futures).await;
+    futures::stream::iter(seen_futures)
+        .for_each_concurrent(FETCH_CONCURRENCY, |fut| fut)
+        .await;
     writer.flush().await?;
     write_line(writer, &tagged_ok(tag, "FETCH completed")).await
 }
@@ -2302,6 +2458,11 @@ async fn handle_copy<W: AsyncWrite + Unpin>(
     };
 
     // RFC 4315: [COPYUID <uidvalidity> <src uid-set> <dst uid-set>]
+    // The uidvalidity is the DESTINATION mailbox's.
+    let dest_uidvalidity = match get_mailbox_status(&mut client, &session.account_id, &dest).await {
+        Ok(s) => s.into_inner().mailbox.unwrap_or_default().uidvalidity.max(1),
+        Err(_) => session.uid_validity.max(1),
+    };
     let mut pairs: Vec<(u64, u64)> = resp
         .uid_mapping
         .iter()
@@ -2317,7 +2478,7 @@ async fn handle_copy<W: AsyncWrite + Unpin>(
             tag,
             &format!(
                 "[COPYUID {} {} {}] COPY completed",
-                session.uid_validity,
+                dest_uidvalidity,
                 srcs.join(","),
                 dsts.join(",")
             ),
@@ -2366,6 +2527,11 @@ async fn handle_move<W: AsyncWrite + Unpin>(
     };
 
     // RFC 4315: [COPYUID <uidvalidity> <src uid-set> <dst uid-set>]
+    // The uidvalidity is the DESTINATION mailbox's.
+    let dest_uidvalidity = match get_mailbox_status(&mut client, &session.account_id, &dest).await {
+        Ok(s) => s.into_inner().mailbox.unwrap_or_default().uidvalidity.max(1),
+        Err(_) => session.uid_validity.max(1),
+    };
     let mut pairs: Vec<(u64, u64)> = resp
         .uid_mapping
         .iter()
@@ -2385,7 +2551,7 @@ async fn handle_move<W: AsyncWrite + Unpin>(
             tag,
             &format!(
                 "[COPYUID {} {} {}] MOVE completed",
-                session.uid_validity,
+                dest_uidvalidity,
                 srcs.join(","),
                 dsts.join(",")
             ),
@@ -2928,6 +3094,16 @@ async fn handle_append<W: AsyncWrite + Unpin>(
 
     let resp = match client.store_message(req).await {
         Ok(r) => r.into_inner(),
+        Err(e) if e.code() == tonic::Code::ResourceExhausted => {
+            // RFC 3501 §6.3.11: quota violations are reported with NO and an
+            // [ALERT] response code so the client surfaces them to the user.
+            warn!("APPEND rejected: quota exceeded for account {}", session.account_id);
+            return write_line(
+                writer,
+                &tagged_no(tag, "[ALERT] Quota exceeded: APPEND failed"),
+            )
+            .await;
+        }
         Err(e) => {
             return write_line(
                 writer,
@@ -2960,7 +3136,7 @@ async fn handle_append<W: AsyncWrite + Unpin>(
 async fn handle_expunge<W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
-    _args: &str,
+    uid_set: Option<&str>,
     writer: &mut W,
 ) -> Result<()> {
     if !mailbox_selected(session) {
@@ -2972,10 +3148,30 @@ async fn handle_expunge<W: AsyncWrite + Unpin>(
 
     refresh_session_view(session).await;
 
+    // UID EXPUNGE (RFC 4315 §2.2.2) restricts the expunge to the given UID
+    // set: only the intersection of \Deleted and the set is removed. An empty
+    // resolved set (e.g. every UID is out of range) expunges nothing.
+    let uids: Vec<u64> = match uid_set {
+        Some(set) => {
+            let resolved = match resolve_sequence_set(session, set, true) {
+                Ok(v) => v,
+                Err(e) => {
+                    return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
+                }
+            };
+            if resolved.is_empty() {
+                return write_line(writer, &tagged_ok(tag, "EXPUNGE completed")).await;
+            }
+            resolved
+        }
+        None => Vec::new(),
+    };
+
     let mut client = session.client.clone();
     let req = ExpungeRequest {
         account_id: session.account_id.clone(),
         mailbox: session.mailbox.clone(),
+        uids,
     };
 
     let resp = match client.expunge(req).await {
@@ -3056,6 +3252,8 @@ async fn handle_close<W: AsyncWrite + Unpin>(
         let req = ExpungeRequest {
             account_id: session.account_id.clone(),
             mailbox: session.mailbox.clone(),
+            // CLOSE expunges every \Deleted message (no UID set).
+            uids: Vec::new(),
         };
         let _ = client.expunge(req).await;
     }
@@ -3087,7 +3285,7 @@ async fn handle_idle<W: AsyncWrite + Unpin>(
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 async fn get_mailbox_status(
-    client: &mut MailstoreServiceClient<Channel>,
+    client: &mut MailstoreClient,
     account_id: &str,
     mailbox: &str,
 ) -> Result<tonic::Response<mail_proto::GetMailboxStatusResponse>> {
@@ -3298,10 +3496,11 @@ async fn run_idle<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             None
         }
     };
-    let mut stream_dead = false;
+    // Without a live event stream we must never reach for `stream.message()`
+    // below: mark it dead up front so the select only waits on DONE.
+    let mut stream_dead = stream.is_none();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(29 * 60);
-    let mut line = String::new();
 
     loop {
         // Build the event-stream future on each iteration: a pending future
@@ -3315,14 +3514,16 @@ async fn run_idle<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         };
 
         tokio::select! {
-            read_res = reader.read_line(&mut line) => {
+            // Bounded read: a client that never sends a newline cannot grow
+            // the buffer indefinitely (MAX_COMMAND_LINE applies).
+            read_res = read_line_limited(reader) => {
                 match read_res {
-                    Ok(0) => {
+                    Ok(None) => {
                         let mut g = session.lock().await;
                         g.state = SessionState::Logout;
                         return Ok(());
                     }
-                    Ok(_) => {
+                    Ok(Some(line)) => {
                         let tokens: Vec<&str> = line.split_whitespace().collect();
                         if tokens.is_empty() {
                             continue;
@@ -3420,13 +3621,14 @@ async fn handle_connection(
         .timeout(Duration::from_secs(30))
         .connect_lazy();
 
-    let client = MailstoreServiceClient::new(channel)
+    let client = build_mailstore_client(channel)
         .max_decoding_message_size(64 * 1024 * 1024)
         .max_encoding_message_size(64 * 1024 * 1024);
     let session = Arc::new(Mutex::new({
         let mut s = ImapSession::new(client);
         s.tls_active = is_tls;
         s.allow_insecure_auth = allow_insecure_auth;
+        s.peer_ip = peer.ip().to_string();
         s
     }));
 
@@ -3778,6 +3980,27 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn auth_failure_tracker_locks_after_limit_and_clears_on_success() {
+        // Unique keys so parallel tests cannot interfere via the global table.
+        let ip = format!("10.9.8.7:{}", std::process::id());
+        let user = "throttle-test@example.com";
+
+        assert!(!auth_is_locked(&ip, user).await);
+        for _ in 0..AUTH_FAILURE_LIMIT {
+            assert!(
+                !auth_is_locked(&ip, user).await,
+                "must not lock before the limit is reached"
+            );
+            auth_record_failure(&ip, user).await;
+        }
+        assert!(auth_is_locked(&ip, user).await, "locked after 5 failures");
+
+        // A successful login clears the history immediately.
+        auth_clear_failures(&ip, user).await;
+        assert!(!auth_is_locked(&ip, user).await);
+    }
+
     #[test]
     fn seq_set_parses_singles_and_ranges() {
         assert_eq!(parse_sequence_set("1").unwrap(), vec![(1, 1)]);
@@ -3785,7 +4008,9 @@ mod tests {
         assert_eq!(parse_sequence_set("1:5").unwrap(), vec![(1, 5)]);
         assert_eq!(parse_sequence_set("1:*").unwrap(), vec![(1, u64::MAX)]);
         assert_eq!(parse_sequence_set("*").unwrap(), vec![(u64::MAX, u64::MAX)]);
-        assert_eq!(parse_sequence_set("5:2").unwrap(), vec![]);
+        // RFC 3501 §9: descending ranges are inclusive and normalized.
+        assert_eq!(parse_sequence_set("5:2").unwrap(), vec![(2, 5)]);
+        assert_eq!(parse_sequence_set("*:4").unwrap(), vec![(4, u64::MAX)]);
         assert_eq!(parse_sequence_set("0").unwrap(), vec![]);
     }
 
@@ -3847,6 +4072,37 @@ mod tests {
         // empty mailbox
         assert_eq!(
             resolve_intervals(&parse_sequence_set("1:*").unwrap(), true, &[], 0),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn star_ranges_always_include_last_message() {
+        let uid_map = vec![10, 20, 30, 40];
+        let max_uid = 40;
+        // UID 100:* with max UID 40 → RFC 3501 §9: always includes the last.
+        assert_eq!(
+            resolve_intervals(&parse_sequence_set("100:*").unwrap(), true, &uid_map, max_uid),
+            vec![40]
+        );
+        // Descending wildcard range *:30 → 30..max
+        assert_eq!(
+            resolve_intervals(&parse_sequence_set("*:30").unwrap(), true, &uid_map, max_uid),
+            vec![30, 40]
+        );
+        // Sequence mode: seq 5:* on a 4-message mailbox → the last message.
+        assert_eq!(
+            resolve_intervals(&parse_sequence_set("5:*").unwrap(), false, &uid_map, max_uid),
+            vec![40]
+        );
+        // Sequence mode descending: *:2 → messages 2..=4
+        assert_eq!(
+            resolve_intervals(&parse_sequence_set("*:2").unwrap(), false, &uid_map, max_uid),
+            vec![20, 30, 40]
+        );
+        // Ranges entirely above the mailbox without a wildcard stay empty.
+        assert_eq!(
+            resolve_intervals(&parse_sequence_set("100:200").unwrap(), true, &uid_map, max_uid),
             Vec::<u64>::new()
         );
     }

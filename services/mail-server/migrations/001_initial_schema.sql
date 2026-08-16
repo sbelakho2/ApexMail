@@ -172,8 +172,14 @@ CREATE INDEX IF NOT EXISTS idx_mail_messages_unread
     ON mail_messages(account_id, is_read) 
     WHERE is_read = false AND is_deleted = false;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_account_message_id 
-    ON mail_messages(account_id, message_id);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_partitioned_table
+                   WHERE partrelid = 'mail_messages'::regclass) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_account_message_id
+            ON mail_messages(account_id, message_id);
+    END IF;
+END $$;
 
 -- Full-text search index
 CREATE INDEX IF NOT EXISTS idx_mail_messages_search 

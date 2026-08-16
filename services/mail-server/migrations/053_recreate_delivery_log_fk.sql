@@ -52,12 +52,14 @@ BEGIN
     IF v_orphan_count > 0 THEN
         RAISE WARNING 'C-17: % email_delivery_log rows have no matching email_queue entry — FK will not be created. Run data cleanup first.', v_orphan_count;
     ELSE
-        -- Safe to add FK
+        -- Safe to add FK (skip if already present on re-run)
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'email_delivery_log_email_id_fkey') THEN
         ALTER TABLE email_delivery_log
             ADD CONSTRAINT email_delivery_log_email_id_fkey
             FOREIGN KEY (email_id, created_at)
             REFERENCES email_queue(id, created_at)
             ON DELETE CASCADE;
         RAISE NOTICE 'C-17: FK email_delivery_log(email_id, created_at) -> email_queue(id, created_at) recreated successfully.';
+        END IF;
     END IF;
 END $$;

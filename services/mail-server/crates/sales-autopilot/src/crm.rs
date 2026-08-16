@@ -38,7 +38,7 @@ impl CrmService {
         source: String,
     ) -> Lead {
         let lead = Lead {
-            id: Uuid::new_v4(),
+            id: Uuid::new_v4().to_string(),
             tenant_id,
             email,
             name,
@@ -54,13 +54,13 @@ impl CrmService {
     }
 
     /// Retrieve a lead by id, scoped to tenant.
-    pub fn get_lead(&self, id: Uuid, tenant_id: &str) -> Result<Lead, SalesError> {
+    pub fn get_lead(&self, id: &str, tenant_id: &str) -> Result<Lead, SalesError> {
         self.leads
             .read()
             .iter()
             .find(|l| l.id == id && l.tenant_id == tenant_id)
             .cloned()
-            .ok_or(SalesError::LeadNotFound(id))
+            .ok_or_else(|| SalesError::LeadNotFound(id.to_string()))
     }
 
     /// List leads, optionally filtering by tenant_id, status and/or source.
@@ -74,16 +74,20 @@ impl CrmService {
             .read()
             .iter()
             .filter(|l| l.tenant_id == tenant_id)
-            .filter(|l| status.is_none_or(|s| l.status == s))
+            .filter(|l| status.as_ref().is_none_or(|s| l.status == *s))
             .filter(|l| source.is_none_or(|src| l.source == src))
             .cloned()
             .collect()
     }
 
     /// Transition a lead to a new status, scoped to tenant.
+    ///
+    /// Enforces the lead lifecycle state machine — see
+    /// [`is_valid_transition`] for the allowed edges. Invalid transitions
+    /// are rejected with [`SalesError::InvalidInput`].
     pub fn update_lead_status(
         &self,
-        id: Uuid,
+        id: &str,
         new_status: LeadStatus,
         tenant_id: &str,
     ) -> Result<Lead, SalesError> {
@@ -91,7 +95,13 @@ impl CrmService {
         let lead = store
             .iter_mut()
             .find(|l| l.id == id && l.tenant_id == tenant_id)
-            .ok_or(SalesError::LeadNotFound(id))?;
+            .ok_or_else(|| SalesError::LeadNotFound(id.to_string()))?;
+        if !is_valid_transition(&lead.status, &new_status) {
+            return Err(SalesError::InvalidInput(format!(
+                "invalid lead status transition: {} -> {}",
+                lead.status, new_status
+            )));
+        }
         lead.status = new_status;
         Ok(lead.clone())
     }
@@ -148,6 +158,34 @@ pub enum CrmBackend {
     Postgres(SqlxCrmService),
 }
 
+/// Lead lifecycle state machine.
+///
+/// Allowed transitions:
+///
+/// ```text
+/// New ──────► Contacted ──► Qualified ──► Converted
+///  │             │              │
+///  │             └──► Lost ◄────┘
+///  │                    │
+///  └───────◄────────────┘   (Lost → New re-open)
+/// ```
+///
+/// Every other edge (including no-op self transitions and transitions out of
+/// terminal/unrecognised statuses) is invalid and must be rejected with
+/// [`SalesError::InvalidInput`].
+pub fn is_valid_transition(from: &LeadStatus, to: &LeadStatus) -> bool {
+    matches!(
+        (from, to),
+        (LeadStatus::New, LeadStatus::Contacted)
+            | (LeadStatus::New, LeadStatus::Qualified)
+            | (LeadStatus::Contacted, LeadStatus::Qualified)
+            | (LeadStatus::Contacted, LeadStatus::Lost)
+            | (LeadStatus::Qualified, LeadStatus::Converted)
+            | (LeadStatus::Qualified, LeadStatus::Lost)
+            | (LeadStatus::Lost, LeadStatus::New)
+    )
+}
+
 impl CrmBackend {
     pub fn postgres(pool: sqlx::PgPool) -> Self {
         Self::Postgres(SqlxCrmService::new(pool))
@@ -177,6 +215,7 @@ impl CrmBackend {
         title: String,
         source: String,
     ) -> Result<Lead, SalesError> {
+        Self::require_tenant_id(tenant_id)?;
         match self {
             Self::Postgres(service) => {
                 service
@@ -186,7 +225,7 @@ impl CrmBackend {
         }
     }
 
-    pub async fn get_lead(&self, id: Uuid, tenant_id: &str) -> Result<Lead, SalesError> {
+    pub async fn get_lead(&self, id: &str, tenant_id: &str) -> Result<Lead, SalesError> {
         Self::require_tenant_id(tenant_id)?;
         match self {
             Self::Postgres(service) => service.get_lead(id, tenant_id).await,
@@ -201,6 +240,7 @@ impl CrmBackend {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Lead>, SalesError> {
+        Self::require_tenant_id(tenant_id)?;
         match self {
             Self::Postgres(service) => {
                 service
@@ -212,7 +252,7 @@ impl CrmBackend {
 
     pub async fn update_lead_status(
         &self,
-        id: Uuid,
+        id: &str,
         new_status: LeadStatus,
         tenant_id: &str,
     ) -> Result<Lead, SalesError> {
@@ -222,7 +262,7 @@ impl CrmBackend {
         }
     }
 
-    pub async fn delete_lead(&self, id: Uuid, tenant_id: &str) -> Result<(), SalesError> {
+    pub async fn delete_lead(&self, id: &str, tenant_id: &str) -> Result<(), SalesError> {
         Self::require_tenant_id(tenant_id)?;
         match self {
             Self::Postgres(service) => service.delete_lead(id, tenant_id).await,
@@ -231,7 +271,7 @@ impl CrmBackend {
 
     pub async fn set_lead_score(
         &self,
-        id: Uuid,
+        id: &str,
         score: u8,
         tenant_id: &str,
     ) -> Result<(), SalesError> {
@@ -248,6 +288,7 @@ impl CrmBackend {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Lead>, SalesError> {
+        Self::require_tenant_id(tenant_id)?;
         match self {
             Self::Postgres(service) => service.search_leads(tenant_id, query, limit, offset).await,
         }
@@ -289,7 +330,7 @@ mod tests {
         let leads = svc.list_leads("tenant-a", None, None);
         assert_eq!(leads.len(), 2);
         let first = &leads[0];
-        let fetched = svc.get_lead(first.id, "tenant-a").unwrap();
+        let fetched = svc.get_lead(&first.id, "tenant-a").unwrap();
         assert_eq!(fetched.email, first.email);
     }
 
@@ -297,14 +338,14 @@ mod tests {
     fn test_update_lead_status() {
         let svc = make_svc();
         let leads = svc.list_leads("tenant-a", None, None);
-        let id = leads[0].id;
+        let id = leads[0].id.clone();
         let updated = svc
-            .update_lead_status(id, LeadStatus::Contacted, "tenant-a")
+            .update_lead_status(&id, LeadStatus::Contacted, "tenant-a")
             .unwrap();
         assert_eq!(updated.status, LeadStatus::Contacted);
 
         // missing lead
-        let res = svc.update_lead_status(Uuid::new_v4(), LeadStatus::Lost, "tenant-a");
+        let res = svc.update_lead_status("does-not-exist", LeadStatus::Lost, "tenant-a");
         assert!(res.is_err());
     }
 
@@ -384,7 +425,7 @@ mod tests {
         );
 
         // tenant-a cannot see tenant-b's lead
-        match svc.get_lead(lead_b.id, "tenant-a") {
+        match svc.get_lead(&lead_b.id, "tenant-a") {
             Err(SalesError::LeadNotFound(_)) => {}
             other => panic!(
                 "Expected LeadNotFound for cross-tenant get, got {:?}",
@@ -393,7 +434,7 @@ mod tests {
         }
 
         // tenant-b cannot see tenant-a's lead
-        match svc.get_lead(lead_a.id, "tenant-b") {
+        match svc.get_lead(&lead_a.id, "tenant-b") {
             Err(SalesError::LeadNotFound(_)) => {}
             other => panic!(
                 "Expected LeadNotFound for cross-tenant get, got {:?}",
@@ -415,7 +456,7 @@ mod tests {
         );
 
         // tenant-b cannot update tenant-a's lead status
-        match svc.update_lead_status(lead_a.id, LeadStatus::Contacted, "tenant-b") {
+        match svc.update_lead_status(&lead_a.id, LeadStatus::Contacted, "tenant-b") {
             Err(SalesError::LeadNotFound(_)) => {}
             other => panic!(
                 "Expected LeadNotFound for cross-tenant status update, got {:?}",
@@ -425,7 +466,7 @@ mod tests {
 
         // tenant-a can still update their own lead
         let updated = svc
-            .update_lead_status(lead_a.id, LeadStatus::Contacted, "tenant-a")
+            .update_lead_status(&lead_a.id, LeadStatus::Contacted, "tenant-a")
             .unwrap();
         assert_eq!(updated.status, LeadStatus::Contacted);
     }
@@ -516,7 +557,7 @@ mod tests {
     #[test]
     fn get_lead_missing_returns_error() {
         let svc = CrmService::new();
-        match svc.get_lead(Uuid::new_v4(), "tenant-a") {
+        match svc.get_lead("no-such-lead-id", "tenant-a") {
             Err(SalesError::LeadNotFound(_)) => {}
             other => panic!("Expected LeadNotFound, got {:?}", other),
         }
@@ -533,17 +574,129 @@ mod tests {
             "".into(),
             "".into(),
         );
-        let id = lead.id;
+        let id = lead.id.clone();
 
+        // Happy path: New → Contacted → Qualified → Converted
         for status in [
             LeadStatus::Contacted,
             LeadStatus::Qualified,
             LeadStatus::Converted,
-            LeadStatus::Lost,
-            LeadStatus::New, // back to New
         ] {
-            let updated = svc.update_lead_status(id, status, "tenant-a").unwrap();
+            let updated = svc
+                .update_lead_status(&id, status.clone(), "tenant-a")
+                .unwrap();
             assert_eq!(updated.status, status);
+        }
+    }
+
+    #[test]
+    fn update_status_lost_lead_can_be_reopened() {
+        let svc = CrmService::new();
+        let lead = svc.create_lead(
+            "tenant-a".into(),
+            "x@x.com".into(),
+            "X".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+        );
+        let id = &lead.id;
+
+        // New → Contacted → Lost, then re-open: Lost → New
+        svc.update_lead_status(id, LeadStatus::Contacted, "tenant-a")
+            .unwrap();
+        svc.update_lead_status(id, LeadStatus::Lost, "tenant-a")
+            .unwrap();
+        let reopened = svc
+            .update_lead_status(id, LeadStatus::New, "tenant-a")
+            .unwrap();
+        assert_eq!(reopened.status, LeadStatus::New);
+    }
+
+    #[test]
+    fn update_status_rejects_invalid_transitions() {
+        let svc = CrmService::new();
+        let lead = svc.create_lead(
+            "tenant-a".into(),
+            "x@x.com".into(),
+            "X".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+        );
+        let id = &lead.id;
+
+        // New → Converted skips qualification: invalid
+        match svc.update_lead_status(id, LeadStatus::Converted, "tenant-a") {
+            Err(SalesError::InvalidInput(_)) => {}
+            other => panic!("Expected InvalidInput for New → Converted, got {:?}", other),
+        }
+
+        // No-op self transition is invalid too
+        assert!(matches!(
+            svc.update_lead_status(id, LeadStatus::New, "tenant-a"),
+            Err(SalesError::InvalidInput(_))
+        ));
+
+        // Converted is terminal: Converted → Lost is invalid
+        svc.update_lead_status(id, LeadStatus::Qualified, "tenant-a")
+            .unwrap();
+        svc.update_lead_status(id, LeadStatus::Converted, "tenant-a")
+            .unwrap();
+        assert!(matches!(
+            svc.update_lead_status(id, LeadStatus::Lost, "tenant-a"),
+            Err(SalesError::InvalidInput(_))
+        ));
+
+        // The rejected transitions must not have mutated the status
+        let fetched = svc.get_lead(id, "tenant-a").unwrap();
+        assert_eq!(fetched.status, LeadStatus::Converted);
+    }
+
+    #[test]
+    fn is_valid_transition_table() {
+        let new = LeadStatus::New;
+        let contacted = LeadStatus::Contacted;
+        let qualified = LeadStatus::Qualified;
+        let converted = LeadStatus::Converted;
+        let lost = LeadStatus::Lost;
+
+        // Allowed edges
+        for (from, to) in [
+            (&new, &contacted),
+            (&new, &qualified),
+            (&contacted, &qualified),
+            (&contacted, &lost),
+            (&qualified, &converted),
+            (&qualified, &lost),
+            (&lost, &new),
+        ] {
+            assert!(
+                is_valid_transition(from, to),
+                "{from} -> {to} should be valid"
+            );
+        }
+
+        // A representative set of disallowed edges
+        for (from, to) in [
+            (&new, &converted),
+            (&new, &lost),
+            (&converted, &lost),
+            (&converted, &new),
+            (&lost, &qualified),
+            (&qualified, &new),
+            (&new, &new),
+            (&contacted, &contacted),
+            (&new, &LeadStatus::Snoozed),
+            (
+                &LeadStatus::Unknown("weird".into()),
+                &LeadStatus::Qualified,
+            ),
+        ] {
+            assert!(
+                !is_valid_transition(from, to),
+                "{from} -> {to} should be invalid"
+            );
         }
     }
 
@@ -593,8 +746,8 @@ mod tests {
     #[test]
     fn filter_by_status_after_update() {
         let svc = make_svc();
-        let id = svc.list_leads("tenant-a", None, None)[0].id;
-        svc.update_lead_status(id, LeadStatus::Qualified, "tenant-a")
+        let id = svc.list_leads("tenant-a", None, None)[0].id.clone();
+        svc.update_lead_status(&id, LeadStatus::Qualified, "tenant-a")
             .unwrap();
         let qualified = svc.list_leads("tenant-a", Some(LeadStatus::Qualified), None);
         assert_eq!(qualified.len(), 1);

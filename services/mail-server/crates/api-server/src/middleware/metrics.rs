@@ -26,12 +26,14 @@ pub async fn metrics_middleware(req: Request<axum::body::Body>, next: Next) -> R
     let method = req.method().clone().to_string();
 
     // Prefer the matched pattern ("/v1/messages/:id") over the raw URI
-    // to avoid high-cardinality label explosion.
+    // to avoid high-cardinality label explosion. When no route matched
+    // (404s, odd probes) fall back to a single literal label instead of
+    // the raw request path, which is attacker-controlled cardinality.
     let path_pattern = req
         .extensions()
         .get::<MatchedPath>()
         .map(|mp| mp.as_str().to_owned())
-        .unwrap_or_else(|| req.uri().path().to_owned());
+        .unwrap_or_else(|| "unmatched".to_owned());
 
     // In-flight gauge
     metrics::gauge!("apexmail_http_requests_in_flight", "method" => method.clone()).increment(1.0);

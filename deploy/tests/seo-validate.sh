@@ -32,7 +32,8 @@ extract_meta() {
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
     local title
-    title="$(grep -oP '<title>\K[^<]+' "$file" 2>/dev/null || echo "")"
+    # Flatten newlines first: built HTML can split the title across lines.
+    title="$(tr '\n' ' ' < "$file" | grep -oP '<title>\K[^<]+' || true)"
     local desc
     desc="$(grep -oP '<meta\s+name="description"\s+content="([^"]+)"' "$file" 2>/dev/null | grep -oP 'content="\K[^"]+' || echo "")"
     local canonical
@@ -46,7 +47,10 @@ extract_meta() {
     local robots
     robots="$(grep -oP '<meta\s+name="robots"\s+content="([^"]+)"' "$file" 2>/dev/null | grep -oP 'content="\K[^"]+' || echo "index, follow")"
     local jsonld
-    jsonld="$(grep -c 'application/ld+json' "$file" 2>/dev/null || echo 0)"
+    # grep -c prints "0" and exits 1 on zero matches — `|| echo 0` would
+    # append a second 0 ("0\n0") and break the jq --argjson call below.
+    jsonld="$(grep -c 'application/ld+json' "$file" 2>/dev/null || true)"
+    jsonld="${jsonld:-0}"
 
     jq -n --arg path "$path" --arg title "$title" --arg desc "$desc" \
         --arg canonical "$canonical" --arg og_title "$og_title" \
@@ -61,7 +65,7 @@ main() {
     local titles_seen=""
     local descriptions_seen=""
 
-    find "${BUILD_DIR}" -name '*.html' -not -name '404.html' | sort | while read -r file; do
+    while read -r file; do
         local meta
         meta="$(extract_meta "$file")"
         local path title desc canonical og_title og_desc og_image robots jsonld
@@ -122,14 +126,15 @@ main() {
         if [[ "$jsonld" -eq 0 ]] && [[ "$path" == "/" || "$path" == "/index.html" ]]; then
             add_issue "$path" "warning" "Homepage missing JSON-LD structured data"
         fi
-    done
+    done < <(find "${BUILD_DIR}" -name '*.html' -not -name '404.html' | sort)
 
     # Check sitemap
     echo ""
     echo "=== Sitemap Check ==="
     if [[ -f "${BUILD_DIR}/sitemap.xml" ]]; then
         local sitemap_urls
-        sitemap_urls="$(grep -c '<url>' "${BUILD_DIR}/sitemap.xml" 2>/dev/null || echo 0)"
+        sitemap_urls="$(grep -c '<url>' "${BUILD_DIR}/sitemap.xml" 2>/dev/null || true)"
+        sitemap_urls="${sitemap_urls:-0}"
         echo "  Sitemap URLs: $sitemap_urls"
 
         grep 'noindex' "${BUILD_DIR}/sitemap.xml" 2>/dev/null && \

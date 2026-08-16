@@ -3,12 +3,17 @@
 //! • Events are RPUSH'd into a Redis list (write-ahead log) _before_ the
 //! HTTP response is sent, so they survive process crashes (Redis AOF).
 //! • A background Tokio task drains batches from Redis → Postgres using an
-//! atomic Lua script (LRANGE + LTRIM in one Redis round-trip).
+//! atomic Lua script (LRANGE + LTRIM in one Redis round-trip). Batch size is
+//! adaptive (LLEN-driven, capped at 500) and Postgres failures back off
+//! exponentially (1 s·2^n, capped 60 s) with a per-event retry budget.
 //! • If the Postgres write fails, events are re-RPUSH'd back to Redis so the
-//! next flush cycle retries (-500-001).
+//! next flush cycle retries (-500-001); after 10 retries an event is dropped
+//! as poison with an error log.
 //! • Events are wrapped in versioned envelopes with a SHA-256 checksum
 //! (E-174) for forward-compatible integrity checking.
-//! • Dedup via Redis SETNX (EX 86400, open; EX 1 s, rapid clicks).
+//! • Dedup via Redis SETNX (EX 86400, open; EX 1 s, rapid clicks) — the key
+//! is rolled back (DEL) when the subsequent WAL enqueue fails, so a failed
+//! enqueue never swallows the client's retry as a "duplicate".
 
 use std::{
     sync::{
@@ -33,6 +38,15 @@ use uuid::Uuid;
 
 /// WAL envelope version for the persisted tracking payload.
 const WAL_VERSION: u8 = 1;
+
+/// Maximum re-enqueue attempts for a WAL event whose Postgres write keeps
+/// failing. Events exceeding this are dropped as poison (with an error log)
+/// so one permanently bad event cannot wedge the WAL forever.
+const MAX_EVENT_RETRIES: usize = 10;
+
+/// Upper bound for a single flush drain (adaptive: the actual batch is the
+/// current WAL length, capped at this value so one flush stays bounded).
+const MAX_FLUSH_BATCH: usize = 500;
 
 /// Redis list key (without the `tracking:` keyPrefix applied by the pool).
 /// The pool's keyPrefix is `tracking:` so the effective key is
@@ -252,16 +266,33 @@ impl EventProcessor {
         self.running.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
             info!(
-                "EventProcessor: flush loop started (interval={}ms, batch={})",
-                this.flush_interval_ms, this.max_buffer_size
+                "EventProcessor: flush loop started (interval={}ms, batch<={})",
+                this.flush_interval_ms,
+                MAX_FLUSH_BATCH.max(this.max_buffer_size)
             );
 
+            // Exponential backoff while Postgres writes keep failing:
+            // 1s · 2^n capped at 60 s, reset on the first success. Without
+            // this a down database is hammered every flush interval while
+            // every event burns its retry budget at full speed.
+            let mut consecutive_failures: u32 = 0;
+
             loop {
+                let sleep_ms = if consecutive_failures == 0 {
+                    interval.as_millis() as u64
+                } else {
+                    // fail 1 → 1 s, 2 → 2 s, 3 → 4 s … shift capped at 6
+                    // (64 s) then clamped to 60 s.
+                    (1_000u64 << (consecutive_failures - 1).min(6)).min(60_000)
+                };
                 tokio::select! {
-                // Re-schedule after the configured fixed interval.
-                                    _ = tokio::time::sleep(interval) => {
+                // Re-schedule after the interval (or the backoff delay).
+                                    _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {
                                         if let Err(e) = this.flush().await {
-                                            error!(error = %e, "EventProcessor: flush error");
+                                            consecutive_failures = consecutive_failures.saturating_add(1);
+                                            error!(error = %e, consecutive_failures, backoff_ms = sleep_ms, "EventProcessor: flush error");
+                                        } else {
+                                            consecutive_failures = 0;
                                         }
                                     }
                 // Shutdown signal received
@@ -322,7 +353,13 @@ impl EventProcessor {
             metadata: None,
         };
 
-        self.enqueue_event(&event).await?;
+        if let Err(e) = self.enqueue_event(&event).await {
+            // Roll back the dedup key: the event never made it into the WAL,
+            // and a stale key would swallow the client's retry as a
+            // "duplicate" for the next 24 h.
+            self.clear_dedup(&dedup_key).await;
+            return Err(e);
+        }
 
         // Increment Redis counters (non-critical, fire-and-forget)
         let now = Utc::now();
@@ -372,7 +409,12 @@ impl EventProcessor {
             metadata: None,
         };
 
-        self.enqueue_event(&event).await?;
+        if let Err(e) = self.enqueue_event(&event).await {
+            // Roll back the rapid-click dedup key (1 s TTL) so a retried
+            // click is not swallowed.
+            self.clear_dedup(&dedup_key).await;
+            return Err(e);
+        }
 
         // Track unique clicks via a separate NX key (30-day window)
         let now = Utc::now();
@@ -446,10 +488,23 @@ impl EventProcessor {
     async fn flush(&self) -> Result<()> {
         let mut conn = self.redis.get().await.context("redis pool get (flush)")?;
 
+        // Adaptive batch size: drain what is actually queued (LLEN), bounded
+        // by MAX_FLUSH_BATCH (500). A fixed small batch lets a deep backlog
+        // grow unbounded during traffic spikes even though the loop is idle.
+        let llen: i64 = redis::cmd("LLEN")
+            .arg(REDIS_WAL_KEY)
+            .query_async(&mut *conn)
+            .await
+            .context("LLEN on WAL")?;
+        if llen <= 0 {
+            return Ok(());
+        }
+        let batch: usize = (llen as usize).min(MAX_FLUSH_BATCH.max(self.max_buffer_size));
+
         let raw: Vec<String> = self
             .drain_script
             .key(REDIS_WAL_KEY)
-            .arg(self.max_buffer_size as i64)
+            .arg(batch as i64)
             .invoke_async(&mut *conn)
             .await
             .context("atomic drain Lua script")?;
@@ -471,7 +526,7 @@ impl EventProcessor {
                 error = %write_err,
                 "writeEvents failed — re-pushing events to Redis WAL"
             );
-            self.reenqueue_events(&events).await;
+            self.reenqueue_events(&raw).await;
             return Err(write_err);
         }
 
@@ -511,26 +566,41 @@ impl EventProcessor {
         }
     }
 
-    async fn reenqueue_events(&self, events: &[TrackingEvent]) {
+    /// Re-push drained WAL entries after a Postgres write failure, bumping the
+    /// per-event retry counter in the envelope. Events that have already been
+    /// retried [`MAX_EVENT_RETRIES`] times are dropped as poison (with an
+    /// error log) so one permanently bad event cannot wedge the WAL forever.
+    async fn reenqueue_events(&self, raw: &[String]) {
         let mut conn = match self.redis.get().await {
             Ok(c) => c,
             Err(e) => {
-                error!(error = %e, count = events.len(),
+                error!(error = %e, count = raw.len(),
                     "CRITICAL: failed to get Redis conn for re-enqueue — events may be lost");
                 return;
             }
         };
 
         let mut pipe = redis::pipe();
-        for event in events {
-            if let Ok(payload) = serde_json::to_string(event) {
-                let cs = sha256_hex8(&payload);
-                let envelope = format!(r#"{{"v":{WAL_VERSION},"cs":"{cs}","d":{payload}}}"#);
-                pipe.rpush(REDIS_WAL_KEY, envelope);
+        let mut dropped: usize = 0;
+        for entry in raw {
+            match bump_envelope_retries(entry) {
+                Some(envelope) => {
+                    pipe.rpush(REDIS_WAL_KEY, envelope);
+                }
+                None => {
+                    dropped += 1;
+                    error!(
+                        raw = &entry[..entry.len().min(100)],
+                        "Dropping poison tracking event after max retries"
+                    );
+                }
             }
         }
+        if dropped > 0 {
+            error!(count = dropped, "Dropped poison events exceeding retry budget");
+        }
         if let Err(e) = pipe.query_async::<()>(&mut *conn).await {
-            error!(error = %e, count = events.len(),
+            error!(error = %e, count = raw.len(),
                 "CRITICAL: failed to re-push events to Redis WAL — events may be lost");
         }
     }
@@ -859,6 +929,25 @@ impl EventProcessor {
         .increment(1);
         Ok(result.is_some())
     }
+
+    /// Delete a dedup key — used to roll back the SETNX when the subsequent
+    /// WAL enqueue fails, so retries are not swallowed as duplicates.
+    async fn clear_dedup(&self, key: &str) {
+        match self.redis.get().await {
+            Ok(mut conn) => {
+                if let Err(e) = redis::cmd("DEL")
+                    .arg(format!("dedupe:{key}"))
+                    .query_async::<()>(&mut *conn)
+                    .await
+                {
+                    warn!(error = %e, "Failed to roll back dedup key after enqueue failure");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to get Redis conn for dedup rollback");
+            }
+        }
+    }
 }
 
 // ── WAL parsing ───────────────────────────────────────────────────────────────
@@ -934,6 +1023,47 @@ fn dedup_key(event_type: &str, message_id: &str, recipient: &str, link_id: Optio
     hex::encode(&hash[..16])
 }
 
+/// Bump the retry counter (`"r"`) in a WAL envelope, returning the new
+/// envelope string. Returns `None` when the event has already been retried
+/// [`MAX_EVENT_RETRIES`] times (poison — drop it).
+///
+/// Legacy bare-event entries (no envelope) are wrapped into a versioned
+/// envelope with `r = 1`. The checksum is computed over the re-serialized
+/// `d` value so the modern verification path in
+/// [`parse_single_wal_entry`] accepts the result.
+fn bump_envelope_retries(raw: &str) -> Option<String> {
+    let mut outer: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if let Some(retries) = outer.get("r").and_then(|r| r.as_u64()) {
+        if retries >= MAX_EVENT_RETRIES as u64 {
+            return None;
+        }
+    }
+    if outer.get("v").is_some() {
+        let next = outer.get("r").and_then(|r| r.as_u64()).unwrap_or(0) + 1;
+        // Recompute the checksum over the re-serialized `d` value so the
+        // modern verification path (which hashes `d.to_string()`) accepts
+        // the bumped envelope — the original string-form checksum does not
+        // survive a Value round-trip without preserve_order.
+        let d_str = outer.get("d").map(|d| d.to_string()).unwrap_or_default();
+        let cs = sha256_hex8(&d_str);
+        outer["r"] = serde_json::json!(next);
+        outer["cs"] = serde_json::json!(cs);
+        Some(outer.to_string())
+    } else {
+        // Legacy bare event — wrap it, computing the checksum the same way
+        // the modern parse path verifies it (`d` re-serialized as a Value).
+        let d_str = outer.to_string();
+        let cs = sha256_hex8(&d_str);
+        let envelope = serde_json::json!({
+            "v": WAL_VERSION,
+            "r": 1,
+            "cs": cs,
+            "d": outer,
+        });
+        Some(envelope.to_string())
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -989,6 +1119,73 @@ mod tests {
         assert_eq!(recipient_domain("User@Example.COM"), "example.com");
         assert_eq!(recipient_domain("no-at-sign"), "");
         assert_eq!(recipient_domain("a@b@c.com"), "c.com");
+    }
+
+    #[test]
+    fn bump_envelope_retries_increments_and_preserves_checksum() {
+        let event = TrackingEvent {
+            id: "evt_1".into(),
+            event_type: EventType::Opened,
+            tenant_id: "t1".into(),
+            message_id: "m1".into(),
+            recipient: "a@b.com".into(),
+            link_id: None,
+            link_url: None,
+            unsubscribe_reason: None,
+            user_agent: None,
+            ip_address: None,
+            timestamp: Utc::now(),
+            metadata: None,
+        };
+        let payload = serde_json::to_string(&event).unwrap();
+        let cs = sha256_hex8(&payload);
+        let envelope = format!(r#"{{"v":{WAL_VERSION},"cs":"{cs}","d":{payload}}}"#);
+
+        let bumped = bump_envelope_retries(&envelope).unwrap();
+        let outer: serde_json::Value = serde_json::from_str(&bumped).unwrap();
+        assert_eq!(outer["r"].as_u64(), Some(1));
+        // The bumped envelope must still parse (checksum intact).
+        let parsed = parse_single_wal_entry(&bumped);
+        assert!(parsed.is_ok(), "bumped envelope must remain parseable");
+
+        // Second bump → 2.
+        let bumped2 = bump_envelope_retries(&bumped).unwrap();
+        let outer2: serde_json::Value = serde_json::from_str(&bumped2).unwrap();
+        assert_eq!(outer2["r"].as_u64(), Some(2));
+    }
+
+    #[test]
+    fn bump_envelope_retries_drops_poison_events() {
+        let event = TrackingEvent {
+            id: "evt_1".into(),
+            event_type: EventType::Opened,
+            tenant_id: "t1".into(),
+            message_id: "m1".into(),
+            recipient: "a@b.com".into(),
+            link_id: None,
+            link_url: None,
+            unsubscribe_reason: None,
+            user_agent: None,
+            ip_address: None,
+            timestamp: Utc::now(),
+            metadata: None,
+        };
+        let payload = serde_json::to_string(&event).unwrap();
+        let cs = sha256_hex8(&payload);
+        let envelope = format!(
+            r#"{{"v":{WAL_VERSION},"r":{MAX_EVENT_RETRIES},"cs":"{cs}","d":{payload}}}"#
+        );
+        assert!(bump_envelope_retries(&envelope).is_none());
+    }
+
+    #[test]
+    fn bump_envelope_retries_wraps_legacy_bare_events() {
+        let raw = r#"{"id":"evt_1","type":"opened","tenantId":"t","messageId":"m","recipient":"x@y.com","timestamp":"2024-01-01T00:00:00Z"}"#;
+        let bumped = bump_envelope_retries(raw).unwrap();
+        let outer: serde_json::Value = serde_json::from_str(&bumped).unwrap();
+        assert_eq!(outer["v"].as_u64(), Some(WAL_VERSION as u64));
+        assert_eq!(outer["r"].as_u64(), Some(1));
+        assert!(parse_single_wal_entry(&bumped).is_ok());
     }
 
     #[test]

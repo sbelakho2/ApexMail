@@ -312,9 +312,17 @@ pub fn build_app(state: AppState) -> Router {
             .max_age(Duration::from_secs(86400));
 
         if has_wildcard_origin {
+            // SECURITY: A wildcard ("*") origin is fundamentally incompatible
+            // with credentialed requests. Reflecting any incoming `Origin` while
+            // also sending `Access-Control-Allow-Credentials: true` would let
+            // *every* site issue authenticated cross-origin calls (session
+            // cookies included) against the API. We therefore reflect the
+            // origin for unauthenticated/public reads but explicitly DISABLE
+            // credentials in this mode. Credentialed cross-origin access is only
+            // available when origins are configured explicitly (see below).
             layer
                 .allow_origin(AllowOrigin::mirror_request())
-                .allow_credentials(true)
+                .allow_credentials(false)
         } else {
             // No configured origins: deny all cross-origin requests
             layer
@@ -455,6 +463,62 @@ pub fn build_app(state: AppState) -> Router {
             ddos::ddos_protection_middleware,
         ));
 
+    // ── Control-plane (`/v1/admin/*`) routes ─────────────────
+    // The wildcard scope "*" is granted to every tenant's admin/owner so they
+    // can manage their OWN tenant's resources on customer routes. That scope
+    // must NOT grant control-plane access — otherwise any tenant administrator
+    // could operate the entire platform. `require_system_tenant_middleware`
+    // rejects any caller whose `tenant_id` is not `system`. It is layered on
+    // this dedicated router, which is then merged into `authenticated`, so for
+    // an admin request the full stack runs:
+    //   ddos → require_auth → rate_limit → idempotency → system_tenant → handler
+    // i.e. the gate always runs AFTER `require_auth` has populated `AuthUser`.
+    let admin = Router::new()
+        .nest("/v1/admin/tenants", routes::admin::tenants::router())
+        .nest("/v1/admin/features", routes::admin::features::router())
+        .nest("/v1/admin/gdpr", routes::admin::gdpr::router())
+        .nest("/v1/admin/secrets", routes::admin::secrets::router())
+        .nest("/v1/admin/audit", routes::admin::audit::router())
+        .nest("/v1/admin/dashboard", routes::admin::dashboard::router())
+        .nest(
+            "/v1/admin/compliance",
+            routes::admin::compliance_overview::router(),
+        )
+        .nest("/v1/admin/risk", routes::admin::risk::router())
+        .nest("/v1/admin/revenue", routes::admin::revenue::router())
+        .nest("/v1/admin/inbox", routes::admin::inbox::router())
+        .nest("/v1/admin/calendar", routes::admin::calendar::router())
+        .nest("/v1/admin/warmup", routes::admin::warmup::router())
+        .nest("/v1/admin/content", routes::admin::content::router())
+        .nest("/v1/admin/autopilot", routes::admin::autopilot::router())
+        .nest("/v1/admin/operators", routes::admin::operators::router())
+        .nest("/v1/admin/proxy", routes::admin::proxy::router())
+        .nest("/v1/admin/sales", routes::admin::sales::router())
+        .nest("/v1/admin/analytics", routes::admin::analytics::router())
+        .nest(
+            "/v1/admin/analytics/export",
+            routes::admin::analytics_export::router(),
+        )
+        .nest("/v1/admin/campaigns", routes::admin::campaigns::router())
+        .nest("/v1/admin/crm/leads", routes::admin::crm_leads::router())
+        .nest(
+            "/v1/admin/leads/discovery",
+            routes::admin::leads_discovery::router(),
+        )
+        .nest("/v1/admin/support", routes::admin::support::router())
+        .nest(
+            "/v1/admin/support/analytics",
+            routes::admin::support_analytics::router(),
+        )
+        .nest(
+            "/v1/admin/system/health",
+            routes::admin::system_health::router(),
+        )
+        .nest("/v1/admin/vat", routes::admin::vat::router())
+        .layer(axum::middleware::from_fn(
+            auth::require_system_tenant_middleware,
+        ));
+
     // ── Authenticated v1 routes ─────────────────────────────
     let authenticated = Router::new()
         // ── Grader authenticated routes (conditionally added) ──
@@ -499,51 +563,42 @@ pub fn build_app(state: AppState) -> Router {
         // Migrated auth routes (require session/auth)
         .nest("/v1/auth/impersonate", routes::impersonate::router())
         .nest("/v1/auth/telemetry", routes::telemetry::router())
-        // Control-plane admin routes
-        .nest("/v1/admin/tenants", routes::admin::tenants::router())
-        .nest("/v1/admin/features", routes::admin::features::router())
-        .nest("/v1/admin/gdpr", routes::admin::gdpr::router())
-        .nest("/v1/admin/secrets", routes::admin::secrets::router())
-        .nest("/v1/admin/audit", routes::admin::audit::router())
-        .nest("/v1/admin/dashboard", routes::admin::dashboard::router())
-        .nest(
-            "/v1/admin/compliance",
-            routes::admin::compliance_overview::router(),
-        )
-        .nest("/v1/admin/risk", routes::admin::risk::router())
-        .nest("/v1/admin/revenue", routes::admin::revenue::router())
-        .nest("/v1/admin/inbox", routes::admin::inbox::router())
-        .nest("/v1/admin/calendar", routes::admin::calendar::router())
-        .nest("/v1/admin/warmup", routes::admin::warmup::router())
-        .nest("/v1/admin/content", routes::admin::content::router())
-        .nest("/v1/admin/autopilot", routes::admin::autopilot::router())
-        .nest("/v1/admin/operators", routes::admin::operators::router())
-        .nest("/v1/admin/proxy", routes::admin::proxy::router())
-        .nest("/v1/admin/sales", routes::admin::sales::router())
-        .nest("/v1/admin/analytics", routes::admin::analytics::router())
-        .nest(
-            "/v1/admin/analytics/export",
-            routes::admin::analytics_export::router(),
-        )
-        .nest("/v1/admin/campaigns", routes::admin::campaigns::router())
-        .nest("/v1/admin/crm/leads", routes::admin::crm_leads::router())
-        .nest(
-            "/v1/admin/leads/discovery",
-            routes::admin::leads_discovery::router(),
-        )
-        .nest("/v1/admin/support", routes::admin::support::router())
-        .nest(
-            "/v1/admin/support/analytics",
-            routes::admin::support_analytics::router(),
-        )
-        .nest(
-            "/v1/admin/system/health",
-            routes::admin::system_health::router(),
-        )
-        .nest("/v1/admin/vat", routes::admin::vat::router())
+        // Control-plane admin routes ride the SAME auth stack so that
+        // `require_auth` populates `AuthUser` before the system-tenant gate
+        // runs (previously merging `admin` at the top level skipped
+        // `require_auth` entirely and 401'd every admin request).
+        .merge(admin)
+        // Layer order in axum 0.7: the LAST `.layer()` added wraps everything
+        // before it, so it is the OUTERMOST layer (runs FIRST on the request
+        // path). The required execution order for an authenticated request is:
+        //
+        //   ddos → require_auth → rate_limit → tenant_binding → idempotency → handler
+        //
+        //   * ddos first   — cheap load-shedding before expensive auth work.
+        //   * require_auth before rate_limit/idempotency — both of those read
+        //     `AuthUser` (tenant_id) from request extensions and MUST run only
+        //     after auth populates it. Running them before auth (the previous
+        //     order) caused every authenticated request to be rate-bucketed as
+        //     "anonymous" and allowed cross-tenant `Idempotency-Key` response
+        //     leaks.
+        //   * tenant_binding after require_auth — it validates the optional
+        //     X-Tenant-ID header against the authenticated identity (and DB
+        //     membership on mismatch), so it needs `AuthUser` populated. It
+        //     no-ops when the header is absent.
+        //
+        // To get execution order [ddos, require_auth, rate_limit,
+        // tenant_binding, idempotency] we add the layers in REVERSE here.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            ddos::ddos_protection_middleware,
+            idempotency::idempotency_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::enforce_tenant_header_binding,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limiter::rate_limit_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -551,11 +606,7 @@ pub fn build_app(state: AppState) -> Router {
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            idempotency::idempotency_middleware,
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            rate_limiter::rate_limit_middleware,
+            ddos::ddos_protection_middleware,
         ));
 
     // ── Assemble ────────────────────────────────────────────
@@ -679,17 +730,132 @@ fn browser_csp_header_with_sources(
         .unwrap_or_default();
 
     HeaderValue::from_str(&format!(
-        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; frame-src 'none'; object-src 'none'"
+        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; style-src-attr 'unsafe-inline'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; frame-src 'none'; object-src 'none'"
     ))
     .expect("browser CSP should be valid")
 }
 
-fn inject_script_nonce(html: &str, nonce: &str) -> String {
+/// Inline `<script>` content signatures that this application legitimately
+/// emits. `inject_script_nonce` only stamps tags whose leading content matches
+/// one of these signatures — anything else (e.g. a payload smuggled into a
+/// response by an injection bug) is left without a nonce, so the CSP blocks
+/// it. Signatures are stored whitespace-collapsed and matched the same way.
+///
+/// Sources:
+/// - `ui_foundation::leptos_views::theme_script` (web + control-plane layouts)
+/// - `ui_foundation::shell::mobile_menu_script` (both shells)
+/// - `ui_foundation::leptos_views::web_auth_form_script` (auth pages)
+/// - `ui_foundation::leptos_views::api_form_script` (dashboard layouts)
+/// - MFA management script (`control_plane_security_page`)
+/// - KiwiCaptcha widget WASM embed + driver (vendored crate resources)
+/// - Zola-built marketing pages: theme bootstrap, footer status dot,
+///   pricing calculator, API explorer console, JSON-LD structured data
+const KNOWN_SCRIPT_SIGNATURES: &[&str] = &[
+    "(function(){'use strict';var k='apexmail-ui:theme'",
+    "(function(){'use strict';function e(e,t)",
+    "(function(){var ALLOWED={",
+    "(function(){function csrf()",
+    "(function(){ let mfaChallengeToken",
+    "(function() { var encoder = new TextEncoder();",
+    "/* Generated by packages/kiwicaptcha-wasm/tools/embed",
+    "(function(){var e=localStorage.getItem('apexmail-theme');",
+    "(function(){ var dot = document.querySelector('.footer-status-dot');",
+    "(function () { 'use strict'; var plans = [",
+    "(function() { var root = document.querySelector('[data-api-console-root]');",
+    "{ \"@context\": \"https://schema.org\"",
+];
+
+/// Inline `<style>` content signatures. Only the KiwiCaptcha widget emits an
+/// inline `<style>` block today.
+const KNOWN_STYLE_SIGNATURES: &[&str] =
+    &["/* ========================================================================== KiwiCaptcha widget"];
+
+/// Same-origin external script sources the application itself references.
+/// External scripts are additionally covered by `script-src 'self'`, so the
+/// nonce is a no-op for them — but an attacker-injected `src` must not be
+/// stamped either.
+const KNOWN_SCRIPT_SRCS: &[&str] = &["/assets/console.js", "/js/apexmail-site.js"];
+
+/// The Zola build bakes the literal nonce `static-build` into its interactive
+/// widget scripts. That is not a nonce the browser will ever accept, so strip
+/// it before scanning; the re-stamp path then gives those known widgets the
+/// real per-response nonce.
+fn strip_static_build_nonce(html: &str) -> String {
+    if !html.contains("static-build") {
+        return html.to_string();
+    }
+    html.replace(" nonce=\"static-build\"", "")
+        .replace(" nonce=static-build", "")
+        .replace("nonce=\"static-build\"", "")
+        .replace("nonce=static-build", "")
+}
+
+/// Collapse all whitespace runs to single spaces (and trims the ends) so
+/// signature matching is robust against formatting differences between the
+/// Rust emitters and the vendored/Zola-built assets.
+fn collapse_whitespace(input: &str) -> String {
+    let mut collapsed = String::with_capacity(input.len());
+    let mut in_whitespace = false;
+    for character in input.chars() {
+        if character.is_whitespace() {
+            if !in_whitespace {
+                collapsed.push(' ');
+                in_whitespace = true;
+            }
+        } else {
+            collapsed.push(character);
+            in_whitespace = false;
+        }
+    }
+    collapsed.trim().to_string()
+}
+
+/// Check whether the leading content of a tag body matches one of the known
+/// server-authored signatures.
+fn matches_known_signature(body: &str, signatures: &[&str]) -> bool {
+    let head: String = body.chars().take(256).collect();
+    let collapsed = collapse_whitespace(&head);
+    signatures
+        .iter()
+        .any(|signature| collapsed.starts_with(signature))
+}
+
+/// Extract the value of the `src` attribute from a tag (quoted or unquoted)
+/// and decide whether it points at one of the known same-origin assets.
+fn has_known_script_src(lower_tag: &str) -> bool {
+    let Some(src_index) = lower_tag.find("src=") else {
+        return false;
+    };
+    let raw = &lower_tag[src_index + "src=".len()..];
+    let value = if let Some(rest) = raw.strip_prefix('"') {
+        rest.split('"').next().unwrap_or("")
+    } else if let Some(rest) = raw.strip_prefix('\'') {
+        rest.split('\'').next().unwrap_or("")
+    } else {
+        raw.split_whitespace().next().unwrap_or("")
+    };
+    KNOWN_SCRIPT_SRCS
+        .iter()
+        .any(|known| value.starts_with(known) || value.contains(known))
+}
+
+/// Stamp the per-response CSP nonce onto `<script>`/`<style>` opening tags,
+/// but ONLY onto tags this server authored:
+/// - tags that already carry a nonce are left untouched;
+/// - external scripts must reference a known same-origin asset;
+/// - inline blocks must start with a known server-authored signature
+///   (see `KNOWN_SCRIPT_SIGNATURES` / `KNOWN_STYLE_SIGNATURES`).
+///
+/// Anything else is deliberately left nonce-less — the browser CSP then
+/// blocks it, which is the correct outcome for injected markup.
+fn inject_nonce_for_tag(html: &str, nonce: &str, tag_name: &str) -> String {
+    let opening = format!("<{tag_name}");
+    let closing = format!("</{tag_name}");
     let lower = html.to_ascii_lowercase();
     let mut output = String::with_capacity(html.len() + (nonce.len() + 9) * 4);
     let mut cursor = 0;
 
-    while let Some(relative_start) = lower[cursor..].find("<script") {
+    while let Some(relative_start) = lower[cursor..].find(&opening) {
         let start = cursor + relative_start;
         output.push_str(&html[cursor..start]);
 
@@ -702,13 +868,38 @@ fn inject_script_nonce(html: &str, nonce: &str) -> String {
         let tag = &html[start..=end];
         let lower_tag = &lower[start..=end];
 
-        if lower_tag.starts_with("</script") || lower_tag.contains(" nonce=") {
+        if lower_tag.starts_with(&format!("</{tag_name}")) || lower_tag.contains(" nonce=") {
+            // Closing tag, or a tag that already has its own nonce.
             output.push_str(tag);
         } else {
-            output.push_str(&html[start..end]);
-            output.push_str(" nonce=\"");
-            output.push_str(nonce);
-            output.push_str("\">");
+            let body_start = (end + 1).min(html.len());
+            let body_until_close = html[body_start..]
+                .find(&closing)
+                .map(|index| &html[body_start..body_start + index])
+                .unwrap_or(&html[body_start..]);
+            let is_known = if tag_name == "script" && lower_tag.contains("src=") {
+                has_known_script_src(lower_tag)
+            } else {
+                matches_known_signature(
+                    body_until_close,
+                    if tag_name == "script" {
+                        KNOWN_SCRIPT_SIGNATURES
+                    } else {
+                        KNOWN_STYLE_SIGNATURES
+                    },
+                )
+            };
+
+            if is_known {
+                output.push_str(&html[start..end]);
+                output.push_str(" nonce=\"");
+                output.push_str(nonce);
+                output.push_str("\">");
+            } else {
+                // Unknown authorship: leave the tag exactly as it was so the
+                // CSP blocks it instead of legitimizing it with our nonce.
+                output.push_str(tag);
+            }
         }
 
         cursor = end + 1;
@@ -718,42 +909,20 @@ fn inject_script_nonce(html: &str, nonce: &str) -> String {
     output
 }
 
+fn inject_script_nonce(html: &str, nonce: &str) -> String {
+    inject_nonce_for_tag(html, nonce, "script")
+}
+
 fn inject_style_nonce(html: &str, nonce: &str) -> String {
-    let lower = html.to_ascii_lowercase();
-    let mut output = String::with_capacity(html.len() + (nonce.len() + 9) * 4);
-    let mut cursor = 0;
-
-    while let Some(relative_start) = lower[cursor..].find("<style") {
-        let start = cursor + relative_start;
-        output.push_str(&html[cursor..start]);
-
-        let Some(relative_end) = lower[start..].find('>') else {
-            output.push_str(&html[start..]);
-            return output;
-        };
-
-        let end = start + relative_end;
-        let tag = &html[start..=end];
-        let lower_tag = &lower[start..=end];
-
-        if lower_tag.starts_with("</style") || lower_tag.contains(" nonce=") {
-            output.push_str(tag);
-        } else {
-            output.push_str(&html[start..end]);
-            output.push_str(" nonce=\"");
-            output.push_str(nonce);
-            output.push_str("\">");
-        }
-
-        cursor = end + 1;
-    }
-
-    output.push_str(&html[cursor..]);
-    output
+    inject_nonce_for_tag(html, nonce, "style")
 }
 
 fn browser_html_response(html: String) -> Response {
     let nonce = generate_csp_nonce();
+    // The Zola-built marketing widgets ship a literal `nonce=static-build`
+    // placeholder; strip it first so the allowlist scanner re-stamps those
+    // known widgets with this response's real nonce.
+    let html = strip_static_build_nonce(&html);
     let html = inject_script_nonce(&html, &nonce);
     let html = inject_style_nonce(&html, &nonce);
     let mut response = Html(html).into_response();
@@ -973,11 +1142,25 @@ fn ui_route_requires_auth(surface: &str, path: &str) -> bool {
         return auth_required;
     }
 
-    ui_foundation::routing::surface_routes(surface)
+    let matches_manifest_pattern = ui_foundation::routing::surface_routes(surface)
         .into_iter()
         .filter(|route| route.auth_required)
         .filter_map(|route| route.canonical_pattern)
-        .any(|pattern| ui_route_pattern_matches(pattern, path))
+        .any(|pattern| ui_route_pattern_matches(pattern, path));
+    if matches_manifest_pattern {
+        return true;
+    }
+
+    // Default-protect authenticated areas: any control-plane `/cp*` path or
+    // web `/inbox-placement*` path that is missing from the manifest must
+    // still redirect unauthenticated visitors to login. Failing OPEN here
+    // would let new (or forgotten) operator/placement routes render for
+    // anonymous users.
+    match surface {
+        "control-plane" => path == "/cp" || path.starts_with("/cp/"),
+        "web" => path == "/inbox-placement" || path.starts_with("/inbox-placement/"),
+        _ => false,
+    }
 }
 
 fn ui_route_pattern_matches(pattern: &str, path: &str) -> bool {
@@ -1534,6 +1717,42 @@ mod tests {
         assert!(!ui_route_requires_auth("web", "/login"));
     }
 
+    #[test]
+    fn inbox_placement_and_cp_routes_require_auth_by_default() {
+        // Manifest entries for the known routes...
+        for path in [
+            "/inbox-placement",
+            "/inbox-placement/new",
+            "/inbox-placement/t_1",
+        ] {
+            assert!(
+                ui_route_requires_auth("web", path),
+                "web {path} must require auth"
+            );
+        }
+        for path in [
+            "/cp",
+            "/cp/tenants",
+            "/cp/audit",
+            "/cp/sales",
+            "/cp/infrastructure",
+            "/cp/security",
+        ] {
+            assert!(
+                ui_route_requires_auth("control-plane", path),
+                "control-plane {path} must require auth"
+            );
+        }
+        // ...and the default-protect fallback for paths NOT in the manifest
+        // (new/forgotten operator or placement routes must never fail open).
+        assert!(ui_route_requires_auth("web", "/inbox-placement/t_not-in-manifest"));
+        assert!(ui_route_requires_auth("control-plane", "/cp/some-future-page"));
+        // Unrelated unknown web routes still render anonymously (404/public).
+        assert!(!ui_route_requires_auth("web", "/definitely-not-protected"));
+        // The marketing-zola /inbox-placement marketing page stays public.
+        assert!(!ui_route_requires_auth("marketing-zola", "/inbox-placement"));
+    }
+
     #[tokio::test]
     async fn render_ui_response_preserves_auth_query_state() {
         let mut headers = HeaderMap::new();
@@ -1558,13 +1777,78 @@ mod tests {
 
     #[test]
     fn inject_script_nonce_only_touches_opening_script_tags() {
-        let html = r#"<html><head><script type="application/ld+json">{}</script><script nonce="keep">ok</script></head></html>"#;
+        let html = r#"<html><head><script type="application/ld+json">{
+            "@context": "https://schema.org",
+            "@type": "Organization"
+        }</script><script nonce="keep">ok</script></head></html>"#;
 
         let updated = inject_script_nonce(html, "nonce-123");
 
         assert!(updated.contains(r#"<script type="application/ld+json" nonce="nonce-123">"#));
         assert!(updated.contains(r#"<script nonce="keep">ok</script>"#));
         assert_eq!(updated.matches("nonce=").count(), 2);
+    }
+
+    #[test]
+    fn inject_script_nonce_refuses_unknown_inline_scripts() {
+        // A script whose content does not match any server-authored signature
+        // (i.e. injected markup) must NOT receive the page nonce — the CSP
+        // blocks it instead.
+        let html = r#"<html><body><script>alert(document.cookie)</script></body></html>"#;
+        let updated = inject_script_nonce(html, "nonce-123");
+        assert!(
+            !updated.contains("nonce="),
+            "unknown inline script must not be stamped: {updated}"
+        );
+        assert!(updated.contains("<script>alert(document.cookie)</script>"));
+    }
+
+    #[test]
+    fn inject_script_nonce_refuses_unknown_external_scripts() {
+        let html = r#"<html><body><script src="https://evil.example.com/x.js"></script></body></html>"#;
+        let updated = inject_script_nonce(html, "nonce-123");
+        assert!(!updated.contains("nonce="), "unknown src must not be stamped");
+        assert!(updated.contains(r#"<script src="https://evil.example.com/x.js">"#));
+    }
+
+    #[test]
+    fn inject_script_nonce_stamps_known_app_scripts() {
+        // theme_script (web + control-plane root layouts)
+        let theme = r#"<script>(function(){'use strict';var k='apexmail-ui:theme',d=document.documentElement;})();</script>"#;
+        assert!(inject_script_nonce(theme, "n1").contains("nonce=\"n1\""));
+
+        // api_form_script (dashboard layouts)
+        let api_form = r#"<script>(function(){function csrf(){var m=document.querySelector('meta[name=csrf-token]');}})();</script>"#;
+        assert!(inject_script_nonce(api_form, "n2").contains("nonce=\"n2\""));
+
+        // Known same-origin external console script is stamped.
+        let external = r#"<script src="/assets/console.js" defer></script>"#;
+        assert!(inject_script_nonce(external, "n3").contains(r#"<script src="/assets/console.js" defer nonce="n3">"#));
+    }
+
+    #[test]
+    fn static_build_placeholder_nonce_is_restamped() {
+        // The Zola marketing build ships `nonce=static-build`; it must be
+        // stripped and the known widget re-stamped with the real nonce.
+        let html = r#"<html><body><script nonce=static-build>(function() {
+  var root = document.querySelector('[data-api-console-root]');
+})();</script></body></html>"#;
+        let stripped = strip_static_build_nonce(html);
+        assert!(!stripped.contains("static-build"), "placeholder must be stripped");
+
+        let updated = inject_script_nonce(&stripped, "real-nonce");
+        assert!(updated.contains("<script nonce=\"real-nonce\">"));
+        assert!(!updated.contains("static-build"));
+    }
+
+    #[test]
+    fn inject_style_nonce_only_stamps_known_styles() {
+        let known = "<style>\n/* ==========================================================================\n   KiwiCaptcha widget — industry-aligned design system\n*/\n.kiwi-container{display:flex}\n</style>";
+        assert!(inject_style_nonce(known, "n1").contains("<style nonce=\"n1\">"));
+
+        let unknown = "<style>body{background:url(https://evil.example.com)}</style>";
+        let updated = inject_style_nonce(unknown, "n2");
+        assert!(!updated.contains("nonce="), "unknown style must not be stamped");
     }
 
     #[tokio::test]
@@ -1866,6 +2150,21 @@ mod tests {
         assert!(!csp.contains("captcha.apexmail"));
     }
 
+    #[test]
+    fn browser_csp_allows_inline_style_attributes() {
+        // SSR primitives (Slider, Progress, chart frames) set per-element
+        // style="..." attributes. Style attributes cannot carry nonces, and
+        // they are far lower risk than script, so the CSP relaxes only the
+        // style-src-attr directive while style-src stays nonce-gated.
+        let csp = browser_csp_header_with_sources("test-nonce", None);
+        let csp = csp.to_str().expect("csp header should be utf-8");
+
+        assert!(csp.contains("style-src-attr 'unsafe-inline'"));
+        // The element style-src directive must remain nonce-only (the
+        // 'unsafe-inline' must not have leaked into style-src itself).
+        assert!(csp.contains("style-src 'self' 'nonce-test-nonce';"));
+    }
+
     #[tokio::test]
     async fn api_json_routes_keep_the_default_locked_down_csp() {
         let app = test_app().await;
@@ -1984,6 +2283,43 @@ mod tests {
             response.status(),
             StatusCode::FORBIDDEN,
             "/v1/auth/change-password should reject cookie-authenticated writes without CSRF"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_routes_run_through_require_auth_not_the_gate() {
+        // Regression test: the control-plane router was previously merged at
+        // the TOP level, outside the `authenticated` stack, so `require_auth`
+        // never executed for `/v1/admin/*`. With no AuthUser in the request
+        // extensions, `require_system_tenant_middleware` 401'd EVERY admin
+        // request — including fully valid ones — with "authentication
+        // required for control-plane access".
+        //
+        // Now the admin router is merged into `authenticated` BEFORE the
+        // layer stack, so a bad bearer token on an admin route is rejected
+        // by `require_auth` itself (token decode failure, or a 503 when the
+        // token-blacklist Redis is unavailable in unit tests) — proving the
+        // auth middleware, which populates AuthUser, runs before the gate.
+        let app = test_app().await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/admin/system/health")
+                    .header("authorization", "Bearer not-a-real-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body = response_body_string(response).await;
+        assert_ne!(status, StatusCode::OK);
+        assert!(
+            !(status == StatusCode::UNAUTHORIZED && body.contains("control-plane")),
+            "admin request must be rejected by require_auth (which populates \
+             AuthUser), not by the system-tenant gate — got {status} with body: {body}"
         );
     }
 }

@@ -262,6 +262,9 @@ pub struct Input<'a> {
     pub disabled: bool,
     pub autocomplete: Option<&'a str>,
     pub required: bool,
+    /// Form field name. Without it the input is invisible to `FormData`
+    /// serialization, so `data-api-form` handlers would submit `{}`.
+    pub name: Option<&'a str>,
 }
 
 impl<'a> Input<'a> {
@@ -282,14 +285,19 @@ impl<'a> Input<'a> {
             .autocomplete
             .map(|value| format!(" autocomplete=\"{}\"", value))
             .unwrap_or_default();
+        let name_attr = self
+            .name
+            .map(|value| format!(" name=\"{}\"", value))
+            .unwrap_or_default();
         let required_attr = if self.required {
             " required aria-required=\"true\""
         } else {
             ""
         };
         let input_markup = format!(
-            "<input type=\"{}\" value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-sm border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}{}{}{}\"{} data-variant=\"{}\" data-size=\"{}\" />",
+            "<input type=\"{}\"{} value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-sm border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}{}{}{}\"{} data-variant=\"{}\" data-size=\"{}\" />",
             self.input_type,
+            name_attr,
             self.value,
             self.placeholder,
             input_variant_class(resolved_variant),
@@ -330,6 +338,8 @@ pub struct Textarea<'a> {
     pub resize: &'a str,
     pub max_length: Option<usize>,
     pub show_count: bool,
+    /// Form field name (see `Input::name`).
+    pub name: Option<&'a str>,
 }
 
 impl<'a> Textarea<'a> {
@@ -340,8 +350,13 @@ impl<'a> Textarea<'a> {
         } else {
             String::new()
         };
+        let name_attr = self
+            .name
+            .map(|value| format!(" name=\"{}\"", value))
+            .unwrap_or_default();
         let textarea = format!(
-            "<textarea class=\"flex min-h-[80px] w-full rounded-sm border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
+            "<textarea{} class=\"flex min-h-[80px] w-full rounded-sm border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
+            name_attr,
             input_variant_class(self.variant),
             textarea_resize_class(self.resize),
             self.variant,
@@ -428,11 +443,30 @@ pub struct Select<'a> {
     pub size: &'a str,
     pub open: bool,
     pub options: Vec<SelectOption<'a>>,
+    /// Form field name. The Select is a custom combobox (not a native
+    /// `<select>`), so the name is emitted on the wrapper together with
+    /// `data-field`/`data-value` which the `data-api-form` hydration script
+    /// reads as a fallback when serializing the form payload.
+    pub name: Option<&'a str>,
 }
 
 impl<'a> Select<'a> {
     pub fn render_html(&self) -> String {
         let value = self.value_label.unwrap_or(self.placeholder);
+        let selected_value = self
+            .options
+            .iter()
+            .find(|option| option.selected)
+            .map(|option| option.value)
+            .unwrap_or("");
+        let name_attrs = self
+            .name
+            .map(|name| {
+                format!(
+                    " name=\"{name}\" data-field=\"{name}\" data-value=\"{selected_value}\""
+                )
+            })
+            .unwrap_or_default();
         let listbox_id = "select-listbox";
         let active_id = if self.open {
             self.options
@@ -486,8 +520,9 @@ impl<'a> Select<'a> {
         };
 
         format!(
-            "<div data-open=\"{}\"><button type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between border border-input bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
+            "<div data-open=\"{}\"{}><button type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between border border-input bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
             self.open,
+            name_attrs,
             expanded, listbox_id,
             activedescendant,
             trigger_keyboard_attrs,
@@ -1026,7 +1061,10 @@ impl<'a> DropdownMenu<'a> {
             format!("<div role=\"menuitem\" tabindex=\"{}\" class=\"relative flex cursor-default select-none items-center rounded-sm px-3 py-3 text-[14px] font-medium outline-none transition-colors focus:bg-surface-100 focus:text-surface-900 cursor-pointer min-h-[44px]{}{}\">{}{}</div>", tabindex, inset, destructive, item.label, shortcut)
         }).collect::<Vec<_>>().join("");
         let keyboard_attrs = " data-keyboard-contract=\"dropdown-menu\" data-keyboard-arrow-navigates=\"true\" data-keyboard-enter-activates=\"true\" data-keyboard-escape-closes=\"true\"";
-        format!("<div class=\"z-50 min-w-[8rem] overflow-hidden rounded-sm border border-surface-200/60 bg-card/90 backdrop-blur-xl p-1.5 text-surface-900 data-[state=open]:animate-in\" role=\"menu\"{}>{}{}</div>{}", keyboard_attrs, label, items, separator)
+        // The separator belongs INSIDE the menu container (between the label
+        // and the items) — rendering it after the closing </div> left it
+        // stranded outside the menu, where keyboard/role semantics ignore it.
+        format!("<div class=\"z-50 min-w-[8rem] overflow-hidden rounded-sm border border-surface-200/60 bg-card/90 backdrop-blur-xl p-1.5 text-surface-900 data-[state=open]:animate-in\" role=\"menu\"{}>{}{}{}</div>", keyboard_attrs, label, separator, items)
     }
 }
 
@@ -1397,8 +1435,11 @@ impl<'a> Toast<'a> {
 impl PaginationControls {
     pub fn render_html(&self) -> String {
         let safe_total_pages = self.total_pages.max(1);
-        let is_first_page = self.page <= 1;
-        let is_last_page = self.page >= safe_total_pages;
+        // Clamp the page counter so a zero/negative state renders "Page 1"
+        // instead of "Page 0 of N" with both back-buttons disabled.
+        let safe_page = self.page.max(1);
+        let is_first_page = safe_page <= 1;
+        let is_last_page = safe_page >= safe_total_pages;
         let button = |label: &str, disabled: bool| {
             let disabled_attr = if disabled {
                 " disabled aria-disabled=\"true\""
@@ -1411,7 +1452,7 @@ impl PaginationControls {
             "<div class=\"flex items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\">{}{}<span class=\"px-2 text-sm text-muted-foreground\">Page {} of {}</span>{}{}</div>",
             button("First", is_first_page),
             button("Previous", is_first_page),
-            self.page,
+            safe_page,
             safe_total_pages,
             button("Next", is_last_page),
             button("Last", is_last_page),
@@ -2576,7 +2617,8 @@ mod tests {
             disabled: false,
             autocomplete: None,
         required: false,
-        };
+        name: None,
+    };
         let progress = Progress {
             value: 42,
             variant: "default",
@@ -2676,7 +2718,8 @@ mod tests {
             disabled: false,
             autocomplete: None,
             required: false,
-        }
+        name: None,
+    }
         .render_html();
 
         assert!(html.contains("relative"));
@@ -2701,7 +2744,8 @@ mod tests {
             disabled: true,
             autocomplete: None,
             required: false,
-        }
+        name: None,
+    }
         .render_html();
 
         assert!(html.contains("h-10 px-3 text-[13px] rounded-sm"));
@@ -2718,12 +2762,87 @@ mod tests {
             resize: "none",
             max_length: Some(10),
             show_count: true,
-        }
+        name: None,
+    }
         .render_html();
 
         assert!(html.contains("resize-none"));
         assert!(html.contains("3/10"));
         assert!(html.contains("absolute bottom-2 right-2"));
+    }
+
+    /// Form fields must carry a `name` attribute — without one, `FormData`
+    /// serialization skips the element entirely and `data-api-form` handlers
+    /// receive an empty `{}` payload.
+    #[test]
+    fn named_fields_render_name_attributes() {
+        let input = Input {
+            input_type: "email",
+            value: "",
+            placeholder: "contact@example.com",
+            variant: "default",
+            size: "default",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false,
+            autocomplete: None,
+            required: true,
+            name: Some("email"),
+        }
+        .render_html();
+        assert!(input.contains("name=\"email\""));
+
+        let textarea = Textarea {
+            value: "",
+            placeholder: "Paste HTML",
+            variant: "default",
+            resize: "vertical",
+            max_length: None,
+            show_count: false,
+            name: Some("html_body"),
+        }
+        .render_html();
+        assert!(textarea.contains("<textarea name=\"html_body\""));
+
+        let select = Select {
+            placeholder: "Select audience",
+            value_label: Some("VIP Customers"),
+            variant: "default",
+            size: "default",
+            open: false,
+            options: vec![SelectOption {
+                value: "vip",
+                label: "VIP Customers",
+                disabled: false,
+                selected: true,
+            }],
+            name: Some("audience"),
+        }
+        .render_html();
+        // The custom combobox is not a native <select>; the name is exposed
+        // via data-field/data-value for the api-form serialization fallback.
+        assert!(select.contains("name=\"audience\""));
+        assert!(select.contains("data-field=\"audience\""));
+        assert!(select.contains("data-value=\"vip\""));
+
+        // Unnamed fields must not render a stale/empty name attribute.
+        let unnamed = Input {
+            input_type: "text",
+            value: "",
+            placeholder: "filter",
+            variant: "default",
+            size: "default",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false,
+            autocomplete: None,
+            required: false,
+            name: None,
+        }
+        .render_html();
+        assert!(!unnamed.contains("name="));
     }
 
     #[test]
@@ -2824,7 +2943,8 @@ mod tests {
                     selected: true,
                 },
             ],
-        }
+        name: None,
+    }
         .render_html();
 
         assert!(html.contains("data-open=\"true\""));
@@ -3092,6 +3212,35 @@ mod tests {
         assert!(html.contains("Actions"));
         assert!(html.contains("⌘E"));
         assert!(html.contains("text-destructive"));
+        // The separator must live INSIDE the menu container, before the
+        // items — not stranded after the closing </div>.
+        let menu_pos = html.find("role=\"menu\"").expect("menu role");
+        let separator_pos = html
+            .find("bg-surface-200/50")
+            .expect("separator rendered");
+        let item_pos = html.find("role=\"menuitem\"").expect("menu items");
+        assert!(
+            menu_pos < separator_pos && separator_pos < item_pos,
+            "separator must sit inside the menu container, before the items"
+        );
+    }
+
+    #[test]
+    fn pagination_clamps_page_counter() {
+        let html = PaginationControls {
+            page: 0,
+            total_pages: 3,
+        }
+        .render_html();
+        assert!(html.contains("Page 1 of 3"));
+        assert!(!html.contains("Page 0"));
+
+        let zeroed = PaginationControls {
+            page: 2,
+            total_pages: 0,
+        }
+        .render_html();
+        assert!(zeroed.contains("Page 2 of 1"));
     }
 
     #[test]

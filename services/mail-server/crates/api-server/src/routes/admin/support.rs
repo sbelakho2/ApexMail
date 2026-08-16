@@ -192,6 +192,13 @@ const VALID_STATUSES: &[&str] = &[
 ];
 const VALID_PRIORITIES: &[&str] = &["low", "medium", "high", "urgent"];
 
+/// Author types that an authenticated operator may legitimately claim when
+/// replying to a support ticket. Anything else (e.g. "customer") is rejected
+/// so a staff member cannot forge messages that look like they came from a
+/// customer or a different staff role.
+const VALID_STAFF_AUTHOR_TYPES: &[&str] =
+    &["agent", "system", "admin", "owner", "staff"];
+
 struct ReplyInsertResult {
     id: String,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -293,6 +300,7 @@ async fn create_ticket(
     Json(body): Json<CreateTicketRequest>,
 ) -> Result<(StatusCode, Json<Ticket>), ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     if body.subject.trim().is_empty() || body.description.trim().is_empty() {
         return Err(ApiError::Validation(vec![
@@ -306,6 +314,14 @@ async fn create_ticket(
             body.priority
         )]));
     }
+
+    // Derive tenant identity from the authenticated operator; never trust
+    // client-supplied tenant fields (prevents forging another tenant's
+    // identity in support tickets or audit logs).
+    let mut body = body;
+    body.tenant_id = Some(auth.tenant_id.clone());
+    body.tenant_name = None;
+    body.tenant_email = None;
 
     let ticket = insert_support_ticket(&state.db, &body).await?;
 
@@ -326,6 +342,7 @@ async fn list_tickets(
     Query(params): Query<TicketsQuery>,
 ) -> Result<Json<Vec<Ticket>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
@@ -426,9 +443,23 @@ async fn add_reply(
     Json(body): Json<AddReplyRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     if body.content.trim().is_empty() {
         return Err(ApiError::Validation(vec!["content is required".into()]));
+    }
+
+    // Author identity is derived server-side from the authenticated operator;
+    // client-supplied author is never trusted (prevents impersonating a
+    // customer or another staff member). author_type is restricted to staff
+    // roles so a caller cannot forge "customer" authorship.
+    let mut body = body;
+    body.author = auth
+        .user_id
+        .clone()
+        .unwrap_or_else(|| "System".to_string());
+    if !VALID_STAFF_AUTHOR_TYPES.contains(&body.author_type.as_str()) {
+        body.author_type = "agent".to_string();
     }
 
     let inserted_reply = insert_support_reply_message(&state.db, &body).await?;
@@ -473,6 +504,7 @@ async fn update_ticket(
     Json(body): Json<UpdateTicketRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     if body.status.is_none() && body.priority.is_none() && body.assignee.is_none() {
         return Err(ApiError::Validation(vec!["No fields to update".into()]));

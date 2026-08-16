@@ -17,6 +17,13 @@ use crate::models::*;
 /// `row_to_message` can distinguish encrypted content from legacy plaintext.
 const ENCRYPTED_PREFIX: &str = "$AES256GCM$";
 
+/// Returned by [`MessageStorage::store_message`] when storing a message would
+/// push the account over its storage quota. Mapped to a
+/// `ResourceExhausted` gRPC status by the service layer.
+#[derive(Debug, thiserror::Error)]
+#[error("quota exceeded: storing this message would exceed the account's storage quota")]
+pub struct QuotaExceeded;
+
 // SAFETY: Column-list constants are compile-time hardcoded strings, never
 // constructed from user input. The format!() calls that embed them into SQL
 // queries are safe because the format argument is a static constant, not
@@ -546,6 +553,27 @@ impl MessageStorage {
             return Err(anyhow!("Mailbox does not belong to account"));
         }
 
+        // Quota enforcement: reject the insert when it would push the account
+        // over its storage quota (`quota_bytes = 0` means unlimited). The
+        // account row is locked FOR UPDATE so concurrent deliveries cannot
+        // both pass the check and overshoot together.
+        let quota: Option<(i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT quota_bytes, used_bytes FROM mail_accounts
+            WHERE id = $1
+            FOR UPDATE
+        "#,
+        )
+        .bind(message.account_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((quota_bytes, used_bytes)) = quota {
+            let incoming = message.raw_size.max(0);
+            if quota_bytes > 0 && used_bytes.saturating_add(incoming) > quota_bytes {
+                return Err(QuotaExceeded.into());
+            }
+        }
+
         // DI-006: Check for existing message with the same message_id in this mailbox.
         // This prevents duplicate insertion when the same email is delivered twice.
         if !message.message_id.is_empty() {
@@ -713,7 +741,13 @@ impl MessageStorage {
         }
     }
 
-    /// List messages
+    /// List messages.
+    ///
+    /// By default (when `query.is_deleted` is `None`) soft-deleted messages are
+    /// excluded, matching the mailbox view reported by `EXISTS`/
+    /// `total_messages` (which count `is_deleted = false` rows). Passing
+    /// `Some(true)` returns only soft-deleted rows; `Some(false)` is identical
+    /// to the default.
     pub async fn list_messages(&self, query: &MessageQuery) -> Result<Vec<StoredMessage>> {
         // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
         // The dynamic WHERE clauses below use format!() only for parameter placeholder
@@ -741,9 +775,16 @@ impl MessageStorage {
             param_idx += 1;
         }
 
-        if query.is_deleted.is_some() {
-            sql.push_str(&format!(" AND is_deleted = ${}", param_idx));
-            param_idx += 1;
+        // Soft-deleted (\Deleted) messages are excluded from the mailbox view
+        // by default — they are only removed from view by EXPUNGE, which has
+        // its own dedicated query. Callers that explicitly pass
+        // `is_deleted = Some(true)` get only deleted rows.
+        match query.is_deleted {
+            Some(_) => {
+                sql.push_str(&format!(" AND is_deleted = ${}", param_idx));
+                param_idx += 1;
+            }
+            None => sql.push_str(" AND is_deleted = false"),
         }
 
         sql.push_str(" ORDER BY uid DESC NULLS LAST, date DESC");
@@ -1073,6 +1114,56 @@ impl MessageStorage {
 
         tx.commit().await?;
         Ok(uids)
+    }
+
+    /// Expunge (permanently delete) only the soft-deleted messages carrying
+    /// the given UIDs, returning the UIDs actually removed. UIDs that are not
+    /// soft-deleted (or do not exist in this mailbox) are left untouched.
+    /// This is the UID EXPUNGE (RFC 4315 §2.2.2) subset of
+    /// [`Self::expunge_deleted_messages`].
+    pub async fn expunge_deleted_messages_for_uids(
+        &self,
+        account_id: &Uuid,
+        mailbox_id: &Uuid,
+        uids: &[i64],
+    ) -> Result<Vec<i64>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        let rows = sqlx::query(
+            r#"
+            DELETE FROM mail_messages
+            WHERE account_id = $1 AND mailbox_id = $2 AND is_deleted = true
+              AND uid = ANY($3)
+            RETURNING uid, raw_size
+        "#,
+        )
+        .bind(account_id)
+        .bind(mailbox_id)
+        .bind(uids)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut removed = Vec::with_capacity(rows.len());
+        let mut total_bytes = 0i64;
+        for row in rows {
+            let uid: i64 = row.get("uid");
+            let raw_size: i64 = row.get("raw_size");
+            removed.push(uid);
+            total_bytes += raw_size;
+        }
+
+        self.update_mailbox_counts_tx(&mut tx, mailbox_id).await?;
+        if total_bytes != 0 {
+            self.update_account_usage_tx(&mut tx, account_id, -total_bytes)
+                .await?;
+        }
+
+        tx.commit().await?;
+        Ok(removed)
     }
 
     /// Refresh mailbox counts for a mailbox.

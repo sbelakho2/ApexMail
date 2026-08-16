@@ -61,8 +61,7 @@ BEGIN
             WHERE table_name = 'email_queue' AND column_name = 'from'
         ) THEN
             EXECUTE 'COMMENT ON COLUMN email_queue."from" IS
-                ''DB-104: Alias for from_address. Prefer from_address in new code; '' ||
-                '''"from" is a SQL reserved word and requires quoting.''';
+                ''DB-104: Alias for from_address. Prefer from_address in new code; "from" is a SQL reserved word and requires quoting.''';
         END IF;
 
         -- Document "to" as alias for to_addresses[1]
@@ -71,8 +70,7 @@ BEGIN
             WHERE table_name = 'email_queue' AND column_name = 'to'
         ) THEN
             EXECUTE 'COMMENT ON COLUMN email_queue."to" IS
-                ''DB-104: Single-recipient alias for to_addresses[1]. '' ||
-                '''Prefer to_addresses in new code; "to" is a SQL reserved word.''';
+                ''DB-104: Single-recipient alias for to_addresses[1]. Prefer to_addresses in new code; "to" is a SQL reserved word.''';
         END IF;
 
         -- Document "text" as alias for text_body
@@ -81,8 +79,7 @@ BEGIN
             WHERE table_name = 'email_queue' AND column_name = 'text'
         ) THEN
             EXECUTE 'COMMENT ON COLUMN email_queue."text" IS
-                ''DB-104: Alias for text_body. Prefer text_body in new code; '' ||
-                '''"text" is a SQL reserved word and requires quoting.''';
+                ''DB-104: Alias for text_body. Prefer text_body in new code; "text" is a SQL reserved word and requires quoting.''';
         END IF;
 
         RAISE NOTICE 'DB-104: Documented reserved-word columns on email_queue';
@@ -148,7 +145,7 @@ BEGIN
         IF v_is_nullable = 'YES' THEN
             -- First: backfill any NULL rows with a sentinel (or raise warning)
             EXECUTE 'UPDATE bounce_bursts
-                     SET tenant_id = ''unknown-'' || gen_random_uuid()::TEXT
+                     SET tenant_id = ''unknown-'' || left(gen_random_uuid()::TEXT, 18)
                      WHERE tenant_id IS NULL';
             GET DIAGNOSTICS v_is_nullable = ROW_COUNT;
             IF v_is_nullable::INT > 0 THEN
@@ -349,7 +346,7 @@ BEGIN
     RAISE NOTICE 'DB-107: Use approximate estimate instead:';
     RAISE NOTICE 'DB-107:   SELECT SUM(reltuples)::BIGINT AS approx_count';
     RAISE NOTICE 'DB-107:   FROM pg_class WHERE relkind = ''r''';
-    RAISE NOTICE 'DB-107:   AND relname LIKE ''email_queue_%'';';
+    RAISE NOTICE 'DB-107:   AND relname LIKE ''email_queue_pct'';';
     RAISE NOTICE 'DB-107: Or maintain a counter via triggers/application logic.';
 END $$;
 
@@ -404,8 +401,7 @@ BEGIN
 
         -- Add COMMENT documenting nullable rationale
         EXECUTE 'COMMENT ON COLUMN postmaster_reputation_events.tenant_id IS
-            ''DB-118: NULL allowed for system-wide reputation events (unowned IPs). '' ||
-            '''Tenant-scoped events always have a non-NULL tenant_id referencing tenants(id).''';
+                ''DB-118: NULL allowed for system-wide reputation events (unowned IPs). Tenant-scoped events always have a non-NULL tenant_id referencing tenants(id).''';
 
         RAISE NOTICE 'DB-118: Documented tenant_id nullable rationale on postmaster_reputation_events';
     ELSE
@@ -628,7 +624,7 @@ BEGIN
         RAISE NOTICE 'DB-125:   CREATE EXTENSION IF NOT EXISTS pg_cron;';
         RAISE NOTICE 'DB-125:   SELECT cron.schedule(''create-partitions'',';
         RAISE NOTICE 'DB-125:       ''0 0 1 * *'',';
-        RAISE NOTICE 'DB-125:       $$SELECT create_future_partitions()$$);';
+        RAISE NOTICE 'DB-125:       dollar-quote SELECT create_future_partitions() dollar-quote);';
         RAISE NOTICE 'DB-125: Or call from application startup:';
         RAISE NOTICE 'DB-125:   SELECT create_future_partitions();';
     ELSE

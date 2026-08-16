@@ -32,10 +32,11 @@ check_duplicate_ids() {
     local file="$1"
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
-    grep -oP 'id="([^"]+)"' "$file" 2>/dev/null | sed 's/id="//;s/"$//' | sort | uniq -d | while read -r dup; do
+    local dup
+    while read -r dup; do
         [[ -z "$dup" ]] && continue
         add_issue "$path" 0 "critical" "Duplicate ID: $dup"
-    done
+    done < <(grep -oP 'id="([^"]+)"' "$file" 2>/dev/null | sed 's/id="//;s/"$//' | sort | uniq -d)
 }
 
 check_heading_hierarchy() {
@@ -43,16 +44,18 @@ check_heading_hierarchy() {
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
     local prev=0
-    grep -noP '<h[1-6][^>]*>' "$file" 2>/dev/null | while IFS=: read -r ln tag; do
-        local level
-        level="$(echo "$tag" | grep -oP '\d')"
+    local ln tag level
+    while IFS=: read -r ln tag; do
+        # Heading level is the digit right after "<h" — do not grep for every
+        # digit in the tag (attribute values like mb-4 would break the -gt test).
+        level="${tag:2:1}"
         if [[ -n "$level" ]]; then
             if [[ "$level" -gt $((prev+1)) && "$prev" -ne 0 ]]; then
                 add_issue "$path" "$ln" "warning" "Heading skip: h$((prev)) to h$level without h$((prev+1))"
             fi
             prev="$level"
         fi
-    done
+    done < <(grep -noP '<h[1-6][^>]*>' "$file" 2>/dev/null)
 }
 
 check_h1_count() {
@@ -60,7 +63,10 @@ check_h1_count() {
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
     local count
-    count="$(grep -cP '<h1[^>]*>' "$file" 2>/dev/null || echo 0)"
+    # grep -c prints "0" and exits 1 on zero matches — do not append a
+    # second 0 with `|| echo 0` (that yields "0\n0" and breaks the -gt test).
+    count="$(grep -cP '<h1[^>]*>' "$file" 2>/dev/null || true)"
+    count="${count:-0}"
     if [[ "$count" -gt 1 ]]; then
         add_issue "$path" 0 "critical" "Multiple H1 tags: $count found"
     elif [[ "$count" -eq 0 ]]; then
@@ -72,46 +78,48 @@ check_missing_alt() {
     local file="$1"
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
-    grep -noP '<img(?![^>]*alt=)[^>]*>' "$file" 2>/dev/null | while IFS=: read -r ln tag; do
+    local ln tag
+    while IFS=: read -r ln tag; do
         add_issue "$path" "$ln" "critical" "Missing alt attribute on img"
-    done
+    done < <(grep -noP '<img(?![^>]*alt=)[^>]*>' "$file" 2>/dev/null)
 }
 
 check_empty_buttons() {
     local file="$1"
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
-    grep -noP '<button[^>]*>\s*</button>' "$file" 2>/dev/null | while IFS=: read -r ln tag; do
+    local ln tag
+    while IFS=: read -r ln tag; do
         add_issue "$path" "$ln" "critical" "Empty button element"
-    done
+    done < <(grep -noP '<button[^>]*>\s*</button>' "$file" 2>/dev/null)
 }
 
 check_missing_labels() {
     local file="$1"
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
-    grep -noP '<input[^>]*id="([^"]+)"[^>]*>' "$file" 2>/dev/null | while IFS=: read -r ln tag; do
-        local input_id
+    local ln tag input_id input_type
+    while IFS=: read -r ln tag; do
         input_id="$(echo "$tag" | grep -oP 'id="\K[^"]+')"
-        local input_type
         input_type="$(echo "$tag" | grep -oP 'type="\K[^"]+' || echo "text")"
         case "$input_type" in hidden|submit|button|reset) continue ;; esac
         if ! grep -q "for=\"$input_id\"" "$file" 2>/dev/null && ! grep -q "aria-label" <<< "$tag" 2>/dev/null; then
             add_issue "$path" "$ln" "warning" "Input #$input_id missing label"
         fi
-    done
+    done < <(grep -noP '<input[^>]*id="([^"]+)"[^>]*>' "$file" 2>/dev/null)
 }
 
 check_invalid_aria() {
     local file="$1"
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
-    grep -noP 'aria-\w+="[^"]*undefined[^"]*"' "$file" 2>/dev/null | while IFS=: read -r ln line; do
+    local ln line
+    while IFS=: read -r ln line; do
         add_issue "$path" "$ln" "critical" "ARIA attribute with 'undefined' value"
-    done
-    grep -noP 'role="[^"]*"[^>]*role="' "$file" 2>/dev/null | while IFS=: read -r ln line; do
+    done < <(grep -noP 'aria-\w+="[^"]*undefined[^"]*"' "$file" 2>/dev/null)
+    while IFS=: read -r ln line; do
         add_issue "$path" "$ln" "warning" "Multiple role attributes on element"
-    done
+    done < <(grep -noP 'role="[^"]*"[^>]*role="' "$file" 2>/dev/null)
 }
 
 check_landmarks() {
@@ -127,13 +135,11 @@ check_page_title() {
     local file="$1"
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
-    if ! grep -qP '<title>[^<]+</title>' "$file" 2>/dev/null; then
-        add_issue "$path" 0 "critical" "Missing page title"
-    fi
+    # Flatten newlines first: built HTML can split the title across lines.
     local title_text
-    title_text="$(grep -oP '<title>\K[^<]+' "$file" 2>/dev/null || echo "")"
+    title_text="$(tr '\n' ' ' < "$file" | grep -oP '<title>\K[^<]+' || true)"
     if [[ -z "$title_text" ]]; then
-        add_issue "$path" 0 "critical" "Empty page title"
+        add_issue "$path" 0 "critical" "Missing or empty page title"
     fi
 }
 
@@ -149,7 +155,7 @@ check_skip_link() {
 main() {
     echo "=== ApexMail HTML & Accessibility Validation ==="
 
-    find "${BUILD_DIR}" -name '*.html' | sort | while read -r file; do
+    while read -r file; do
         local rel
         rel="$(echo "$file" | sed "s|${BUILD_DIR}||")"
         echo "  Checking: $rel"
@@ -164,7 +170,7 @@ main() {
         check_landmarks "$file"
         check_page_title "$file"
         check_skip_link "$file"
-    done
+    done < <(find "${BUILD_DIR}" -name '*.html' | sort)
 
     jq -n --argjson issues "$ISSUES" \
         --arg checked_at "$TIMESTAMP" \

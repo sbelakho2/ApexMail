@@ -28,7 +28,8 @@ use crate::sub_accounts::SubAccountService;
 use crate::support::SupportService;
 use crate::template_approval::TemplateApprovalService;
 use crate::types::{
-    ApiResult, ContractAdditionalFee, ContractRenewalTerms, SSOConfigureRequest, SubAccount,
+    ApiResult, ContractAdditionalFee, ContractRenewalTerms, SSOConfigureRequest, SSOPublicConfig,
+    SubAccount,
 };
 use crate::whitelabel::WhiteLabelService;
 
@@ -1309,24 +1310,54 @@ async fn contract_purchase_order(
 
 async fn sso_configure(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<SSOConfigureRequest>,
 ) -> impl IntoResponse {
-    service_result(state.sso.configure(body).await)
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
+    // The response is sanitized: secrets (encrypted private key / client
+    // secret, SAML certificate) never leave the server.
+    match state.sso.configure(body).await {
+        Ok(r) => match r.data {
+            Some(config) => ok_json(SSOPublicConfig::from(config)),
+            None => err_json(StatusCode::INTERNAL_SERVER_ERROR, "SSO configuration failed"),
+        },
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
 }
 
 async fn sso_get_config(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
-    service_result(state.sso.get_configuration(&tenant_id).await)
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
+    match state.sso.get_configuration(&tenant_id).await {
+        Ok(r) => match r.data {
+            Some(config) => ok_json(SSOPublicConfig::from(config)),
+            None => err_json(StatusCode::NOT_FOUND, "SSO not configured"),
+        },
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
 }
 
 async fn sso_get_config_by_domain(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(domain): Path<String>,
 ) -> impl IntoResponse {
     match state.sso.get_config_by_domain(&domain).await {
-        Ok(Some(c)) => ok_json(c),
+        Ok(Some(config)) => {
+            // Resolve the tenant that owns the domain, then enforce the same
+            // tenant access check the other handlers use.
+            if let Err(e) = verify_tenant_access(&auth, &config.tenant_id) {
+                return e;
+            }
+            ok_json(SSOPublicConfig::from(config))
+        }
         Ok(None) => err_json(StatusCode::NOT_FOUND, "SSO config not found for domain"),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }

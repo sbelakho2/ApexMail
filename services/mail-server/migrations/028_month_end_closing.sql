@@ -48,7 +48,7 @@ DO $$
 BEGIN
     IF to_regclass('public.invoices') IS NOT NULL THEN
         EXECUTE 'CREATE INDEX IF NOT EXISTS idx_invoices_month_issued
-            ON invoices(EXTRACT(YEAR FROM issued_at), EXTRACT(MONTH FROM issued_at))
+            ON invoices(date_trunc(''month'', (issued_at AT TIME ZONE ''UTC'')::timestamp))
             WHERE closed_at IS NULL';
     END IF;
 END $$;

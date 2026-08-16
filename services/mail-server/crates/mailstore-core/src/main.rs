@@ -21,8 +21,10 @@ use mailstore_core::{MailstoreServiceImpl, MessageStorage};
 #[command(name = "mailstore")]
 #[command(about = "Mailstore Service - Message storage and retrieval")]
 struct Cli {
-    /// gRPC listen address
-    #[arg(short, long, default_value = "0.0.0.0:50051")]
+    /// gRPC listen address. Defaults to loopback so the service is not
+    /// exposed by accident; container deployments override this with
+    /// MAILSTORE_BIND_ADDR=0.0.0.0:50051 (see docker-compose).
+    #[arg(short, long, env = "MAILSTORE_BIND_ADDR", default_value = "127.0.0.1:50051")]
     listen: String,
 
     /// Database URL
@@ -37,6 +39,67 @@ struct Cli {
     /// If provided, message body content is encrypted at rest using AES‑256‑GCM.
     #[arg(long, env = "ENCRYPTION_KEY_FILE")]
     encryption_key_file: Option<PathBuf>,
+}
+
+/// Shared-token gRPC authentication.
+///
+/// When `INTERNAL_SERVICE_TOKEN` is set, every request must present
+/// `authorization: Bearer <INTERNAL_SERVICE_TOKEN>` or it is rejected with
+/// UNAUTHENTICATED. When the variable is unset the server fails open (local
+/// development), but a startup warning is emitted for non-loopback binds.
+#[derive(Clone)]
+struct SharedTokenInterceptor {
+    expected: Arc<str>,
+}
+
+impl SharedTokenInterceptor {
+    fn from_env() -> Self {
+        Self {
+            expected: std::env::var("INTERNAL_SERVICE_TOKEN")
+                .unwrap_or_default()
+                .into(),
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        !self.expected.is_empty()
+    }
+}
+
+impl tonic::service::Interceptor for SharedTokenInterceptor {
+    fn call(
+        &mut self,
+        request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        if !self.is_enabled() {
+            return Ok(request);
+        }
+        let authorized = request
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().strip_prefix("Bearer "))
+            .is_some_and(|provided| constant_time_eq(provided.as_bytes(), self.expected.as_bytes()));
+        if authorized {
+            Ok(request)
+        } else {
+            Err(tonic::Status::unauthenticated(
+                "missing or invalid internal service token",
+            ))
+        }
+    }
+}
+
+/// Length-safe constant-time byte comparison (avoids a new dependency on
+/// `subtle`; the length check itself leaks only the token length).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b)
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 fn init_tracing(log_level: &str) -> Option<TracingGuard> {
@@ -88,8 +151,19 @@ async fn main() -> Result<()> {
     let service = MailstoreServiceImpl::new(storage);
 
     // Start gRPC server
-    let addr = cli.listen.parse()?;
+    let addr: std::net::SocketAddr = cli.listen.parse()?;
     info!("Starting gRPC server on {}", addr);
+
+    let interceptor = SharedTokenInterceptor::from_env();
+    if interceptor.is_enabled() {
+        info!("gRPC shared-token authentication enabled (INTERNAL_SERVICE_TOKEN)");
+    } else if !addr.ip().is_loopback() {
+        tracing::warn!(
+            "gRPC server listening on {} without INTERNAL_SERVICE_TOKEN; requests are unauthenticated. \
+             Set INTERNAL_SERVICE_TOKEN to require a shared bearer token.",
+            addr
+        );
+    }
 
     // Message limits raised to 64 MiB so large messages (e.g. 5 MB APPENDs or
     // inbound SMTP deliveries) round-trip without hitting the 4 MiB default.
@@ -98,6 +172,7 @@ async fn main() -> Result<()> {
         .max_encoding_message_size(64 * 1024 * 1024);
 
     Server::builder()
+        .layer(tonic::service::interceptor(interceptor))
         .add_service(service)
         .serve_with_shutdown(addr, async {
             tokio::signal::ctrl_c().await.ok();
@@ -152,6 +227,15 @@ fn trim_trailing_line_endings(bytes: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_time_eq_compares_bytes() {
+        assert!(constant_time_eq(b"token", b"token"));
+        assert!(!constant_time_eq(b"token", b"tokeN"));
+        assert!(!constant_time_eq(b"token", b"token2"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(constant_time_eq(b"", b""));
+    }
 
     #[test]
     fn trim_trailing_line_endings_only_removes_crlf_suffix() {

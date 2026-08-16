@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dashmap::DashMap;
 use sqlx::PgPool;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls::{TlsAcceptor, TlsStream};
@@ -20,14 +20,7 @@ use uuid::Uuid;
 use crate::auth::{verify_against_dummy, AuthError, AuthFailTracker};
 use crate::config::{RateLimitConfig, SubmissionConfig};
 
-/// Maximum length of a single SMTP command line (RFC 5321 §4.5.3.1.4 limits
-/// commands to 512 octets and lines to 1000; 4096 gives headroom for the
-/// inline `AUTH PLAIN <base64>` payload while still bounding memory).
-const MAX_COMMAND_LINE: usize = 4096;
-
-/// After an over-long line, keep draining this many bytes looking for the
-/// terminator so the session can resynchronise instead of closing.
-const MAX_LINE_DRAIN: usize = 64 * 1024;
+use super::util::{read_line_capped, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE};
 
 /// Per-read timeout for AUTH challenge/response lines (a silent client must
 /// not hold the session forever).
@@ -39,14 +32,13 @@ const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Per-line timeout while receiving message DATA.
 const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Result of a capped line read.
-enum LineRead {
-    /// A full line (including trailing `\r\n`).
-    Line(String),
-    /// The line exceeded the cap; the terminator was still drained.
-    TooLong,
-    /// End of stream.
-    Eof,
+/// Outcome of persisting a submitted message.
+enum QueueOutcome {
+    /// The message was inserted into `email_queue`.
+    Queued,
+    /// The MAIL FROM domain is not owned by the authenticated user's
+    /// tenant — the message must be refused with `550 5.7.1`.
+    SenderNotOwned,
 }
 
 pub struct SubmissionServer {
@@ -109,6 +101,21 @@ impl SubmissionServer {
 
     async fn handle_session(self: Arc<Self>, socket: TcpStream, peer: SocketAddr) {
         let ip = peer.ip();
+
+        // Admission control: per-IP connection cap (mirrors the inbound
+        // server's gate; without it `connections` is tracked but never
+        // enforced, so one IP may hold unlimited concurrent sessions).
+        let active = self.connections.get(&ip).map(|c| *c).unwrap_or(0);
+        if self.rate_limit.enabled && active >= self.rate_limit.max_connections_per_ip {
+            let mut stream = BufStream::new(socket);
+            let _ = write_line(
+                &mut stream,
+                "421 4.7.0 Too many connections from your IP\r\n",
+            )
+            .await;
+            return;
+        }
+
         self.track_connection(ip, true);
 
         let greeting = format!("220 {} ESMTP ApexMail Submission\r\n", self.config.hostname);
@@ -308,13 +315,30 @@ impl SubmissionServer {
                             break;
                         }
                         let per_line = remaining.min(DATA_LINE_TIMEOUT);
-                        match tokio::time::timeout(per_line, stream.read_line(&mut buf)).await {
+                        match tokio::time::timeout(
+                            per_line,
+                            read_line_capped(stream, MAX_DATA_LINE),
+                        )
+                        .await
+                        {
                             Err(_) => {
                                 timed_out = true;
                                 break;
                             }
-                            Ok(Ok(0)) => break, // client disconnected mid-DATA
-                            Ok(Ok(_)) => {
+                            Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => {
+                                break; // client disconnected / stream error mid-DATA
+                            }
+                            Ok(Ok(LineRead::TooLong)) => {
+                                // A single line over the per-line cap cannot be
+                                // part of a message we are willing to store; the
+                                // line itself was drained, keep reading so the
+                                // session stays synchronised and can be refused
+                                // with 552.
+                                too_large = true;
+                                data.clear();
+                            }
+                            Ok(Ok(LineRead::Line(l))) => {
+                                buf = l;
                                 if buf.trim_end_matches(['\r', '\n']) == "." {
                                     terminated = true;
                                     break;
@@ -336,7 +360,6 @@ impl SubmissionServer {
                                     data.extend_from_slice(data_slice.as_bytes());
                                 }
                             }
-                            Ok(Err(_)) => break,
                         }
                     }
 
@@ -372,7 +395,7 @@ impl SubmissionServer {
                             )
                             .await
                         {
-                            Ok(_) => {
+                            Ok(QueueOutcome::Queued) => {
                                 message_count += 1;
                                 let _ =
                                     write_line(stream, &format!("250 OK id={}\r\n", msg_id)).await;
@@ -384,6 +407,15 @@ impl SubmissionServer {
                                     .await;
                                     break;
                                 }
+                            }
+                            Ok(QueueOutcome::SenderNotOwned) => {
+                                // MAIL FROM domain is not owned by the
+                                // authenticated account's tenant.
+                                let _ = write_line(
+                                    stream,
+                                    "550 5.7.1 sender address not owned by account\r\n",
+                                )
+                                .await;
                             }
                             Err(_) => {
                                 let _ =
@@ -580,10 +612,12 @@ impl SubmissionServer {
             return Err(AuthError::LockedOut);
         }
 
+        // NOTE: `users` has no `username` column (only smtp_credentials does),
+        // so the lookup is by email only — identical to the api-server login
+        // path.
         let user = sqlx::query_as::<_, (String, Uuid, String, String)>(
-            "SELECT email, id, password_hash, status FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)",
+            "SELECT email, id, password_hash, status FROM users WHERE LOWER(email) = LOWER($1)",
         )
-        .bind(email)
         .bind(email)
         .fetch_optional(&self.pool)
         .await
@@ -651,7 +685,7 @@ impl SubmissionServer {
         rcpt_to: &[String],
         data: &str,
         msg_id: &str,
-    ) -> Result<(), ()> {
+    ) -> Result<QueueOutcome, ()> {
         // Split the raw message into headers and body so the queue stores them
         // separately (the queue has no raw_mime column).
         let (headers_part, body_part) = split_headers_body(data);
@@ -683,11 +717,11 @@ impl SubmissionServer {
         };
 
         // tenant_id is VARCHAR(26) referencing tenants(id) — never the user's
-        // account UUID. Look up the authenticated user's actual tenant.
+        // account UUID. Look up the authenticated user's actual tenant (by
+        // email only: `users` has no `username` column).
         let tenant_id: Option<String> = sqlx::query_scalar(
-            "SELECT tenant_id FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)",
+            "SELECT tenant_id FROM users WHERE LOWER(email) = LOWER($1)",
         )
-        .bind(auth_email)
         .bind(auth_email)
         .fetch_optional(&self.pool)
         .await
@@ -717,6 +751,19 @@ impl SubmissionServer {
             }
             None => None,
         };
+
+        // Sender-spoofing gate: the MAIL FROM address was already validated to
+        // carry a non-empty domain, so a `None` domain_id here means the
+        // domain does not belong to the authenticated user's tenant. Refuse
+        // the message instead of relaying mail as an address the account
+        // does not own.
+        if domain_id.is_none() {
+            warn!(
+                from = %mail_common::pii::redact_email(mail_from),
+                "Submission MAIL FROM domain not owned by account's tenant; rejecting"
+            );
+            return Ok(QueueOutcome::SenderNotOwned);
+        }
 
         let message_uuid = Uuid::parse_str(msg_id).map_err(|_| ())?;
         let to_first = rcpt_to.first().cloned().unwrap_or_default();
@@ -754,7 +801,7 @@ impl SubmissionServer {
             size = data.len(),
             "Message queued via submission"
         );
-        Ok(())
+        Ok(QueueOutcome::Queued)
     }
 
     fn track_connection(&self, ip: std::net::IpAddr, incr: bool) {
@@ -775,90 +822,15 @@ impl SubmissionServer {
 
 // ── I/O helpers ─────────────────────────────────────────────────────────
 
-/// Read one line with a hard cap on its length. When the cap is exceeded,
-/// the remainder of the line is drained (up to `MAX_LINE_DRAIN` bytes) so
-/// the session can stay synchronised, then `LineRead::TooLong` is returned.
-async fn read_line_capped<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut BufStream<S>,
-    cap: usize,
-) -> std::io::Result<LineRead> {
-    use tokio::io::AsyncBufReadExt;
-    let mut line = Vec::with_capacity(128);
-    let mut too_long = false;
-    let mut drained = 0usize;
-    loop {
-        // Scope the borrow so `buf` is dropped before `stream.consume`.
-        let action = {
-            let buf = stream.fill_buf().await?;
-            if buf.is_empty() {
-                if line.is_empty() && !too_long {
-                    return Ok(LineRead::Eof);
-                }
-                // EOF mid-line: return what we have.
-                Action::Done
-            } else if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                let take = pos + 1;
-                if line.len() + take > cap {
-                    too_long = true;
-                    line.clear();
-                } else if !too_long {
-                    line.extend_from_slice(&buf[..take]);
-                }
-                // A newline-terminated line is complete — return now.
-                // (Action::Return breaks after consuming; looping back to
-                // fill_buf() would block until MORE data arrives, hanging
-                // the session while the client waits for a reply.)
-                Action::Return(take)
-            } else if too_long {
-                drained += buf.len();
-                if drained > MAX_LINE_DRAIN {
-                    Action::GiveUp
-                } else {
-                    Action::Consume(buf.len())
-                }
-            } else if line.len() + buf.len() > cap {
-                too_long = true;
-                line.clear();
-                Action::Consume(buf.len())
-            } else {
-                line.extend_from_slice(buf);
-                Action::Consume(buf.len())
-            }
-        };
-        match action {
-            Action::Done => break,
-            Action::Return(n) => {
-                stream.consume(n);
-                break;
-            }
-            Action::GiveUp => return Ok(LineRead::TooLong),
-            Action::Consume(n) => stream.consume(n),
-        }
-    }
-    if too_long {
-        Ok(LineRead::TooLong)
-    } else {
-        Ok(LineRead::Line(String::from_utf8_lossy(&line).into_owned()))
-    }
-}
-
-enum Action {
-    Done,
-    Return(usize),
-    Consume(usize),
-    GiveUp,
-}
-
 /// Extract the bare address from an SMTP command line such as
 /// `RCPT TO:<user@example.com>` or `MAIL FROM: user@example.com`.
 /// Only the address path is returned — trailing parameters such as
 /// `SIZE=1000` are never part of the address.
 fn extract_address(line: &str) -> String {
-    // Prefer the explicit angle-bracketed path.
-    if let Some(start) = line.find('<') {
-        if let Some(end) = line[start + 1..].find('>') {
-            return line[start + 1..start + 1 + end].to_string();
-        }
+    // Prefer the explicit angle-bracketed path (shared panic-safe helper:
+    // the closing '>' is always searched after the opening '<').
+    if let Some(addr) = super::util::extract_addr_safe(line) {
+        return addr.to_string();
     }
     // Fall back to the token directly after the MAIL FROM:/RCPT TO: verb
     // (never the last token — that could be a command parameter).

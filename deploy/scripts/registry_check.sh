@@ -165,13 +165,24 @@ db_upsert_registry_status() {
 
     [[ -z "$code" ]] && { log error "Cannot upsert: missing registry_code"; return 1; }
 
-    psql "$DATABASE_URL" <<SQL 2>&1 | tail -5
+    # SECURITY: all values are passed as psql client-side variables (-v) and
+    # referenced with :'var' placeholders, which psql quotes/escapes safely.
+    # Never interpolate shell values into the SQL text — registry API
+    # responses (company/contact names) are untrusted input.
+    # NULLIF(:'var','') keeps the old semantics: empty string -> SQL NULL.
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+        -v check_id="$CHECK_ID" \
+        -v registry_code="$code" \
+        -v status="$status" \
+        -v last_report="$last_report" \
+        -v contact_person="$contact_person" \
+        -v contact_changed="$contact_changed" <<SQL 2>&1 | tail -5
 INSERT INTO registry_checks (check_id, registry_code, status, checked_at,
     last_annual_report_date, contact_person_name, contact_person_changed)
-VALUES ('$CHECK_ID', '$code', '$status', NOW(),
-    ${last_report:+'$last_report'}${last_report:-, NULL},
-    ${contact_person:+'$contact_person'}${contact_person:-, NULL},
-    $contact_changed)
+VALUES (:'check_id', :'registry_code', :'status', NOW(),
+    NULLIF(:'last_report', ''),
+    NULLIF(:'contact_person', ''),
+    :'contact_changed'::boolean)
 ON CONFLICT (registry_code) DO UPDATE SET
     status = EXCLUDED.status,
     checked_at = EXCLUDED.checked_at,
@@ -244,8 +255,11 @@ main() {
     else
         contact_name="$(echo "$contact_person" | jq -r '.name // ""')"
         local previous_name
-        previous_name="$(psql "$DATABASE_URL" -tAc \
-            "SELECT contact_person_name FROM registry_checks WHERE registry_code = '$REGISTRY_CODE' ORDER BY checked_at DESC LIMIT 1" \
+        # SECURITY: psql variable placeholder (:'registry_code') instead of
+        # string interpolation — $REGISTRY_CODE is operator-configurable.
+        previous_name="$(psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -tAc \
+            -v registry_code="$REGISTRY_CODE" \
+            "SELECT contact_person_name FROM registry_checks WHERE registry_code = :'registry_code' ORDER BY checked_at DESC LIMIT 1" \
             2>/dev/null || echo "")"
         if [[ -n "$previous_name" && "$previous_name" != "$contact_name" && -n "$contact_name" ]]; then
             contact_changed="true"

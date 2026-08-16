@@ -432,6 +432,18 @@ async fn remove_subscribers(
 ) -> Result<Json<BulkResult>, ApiError> {
     require_scopes(&auth, &["lists:write"])?;
 
+    // Verify list belongs to tenant (same guard as add_subscribers).
+    let exists: Option<bool> =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lists WHERE id = $1 AND tenant_id = $2)")
+            .bind(&list_id)
+            .bind(&auth.tenant_id)
+            .fetch_one(&state.db)
+            .await?;
+
+    if !exists.unwrap_or(false) {
+        return Err(ApiError::NotFound("list not found".into()));
+    }
+
     let contact_ids: Vec<String> = body.contact_ids.iter().map(|id| id.to_string()).collect();
     let affected = sqlx::query(
         "DELETE FROM list_subscribers ls

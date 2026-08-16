@@ -12,13 +12,23 @@ ALTER TABLE dedicated_ips ADD COLUMN IF NOT EXISTS warmup_day INTEGER DEFAULT 0;
 ALTER TABLE dedicated_ips ADD COLUMN IF NOT EXISTS warmup_daily_limit INTEGER DEFAULT 0;
 
 -- 2. automations: code uses 'actions', 'conditions', 'status' but table had 'steps', 'enabled'
-ALTER TABLE automations ADD COLUMN IF NOT EXISTS actions JSONB DEFAULT '[]';
-ALTER TABLE automations ADD COLUMN IF NOT EXISTS conditions JSONB DEFAULT '{}';
-ALTER TABLE automations ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'draft';
-ALTER TABLE automations ALTER COLUMN id TYPE VARCHAR(26) USING id::text;
+DO $$
+BEGIN
+    IF to_regclass('public.automations') IS NOT NULL THEN
+        ALTER TABLE automations ADD COLUMN IF NOT EXISTS actions JSONB DEFAULT '[]';
+        ALTER TABLE automations ADD COLUMN IF NOT EXISTS conditions JSONB DEFAULT '{}';
+        ALTER TABLE automations ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'draft';
+        ALTER TABLE automations ALTER COLUMN id TYPE VARCHAR(26) USING id::text;
+    END IF;
+END $$;
 
 -- 3. support_tickets: code expects 'assigned_to'
-ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS assigned_to VARCHAR(26);
+DO $$
+BEGIN
+    IF to_regclass('public.support_tickets') IS NOT NULL THEN
+        ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS assigned_to VARCHAR(26);
+    END IF;
+END $$;
 
 -- 4. plans: add columns the billing code reads
 ALTER TABLE plans ADD COLUMN IF NOT EXISTS display_name VARCHAR(255);
@@ -48,9 +58,19 @@ ALTER TABLE self_hosted_bounces ALTER COLUMN tenant_id TYPE VARCHAR(26) USING te
 ALTER TABLE self_hosted_complaints ALTER COLUMN tenant_id TYPE VARCHAR(26) USING tenant_id::text;
 
 -- 7. contacts: drop generated column and make name a regular column
-ALTER TABLE contacts DROP COLUMN IF EXISTS name;
-ALTER TABLE contacts ADD COLUMN name VARCHAR(512);
+DO $$
+BEGIN
+    IF to_regclass('public.contacts') IS NOT NULL THEN
+        ALTER TABLE contacts DROP COLUMN IF EXISTS name;
+        ALTER TABLE contacts ADD COLUMN name VARCHAR(512);
+    END IF;
+END $$;
 
 -- 8. templates: slug NOT NULL but code doesn't always provide it
-ALTER TABLE templates ALTER COLUMN slug DROP NOT NULL;
-ALTER TABLE templates ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
+DO $$
+BEGIN
+    IF to_regclass('public.templates') IS NOT NULL THEN
+        ALTER TABLE templates ALTER COLUMN slug DROP NOT NULL;
+        ALTER TABLE templates ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
+    END IF;
+END $$;

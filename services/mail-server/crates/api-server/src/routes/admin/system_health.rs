@@ -71,8 +71,6 @@ pub struct MtaNode {
     pub status: String,
     pub warmup_day: Option<i32>,
     pub daily_limit: Option<i64>,
-    pub daily_sent: Option<i64>,
-    pub is_fully_warmed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +88,7 @@ async fn system_health(
     auth: AuthUser,
 ) -> Result<Json<SystemHealthResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     // ── Queues ─────────────────────────────────────────────────
     let queue_rows = optional_relation_rows(
@@ -117,12 +116,16 @@ async fn system_health(
         })
         .collect();
 
-    // ── Workers (derived from queue_jobs.worker_id) ────────────
+    // ── Workers (derived from queue_jobs activity) ─────────────
+    // queue_jobs has no worker_id column — derive one logical worker per
+    // queue from the most recent job activity (updated_at on jobs that a
+    // worker actually touched).
     let worker_rows = optional_relation_rows(
-        sqlx::query_as::<_, (String, String, Option<chrono::DateTime<chrono::Utc>>)>(
-            "SELECT DISTINCT worker_id, queue_name, MAX(updated_at)
-             FROM queue_jobs WHERE worker_id IS NOT NULL
-             GROUP BY worker_id, queue_name",
+        sqlx::query_as::<_, (String, Option<chrono::DateTime<chrono::Utc>>)>(
+            "SELECT COALESCE(queue_name, queue) AS worker_queue, MAX(updated_at)
+             FROM queue_jobs
+             WHERE status IN ('processing', 'completed', 'failed')
+             GROUP BY COALESCE(queue_name, queue)",
         )
         .fetch_all(&state.db)
         .await,
@@ -131,7 +134,8 @@ async fn system_health(
 
     let workers: Vec<WorkerStatus> = worker_rows
         .into_iter()
-        .map(|(id, queue, hb)| WorkerStatus {
+        .map(|(queue, hb)| WorkerStatus {
+            id: format!("worker:{queue}"),
             name: format!("{queue}-worker"),
             r#type: queue,
             status: if hb
@@ -143,7 +147,6 @@ async fn system_health(
                 "idle".into()
             },
             last_heartbeat: hb.map(|t| t.to_rfc3339()),
-            id,
         })
         .collect();
 
@@ -158,12 +161,10 @@ async fn system_health(
                 String,
                 Option<i32>,
                 Option<i64>,
-                Option<i64>,
-                bool,
             ),
         >(
             "SELECT id::text, ip_address, pool_id::text, status,
-                    warmup_day, daily_limit, daily_sent, is_fully_warmed
+                    warmup_day, daily_limit
              FROM ip_pool_addresses ORDER BY ip_address LIMIT 50",
         )
         .fetch_all(&state.db)
@@ -173,15 +174,13 @@ async fn system_health(
 
     let mta_nodes: Vec<MtaNode> = mta_rows
         .into_iter()
-        .map(|(id, ip, pool, status, wd, dl, ds, fw)| MtaNode {
+        .map(|(id, ip, pool, status, wd, dl)| MtaNode {
             id,
             ip_address: ip,
             pool_id: pool,
             status,
             warmup_day: wd,
             daily_limit: dl,
-            daily_sent: ds,
-            is_fully_warmed: fw,
         })
         .collect();
 
@@ -198,8 +197,8 @@ async fn system_health(
                 bool,
             ),
         >(
-            "SELECT id::text, severity, component, message, timestamp, acknowledged
-             FROM system_alerts ORDER BY timestamp DESC LIMIT 50",
+            "SELECT id::text, severity, alert_type AS component, message, created_at AS timestamp, acknowledged
+             FROM system_alerts ORDER BY created_at DESC LIMIT 50",
         )
         .fetch_all(&state.db)
         .await,

@@ -45,13 +45,13 @@ impl InboxPlacementService {
         let rows = sqlx::query_as::<_, (String, String, i64)>(
             "SELECT recipient_domain, \
                     CASE WHEN event_type = 'delivered' THEN 'inbox' \
-                         WHEN event_type = 'complaint' THEN 'spam' \
+                         WHEN event_type = 'complained' THEN 'spam' \
                          WHEN event_type = 'bounced' THEN 'bounced' \
                          ELSE 'unknown' END as placement, \
                     COUNT(*) as cnt \
              FROM events \
              WHERE tenant_id = $1 AND timestamp >= $2 \
-               AND event_type IN ('delivered', 'complaint', 'bounced') \
+               AND event_type IN ('delivered', 'complained', 'bounced') \
              GROUP BY recipient_domain, placement",
         )
         .bind(tenant_id)
@@ -133,12 +133,12 @@ impl InboxPlacementService {
         let rows = sqlx::query_as::<_, (String, String, i64)>(
             "SELECT DATE_TRUNC('day', timestamp)::text as day, \
                     CASE WHEN event_type = 'delivered' THEN 'inbox' \
-                         WHEN event_type = 'complaint' THEN 'spam' \
+                         WHEN event_type = 'complained' THEN 'spam' \
                          ELSE 'other' END as placement, \
                     COUNT(*) as cnt \
              FROM events \
              WHERE tenant_id = $1 AND timestamp >= $2 \
-               AND event_type IN ('delivered', 'complaint') \
+               AND event_type IN ('delivered', 'complained') \
              GROUP BY day, placement ORDER BY day",
         )
         .bind(tenant_id)

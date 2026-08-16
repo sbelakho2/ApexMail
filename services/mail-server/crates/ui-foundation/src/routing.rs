@@ -171,10 +171,45 @@ mod tests {
 
     #[test]
     fn counts_declared_routes() {
-        assert_eq!(declared_route_count("web"), Some(30));
-        assert_eq!(declared_route_count("control-plane"), Some(24));
+        assert_eq!(declared_route_count("web"), Some(33));
+        assert_eq!(declared_route_count("control-plane"), Some(30));
         assert_eq!(declared_route_count("marketing"), Some(19));
         assert_eq!(declared_route_count("marketing-zola"), Some(37));
-        assert_eq!(total_route_count(), 110);
+        assert_eq!(total_route_count(), 119);
+    }
+
+    #[test]
+    fn inbox_placement_and_cp_alias_routes_require_auth() {
+        // Web inbox-placement surface (audit finding: the auth gate missed
+        // these — they previously rendered for anonymous visitors).
+        for route in surface_routes("web") {
+            if route.path.starts_with("/inbox-placement") {
+                assert!(
+                    route.auth_required,
+                    "web {} must require auth",
+                    route.path
+                );
+            }
+        }
+        assert_eq!(
+            canonical_pattern("web", "/inbox-placement/t_1"),
+            Some("/inbox-placement/[id]")
+        );
+
+        // Control-plane /cp alias routes.
+        for path in [
+            "/cp",
+            "/cp/tenants",
+            "/cp/audit",
+            "/cp/sales",
+            "/cp/infrastructure",
+            "/cp/security",
+        ] {
+            let route = surface_routes("control-plane")
+                .into_iter()
+                .find(|route| route.path == path)
+                .unwrap_or_else(|| panic!("control-plane {path} missing from manifest"));
+            assert!(route.auth_required, "control-plane {path} must require auth");
+        }
     }
 }

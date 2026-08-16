@@ -1,4 +1,9 @@
 {# ── Shared translation macro ── #}
+{# NOTE: Tera macros cannot access global/page variables (i18n_data, l). #}
+{# This macro therefore always falls back unless callers pre-resolve and  #}
+{# pass the translated value. The inline {% if i18n_data and i18n_data[l] #}
+{# ... %} pattern used across templates is the canonical approach because #}
+{# it CAN see the globals. Kept here for legacy callers.                  #}
 {%- macro t(section, key, fallback) -%}
   {%- if i18n_data and i18n_data[l] and i18n_data[l][section] and i18n_data[l][section][key] -%}
     {{- i18n_data[l][section][key] | safe -}}
@@ -6,3 +11,62 @@
     {{- fallback | safe -}}
   {%- endif -%}
 {%- endmacro t -%}
+
+{# ── Compare-page macros (audit 3.3) ─────────────────────────────────── #}
+{#                                                                       #}
+{# Before these macros, every competitor-comparison page hand-wrote its  #}
+{# row HTML inline in content/compare/<name>/index.md, and the 5 files   #}
+{# used two incompatible grammars (div-grid for resend/sendgrid/postmark #}
+{# and <tbody>/<tr>/<td> for amazon-ses/mailgun). A single design change #}
+{# to the "winner" indicator or row styling required manual regex across  #}
+{# all 5 files with two patterns.                                        #}
+{#                                                                       #}
+{# These macros are called from partials/compare/table.html, which loops #}
+{# over page.extra.comparison_sections. The macros themselves only use   #}
+{# their own parameters (no global-variable access needed), so the Tera  #}
+{# macro scoping limitation does not affect them.                        #}
+
+{# winner_badge(winner, competitor_name): the 4th-column indicator.
+   Handles the 6 distinct variants that existed across the 5 files:
+     apexmail   → <span class="text-brand-600 font-semibold">ApexMail</span>
+     competitor → <span class="text-brand-600 font-semibold">{competitor_name}</span>
+     tie        → <span class="text-surface-500">Tie</span>
+     none       → <span class="text-surface-500">—</span>
+   (The bare "—" with no span from amazon-ses/mailgun normalizes to the
+   spanned "—" variant — semantically identical, now structurally consistent.) #}
+{%- macro winner_badge(winner, competitor_name) -%}
+{%- if winner == "apexmail" -%}
+<span class="text-brand-600 font-semibold">ApexMail</span>
+{%- elif winner == "competitor" -%}
+<span class="text-brand-600 font-semibold">{{ competitor_name }}</span>
+{%- elif winner == "tie" -%}
+<span class="text-surface-500">Tie</span>
+{%- else -%}
+<span class="text-surface-500">&mdash;</span>
+{%- endif -%}
+{%- endmacro winner_badge -%}
+
+{# sources_block(sources, disclaimer): trailing footnote/citation block
+   for pages with inline <sup><a href="#src-XXn"> references (amazon-ses,
+   mailgun). sources is an array of {ref, n, label, url}. #}
+{%- macro sources_block(sources, disclaimer) -%}
+<div class="mt-12 p-6 bg-surface-50 border border-surface-200 rounded-lg">
+  <p class="text-xs text-surface-500 leading-relaxed">
+  {%- for src in sources -%}
+    <sup id="src-{{ src.ref }}">{{ src.n }}</sup> <a href="{{ src.url }}" class="text-brand-600 hover:text-brand-700 underline" rel="noopener noreferrer">{{ src.label }}</a><br/>
+  {%- endfor -%}
+  {%- if disclaimer -%}
+    <br/><em>{{ disclaimer }}</em>
+  {%- endif -%}
+  </p>
+</div>
+{%- endmacro sources_block -%}
+
+{# methodology_note(text): trailing methodology paragraph (postmark style).
+   text is raw HTML — typically contains <strong>Methodology:</strong> plus
+   a link to /compare/methodology/. #}
+{%- macro methodology_note(text) -%}
+<div class="mt-12 p-6 bg-surface-50 border border-surface-200 rounded-lg">
+  <p class="text-xs text-surface-500 leading-relaxed">{{ text | safe }}</p>
+</div>
+{%- endmacro methodology_note -%}

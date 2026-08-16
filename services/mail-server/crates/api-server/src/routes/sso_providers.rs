@@ -66,7 +66,18 @@ fn redirect_from_state(state: &str) -> String {
 }
 
 fn state_cookie(name: &str, value: &str, secure: bool) -> Result<String, ApiError> {
-    Ok(format!("{name}={value}; HttpOnly; Path=/; Max-Age=600; SameSite=Lax{}", if secure { "; Secure" } else { "" }))
+    // Apple's authorization response uses response_mode=form_post — a
+    // cross-site POST navigation. SameSite=Lax cookies are NOT sent on
+    // cross-site POSTs, so the Apple state cookie must be SameSite=None
+    // (which also requires Secure) or state validation always fails.
+    // Google/Microsoft/GitHub use query-mode redirects (GET), where Lax
+    // works, but None is safe for all of them.
+    let _ = secure; // None implies Secure; non-secure deployments get Lax below
+    if secure {
+        Ok(format!("{name}={value}; HttpOnly; Path=/; Max-Age=600; SameSite=None; Secure"))
+    } else {
+        Ok(format!("{name}={value}; HttpOnly; Path=/; Max-Age=600; SameSite=Lax"))
+    }
 }
 
 fn clear_cookie(name: &str, secure: bool) -> String {
@@ -188,7 +199,7 @@ async fn complete_sso(state: &AppState, email: &str, name: &str, provider: &str,
         ],
         _ => vec!["messages:read".into()],
     };
-    let claims = crate::middleware::auth::JwtClaims { sub: user_id.to_string(), tenant_id, scopes, exp: exp.timestamp(), iat: issued_at.timestamp(), jti: Uuid::new_v4().to_string() };
+    let claims = crate::middleware::auth::JwtClaims { sub: user_id.to_string(), tenant_id, scopes, exp: exp.timestamp(), iat: issued_at.timestamp(), jti: Uuid::new_v4().to_string(), typ: Some("session".into()) };
     let token = encode(&Header::new(Algorithm::RS256), &claims, &EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes()).map_err(|e| ApiError::Internal(format!("JWT: {e}")))?)
         .map_err(|e| ApiError::Internal(format!("token: {e}")))?;
 

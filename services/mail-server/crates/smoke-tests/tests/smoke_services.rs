@@ -357,7 +357,7 @@ mod observability_tests {
             result.compliant,
             "99.95% success should be compliant with 99.9% target"
         );
-        assert!(result.current_pct > 99.9);
+        assert!(result.current_pct.expect("traffic observed") > 99.9);
         assert!(result.error_budget_remaining > 0.0);
     }
 }
@@ -382,7 +382,7 @@ mod sales_tests {
         assert_eq!(lead.email, "john@acme.com");
         assert_eq!(lead.status, sales_autopilot::types::LeadStatus::New);
 
-        let retrieved = crm.get_lead(lead.id, "tenant-a");
+        let retrieved = crm.get_lead(&lead.id, "tenant-a");
         assert!(retrieved.is_ok());
         assert_eq!(retrieved.unwrap().name, "John Doe");
     }

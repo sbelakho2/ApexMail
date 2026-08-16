@@ -7,7 +7,17 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 /// Status of a lead as it progresses through the sales funnel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Snoozed` and `Interested` are written by the reply-handling workers
+/// (e.g. out-of-office replies snooze a lead, positive replies mark it
+/// interested) and must round-trip through the database.
+///
+/// `Unknown` is used when reading a status value that this service does
+/// not recognise; the original value is preserved so it round-trips
+/// instead of being silently coerced to `New`.
+///
+/// Note: not `Copy` because `Unknown` carries a `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeadStatus {
     New,
@@ -15,6 +25,9 @@ pub enum LeadStatus {
     Qualified,
     Converted,
     Lost,
+    Snoozed,
+    Interested,
+    Unknown(String),
 }
 
 impl std::fmt::Display for LeadStatus {
@@ -25,6 +38,10 @@ impl std::fmt::Display for LeadStatus {
             Self::Qualified => write!(f, "qualified"),
             Self::Converted => write!(f, "converted"),
             Self::Lost => write!(f, "lost"),
+            Self::Snoozed => write!(f, "snoozed"),
+            Self::Interested => write!(f, "interested"),
+            // Preserve the original value so Display round-trips with parse.
+            Self::Unknown(raw) => write!(f, "{raw}"),
         }
     }
 }
@@ -92,9 +109,13 @@ impl MessageCategory {
 // ---------------------------------------------------------------------------
 
 /// A sales lead tracked in the CRM.
+///
+/// The id is a `String` because leads are created by several services with
+/// different identifier formats (UUID here, `lead_<timestamp>` in api-server,
+/// nanoid/ULID elsewhere); the storage column is TEXT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lead {
-    pub id: Uuid,
+    pub id: String,
     pub tenant_id: String,
     pub email: String,
     pub name: String,
@@ -213,13 +234,19 @@ pub struct CreateConversionBody {
 #[non_exhaustive]
 pub enum SalesError {
     #[error("lead not found: {0}")]
-    LeadNotFound(Uuid),
+    LeadNotFound(String),
+
+    #[error("lead already exists for tenant: {0}")]
+    LeadAlreadyExists(String),
 
     #[error("campaign not found: {0}")]
     CampaignNotFound(Uuid),
 
     #[error("event not found: {0}")]
     EventNotFound(Uuid),
+
+    #[error("inbox message not found: {0}")]
+    MessageNotFound(Uuid),
 
     #[error("conversion not found: {0}")]
     ConversionNotFound(Uuid),
@@ -254,9 +281,11 @@ impl axum::response::IntoResponse for SalesError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
         let (status, msg) = match &self {
-            SalesError::LeadNotFound(_)
-            | SalesError::CampaignNotFound(_)
+            SalesError::LeadNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
+            SalesError::LeadAlreadyExists(_) => (StatusCode::CONFLICT, self.to_string()),
+            SalesError::CampaignNotFound(_)
             | SalesError::EventNotFound(_)
+            | SalesError::MessageNotFound(_)
             | SalesError::ConversionNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             SalesError::InvalidInput(_)
             | SalesError::MaxCampaignsReached(_)
@@ -287,6 +316,12 @@ mod tests {
         assert_eq!(LeadStatus::Qualified.to_string(), "qualified");
         assert_eq!(LeadStatus::Converted.to_string(), "converted");
         assert_eq!(LeadStatus::Lost.to_string(), "lost");
+        assert_eq!(LeadStatus::Snoozed.to_string(), "snoozed");
+        assert_eq!(LeadStatus::Interested.to_string(), "interested");
+        assert_eq!(
+            LeadStatus::Unknown("custom_status".into()).to_string(),
+            "custom_status"
+        );
     }
 
     #[test]
@@ -306,7 +341,7 @@ mod tests {
     #[test]
     fn test_lead_serialization() {
         let lead = Lead {
-            id: Uuid::nil(),
+            id: "06b6b0e0-8c7f-4a1e-9d3a-2f0d5c9b1e64".into(),
             tenant_id: "tenant-a".into(),
             email: "alice@example.com".into(),
             name: "Alice".into(),
@@ -318,18 +353,41 @@ mod tests {
             created_at: Utc::now(),
         };
         let json = serde_json::to_value(&lead).unwrap();
+        assert_eq!(json["id"], "06b6b0e0-8c7f-4a1e-9d3a-2f0d5c9b1e64");
         assert_eq!(json["email"], "alice@example.com");
         assert_eq!(json["score"], 85);
         assert_eq!(json["status"], "new");
     }
 
     #[test]
+    fn test_lead_serialization_preserves_non_uuid_id() {
+        // Leads created by other services use non-UUID id formats (nanoid,
+        // ULID, "lead_<ts>"); they must survive a serde round-trip intact.
+        let lead = Lead {
+            id: "lead_1739612345678".into(),
+            tenant_id: "system".into(),
+            email: "x@example.com".into(),
+            name: "X".into(),
+            company: "".into(),
+            title: "".into(),
+            score: 5,
+            source: "contact_form".into(),
+            status: LeadStatus::New,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&lead).unwrap();
+        let parsed: Lead = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, "lead_1739612345678");
+    }
+
+    #[test]
     fn test_sales_error_display() {
-        let id = Uuid::nil();
-        let err = SalesError::LeadNotFound(id);
+        let err = SalesError::LeadNotFound("missing".into());
         assert!(err.to_string().contains("lead not found"));
         let err2 = SalesError::InvalidInput("bad email".into());
         assert!(err2.to_string().contains("bad email"));
+        let err3 = SalesError::LeadAlreadyExists("alice@acme.com".into());
+        assert!(err3.to_string().contains("lead already exists"));
     }
 
     #[test]
@@ -341,11 +399,12 @@ mod tests {
 
     #[test]
     fn test_all_error_variants_display() {
-        let id = Uuid::nil();
         let errors: Vec<SalesError> = vec![
-            SalesError::LeadNotFound(id),
-            SalesError::CampaignNotFound(id),
-            SalesError::EventNotFound(id),
+            SalesError::LeadNotFound("id".into()),
+            SalesError::LeadAlreadyExists("alice@acme.com".into()),
+            SalesError::CampaignNotFound(Uuid::nil()),
+            SalesError::EventNotFound(Uuid::nil()),
+            SalesError::MessageNotFound(Uuid::nil()),
             SalesError::InvalidInput("bad".into()),
             SalesError::EnrichmentFailed("timeout".into()),
             SalesError::RateLimited("too many requests".into()),
@@ -391,6 +450,8 @@ mod tests {
             LeadStatus::Qualified,
             LeadStatus::Converted,
             LeadStatus::Lost,
+            LeadStatus::Snoozed,
+            LeadStatus::Interested,
         ] {
             let json = serde_json::to_string(&status).unwrap();
             let parsed: LeadStatus = serde_json::from_str(&json).unwrap();
@@ -408,6 +469,8 @@ mod tests {
         assert_eq!(LeadStatus::Qualified.to_string(), "qualified");
         assert_eq!(LeadStatus::Converted.to_string(), "converted");
         assert_eq!(LeadStatus::Lost.to_string(), "lost");
+        assert_eq!(LeadStatus::Snoozed.to_string(), "snoozed");
+        assert_eq!(LeadStatus::Interested.to_string(), "interested");
     }
 
     #[test]
@@ -421,7 +484,7 @@ mod tests {
     #[test]
     fn lead_score_boundary() {
         let lead = Lead {
-            id: Uuid::nil(),
+            id: "lead-1".into(),
             tenant_id: "tenant-a".into(),
             email: "x@x.com".into(),
             name: "X".into(),
@@ -449,7 +512,7 @@ mod tests {
     #[test]
     fn lead_clone() {
         let lead = Lead {
-            id: Uuid::new_v4(),
+            id: Uuid::new_v4().to_string(),
             tenant_id: "tenant-a".into(),
             email: "test@test.com".into(),
             name: "Test".into(),

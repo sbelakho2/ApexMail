@@ -15,7 +15,6 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CrmLeadsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -49,6 +48,7 @@ async fn list_crm_leads(
     Query(params): Query<CrmLeadsQuery>,
 ) -> Result<Json<Vec<CrmLead>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     // Check table exists
     let exists: Option<(bool,)> = sqlx::query_as(
@@ -83,8 +83,9 @@ async fn list_crm_leads(
         ),
     >(
         // API-104: Scope CRM leads by tenant_id to prevent cross-tenant access.
+        // `last_contacted_at` exists per migration 006; `last_activity` does not.
         "SELECT id::text, company_name, domain, contact_email, contact_name,
-                stage, score, source, last_activity, created_at,
+                stage, score, source, last_contacted_at, created_at,
                 COALESCE(tags, '[]'::jsonb)
          FROM sales_leads WHERE tenant_id = $3
          ORDER BY score DESC NULLS LAST, created_at DESC

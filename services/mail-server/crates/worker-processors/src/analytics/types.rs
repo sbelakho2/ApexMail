@@ -74,6 +74,20 @@ impl AggregatedStats {
             Err(_) => {}
         }
     }
+
+    /// Merge another period-aligned stats entry into this one (counter-wise
+    /// addition). Used when restoring an aggregation buffer after a failed
+    /// flush that raced with new events landing under the same keys.
+    pub fn merge_from(&mut self, other: AggregatedStats) {
+        self.sent += other.sent;
+        self.delivered += other.delivered;
+        self.opened += other.opened;
+        self.clicked += other.clicked;
+        self.bounced += other.bounced;
+        self.unsubscribed += other.unsubscribed;
+        self.complained += other.complained;
+        self.failed += other.failed;
+    }
 }
 
 /// Event type enumeration.

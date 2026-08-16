@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tracing::error;
 
 /// Sales Autopilot configuration.
 /// This service runs as a **separate process** from the customer-facing API
@@ -8,8 +7,15 @@ use tracing::error;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SalesConfig {
-    /// Base URL of the enrichment / company-lookup API.
+    /// Base URL of the enrichment / company-lookup API (no trailing `/v1`;
+    /// the provider appends the versioned path itself).
     pub enrichment_api_url: String,
+
+    /// API key for the enrichment API (sent as a Bearer token).
+    /// Read from `ENRICHMENT_API_KEY`, falling back to the production
+    /// template name `SALES_ENRICHMENT_API_KEY`.
+    #[serde(default)]
+    pub enrichment_api_key: String,
 
     /// How often (in seconds) to sync the calendar with external providers.
     pub calendar_sync_interval_secs: u64,
@@ -65,7 +71,8 @@ impl Default for LeadScoringWeights {
 impl Default for SalesConfig {
     fn default() -> Self {
         Self {
-            enrichment_api_url: "https://enrich.apexmail.ee/v1".into(),
+            enrichment_api_url: "https://enrich.apexmail.ee".into(),
+            enrichment_api_key: String::new(),
             calendar_sync_interval_secs: 300,
             max_campaigns: 50,
             port: 3010,
@@ -78,52 +85,55 @@ impl Default for SalesConfig {
 
 impl SalesConfig {
     /// Build a config from environment variables, falling back to defaults.
-    pub fn from_env() -> Self {
+    ///
+    /// A variable that is *absent* (or empty) falls back to its default.
+    /// A variable that is *present but invalid* (e.g. a non-numeric port)
+    /// is treated as a configuration error and returns `Err` instead of
+    /// being silently ignored — misconfigured deployments should fail fast
+    /// rather than run with unexpected defaults.
+    pub fn from_env() -> anyhow::Result<Self> {
         let config = Self {
-            enrichment_api_url: std::env::var("ENRICHMENT_API_URL")
-                .unwrap_or_else(|_| "https://enrich.apexmail.ee/v1".into()),
-            calendar_sync_interval_secs: std::env::var("CALENDAR_SYNC_INTERVAL")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(300),
-            max_campaigns: std::env::var("MAX_CAMPAIGNS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(50),
-            port: std::env::var("SALES_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(3010),
-            scraper_rpm: std::env::var("SCRAPER_RPM")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(30),
-            redis_url: std::env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
+            // Prefer the SALES_-prefixed (production template) names and fall
+            // back to the short names used by local development environments.
+            enrichment_api_url: read_env(&["SALES_ENRICHMENT_API_URL", "ENRICHMENT_API_URL"])?
+                .unwrap_or_else(|| "https://enrich.apexmail.ee".into()),
+            enrichment_api_key: read_env(&["ENRICHMENT_API_KEY", "SALES_ENRICHMENT_API_KEY"])?
+                .unwrap_or_default(),
+            calendar_sync_interval_secs: parse_env_num(
+                &["CALENDAR_SYNC_INTERVAL"],
+                300,
+                "a positive number of seconds",
+            )?,
+            max_campaigns: parse_env_num(&["MAX_CAMPAIGNS"], 50, "a positive integer")?,
+            port: parse_env_num(
+                &["SALES_AUTOPILOT_PORT", "SALES_PORT"],
+                3010,
+                "a port between 1 and 65535",
+            )?,
+            scraper_rpm: parse_env_num(&["SCRAPER_RPM"], 30, "a positive integer")?,
+            redis_url: read_env(&["REDIS_URL"])?.unwrap_or_else(|| "redis://127.0.0.1:6379".into()),
             lead_scoring: LeadScoringWeights {
-                engagement_weight: std::env::var("LEAD_SCORE_ENGAGEMENT_WEIGHT")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(40),
-                company_size_weight: std::env::var("LEAD_SCORE_COMPANY_SIZE_WEIGHT")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(30),
-                recency_weight: std::env::var("LEAD_SCORE_RECENCY_WEIGHT")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(30),
+                engagement_weight: parse_env_num(
+                    &["LEAD_SCORE_ENGAGEMENT_WEIGHT"],
+                    40,
+                    "an integer 0-100",
+                )?,
+                company_size_weight: parse_env_num(
+                    &["LEAD_SCORE_COMPANY_SIZE_WEIGHT"],
+                    30,
+                    "an integer 0-100",
+                )?,
+                recency_weight: parse_env_num(
+                    &["LEAD_SCORE_RECENCY_WEIGHT"],
+                    30,
+                    "an integer 0-100",
+                )?,
             },
         };
-        if let Err(err) = config.validate() {
-            error!(error = %err, "Invalid sales-autopilot config, falling back to defaults");
-            let fallback = Self::default();
-            if let Err(default_err) = fallback.validate() {
-                error!(error = %default_err, "Default sales-autopilot config failed validation");
-            }
-            return fallback;
-        }
         config
+            .validate()
+            .map_err(|err| anyhow::anyhow!("invalid sales-autopilot configuration: {err}"))?;
+        Ok(config)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -159,6 +169,49 @@ impl SalesConfig {
     }
 }
 
+/// Read the first *present, non-empty* variable among `names` (checked in
+/// order, so earlier names take precedence). Empty or whitespace-only values
+/// are treated as unset so templated `.env` files (e.g. `SALES_ENRICHMENT_API_URL=`)
+/// fall back to defaults rather than failing validation.
+fn read_env(names: &[&str]) -> anyhow::Result<Option<String>> {
+    for name in names {
+        match std::env::var(name) {
+            Ok(value) => {
+                let trimmed = value.trim();
+                return Ok(if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                });
+            }
+            // Not set under this name — try the next alias.
+            Err(std::env::VarError::NotPresent) => continue,
+            Err(err) => {
+                return Err(anyhow::anyhow!("invalid environment variable {name}: {err}"));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Parse the first present, non-empty variable among `names` as `T`.
+/// Returns `default` only when none of the variables is set; a present but
+/// unparseable value is an error (see [`SalesConfig::from_env`]).
+fn parse_env_num<T>(names: &[&str], default: T, expected: &str) -> anyhow::Result<T>
+where
+    T: std::str::FromStr,
+{
+    match read_env(names)? {
+        None => Ok(default),
+        Some(raw) => raw.parse::<T>().map_err(|_| {
+            anyhow::anyhow!(
+                "environment variable {} is set to invalid value {raw:?}; expected {expected}",
+                names.join(" or ")
+            )
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,7 +223,11 @@ mod tests {
         assert_eq!(cfg.max_campaigns, 50);
         assert_eq!(cfg.calendar_sync_interval_secs, 300);
         assert_eq!(cfg.scraper_rpm, 30);
-        assert!(cfg.enrichment_api_url.contains("enrich"));
+        // The default base URL must NOT include a trailing /v1 — the
+        // HttpEnrichmentProvider appends the versioned path itself, so a
+        // /v1 suffix here would produce a doubled /v1/v1 request path.
+        assert_eq!(cfg.enrichment_api_url, "https://enrich.apexmail.ee");
+        assert!(cfg.enrichment_api_key.is_empty());
         assert_eq!(cfg.lead_scoring.engagement_weight, 40);
         assert_eq!(cfg.lead_scoring.company_size_weight, 30);
         assert_eq!(cfg.lead_scoring.recency_weight, 30);
@@ -180,6 +237,7 @@ mod tests {
     fn test_config_serialization_roundtrip() {
         let cfg = SalesConfig {
             enrichment_api_url: "https://example.com/api".into(),
+            enrichment_api_key: "secret-key".into(),
             calendar_sync_interval_secs: 120,
             max_campaigns: 10,
             port: 9090,
@@ -198,6 +256,7 @@ mod tests {
         assert_eq!(parsed.calendar_sync_interval_secs, 120);
         assert_eq!(parsed.scraper_rpm, 60);
         assert_eq!(parsed.enrichment_api_url, "https://example.com/api");
+        assert_eq!(parsed.enrichment_api_key, "secret-key");
         assert_eq!(parsed.lead_scoring.engagement_weight, 50);
         assert_eq!(parsed.lead_scoring.company_size_weight, 25);
         assert_eq!(parsed.lead_scoring.recency_weight, 25);

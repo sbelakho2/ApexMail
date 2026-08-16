@@ -7,7 +7,6 @@ on:
     paths:
       - 'services/mail-server/**/Cargo.toml'
       - 'services/mail-server/**/Cargo.lock'
-      - 'services/mail-server/**/Cargo.lock'
       - '.github/workflows/security-audit.yml'
   pull_request:
     paths:

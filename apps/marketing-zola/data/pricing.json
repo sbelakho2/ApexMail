@@ -1,0 +1,81 @@
+{
+  "_comment": "Single source of truth for ApexMail pricing. Consumed by templates/partials/pricing/calculator.html (interactive JS) via Zola load_data. Keep in sync with the billing engine plan boundaries in services/mail-server/crates/api-server/src/routes/billing.rs and the auth-server plan definitions.",
+  "currency_symbol": "\u20AC",
+  "ip_cost": 30,
+  "deployment_setup": { "shared": 0, "private": 10000, "byoc": 20000 },
+  "deployment_monthly": { "shared": 0, "private": 4000, "byoc": 6500 },
+  "plans": [
+    {
+      "name": "Free",
+      "monthly_price": 0,
+      "annual_price_per_month": 0,
+      "included_volume": 30000,
+      "overage_per_1k": null,
+      "included_ips": 0,
+      "included_domains": 1,
+      "included_users": 1,
+      "support": "community",
+      "setup_fee": 0
+    },
+    {
+      "name": "Developer",
+      "monthly_price": 29,
+      "annual_price_per_month": 26,
+      "included_volume": 50000,
+      "overage_per_1k": 0.80,
+      "included_ips": 0,
+      "included_domains": 5,
+      "included_users": 3,
+      "support": "email",
+      "setup_fee": 0
+    },
+    {
+      "name": "Pro",
+      "monthly_price": 89,
+      "annual_price_per_month": 80,
+      "included_volume": 150000,
+      "overage_per_1k": 0.60,
+      "included_ips": 0,
+      "included_domains": 15,
+      "included_users": 8,
+      "support": "email",
+      "setup_fee": 0
+    },
+    {
+      "name": "Growth",
+      "monthly_price": 229,
+      "annual_price_per_month": 206,
+      "included_volume": 500000,
+      "overage_per_1k": 0.35,
+      "included_ips": 1,
+      "included_domains": 50,
+      "included_users": 15,
+      "support": "priority",
+      "setup_fee": 0
+    },
+    {
+      "name": "Business",
+      "monthly_price": 699,
+      "annual_price_per_month": 629,
+      "included_volume": 2000000,
+      "overage_per_1k": 0.35,
+      "included_ips": 1,
+      "included_domains": 999,
+      "included_users": 25,
+      "support": "priority",
+      "setup_fee": 0
+    },
+    {
+      "name": "Enterprise",
+      "monthly_price": 3000,
+      "annual_price_per_month": 3000,
+      "included_volume": 5000000,
+      "overage_per_1k": 0.22,
+      "included_ips": 10,
+      "included_domains": 999,
+      "included_users": 999,
+      "support": "dedicated",
+      "setup_fee": 0
+    }
+  ]
+}

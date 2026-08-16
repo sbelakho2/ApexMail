@@ -48,6 +48,7 @@ async fn list_campaigns(
     Query(params): Query<CampaignsQuery>,
 ) -> Result<Json<Vec<CampaignRow>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     // Check table exists
     let exists: Option<(bool,)> = sqlx::query_as(

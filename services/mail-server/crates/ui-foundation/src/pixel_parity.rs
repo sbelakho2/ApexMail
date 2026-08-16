@@ -391,7 +391,8 @@ mod tests {
             disabled: false,
             autocomplete: None,
         required: false,
-        };
+        name: None,
+    };
         let html = inp.render_html();
         let classes = extract_classes(&html);
         assert!(!classes.is_empty());

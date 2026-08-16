@@ -322,6 +322,11 @@ fn render_campaign_editor_page(
                 selected: false,
             },
         ],
+        // `CreateCampaignRequest` uses `deny_unknown_fields` and accepts only
+        // name/subject/template_id/scheduled_at — the audience picker is a
+        // client-side control for the autosave draft flow, so it deliberately
+        // carries no form name.
+        name: None,
     }
     .render_html();
     let content_input = Textarea {
@@ -331,6 +336,9 @@ fn render_campaign_editor_page(
         resize: "vertical",
         max_length: Some(25_000),
         show_count: true,
+        // Not a `CreateCampaignRequest` field — handled via the autosave
+        // draft endpoint, not the data-api-form JSON payload.
+        name: None,
     }
     .render_html();
     let preview_button = Button {
@@ -379,9 +387,9 @@ fn render_campaign_editor_page(
         title = title,
         autosave_badge = autosave_badge,
         name_label = Label { text: "Campaign Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
+        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
         subject_label = Label { text: "Subject Line", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Enter email subject...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
+        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Enter email subject...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("subject") }.render_html(),
         audience_label = Label { text: "Audience", variant: "default", size: "default", required: true, optional: false }.render_html(),
         audience_select = audience_select,
         content_label = Label { text: "HTML Content", variant: "default", size: "default", required: false, optional: false }.render_html(),
@@ -594,7 +602,8 @@ pub fn control_plane_audit_page() -> String {
         disabled: false,
         autocomplete: None,
         required: false,
-    };
+            name: None,
+        };
 
     let table = Table {
         caption: Some("Audit logs"),
@@ -1141,7 +1150,7 @@ e.preventDefault();var form=e.target;if(!form.dataset.apiAction)return;\
 var btn=form.querySelector('[type=submit]');if(btn){btn.dataset.ol=btn.textContent;btn.disabled=true;btn.textContent='Saving...';}\
 var p={};\
 new FormData(form).forEach(function(v,k){if(p[k]!==undefined){if(!Array.isArray(p[k]))p[k]=[p[k]];p[k].push(v);}else p[k]=v;});\
-form.querySelectorAll('[data-field]').forEach(function(el){var n=el.dataset.field||el.id;if(n&&!(n in p))p[n]=el.value;});\
+form.querySelectorAll('[data-field]').forEach(function(el){var n=el.dataset.field||el.id;if(n&&!(n in p))p[n]=el.dataset.value!==undefined?el.dataset.value:el.value;});\
 fetch(form.dataset.apiAction,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf()},body:JSON.stringify(p)})\
 .then(function(r){return r.json().then(function(d){return{ok:r.ok,status:r.status,data:d,headers:r.headers};}).catch(function(){return{ok:r.ok,status:r.status,data:null,headers:r.headers};});})\
 .then(function(r){\
@@ -1172,7 +1181,14 @@ fn password_requirements_hint() -> String {
 }
 
 fn web_auth_hidden_input(name: &str, value: &str) -> String {
-    format!("<input type=\"hidden\" name=\"{name}\" value=\"{value}\" />",)
+    // `name` and `value` can originate from query parameters (token/email on
+    // /reset-password and /verify-email), so both must be escaped to prevent
+    // attribute breakout (reflected XSS).
+    format!(
+        "<input type=\"hidden\" name=\"{}\" value=\"{}\" />",
+        html_escape(name),
+        html_escape(value),
+    )
 }
 
 /// Generates a CSRF token hidden input for form protection.
@@ -1199,10 +1215,15 @@ fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
         _ => "border-brand-200 bg-brand-50/80 text-brand-900",
     };
 
+    // `title`/`description` interpolate query-derived values (message, email
+    // address sentences) — escape everything to block reflected XSS.
     format!(
-        "<div class=\"apex-auth-notice rounded-xl border px-4 py-4 {classes}\" data-intent=\"{intent}\">\
-<p class=\"text-sm font-bold\">{title}</p>\
-<p class=\"mt-1 text-sm leading-relaxed\">{description}</p></div>",
+        "<div class=\"apex-auth-notice rounded-xl border px-4 py-4 {classes}\" data-intent=\"{}\">\
+<p class=\"text-sm font-bold\">{}</p>\
+<p class=\"mt-1 text-sm leading-relaxed\">{}</p></div>",
+        html_escape(intent),
+        html_escape(title),
+        html_escape(description),
     )
 }
 
@@ -1552,7 +1573,8 @@ pub fn web_campaigns_page() -> String {
                 selected: false,
             },
         ],
-    }
+            name: None,
+        }
     .render_html();
     let sort_filter = Select {
         placeholder: "Sort",
@@ -1580,7 +1602,8 @@ pub fn web_campaigns_page() -> String {
                 selected: false,
             },
         ],
-    }
+            name: None,
+        }
     .render_html();
     let filters = format!(
         "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
@@ -1763,7 +1786,8 @@ pub fn web_contacts_page() -> String {
                 selected: false,
             },
         ],
-    }
+            name: None,
+        }
     .render_html();
     let segment_filter = Select {
         placeholder: "List",
@@ -1791,7 +1815,8 @@ pub fn web_contacts_page() -> String {
                 selected: false,
             },
         ],
-    }
+            name: None,
+        }
     .render_html();
     let filters = format!(
         "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
@@ -1948,9 +1973,9 @@ pub fn web_contacts_new_page() -> String {
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
         email_label = Label { text: "Email", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
+        email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("email") }.render_html(),
         name_label = Label { text: "Name", variant: "default", size: "default", required: false, optional: true }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
+        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
         save_button = Button { variant: "default", size: "default", label: "Add Contact", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
     )
 }
@@ -1977,7 +2002,8 @@ pub fn web_lists_page() -> String {
                 selected: false,
             },
         ],
-    }
+            name: None,
+        }
     .render_html();
     let sort_filter = Select {
         placeholder: "Sort",
@@ -1999,7 +2025,8 @@ pub fn web_lists_page() -> String {
                 selected: false,
             },
         ],
-    }
+            name: None,
+        }
     .render_html();
     let filters = format!(
         "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
@@ -2099,9 +2126,9 @@ pub fn web_lists_new_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: true
-        }
-        .render_html(),
+            required: true,
+            name: Some("name"),
+        }.render_html(),
         save_button = Button {
             variant: "default",
             size: "default",
@@ -2163,14 +2190,14 @@ pub fn web_templates_new_page() -> String {
 <div class=\"space-y-2\">{subject_label}{subject_input}</div>\
 <div class=\"space-y-2\">\
 <label class=\"text-sm font-medium leading-none\">HTML Content</label>\
-<textarea class=\"flex min-h-[300px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono resize-vertical\" placeholder=\"Paste your HTML template here...\"></textarea>\
+<textarea name=\"html_body\" class=\"flex min-h-[300px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono resize-vertical\" placeholder=\"Paste your HTML template here...\"></textarea>\
 </div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
         name_label = Label { text: "Template Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "e.g. Welcome Email", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true }.render_html(),
+        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "e.g. Welcome Email", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
         subject_label = Label { text: "Default Subject", variant: "default", size: "default", required: false, optional: true }.render_html(),
-        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Subject line...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false }.render_html(),
+        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Subject line...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("subject") }.render_html(),
         save_button = Button { variant: "default", size: "default", label: "Save Template", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
     )
 }
@@ -2417,7 +2444,8 @@ pub fn web_events_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: false
+            required: false,
+            name: None,
         }
         .render_html(),
         loading = render_table_loading_state("Loading events", "api", 4),
@@ -2493,9 +2521,9 @@ pub fn web_domains_new_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: true
-        }
-        .render_html(),
+            required: true,
+            name: Some("name"),
+        }.render_html(),
         save_button = Button {
             variant: "default",
             size: "default",
@@ -2744,7 +2772,8 @@ pub fn web_settings_profile_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: true
+            required: true,
+            name: None,
         }
         .render_html(),
         email_label = Label {
@@ -2766,7 +2795,8 @@ pub fn web_settings_profile_page() -> String {
             error: None,
             disabled: true,
             autocomplete: None,
-            required: true
+            required: true,
+            name: None,
         }
         .render_html(),
         save_button = Button {
@@ -2798,7 +2828,8 @@ pub fn web_settings_profile_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: true
+            required: true,
+            name: None,
         }
         .render_html(),
         new_label = Label {
@@ -2820,7 +2851,8 @@ pub fn web_settings_profile_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: true
+            required: true,
+            name: None,
         }
         .render_html(),
         update_button = Button {
@@ -3050,7 +3082,8 @@ pub fn control_plane_tenants_new_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: true
+            required: true,
+            name: None,
         }
         .render_html(),
         domain_label = Label {
@@ -3072,7 +3105,8 @@ pub fn control_plane_tenants_new_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: true
+            required: true,
+            name: None,
         }
         .render_html(),
         save_button = Button {
@@ -3156,7 +3190,8 @@ pub fn control_plane_operators_new_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: true
+            required: true,
+            name: None,
         }
         .render_html(),
         email_label = Label {
@@ -3178,7 +3213,8 @@ pub fn control_plane_operators_new_page() -> String {
             error: None,
             disabled: false,
             autocomplete: None,
-            required: true
+            required: true,
+            name: None,
         }
         .render_html(),
         save_button = Button {
@@ -4312,6 +4348,111 @@ mod tests {
         assert!(html.contains("Verify your email"));
         assert!(html.contains("verification link"));
         assert!(html.contains("Back to sign in"));
+    }
+
+    /// Reflected-XSS regression: /reset-password interpolates the `token`,
+    /// `email`, and `message` query parameters into hidden inputs and the
+    /// header notice. Hostile payloads must be HTML-escaped — never rendered
+    /// as raw markup or allowed to break out of an attribute.
+    #[test]
+    fn web_reset_password_page_escapes_hostile_query_params() {
+        let token = "\"><svg onload=alert(1)>";
+        let email = "\"><script>alert(1)</script>";
+        let html = web_reset_password_page_with_state(Some(token), Some(email), None, "");
+
+        // Hidden input values are attribute-escaped.
+        assert!(
+            html.contains("value=\"&quot;&gt;&lt;svg onload=alert(1)&gt;\""),
+            "token must be escaped inside the hidden input value"
+        );
+        // The notice (address sentence) escapes the script payload.
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("&quot;&gt;&lt;script&gt;"));
+        // No raw breakout or executable markup from either payload. (The
+        // page legitimately contains the auth-form and KiwiCaptcha scripts,
+        // so the check targets the hostile payloads specifically.)
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(!html.contains("<svg onload"));
+        assert!(!html.contains("onload=alert(1)>"));
+        // The raw payloads themselves must not appear verbatim.
+        assert!(!html.contains(token));
+        assert!(!html.contains(email));
+    }
+
+    /// Reflected-XSS regression: /verify-email interpolates `message` and
+    /// `email` query parameters into the notice and hidden inputs.
+    #[test]
+    fn web_verify_email_page_escapes_hostile_query_params() {
+        let token = "\"><svg onload=alert(1)>";
+        let email = "\"><script>alert(1)</script>";
+        let message = "<img src=x onerror=alert(2)>";
+
+        // status=success renders the message inside the notice.
+        let success = web_verify_email_page_with_state(
+            Some(token),
+            Some(email),
+            Some("success"),
+            Some(message),
+        );
+        assert!(success.contains("&lt;img src=x onerror=alert(2)&gt;"));
+        assert!(!success.contains("<img src=x onerror"));
+        assert!(!success.contains("<script>alert(1)"));
+        assert!(!success.contains("<svg onload"));
+        assert!(!success.contains(token));
+        assert!(!success.contains(email));
+
+        // status=None + token renders the hidden token/email inputs.
+        let pending = web_verify_email_page_with_state(Some(token), Some(email), None, None);
+        assert!(pending.contains("value=\"&quot;&gt;&lt;svg onload=alert(1)&gt;\""));
+        assert!(pending.contains("value=\"&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\""));
+        assert!(!pending.contains("<script>alert(1)"));
+        assert!(!pending.contains("<svg onload"));
+
+        // No token: the email appears in the notice sentence, escaped.
+        let emailed = web_verify_email_page_with_state(None, Some(email), None, None);
+        assert!(emailed.contains("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!emailed.contains("<script>alert(1)"));
+        assert!(!emailed.contains(email));
+    }
+
+    /// The error-message notice path (query `message` on /reset-password)
+    /// must escape, too.
+    #[test]
+    fn web_reset_password_notice_escapes_error_message() {
+        let html = web_reset_password_page_with_state(
+            None,
+            None,
+            Some("\"><iframe src=javascript:alert(1)></iframe>"),
+            "",
+        );
+        assert!(!html.contains("<iframe"));
+        assert!(html.contains("&lt;iframe src="));
+        assert!(html.contains("&quot;&gt;&lt;iframe"));
+    }
+
+    /// `data-api-form` hydration serializes FormData, which only includes
+    /// fields carrying a `name` attribute. Every API-backed form field must
+    /// render one, otherwise the handler receives an empty `{}` payload.
+    #[test]
+    fn data_api_form_pages_render_named_fields() {
+        let contacts = web_contacts_new_page();
+        assert!(contacts.contains("name=\"email\""));
+        assert!(contacts.contains("name=\"name\""));
+
+        let lists = web_lists_new_page();
+        assert!(lists.contains("name=\"name\""));
+
+        let domains = web_domains_new_page();
+        assert!(domains.contains("name=\"name\""));
+
+        let templates = web_templates_new_page();
+        assert!(templates.contains("name=\"name\""));
+        assert!(templates.contains("name=\"subject\""));
+        assert!(templates.contains("name=\"html_body\""));
+
+        let campaign = web_campaigns_new_page();
+        assert!(campaign.contains("name=\"name\""));
+        assert!(campaign.contains("name=\"subject\""));
     }
 
     // ─── Web dashboard page tests ───────────────────────────

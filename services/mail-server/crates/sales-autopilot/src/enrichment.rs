@@ -184,6 +184,9 @@ impl HttpEnrichmentProvider {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .user_agent("ApexMail/1.0 (enrichment)")
+            // Never follow redirects: a redirect could leak the Bearer API
+            // key to whatever host the response points at.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("valid reqwest client configuration");
         Self {
@@ -197,6 +200,19 @@ impl HttpEnrichmentProvider {
 #[async_trait::async_trait]
 impl EnrichmentProvider for HttpEnrichmentProvider {
     async fn enrich(&self, domain: &str) -> Result<Company, SalesError> {
+        // The domain is interpolated into the request path, so reject
+        // anything outside a strict hostname character set. This prevents
+        // path traversal / query injection (e.g. `evil.com/../../admin` or
+        // `evil.com?x=1`) from altering the request target.
+        if domain.is_empty()
+            || !domain
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            return Err(SalesError::InvalidInput(format!(
+                "invalid domain: {domain:?}"
+            )));
+        }
         let url = format!("{}/v1/companies/domain/{}", self.base_url, domain);
         let client = self.client.clone();
 
@@ -400,6 +416,25 @@ mod tests {
         );
         assert_eq!(EnrichmentService::extract_domain("nodomain"), None);
         assert_eq!(EnrichmentService::extract_domain("@"), None);
+    }
+
+    #[tokio::test]
+    async fn test_http_provider_rejects_invalid_domains() {
+        let provider = HttpEnrichmentProvider::new("https://enrich.example.com", "test-key");
+        for bad in [
+            "",
+            "evil.com/../../admin",
+            "evil.com?x=1",
+            "evil.com#fragment",
+            "ev il.com",
+            "evil.com%2f..",
+        ] {
+            let err = provider.enrich(bad).await.unwrap_err();
+            assert!(
+                matches!(err, SalesError::InvalidInput(_)),
+                "expected InvalidInput for {bad:?}, got {err:?}"
+            );
+        }
     }
 
     #[tokio::test]

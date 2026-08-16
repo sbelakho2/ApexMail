@@ -28,7 +28,7 @@ Navigate to [app.apexmail.ee/signup](https://app.apexmail.ee/signup).
 **Expected result:** Redirect to the dashboard with a banner prompting email verification.
 
 **Error cases:**
-- **`Email already registered`**: Use the password reset flow at [app.apexmail.ee/reset](https://app.apexmail.ee/reset).
+- **`Email already registered`**: Use the password reset flow at [app.apexmail.ee/reset-password](https://app.apexmail.ee/reset-password).
 - **`Password too weak`**: Use 12+ characters with at least one number and one symbol.
 
 ---

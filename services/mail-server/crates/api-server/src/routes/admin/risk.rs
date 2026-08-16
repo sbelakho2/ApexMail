@@ -551,6 +551,7 @@ async fn get_risk_tenants(
     Query(params): Query<RiskListQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let settings = load_risk_settings(&state.db).await?;
 
@@ -632,6 +633,7 @@ async fn update_risk(
     Json(body): Json<RiskMutation>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     match body {
         RiskMutation::SetLimit {

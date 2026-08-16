@@ -77,6 +77,13 @@ fi
 install -m 644 "$SRC/fullchain.pem" "$LIVE/fullchain.pem"
 install -m 600 "$SRC/privkey.pem"   "$LIVE/privkey.pem"
 install -m 644 "$SRC/chain.pem"     "$LIVE/ca-chain.pem"
+# The nginx container runs as 101:101 and reads these files through the
+# read-only bind mount of deploy/nginx/ssl. install(1) above leaves them
+# root:root — a root-owned 600 key makes every nginx reload fail with
+# BIO_new_file "Permission denied" (same fix as deploy.sh Step 4):
+# owner 101:101, key group-readable (640) but never world-readable.
+chown 101:101 "$LIVE/fullchain.pem" "$LIVE/privkey.pem" "$LIVE/ca-chain.pem"
+chmod 640 "$LIVE/privkey.pem"
 
 echo "[letsencrypt] reloading nginx with new cert"
 docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \

@@ -14,7 +14,7 @@
 --   6. idx_webhook_events_tenant_delivery       — failed webhook retries (partial)
 --
 -- NOTE: This migration MUST NOT be wrapped in a transaction block.
--- CREATE INDEX CONCURRENTLY requires running outside any explicit transaction.
+-- CREATE INDEX IF NOT EXISTS requires running outside any explicit transaction.
 -- =============================================================================
 
 -- =============================================================================
@@ -24,7 +24,7 @@
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_email_queue_tenant_status_created') THEN
-    EXECUTE format('CREATE INDEX CONCURRENTLY idx_email_queue_tenant_status_created
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_email_queue_tenant_status_created
       ON email_queue (tenant_id, status, created_at)');
   END IF;
 END $$;
@@ -36,7 +36,7 @@ END $$;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_email_delivery_log_email_id') THEN
-    EXECUTE format('CREATE INDEX CONCURRENTLY idx_email_delivery_log_email_id
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_email_delivery_log_email_id
       ON email_delivery_log (email_id)');
   END IF;
 END $$;
@@ -50,7 +50,7 @@ END $$;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_tenant_resource') THEN
-    EXECUTE format('CREATE INDEX CONCURRENTLY idx_audit_logs_tenant_resource
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_resource
       ON audit_logs (tenant_id, resource, timestamp)');
   END IF;
 END $$;
@@ -61,8 +61,9 @@ END $$;
 -- =============================================================================
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_metering_events_tenant_type_ts_desc') THEN
-    EXECUTE format('CREATE INDEX CONCURRENTLY idx_metering_events_tenant_type_ts_desc
+  IF to_regclass('public.metering_events') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_metering_events_tenant_type_ts_desc') THEN
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_metering_events_tenant_type_ts_desc
       ON metering_events (tenant_id, event_type, timestamp DESC)');
   END IF;
 END $$;
@@ -77,7 +78,7 @@ DO $$
 BEGIN
   IF to_regclass('public.api_keys') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_api_keys_tenant_revoked') THEN
-    EXECUTE format('CREATE INDEX CONCURRENTLY idx_api_keys_tenant_revoked
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_revoked
       ON api_keys (tenant_id, revoked_at)
       WHERE revoked_at IS NULL');
   END IF;
@@ -93,7 +94,7 @@ DO $$
 BEGIN
   IF to_regclass('public.webhook_events') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_webhook_events_tenant_delivery') THEN
-    EXECUTE format('CREATE INDEX CONCURRENTLY idx_webhook_events_tenant_delivery
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_webhook_events_tenant_delivery
       ON webhook_events (tenant_id, delivery_status, created_at)');
   END IF;
 END $$;

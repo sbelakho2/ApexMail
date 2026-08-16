@@ -238,12 +238,21 @@ pub async fn verify_kiwi_token(
     let mut ctx = kiwicaptcha::VerifyContext {
         record: &mut record_mut,
         secret_key: &config.kiwi_secret_key,
+        // No key rotation configured: the single secret verifies every record
+        // (the historical single-key path). No kids are revoked either.
+        secrets_by_kid: None,
+        revoked_kids: None,
         counter: solution.counter,
         duration_ms: solution.duration_ms,
         now_unix,
         now_ns,
         min_duration_ms,
         expected_scope: scope,
+        // No region / issuer / policy-version pinning is configured on this
+        // deployment — those enforcement knobs stay off.
+        expected_region: None,
+        expected_issuer: None,
+        expected_policy_version: None,
         // IP binding is enforced inside verify_solution (intrinsic).
         client_ip: Some(client_ip),
         // v1 challenges are rejected by default (the migration window is
@@ -283,7 +292,10 @@ pub async fn verify_kiwi_token(
     };
 
     match kiwicaptcha::verify_solution(&mut ctx) {
-        kiwicaptcha::VerifyOutcome::Valid => {
+        // `Valid` is a struct variant carrying the consumed challenge's nonce
+        // (jti) and any request binding — neither is needed here: consumption
+        // is keyed by `solution.nonce` below.
+        kiwicaptcha::VerifyOutcome::Valid { .. } => {
             // Atomic single-use consumption (compare-and-delete): the record is
             // deleted only if it still holds the exact value verified above, so
             // a replayed token or a concurrent use can never succeed twice.
@@ -387,7 +399,7 @@ fn scopes_for_role(role: &str) -> Vec<String> {
     }
 }
 
-fn role_requires_mfa(role: &str) -> bool {
+pub(crate) fn role_requires_mfa(role: &str) -> bool {
     matches!(role, "admin" | "owner")
 }
 
@@ -1138,6 +1150,7 @@ fn issue_session_response_with_codes_at(
         exp: exp.timestamp(),
         iat: issued_at.timestamp(),
         jti: session_id.clone(),
+        typ: Some("session".into()),
     };
 
     let token = encode(
@@ -1198,6 +1211,21 @@ async fn insert_auth_audit_log(
     hasher.update(timestamp.to_rfc3339().as_bytes());
     let hash = hex::encode(hasher.finalize());
 
+    // Chain the audit entry: link it to the most recent prior entry's hash
+    // (by timestamp, then id) so tampering, deletion, or reordering breaks
+    // the chain instead of passing silently. Chosen in the same transaction
+    // as the insert to close the concurrent-writer race.
+    let mut tx = state.db.begin().await?;
+    let previous_hash: Option<String> = sqlx::query_scalar(
+        "SELECT hash FROM audit_logs ORDER BY timestamp DESC, id DESC LIMIT 1 FOR UPDATE",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let signature = audit_log_signature(
+        &hash,
+        previous_hash.as_deref().unwrap_or_default(),
+    )?;
+
     sqlx::query(
         "INSERT INTO audit_logs (
             id, tenant_id, user_id, action, resource, resource_id,
@@ -1206,7 +1234,7 @@ async fn insert_auth_audit_log(
          ) VALUES (
             $1, $2, $3, $4, 'auth', $5,
             $6::jsonb, $7, $8, 'success', NULL,
-            $9, $10, NULL, $11, $9
+            $9, $10, $11, $12, $9
          )",
     )
     .bind(&id)
@@ -1218,26 +1246,48 @@ async fn insert_auth_audit_log(
     .bind(user_agent)
     .bind(timestamp)
     .bind(&hash)
-    .bind(audit_log_signature(&hash))
-    .execute(&state.db)
+    .bind(&previous_hash)
+    .bind(&signature)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(())
 }
 
-/// HMAC-SHA256 signature over the audit hash, keyed with the same
-/// `AUDIT_SIGNING_KEY` the compliance crate uses for chain verification.
-fn audit_log_signature(hash: &str) -> String {
+/// HMAC-SHA256 signature over the audit hash (and its chain link), keyed
+/// with `AUDIT_SIGNING_KEY`. In production the key MUST be configured — a
+/// publicly-known fallback would make every signature forgeable — so the
+/// function fails closed there. Development keeps a fallback with a warning.
+fn audit_log_signature(hash: &str, previous_hash: &str) -> Result<String, ApiError> {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
-    let key = std::env::var("AUDIT_SIGNING_KEY")
-        .unwrap_or_else(|_| "apexmail-auth-audit-fallback-key".to_string());
+    let key = match std::env::var("AUDIT_SIGNING_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        Ok(_) | Err(_) => {
+            if state_is_production() {
+                return Err(ApiError::Internal(
+                    "AUDIT_SIGNING_KEY must be configured in production".into(),
+                ));
+            }
+            tracing::warn!("AUDIT_SIGNING_KEY not set — using development fallback for audit signatures");
+            "apexmail-auth-audit-fallback-key".to_string()
+        }
+    };
     let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
         Ok(mac) => mac,
-        Err(_) => return String::new(),
+        Err(_) => return Err(ApiError::Internal("audit HMAC init failed".into())),
     };
+    mac.update(previous_hash.as_bytes());
+    mac.update(b"|");
     mac.update(hash.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn state_is_production() -> bool {
+    std::env::var("ENVIRONMENT")
+        .map(|v| v.eq_ignore_ascii_case("production"))
+        .unwrap_or(false)
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -2422,6 +2472,24 @@ async fn create_api_key(
     if body.name.is_empty() {
         return Err(ApiError::Validation(vec!["name is required".into()]));
     }
+    if body.name.len() > 100 {
+        return Err(ApiError::Validation(vec!["name must be at most 100 characters".into()]));
+    }
+    if body.scopes.len() > 50 {
+        return Err(ApiError::Validation(vec!["at most 50 scopes are allowed".into()]));
+    }
+
+    // Privilege-escalation guard: a key can never carry more authority than
+    // its creator. Every requested scope must already be held by the caller
+    // (the wildcard "*" is only mintable by a caller who already holds it,
+    // and unknown scope strings are rejected outright).
+    for scope in &body.scopes {
+        if !auth.scopes.iter().any(|s| s == scope) {
+            return Err(ApiError::Forbidden(format!(
+                "scope '{scope}' exceeds your own permissions"
+            )));
+        }
+    }
 
     let raw_key = apexmail_lib::id::generate_api_key(false);
     let key_hash =
@@ -2623,8 +2691,8 @@ async fn reset_password(
 
     let token_hash = hash_token(&body.token);
     let email = body.email.trim().to_lowercase();
-    let user: Option<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT id::text, status, metadata FROM users
+    let user: Option<(String, String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT id::text, tenant_id, status, metadata FROM users
          WHERE LOWER(email) = LOWER($1)
                      AND metadata->>'password_reset_token_hash' = $2
          LIMIT 1",
@@ -2634,7 +2702,7 @@ async fn reset_password(
     .fetch_optional(&state.db)
     .await?;
 
-    let Some((user_id, status, metadata)) = user else {
+    let Some((user_id, tenant_id, status, metadata)) = user else {
         return Err(ApiError::BadRequest(
             "invalid or expired reset token".into(),
         ));
@@ -2690,6 +2758,12 @@ async fn reset_password(
     .bind(&user_id)
     .execute(&state.db)
     .await?;
+
+    // A password reset must invalidate every existing session — otherwise a
+    // stolen reset token leaves the attacker's (or anyone else's) live
+    // sessions valid after the victim changes the password.
+    let ttl = state.config.jwt_expiry.as_secs();
+    revoke_user_sessions(&state.redis, &tenant_id, &user_id, ttl).await?;
 
     Ok(Json(ResetPasswordResponse {
         success: true,
@@ -2804,6 +2878,7 @@ async fn refresh_token(
         exp: exp.timestamp(),
         iat: now.timestamp(),
         jti: session_id,
+        typ: Some("session".into()),
     };
 
     let token = encode(
@@ -3244,8 +3319,13 @@ mod tests {
             auto_tune_min_bits: config.kiwi_auto_tune_min_bits,
             auto_tune_max_bits: config.kiwi_auto_tune_max_bits,
             binding_mode: kiwicaptcha::BindingMode::Bound,
+            // Mirrors the issuance defaults used by the challenge route.
+            policy_version: 1,
+            region: None,
+            issuer: None,
+            kid: 1,
         };
-        let issued = kiwicaptcha::issue_challenge(&kc_config, "login", "1.2.3.4", now_unix, now_unix * 1_000_000_000, 0)
+        let issued = kiwicaptcha::issue_challenge(&kc_config, "login", "1.2.3.4", now_unix, now_unix * 1_000_000_000, 0, None)
             .expect("challenge issuance succeeds");
 
         let record_json = serde_json::to_string(&issued.record).expect("record serializes");

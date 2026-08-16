@@ -87,11 +87,18 @@ BEGIN
               AND column_name = 'tenant_id'
               AND udt_name IN ('varchar', 'character varying');
             
-            IF FOUND THEN
+            IF FOUND AND (SELECT data_type FROM information_schema.columns
+                           WHERE table_name = 'tenants' AND column_name = 'id') = 'uuid'
+               AND NOT EXISTS (SELECT 1 FROM pg_constraint
+                               WHERE conrelid = to_regclass('public.' || v_table_name)
+                                 AND contype = 'f'
+                                 AND pg_get_constraintdef(oid) LIKE '%tenant_id%') THEN
                 EXECUTE format('
                     ALTER TABLE %I ALTER COLUMN tenant_id TYPE UUID USING tenant_id::uuid
                 ', v_table_name);
                 RAISE NOTICE 'H-01.a: Converted %.tenant_id VARCHAR -> UUID', v_table_name;
+            ELSIF FOUND THEN
+                RAISE NOTICE 'H-01.a: %.tenant_id conversion skipped (tenants.id not UUID or FK present)', v_table_name;
             ELSE
                 RAISE NOTICE 'H-01.a: %.tenant_id is already UUID or not VARCHAR — skipping', v_table_name;
             END IF;
@@ -116,7 +123,12 @@ BEGIN
                 WHERE table_name = v_table_name
                   AND column_name = 'tenant_id'
                   AND udt_name IN ('varchar', 'character varying')
-            ) THEN
+            ) AND (SELECT data_type FROM information_schema.columns
+                   WHERE table_name = 'tenants' AND column_name = 'id') = 'uuid'
+              AND NOT EXISTS (SELECT 1 FROM pg_constraint
+                              WHERE conrelid = to_regclass('public.' || v_table_name)
+                                AND contype = 'f'
+                                AND pg_get_constraintdef(oid) LIKE '%tenant_id%') THEN
                 EXECUTE format('
                     ALTER TABLE %I ALTER COLUMN tenant_id TYPE UUID USING tenant_id::uuid
                 ', v_table_name);
@@ -138,8 +150,9 @@ BEGIN
             WHERE table_name = 'notification_queue'
               AND column_name = 'tenant_id'
               AND udt_name IN ('varchar', 'character varying')
-        ) THEN
-            ALTER TABLE notification_queue ALTER COLUMN tenant_id TYPE UUID USING tenant_id::uuid;
+        
+            ) AND (SELECT data_type FROM information_schema.columns WHERE table_name = 'tenants' AND column_name = 'id') = 'uuid' AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('public.notification_queue') AND contype = 'f' AND pg_get_constraintdef(oid) LIKE '%tenant_id%') THEN
+        ALTER TABLE notification_queue ALTER COLUMN tenant_id TYPE UUID USING tenant_id::uuid;
             RAISE NOTICE 'H-01.c: Converted notification_queue.tenant_id VARCHAR -> UUID';
         END IF;
     END IF;
@@ -151,8 +164,9 @@ BEGIN
             WHERE table_name = 'usage_alert_configs'
               AND column_name = 'tenant_id'
               AND udt_name IN ('varchar', 'character varying')
-        ) THEN
-            ALTER TABLE usage_alert_configs ALTER COLUMN tenant_id TYPE UUID USING tenant_id::uuid;
+        
+            ) AND (SELECT data_type FROM information_schema.columns WHERE table_name = 'tenants' AND column_name = 'id') = 'uuid' AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('public.usage_alert_configs') AND contype = 'f' AND pg_get_constraintdef(oid) LIKE '%tenant_id%') THEN
+        ALTER TABLE usage_alert_configs ALTER COLUMN tenant_id TYPE UUID USING tenant_id::uuid;
             RAISE NOTICE 'H-01.c: Converted usage_alert_configs.tenant_id VARCHAR -> UUID';
         END IF;
     END IF;
@@ -269,22 +283,22 @@ END $$;
 -- Rollback: N/A — function was already defined in migration 001.
 -- =============================================================================
 
-DO $$
+DO $outer$
 BEGIN
     -- Drop any existing definition to ensure clean slate
     DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE;
 
     -- Recreate with canonical form (matching migration 001)
     CREATE OR REPLACE FUNCTION update_updated_at_column()
-    RETURNS TRIGGER AS $$
+    RETURNS TRIGGER AS $func$
     BEGIN
         NEW.updated_at = NOW();
         RETURN NEW;
     END;
-    $$ language 'plpgsql';
+    $func$ language 'plpgsql';
 
     RAISE NOTICE 'H-03: Recreated update_updated_at_column() function (canonical form)';
-END $$;
+END $outer$;
 
 -- =============================================================================
 -- Section 4: H-04 — Validate NOT VALID constraints from migration 046
@@ -620,10 +634,10 @@ END $$;
 --            indexes (lines 287-291), this section ensures they exist regardless
 --            of migration ordering or partial application.
 --
--- Fix:  CREATE INDEX CONCURRENTLY IF NOT EXISTS on FK columns of all partitioned
+-- Fix:  CREATE INDEX IF NOT EXISTS on FK columns of all partitioned
 --       tables. Uses CONCURRENTLY so this runs outside the main transaction block.
 --
--- NOTE: These CREATE INDEX CONCURRENTLY statements MUST run outside any explicit
+-- NOTE: These CREATE INDEX IF NOT EXISTS statements MUST run outside any explicit
 --       transaction block. They are placed after the COMMIT/end of the DO blocks.
 --
 -- Rollback: DROP INDEX IF EXISTS idx_mail_messages_account_id;
@@ -635,14 +649,14 @@ DO $$
 BEGIN
     IF to_regclass('public.mail_messages') IS NOT NULL THEN
         IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_mail_messages_account_id') THEN
-            EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_mail_messages_account_id ON mail_messages(account_id)';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_mail_messages_account_id ON mail_messages(account_id)';
             RAISE NOTICE 'H-09/G-01.a: Created idx_mail_messages_account_id on mail_messages(account_id)';
         ELSE
             RAISE NOTICE 'H-09/G-01.a: idx_mail_messages_account_id already exists';
         END IF;
 
         IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_mail_messages_mailbox_id') THEN
-            EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_mail_messages_mailbox_id ON mail_messages(mailbox_id)';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_mail_messages_mailbox_id ON mail_messages(mailbox_id)';
             RAISE NOTICE 'H-09/G-01.a: Created idx_mail_messages_mailbox_id on mail_messages(mailbox_id)';
         ELSE
             RAISE NOTICE 'H-09/G-01.a: idx_mail_messages_mailbox_id already exists';
@@ -655,12 +669,12 @@ DO $$
 BEGIN
     IF to_regclass('public.email_queue') IS NOT NULL THEN
         IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_email_queue_tenant_id') THEN
-            EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_email_queue_tenant_id ON email_queue(tenant_id)';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_email_queue_tenant_id ON email_queue(tenant_id)';
             RAISE NOTICE 'H-09/G-01.b: Created idx_email_queue_tenant_id on email_queue(tenant_id)';
         END IF;
 
         IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_email_queue_campaign_id') THEN
-            EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_email_queue_campaign_id ON email_queue(campaign_id) WHERE campaign_id IS NOT NULL';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_email_queue_campaign_id ON email_queue(campaign_id) WHERE campaign_id IS NOT NULL';
             RAISE NOTICE 'H-09/G-01.b: Created idx_email_queue_campaign_id on email_queue(campaign_id)';
         END IF;
     END IF;
@@ -674,7 +688,7 @@ DO $$
 BEGIN
     IF to_regclass('public.audit_logs') IS NOT NULL THEN
         IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_user_id') THEN
-            EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)';
             RAISE NOTICE 'H-09/G-01.c: Created idx_audit_logs_user_id on audit_logs(user_id)';
         END IF;
     END IF;
@@ -685,7 +699,7 @@ DO $$
 BEGIN
     IF to_regclass('public.email_delivery_log') IS NOT NULL THEN
         IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_email_delivery_log_email_id') THEN
-            EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_email_delivery_log_email_id ON email_delivery_log(email_id)';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_email_delivery_log_email_id ON email_delivery_log(email_id)';
             RAISE NOTICE 'H-09/G-01.d: Created idx_email_delivery_log_email_id on email_delivery_log(email_id)';
         ELSE
             RAISE NOTICE 'H-09/G-01.d: idx_email_delivery_log_email_id already exists';
@@ -723,9 +737,9 @@ BEGIN
 
             IF NOT v_is_partial THEN
                 -- Drop the full index and create partial
-                EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS idx_mail_mailboxes_parent_id';
+                EXECUTE 'DROP INDEX IF EXISTS IF EXISTS idx_mail_mailboxes_parent_id';
                 RAISE NOTICE 'H-10: Dropped full index idx_mail_mailboxes_parent_id';
-                EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_mail_mailboxes_parent_id
+                EXECUTE 'CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_parent_id
                          ON mail_mailboxes (parent_id)
                          WHERE parent_id IS NOT NULL';
                 RAISE NOTICE 'H-10: Created partial index idx_mail_mailboxes_parent_id WHERE parent_id IS NOT NULL';
@@ -734,7 +748,7 @@ BEGIN
             END IF;
         ELSE
             -- Index doesn't exist — create it
-            EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_mail_mailboxes_parent_id
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_parent_id
                      ON mail_mailboxes (parent_id)
                      WHERE parent_id IS NOT NULL';
             RAISE NOTICE 'H-10: Created partial index idx_mail_mailboxes_parent_id';
@@ -774,7 +788,7 @@ BEGIN
         IF NOT EXISTS (
             SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_tenant_resource'
         ) THEN
-            EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_logs_tenant_resource
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_resource
                      ON audit_logs (tenant_id, resource, timestamp)';
             RAISE NOTICE 'H-11: Created index idx_audit_logs_tenant_resource on (tenant_id, resource, timestamp)';
         ELSE

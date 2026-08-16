@@ -93,7 +93,7 @@
   if (!root) return;
   var respEl = root.querySelector('[data-api-console-response]');
   var panels = root.querySelectorAll('[id^="api-console-panel-"]');
-  var sandboxURL = 'https://api.apexmail.ee/v1/sandbox/send';
+  var sandboxURL = '{{ config.extra.api_url }}/v1/sandbox/send';
 
   function buildPayload(panelIdx) {
     return {

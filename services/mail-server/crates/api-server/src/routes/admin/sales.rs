@@ -26,6 +26,7 @@ pub fn router() -> Router<AppState> {
 
 async fn log_sales_audit(
     db: &sqlx::PgPool,
+    auth: &AuthUser,
     action: &str,
     resource_type: &str,
     resource_id: Option<&str>,
@@ -33,8 +34,8 @@ async fn log_sales_audit(
 ) {
     crate::audit_log::insert_audit_log_best_effort(
         db,
-        None,
-        None,
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
         action,
         resource_type,
         resource_id,
@@ -68,8 +69,8 @@ fn empty_leads_response() -> LeadsResponse {
     LeadsResponse {
         leads: Vec::new(),
         total: 0,
-        stats_by_provider: serde_json::json!({}),
         stats_by_source: serde_json::json!({}),
+        stats_by_status: serde_json::json!({}),
     }
 }
 
@@ -88,6 +89,7 @@ async fn ensure_campaign_tables(db: &sqlx::PgPool) -> Result<(), ApiError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS drip_campaigns (
             id TEXT PRIMARY KEY,
+            tenant_id VARCHAR(26),
             name TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'draft',
             campaign_type TEXT,
@@ -136,7 +138,6 @@ async fn ensure_campaign_tables(db: &sqlx::PgPool) -> Result<(), ApiError> {
 // ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LeadsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -173,8 +174,8 @@ pub struct LeadEntry {
 pub struct LeadsResponse {
     pub leads: Vec<LeadEntry>,
     pub total: i64,
-    pub stats_by_provider: serde_json::Value,
     pub stats_by_source: serde_json::Value,
+    pub stats_by_status: serde_json::Value,
 }
 
 async fn list_leads(
@@ -183,6 +184,7 @@ async fn list_leads(
     Query(params): Query<LeadsQuery>,
 ) -> Result<Json<LeadsResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     if !table_exists(&state.db, "sales_leads").await {
         return Ok(Json(empty_leads_response()));
@@ -193,9 +195,14 @@ async fn list_leads(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
+    // Scope reads to the caller's tenant so listing matches the tenant-scoped
+    // writes in update_leads/start_outreach (require_system_tenant guarantees
+    // the system tenant here).
     let mut count_builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT COUNT(*)::bigint FROM sales_leads WHERE 1=1",
+        "SELECT COUNT(*)::bigint FROM sales_leads WHERE tenant_id = ",
     );
+    count_builder.push_bind(auth.tenant_id.clone());
+    count_builder.push(" AND 1=1");
     if let Some(status) = params.status.as_deref() {
         count_builder.push(" AND status = ").push_bind(status);
     }
@@ -219,8 +226,10 @@ async fn list_leads(
     }
     leads_builder.push(
         ", created_at, updated_at
-         FROM sales_leads WHERE 1=1",
+         FROM sales_leads WHERE tenant_id = ",
     );
+    leads_builder.push_bind(auth.tenant_id.clone());
+    leads_builder.push(" AND 1=1");
     if let Some(status) = params.status.as_deref() {
         leads_builder.push(" AND status = ").push_bind(status);
     }
@@ -286,25 +295,27 @@ async fn list_leads(
         )
         .collect();
 
-    // Aggregate stats
-    let provider_stats: Vec<(String, String)> = sqlx::query_as(
-        "SELECT COALESCE(source, 'unknown'), COUNT(*)::text FROM sales_leads GROUP BY source",
+    // Aggregate stats (scoped to the same tenant as the rows above)
+    let source_stats: Vec<(String, String)> = sqlx::query_as(
+        "SELECT COALESCE(source, 'unknown'), COUNT(*)::text FROM sales_leads WHERE tenant_id = $1 GROUP BY source",
     )
+    .bind(&auth.tenant_id)
     .fetch_all(&state.db)
     .await?;
 
-    let source_stats: Vec<(String, String)> =
-        sqlx::query_as("SELECT status, COUNT(*)::text FROM sales_leads GROUP BY status")
+    let status_stats: Vec<(String, String)> =
+        sqlx::query_as("SELECT status, COUNT(*)::text FROM sales_leads WHERE tenant_id = $1 GROUP BY status")
+            .bind(&auth.tenant_id)
             .fetch_all(&state.db)
             .await?;
 
-    let stats_by_provider: serde_json::Value = provider_stats
+    let stats_by_source: serde_json::Value = source_stats
         .into_iter()
         .map(|(k, v)| (k, serde_json::json!(v.parse::<i64>().unwrap_or(0))))
         .collect::<serde_json::Map<String, serde_json::Value>>()
         .into();
 
-    let stats_by_source: serde_json::Value = source_stats
+    let stats_by_status: serde_json::Value = status_stats
         .into_iter()
         .map(|(k, v)| (k, serde_json::json!(v.parse::<i64>().unwrap_or(0))))
         .collect::<serde_json::Map<String, serde_json::Value>>()
@@ -313,8 +324,8 @@ async fn list_leads(
     Ok(Json(LeadsResponse {
         leads,
         total,
-        stats_by_provider,
         stats_by_source,
+        stats_by_status,
     }))
 }
 
@@ -341,6 +352,7 @@ async fn update_leads(
     Json(body): Json<LeadUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let ids: Vec<String> = if let Some(ref single) = body.id {
         vec![single.clone()]
@@ -372,6 +384,9 @@ async fn update_leads(
     }
 
     // Build dynamic SET clause
+    // deal_value is not present in any migration; only emit it when the
+    // column actually exists (same guard as list_leads).
+    let has_deal_value = column_exists(&state.db, "sales_leads", "deal_value").await;
     let mut sets: Vec<String> = Vec::new();
     let mut bind_idx = 2u32; // $1 = ids array
 
@@ -395,7 +410,7 @@ async fn update_leads(
         sets.push(format!("contact_name = ${bind_idx}"));
         bind_idx += 1;
     }
-    if body.deal_value.is_some() {
+    if has_deal_value && body.deal_value.is_some() {
         sets.push(format!("deal_value = ${bind_idx}"));
         bind_idx += 1;
     }
@@ -430,8 +445,10 @@ async fn update_leads(
     if let Some(ref name) = body.contact_name {
         query = query.bind(name);
     }
-    if let Some(deal) = body.deal_value {
-        query = query.bind(deal);
+    if has_deal_value {
+        if let Some(deal) = body.deal_value {
+            query = query.bind(deal);
+        }
     }
     // Bind tenant_id for WHERE clause scoping
     query = query.bind(&auth.tenant_id);
@@ -440,6 +457,7 @@ async fn update_leads(
 
     log_sales_audit(
         &state.db,
+        &auth,
         "control_plane.sales.leads_updated",
         "sales_lead",
         if ids.len() == 1 {
@@ -485,6 +503,7 @@ async fn enrich_leads(
     Json(body): Json<EnrichRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     if body.lead_ids.is_empty() || body.lead_ids.len() > 50 {
         return Err(ApiError::Validation(vec!["1-50 lead IDs allowed".into()]));
@@ -493,6 +512,7 @@ async fn enrich_leads(
     if !table_exists(&state.db, "sales_leads").await {
         log_sales_audit(
             &state.db,
+            &auth,
             "control_plane.sales.leads_enriched",
             "sales_lead",
             None,
@@ -546,10 +566,13 @@ async fn enrich_leads(
             continue;
         };
 
+        // sales-autopilot requires both the service token (x-api-key, added
+        // by with_internal_service_auth when configured) and a tenant header.
         let response = with_internal_service_auth(
             state
                 .http_client
                 .post(format!("{base_url}/enrich"))
+                .header("x-tenant-id", "system")
                 .json(&payload),
             &state,
         )
@@ -582,6 +605,7 @@ async fn enrich_leads(
 
     log_sales_audit(
         &state.db,
+        &auth,
         "control_plane.sales.leads_enriched",
         "sales_lead",
         None,
@@ -626,6 +650,7 @@ async fn list_campaigns(
     auth: AuthUser,
 ) -> Result<Json<Vec<Campaign>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     if !table_exists(&state.db, "drip_campaigns").await {
         return Ok(Json(vec![]));
@@ -707,6 +732,7 @@ async fn update_campaign(
     Json(body): Json<CampaignUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     if !table_exists(&state.db, "drip_campaigns").await {
         return Err(ApiError::NotFound("campaign not found".into()));
@@ -733,6 +759,7 @@ async fn update_campaign(
 
     log_sales_audit(
         &state.db,
+        &auth,
         "control_plane.sales.campaign_updated",
         "drip_campaign",
         Some(&body.id),
@@ -776,6 +803,7 @@ async fn run_discovery(
     Json(body): Json<DiscoveryRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     if body.sources.is_empty() {
         return Err(ApiError::Validation(vec![
@@ -789,6 +817,7 @@ async fn run_discovery(
     {
         log_sales_audit(
             &state.db,
+            &auth,
             "control_plane.sales.discovery_run",
             "sales_discovery_job",
             Some(&job_id),
@@ -810,21 +839,21 @@ async fn run_discovery(
     }
 
     let limit = i64::from(body.max_pages.clamp(1, 10)) * 25;
+    // CP admins see every enriched company regardless of which tenant it was
+    // enriched for; imported leads are attributed to the system tenant so
+    // they show up in the tenant-scoped leads list.
     let rows: Vec<(
-        String,
         String,
         Option<String>,
         Option<String>,
         Option<String>,
     )> = sqlx::query_as(
-        "SELECT tenant_id, domain, company_name, industry, description
+        "SELECT domain, company_name, industry, description
          FROM enriched_companies
-         WHERE tenant_id = $2
          ORDER BY last_enriched_at DESC
          LIMIT $1",
     )
     .bind(limit)
-    .bind(&auth.tenant_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -842,7 +871,7 @@ async fn run_discovery(
     let mut discovered = 0i64;
     let mut imported = 0i64;
 
-    for (tenant_id, domain, company_name, industry, description) in rows {
+    for (domain, company_name, industry, description) in rows {
         if !normalized_categories.is_empty() {
             let Some(ref industry_name) = industry else {
                 continue;
@@ -862,7 +891,7 @@ async fn run_discovery(
             "SELECT id FROM sales_leads WHERE domain = $1 AND tenant_id = $2 LIMIT 1",
         )
         .bind(&domain)
-        .bind(&tenant_id)
+        .bind(&auth.tenant_id)
         .fetch_optional(&state.db)
         .await?;
 
@@ -876,7 +905,7 @@ async fn run_discovery(
                 tenant_id, id, company_name, domain, status, source, notes, created_at, updated_at
              ) VALUES ($1, $2, $3, $4, 'new', $5, $6, NOW(), NOW())",
         )
-        .bind(&tenant_id)
+        .bind(&auth.tenant_id)
         .bind(&lead_id)
         .bind(company_name.unwrap_or_else(|| domain.clone()))
         .bind(&domain)
@@ -889,6 +918,7 @@ async fn run_discovery(
 
     log_sales_audit(
         &state.db,
+        &auth,
         "control_plane.sales.discovery_run",
         "sales_discovery_job",
         Some(&job_id),
@@ -966,6 +996,7 @@ async fn start_outreach(
     Json(body): Json<OutreachRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     if body.lead_ids.is_empty() || body.lead_ids.len() > 100 {
         return Err(ApiError::Validation(vec!["1-100 lead IDs allowed".into()]));
@@ -1070,6 +1101,7 @@ async fn start_outreach(
 
     log_sales_audit(
         &state.db,
+        &auth,
         "control_plane.sales.outreach_started",
         "drip_campaign",
         Some(&campaign_id),
@@ -1086,7 +1118,7 @@ async fn start_outreach(
     Ok(Json(serde_json::json!({
         "success": true,
         "campaignId": campaign_id,
-        "status": "active",
+        "status": "queued",
         "leadsEnrolled": valid_recipients.len(),
         "offer": body.offer_id,
         "template": template,
@@ -1114,6 +1146,7 @@ async fn get_settings(
     auth: AuthUser,
 ) -> Result<Json<SalesSettings>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let row: Option<(serde_json::Value, serde_json::Value, serde_json::Value)> = sqlx::query_as(
         "SELECT scoring_weights, schedule, notifications FROM sales_settings LIMIT 1",
@@ -1145,6 +1178,7 @@ async fn save_settings(
     Json(body): Json<SalesSettings>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     // API-114/115: Use OnceLock to avoid running DDL on every request.
     static SALES_SETTINGS_ENSURE: OnceLock<()> = OnceLock::new();
@@ -1180,6 +1214,7 @@ async fn save_settings(
 
     log_sales_audit(
         &state.db,
+        &auth,
         "control_plane.sales.settings_saved",
         "sales_settings",
         Some("1"),

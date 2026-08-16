@@ -35,6 +35,13 @@ static PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("PLACEHOLDER_RE: invalid regex pattern - this is a bug")
 });
 
+/// Matches double-quoted `href`/`src` attribute values (the serializer and
+/// templates in this crate emit double quotes).
+static URL_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b(href|src)\s*=\s*"([^"]*)""#)
+        .expect("URL_ATTR_RE: invalid regex pattern - this is a bug")
+});
+
 static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         Regex::new(r"(?i)\beval\s*\(").expect("DANGEROUS_PATTERNS[0]: invalid regex"),
@@ -182,18 +189,67 @@ pub fn transpile(
 }
 
 /// Resolve `{{ variable }}` placeholders in rendered HTML with props values.
+///
+/// Security:
+/// - String values are HTML-escaped (`&`, `<`, `>`, `"`, `'`) before
+///   substitution so props can never inject markup. Only props whose leaf
+///   key ends with `_html` (explicitly-trusted pre-rendered fragments) are
+///   substituted raw.
+/// - After substitution, every `href`/`src` attribute value is checked:
+///   only `http:`/`https:` schemes (and scheme-less relative URLs) are
+///   allowed; anything else (`javascript:`, `data:`, `vbscript:`, …) is
+///   neutralized to `#`.
 pub fn resolve_placeholders(html: &str, props: &serde_json::Value) -> String {
-    PLACEHOLDER_RE
+    let substituted = PLACEHOLDER_RE
         .replace_all(html, |caps: &regex::Captures| {
             let key = &caps[1];
             resolve_prop(props, key)
+        })
+        .into_owned();
+    sanitize_url_attributes(&substituted)
+}
+
+/// Resolve placeholders WITHOUT HTML escaping or URL sanitization.
+///
+/// Only for non-HTML contexts (e.g. the plain-text subject line) where
+/// escaping would corrupt the output.
+pub fn resolve_placeholders_plain(text: &str, props: &serde_json::Value) -> String {
+    PLACEHOLDER_RE
+        .replace_all(text, |caps: &regex::Captures| {
+            let key = &caps[1];
+            resolve_prop_raw(props, key)
         })
         .into_owned()
 }
 
 // ─── Internal helpers ──────────────────────────────────────────
 
-fn resolve_prop(props: &serde_json::Value, path: &str) -> String {
+/// HTML-escape a string so it is inert when interpolated into markup.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Trusted prop paths: leaf key ends with `_html` — documented convention for
+/// pre-rendered fragments the template author intentionally injects raw.
+fn is_trusted_html_path(path: &str) -> bool {
+    path.rsplit('.')
+        .next()
+        .is_some_and(|leaf| leaf.ends_with("_html"))
+}
+
+/// Resolve a prop to its raw string value (no escaping).
+fn resolve_prop_raw(props: &serde_json::Value, path: &str) -> String {
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = props;
     for part in parts {
@@ -207,6 +263,59 @@ fn resolve_prop(props: &serde_json::Value, path: &str) -> String {
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/// Resolve a prop for interpolation into HTML: escaped unless trusted.
+fn resolve_prop(props: &serde_json::Value, path: &str) -> String {
+    let raw = resolve_prop_raw(props, path);
+    if is_trusted_html_path(path) {
+        raw
+    } else {
+        escape_html(&raw)
+    }
+}
+
+/// Neutralize dangerous URL schemes in href/src attributes
+/// (applied post-substitution so prop-injected URLs are covered too).
+fn sanitize_url_attributes(html: &str) -> String {
+    URL_ATTR_RE
+        .replace_all(html, |caps: &regex::Captures| {
+            let attr = &caps[1];
+            let value = &caps[2];
+            let sanitized = sanitize_url(value);
+            if sanitized == value {
+                caps[0].to_string()
+            } else {
+                format!("{attr}=\"{sanitized}\"")
+            }
+        })
+        .into_owned()
+}
+
+/// Allow only http/https schemes (or scheme-less relative URLs).
+fn sanitize_url(value: &str) -> &str {
+    let trimmed = value.trim();
+    if let Some(colon) = trimmed.find(':') {
+        let scheme = &trimmed[..colon];
+        let looks_like_scheme = scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.');
+        if looks_like_scheme {
+            let lower = scheme.to_ascii_lowercase();
+            if lower != "http" && lower != "https" {
+                tracing::warn!(
+                    url = %trimmed,
+                    "Rejected href/src with disallowed scheme; neutralized to '#'"
+                );
+                return "#";
+            }
+        }
+    }
+    trimmed
 }
 
 /// Validate every node in the AST against the element and attribute allowlists.
@@ -489,6 +598,78 @@ mod tests {
         let props = serde_json::json!({"count": 42});
         let result = resolve_placeholders(html, &props);
         assert_eq!(result, "Count: 42");
+    }
+
+    #[test]
+    fn test_string_props_are_html_escaped() {
+        let html = "<p>{{ message }}</p>";
+        let props = serde_json::json!({"message": "<script>alert(1)</script> & \"'"});
+        let result = resolve_placeholders(html, &props);
+        assert_eq!(
+            result,
+            "<p>&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;&#x27;</p>"
+        );
+        assert!(!result.contains("<script"));
+    }
+
+    #[test]
+    fn test_trusted_html_prop_is_not_escaped() {
+        let html = "<div>{{ body_html }}</div>";
+        let props = serde_json::json!({"body_html": "<strong>ok</strong>"});
+        let result = resolve_placeholders(html, &props);
+        assert_eq!(result, "<div><strong>ok</strong></div>");
+    }
+
+    #[test]
+    fn test_prop_injection_via_attribute_is_neutralized() {
+        // Even when the escaped value lands inside an attribute, the
+        // injected event handler cannot take effect.
+        let html = r#"<div class="{{ cls }}"></div>"#;
+        let props = serde_json::json!({"cls": "x\" onmouseover=\"alert(1)"});
+        let result = resolve_placeholders(html, &props);
+        assert!(!result.contains("onmouseover=\"alert"), "{result}");
+    }
+
+    #[test]
+    fn test_javascript_url_rejected_in_href() {
+        let html = r#"<a href="{{ link }}">click</a>"#;
+        let props = serde_json::json!({"link": "javascript:alert(1)"});
+        let result = resolve_placeholders(html, &props);
+        assert_eq!(result, r##"<a href="#">click</a>"##);
+    }
+
+    #[test]
+    fn test_data_url_rejected_in_src() {
+        let html = r#"<img src="{{ img }}">"#;
+        let props = serde_json::json!({"img": "data:text/html;base64,PHNjcmlwdD4="});
+        let result = resolve_placeholders(html, &props);
+        assert_eq!(result, r##"<img src="#">"##);
+    }
+
+    #[test]
+    fn test_http_urls_and_relative_urls_pass() {
+        let props = serde_json::json!({"a": "https://example.com/x?y=1&z=2", "b": "/logo.png"});
+        let result = resolve_placeholders(
+            r#"<a href="{{ a }}"><img src="{{ b }}"></a>"#,
+            &props,
+        );
+        assert!(result.starts_with(r#"<a href="https://example.com/x?y=1&amp;z=2">"#));
+        assert!(result.contains(r#"src="/logo.png""#));
+    }
+
+    #[test]
+    fn test_obfuscated_javascript_scheme_rejected() {
+        let html = r#"<a href="{{ u }}">x</a>"#;
+        let props = serde_json::json!({"u": " JaVaScRiPt:alert(1)"});
+        let result = resolve_placeholders(html, &props);
+        assert_eq!(result, r##"<a href="#">x</a>"##);
+    }
+
+    #[test]
+    fn test_plain_variant_does_not_escape() {
+        let props = serde_json::json!({"name": "Tom & Jerry <b>"});
+        let result = resolve_placeholders_plain("Hello {{ name }}", &props);
+        assert_eq!(result, "Hello Tom & Jerry <b>");
     }
 
     #[test]

@@ -73,7 +73,7 @@ kiwicaptcha = { path = "../../../../packages/kiwicaptcha" }
 [features]
 default = []
 # Live-database integration tests that require a running PostgreSQL instance
-# and the full AppState wiring (DdosProtector, WafEngine). Disabled by default.
+# and the full AppState wiring (DdosProtector). Disabled by default.
 live-db = []
 
 [dev-dependencies]

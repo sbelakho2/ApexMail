@@ -15,6 +15,23 @@ CREATE TABLE IF NOT EXISTS lists (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lists_tenant_name ON lists(tenant_id, name);
 CREATE INDEX IF NOT EXISTS idx_lists_tenant ON lists(tenant_id);
 
+-- contacts is created by 075; on a fresh DB running in order, ensure it
+-- exists first with 075's full shape so the FK below resolves and 075's
+-- CREATE/INDEX statements remain valid no-ops.
+CREATE TABLE IF NOT EXISTS contacts (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id        VARCHAR(26) NOT NULL,
+    email            VARCHAR(320) NOT NULL,
+    name             VARCHAR(512),
+    status           VARCHAR(20) NOT NULL DEFAULT 'subscribed',
+    unsubscribe_token VARCHAR(64),
+    phone            VARCHAR(32),
+    unsubscribed_at  TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_tenant_email ON contacts(tenant_id, email);
+
 CREATE TABLE IF NOT EXISTS list_subscribers (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     list_id      UUID NOT NULL REFERENCES lists(id) ON DELETE CASCADE,

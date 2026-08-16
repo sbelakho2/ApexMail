@@ -280,7 +280,9 @@ services:
       - "127.0.0.1:${TRACKING_PORT:-3001}:3001"
       - "127.0.0.1:${TRACKING_METRICS_PORT:-9092}:9092"
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 3001"]
+      # The tracking runtime image ships wget (no netcat) — mirror the image's
+      # own HEALTHCHECK probe against the /health endpoint.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3001/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -339,6 +341,13 @@ services:
       # ── Server bind ───────────────────────────────────────────────────────
       API_HOST: 0.0.0.0
       API_PORT: 8080
+      # ── Internal service auth (shared with pdf-renderer) ──────────────────
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      # ── Inbox placement tests (runs in-process; sends via platform MTA) ───
+      # The api-server shares the apexmail_data network with the mta service,
+      # so unauthenticated submission on mta:25 measures real reputation.
+      PLACEMENT_SMTP_HOST: ${PLACEMENT_SMTP_HOST:-mta}
+      PLACEMENT_SMTP_PORT: ${PLACEMENT_SMTP_PORT:-25}
       # ── Observability ─────────────────────────────────────────────────────
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
       METRICS_PORT: 9090
@@ -470,8 +479,17 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
-      LOCAL_DOMAINS: ${LOCAL_DOMAINS:-apexmail.ee}
+      # ── Backend datastores (crates/mta/src/config.rs reads these names) ────
+      # Without DATABASE_URL/REDIS_URL the MTA silently falls back to
+      # localhost defaults and crashes/loops on first DB or Redis use.
+      DATABASE_URL: ${DATABASE_URL:-postgres://apexmail:apexmail@postgres:5432/apexmail}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # gRPC endpoint of the mailstore service (inbound mailbox delivery).
+      # Matches the config default format (http:// scheme) and the prod overlay.
+      MAILSTORE_GRPC_ADDR: ${MAILSTORE_GRPC_ADDR:-http://mailstore:50051}
       SUBMISSION_PORT: ${SUBMISSION_PORT:-587}
+      # METRICS_PORT is read by the MTA's metrics listener (enabled via
+      # METRICS_ENABLED). The healthcheck probes SMTP port 25 directly.
       METRICS_PORT: 9090
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 25"]
@@ -511,6 +529,7 @@ services:
       PDF_HOST: 0.0.0.0
       PDF_PORT: "3004"
       RUST_LOG: ${PDF_LOG_LEVEL:-info}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3004/health || exit 1"]
       interval: 15s
@@ -536,6 +555,74 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+
+  # ===========================================================================
+  # BILLING SERVICE (plans, metering, invoices, Stripe webhooks)
+  # ===========================================================================
+  billing-service:
+    profiles: ["dev", "full-stack"]
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: billing-service
+    restart: unless-stopped
+    # The wrapper bridges the DB/Redis Docker secrets to native env vars and
+    # assembles DATABASE_URL / REDIS_URL from the DB_* / REDIS_* parts — the
+    # billing binary reads those two URL env vars directly (clap env).
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "billing-service"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,billing_service=debug}
+      BILLING_LISTEN_ADDR: 0.0.0.0:4100
+      # ── Database / Redis (URLs assembled by the entrypoint wrapper) ───────
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── Internal service auth (shared with api-server / pdf-renderer) ─────
+      SERVICE_AUTH_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      # ── Stripe (webhook secret is required — the binary fails fast without it)
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-dev-stripe-webhook-secret-change-me}
+      # Dedicated-IP auto-provisioning calls the api-server internal API.
+      API_BASE_URL: ${BILLING_API_BASE_URL:-http://api-server:8080}
+      # ── Invoice PDF rendering (pdf-renderer on the shared backend network) ─
+      PDF_RENDERER_URL: http://pdf-renderer:3004
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4100"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apexmail_backend
+      - apexmail_data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
+    logging: *default-logging
 
   # ===========================================================================
   # DEVELOPMENT SMTP (Mailpit)

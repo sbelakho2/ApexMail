@@ -257,7 +257,7 @@ BEGIN
 
         -- Create the correct index using actual column names
         IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_tenant_resource') THEN
-            EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_logs_tenant_resource
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_resource
                      ON audit_logs (tenant_id, resource, timestamp)';
             RAISE NOTICE 'C-07: Created index idx_audit_logs_tenant_resource on (tenant_id, resource, timestamp)';
         END IF;
@@ -402,7 +402,16 @@ CREATE TABLE IF NOT EXISTS domains (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='domains' AND column_name='domain') THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
+    ELSIF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='domains' AND column_name='name') THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_domains_domain ON domains(name);
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_domains_tenant ON domains(tenant_id);
 
 -- =============================================================================
@@ -502,7 +511,7 @@ BEGIN
         -- (uses user_id and created_at — the pattern migration 029 intended)
         IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_user_created') THEN
             BEGIN
-                EXECUTE 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_logs_user_created
+                EXECUTE 'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created
                          ON audit_logs (user_id, created_at DESC)';
                 RAISE NOTICE 'C-14: Created idx_audit_logs_user_created index';
             EXCEPTION WHEN OTHERS THEN

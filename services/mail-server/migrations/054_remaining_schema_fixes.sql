@@ -93,17 +93,29 @@ $$;
 -- M-01: Add CHECK constraint on email_queue.priority range
 -- =============================================================================
 
-ALTER TABLE email_queue
-    ADD CONSTRAINT IF NOT EXISTS chk_email_queue_priority
-    CHECK (priority >= 0 AND priority <= 100);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_email_queue_priority') THEN
+        ALTER TABLE email_queue
+            ADD CONSTRAINT chk_email_queue_priority
+            CHECK (priority >= 0 AND priority <= 100);
+    END IF;
+END
+$$;
 
 -- =============================================================================
 -- M-02: Add CHECK constraint on email_queue.max_attempts range
 -- =============================================================================
 
-ALTER TABLE email_queue
-    ADD CONSTRAINT IF NOT EXISTS chk_email_queue_max_attempts
-    CHECK (max_attempts > 0 AND max_attempts <= 100);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_email_queue_max_attempts') THEN
+        ALTER TABLE email_queue
+            ADD CONSTRAINT chk_email_queue_max_attempts
+            CHECK (max_attempts > 0 AND max_attempts <= 100);
+    END IF;
+END
+$$;
 
 -- =============================================================================
 -- M-04: Add partial index on mail_messages(is_deleted) for purge operations
@@ -120,9 +132,11 @@ CREATE INDEX IF NOT EXISTS idx_mail_messages_deleted
 DO $$
 BEGIN
     IF to_regclass('public.placement_tests') IS NOT NULL THEN
-        ALTER TABLE placement_tests
-            ADD CONSTRAINT IF NOT EXISTS chk_placement_tests_status
-            CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'));
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_placement_tests_status') THEN
+            ALTER TABLE placement_tests
+                ADD CONSTRAINT chk_placement_tests_status
+                CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'));
+        END IF;
     END IF;
 END $$;
 
@@ -145,9 +159,11 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('public.ent_ticket_comments') IS NOT NULL THEN
-        ALTER TABLE ent_ticket_comments
-            ADD CONSTRAINT IF NOT EXISTS chk_ent_ticket_comments_author_type
-            CHECK (author_type IN ('agent', 'customer', 'system'));
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_ent_ticket_comments_author_type') THEN
+            ALTER TABLE ent_ticket_comments
+                ADD CONSTRAINT chk_ent_ticket_comments_author_type
+                CHECK (author_type IN ('agent', 'customer', 'system'));
+        END IF;
     END IF;
 END $$;
 

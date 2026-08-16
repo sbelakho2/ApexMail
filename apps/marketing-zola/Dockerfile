@@ -15,13 +15,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Pin the builder stage to linux/amd64 so local Apple Silicon builds and CI
-# builds use the same toolchain.
+# Download the toolchain matching the BUILD target architecture. TARGETARCH
+# is provided automatically by the builder (amd64/arm64) — including under
+# buildx cross-builds — so local Apple Silicon and CI amd64 builds both get
+# a runnable binary instead of the previously hard-pinned x86_64 one.
+ARG TARGETARCH
 RUN set -eux; \
-        curl -sL "https://github.com/getzola/zola/releases/download/v0.22.1/zola-v0.22.1-x86_64-unknown-linux-gnu.tar.gz" \
+        case "${TARGETARCH:-amd64}" in \
+            amd64) ZOLA_ARCH='x86_64';  TW_ARCH='x64'   ;; \
+            arm64) ZOLA_ARCH='aarch64'; TW_ARCH='arm64' ;; \
+            *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+        esac; \
+        curl -sL "https://github.com/getzola/zola/releases/download/v0.22.1/zola-v0.22.1-${ZOLA_ARCH}-unknown-linux-gnu.tar.gz" \
             | tar xz -C /usr/local/bin; \
         curl -sLo /usr/local/bin/tailwindcss \
-            "https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-linux-x64"; \
+            "https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-linux-${TW_ARCH}"; \
         chmod +x /usr/local/bin/tailwindcss
 
 # Copy source
@@ -33,6 +41,19 @@ RUN tailwindcss -i static/css/input.css -o static/css/styles.css --minify
 # can override OS-level dark mode. Tailwind's minifier normalizes :root:not(.light)
 # back to :root inside @media, so we fix it AFTER the Tailwind build.
 RUN sed -i 's/@media(prefers-color-scheme:dark){:root/@media(prefers-color-scheme:dark){:root:not(.light)/g; s/@media (prefers-color-scheme:dark){:root/@media (prefers-color-scheme:dark){:root:not(.light)/g' static/css/styles.css
+# Cachebust @font-face src URLs in the built CSS so they match the cachebusted
+# <link rel=preload> URLs that base.html emits via Zola's get_url(cachebust=true).
+# Without this, browsers fetch each font twice on a cold cache (preload with
+# hash, @font-face without). We hash the font bytes (sha256, 20 chars) and
+# inject ?h=<hash> into every url('/fonts/...') reference in styles.css.
+RUN set -eux; \
+    for font in static/fonts/*; do \
+        [ -f "$font" ] || continue; \
+        base=$(basename "$font"); \
+        h=$(sha256sum "$font" | cut -c1-20); \
+        sed -i "s|url('/fonts/${base}')|url('/fonts/${base}?h=${h}')|g" static/css/styles.css; \
+        sed -i "s|url(/fonts/${base})|url(/fonts/${base}?h=${h})|g" static/css/styles.css; \
+    done
 RUN zola build
 
 # =============================================================================

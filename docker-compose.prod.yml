@@ -501,6 +501,10 @@ services:
     environment:
       RUST_LOG: info
       DATABASE_URL: ${DATABASE_URL}
+      # Bind all interfaces inside the container; the service is only reachable
+      # on the internal apexmail_data network. Set INTERNAL_SERVICE_TOKEN to
+      # additionally require a shared bearer token from callers.
+      MAILSTORE_BIND_ADDR: 0.0.0.0:50051
     secrets:
       - postgres_password
     healthcheck:
@@ -631,6 +635,74 @@ services:
         delay: 10s
         max_attempts: 5
 
+  # ===========================================================================
+  # BILLING SERVICE (plans, metering, invoices, Stripe webhooks)
+  # ===========================================================================
+  billing-service:
+    image: ghcr.io/sbelakho2/apexmail/billing-service:latest
+    restart: unless-stopped
+    # Same wrapper pattern as api-server/worker: Docker secrets (_FILE) are
+    # bridged to native env vars and DATABASE_URL / REDIS_URL are assembled
+    # from the DB_* / REDIS_* parts + secrets.
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "billing-service"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      BILLING_LISTEN_ADDR: 0.0.0.0:4100
+      # ── Database / Redis (URLs assembled by the entrypoint wrapper) ───────
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── Internal service auth ──────────────────────────────────────────────
+      # Re-require the real token so the dev-compose default can never reach a
+      # production container; the mounted secret file wins inside the wrapper.
+      SERVICE_AUTH_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required in production}
+      SERVICE_AUTH_TOKEN_FILE: /run/secrets/internal_service_token
+      # ── Stripe (secrets via wrapper-managed _FILE bridging) ────────────────
+      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_secret_key
+      STRIPE_WEBHOOK_SECRET_FILE: /run/secrets/stripe_webhook_secret
+      # Dedicated-IP auto-provisioning calls the api-server internal API
+      # (prod api-server binds :3000 per this overlay).
+      API_BASE_URL: ${BILLING_API_BASE_URL:-http://api-server:3000}
+      PDF_RENDERER_URL: http://pdf-renderer:3004
+    secrets:
+      - postgres_password
+      - redis_password
+      - internal_service_token
+      - stripe_secret_key
+      - stripe_webhook_secret
+    healthcheck:
+      # netcat-openbsd ships in the runtime-base image (same probe as the
+      # Dockerfile HEALTHCHECK).
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4100"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
   postgres-backup:
     image: prodrigestivill/postgres-backup-local:16-alpine
     restart: unless-stopped
@@ -714,3 +786,7 @@ secrets:
     file: ${PROD_CSRF_SECRET_FILE:?PROD_CSRF_SECRET_FILE is required in production}
   kiwi_secret_key:
     file: ${PROD_KIWI_SECRET_KEY_FILE:?PROD_KIWI_SECRET_KEY_FILE is required in production}
+  stripe_secret_key:
+    file: ${PROD_STRIPE_SECRET_KEY_FILE:?PROD_STRIPE_SECRET_KEY_FILE is required in production}
+  stripe_webhook_secret:
+    file: ${PROD_STRIPE_WEBHOOK_SECRET_FILE:?PROD_STRIPE_WEBHOOK_SECRET_FILE is required in production}

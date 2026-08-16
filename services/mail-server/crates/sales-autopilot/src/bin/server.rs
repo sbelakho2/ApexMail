@@ -40,7 +40,12 @@ fn init_tracing() -> Option<TracingGuard> {
 async fn main() -> anyhow::Result<()> {
     let _guard = init_tracing();
 
-    let cfg = SalesConfig::from_env();
+    let cfg = SalesConfig::from_env().context("failed to load sales-autopilot config")?;
+    if cfg.enrichment_api_key.is_empty() {
+        tracing::warn!(
+            "ENRICHMENT_API_KEY is not set — enrichment requests will be unauthenticated and likely rejected by the provider"
+        );
+    }
     tracing::info!(
         port = cfg.port,
         max_campaigns = cfg.max_campaigns,
@@ -76,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
         config: cfg.clone(),
         enrichment: EnrichmentService::new(Arc::new(HttpEnrichmentProvider::new(
             &cfg.enrichment_api_url,
-            "",
+            &cfg.enrichment_api_key,
         ))),
         campaigns: CampaignManager::new(cfg.max_campaigns, db.clone()),
         calendar: CalendarService::new(db.clone()),
@@ -87,7 +92,10 @@ async fn main() -> anyhow::Result<()> {
         service_token: {
             let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
             if token.is_empty() {
-                tracing::warn!("INTERNAL_SERVICE_TOKEN is not set — protected routes will reject requests until it is configured");
+                // An empty token would make require_service_token reject every
+                // authenticated route — fail fast instead of starting a service
+                // that can only serve /health.
+                anyhow::bail!("INTERNAL_SERVICE_TOKEN must be set");
             }
             token
         },
@@ -102,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(listener) => listener,
         Err(err) => {
             tracing::error!(error = %err, addr = %addr, "failed to bind listener");
-            return Ok(());
+            return Err(anyhow::anyhow!("failed to bind {addr}: {err}"));
         }
     };
     tracing::info!(addr = %addr, "listening");
@@ -129,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         .await
     {
         tracing::error!(error = %err, "server error");
+        return Err(anyhow::anyhow!("server error: {err}"));
     }
 
     Ok(())

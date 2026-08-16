@@ -269,6 +269,11 @@ message GetMailboxStatusResponse {
 message ExpungeRequest {
     string account_id = 1;
     string mailbox = 2;
+    // Optional UID set for UID EXPUNGE (RFC 4315 §2.2.2). When empty (or the
+    // field is absent, which keeps older clients wire-compatible) every
+    // \Deleted message in the mailbox is expunged; when set, only the
+    // intersection of \Deleted and the given UIDs is expunged.
+    repeated uint64 uids = 3;
 }
 
 message ExpungeResponse {

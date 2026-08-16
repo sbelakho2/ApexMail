@@ -6,7 +6,6 @@ use enterprise::field_encryption::{encryptor_from_secret, FieldEncryptor};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::classifier::{classify_folder, delivery_category};
 use crate::config::PlacementConfig;
 use crate::imap_poller::{ImapPoller, InboxPollResult};
 use crate::seed_manager::SeedManager;
@@ -137,7 +136,10 @@ impl PlacementEngine {
         // 3. Insert the test.
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let status = "Pending";
+        // Statuses are lowercase — migration 035/054 define a CHECK constraint
+        // (`chk_placement_tests_status`) and partial indexes over the
+        // lowercase values 'pending'/'running'/'completed'/'failed'/'cancelled'.
+        let status = "pending";
 
         let seed_uuids: Vec<Uuid> = used_accounts.clone();
 
@@ -201,8 +203,8 @@ impl PlacementEngine {
         .await?
         .ok_or_else(|| sqlx::Error::Protocol(format!("placement test {} not found", test_id)))?;
 
-        // 2. Mark as Running.
-        sqlx::query("UPDATE placement_tests SET status = 'Running' WHERE id = $1")
+        // 2. Mark as running (lowercase — see create_test for schema notes).
+        sqlx::query("UPDATE placement_tests SET status = 'running' WHERE id = $1")
             .bind(test_id)
             .execute(&self.db)
             .await?;
@@ -210,6 +212,8 @@ impl PlacementEngine {
         let imp = ImapPoller::new(self.config.clone());
         let mut completed = 0i32;
         let total = test.seed_accounts_used.len() as i32;
+        // Per-account health outcome (account_id → account succeeded).
+        let mut account_outcomes: HashMap<Uuid, bool> = HashMap::new();
 
         // 3. Process each seed account.
         for &account_id in &test.seed_accounts_used {
@@ -235,8 +239,16 @@ impl PlacementEngine {
                 }
             };
 
-            // 3a. Send test email.
-            if let Err(e) = send_test_email(&account, &password, test_id).await {
+            // 3a. Send test email via the platform SMTP relay, from the
+            // tenant's configured sender to the seed address.
+            if let Err(e) = send_test_email(
+                &self.config,
+                &test.from_email,
+                &account.email,
+                test_id,
+            )
+            .await
+            {
                 tracing::warn!(
                     test_id = %test_id,
                     account = %account.email,
@@ -249,6 +261,7 @@ impl PlacementEngine {
                         test_id, account_id, None, None, None, None, None, None,
                     )
                     .await;
+                account_outcomes.insert(account_id, false);
                 completed += 1;
                 continue;
             }
@@ -276,17 +289,28 @@ impl PlacementEngine {
                             test_id, account_id, None, None, None, None, None, None,
                         )
                         .await;
+                    account_outcomes.insert(account_id, false);
                     completed += 1;
                     continue;
                 }
             };
 
-            // 3c. Classify delivery folder.
+            // 3c. Classify delivery folder: INBOX (any case) → inbox,
+            // spam/junk/bulk/promotions → spam, everything else via the
+            // provider classifier fallback.
             let provider_name = self.resolve_provider_name(account_id).await;
-            let inbox_type = poll_result.folder.as_deref().map(|f| {
-                let folder = classify_folder(f, &provider_name);
-                delivery_category(&folder).to_string()
-            });
+            let inbox_type = poll_result
+                .folder
+                .as_deref()
+                .map(|f| crate::classifier::placement_from_folder(f, &provider_name));
+
+            // 3c'. Parse SPF/DKIM/DMARC verdicts from the delivered
+            // message's Authentication-Results header.
+            let (spf_pass, dkim_pass, dmarc_pass) = poll_result
+                .raw_headers
+                .as_deref()
+                .map(parse_auth_results)
+                .unwrap_or((None, None, None));
 
             // 3d. Persist result.
             if let Err(e) = self
@@ -295,10 +319,10 @@ impl PlacementEngine {
                     account_id,
                     inbox_type.as_deref(),
                     poll_result.response_time_ms,
-                    None, // raw_headers
-                    None, // spf_pass
-                    None, // dkim_pass
-                    None, // dmarc_pass
+                    poll_result.raw_headers.as_deref(),
+                    spf_pass,
+                    dkim_pass,
+                    dmarc_pass,
                 )
                 .await
             {
@@ -310,12 +334,13 @@ impl PlacementEngine {
                 );
             }
 
+            account_outcomes.insert(account_id, true);
             completed += 1;
         }
 
-        // 4. Finalise test status.
+        // 4. Finalise test status (lowercase values — see create_test).
         let now = Utc::now();
-        let new_status = if completed > 0 { "Completed" } else { "Failed" };
+        let new_status = if completed > 0 { "completed" } else { "failed" };
 
         sqlx::query(
             "UPDATE placement_tests SET status = $1, completed_accounts = $2, completed_at = $3 WHERE id = $4",
@@ -327,9 +352,14 @@ impl PlacementEngine {
         .execute(&self.db)
         .await?;
 
-        // 5. Update health status for each account.
+        // 5. Update health status per account, derived from that account's own
+        // outcome in this test (not the aggregate test result).
         for &account_id in &test.seed_accounts_used {
-            let health = if completed > 0 { "ok" } else { "error" };
+            let health = if account_outcomes.get(&account_id).copied().unwrap_or(false) {
+                "ok"
+            } else {
+                "error"
+            };
             let _ = self
                 .seed_manager
                 .update_account_health(account_id, health, Utc::now())
@@ -372,10 +402,13 @@ impl PlacementEngine {
     ) -> Result<(), sqlx::Error> {
         // Resolve subscribed webhook IDs for this tenant. Matches the same
         // selector contract used by tracking-service::unsubscribe.
+        // NOTE: the `webhooks` table (migration 075) gates subscriptions on the
+        // `enabled` boolean column — `status` is a lifecycle label ('active'),
+        // never 'enabled'.
         let webhook_ids: Vec<(String,)> = sqlx::query_as(
             r#"SELECT id FROM webhooks
                WHERE tenant_id = $1
-                 AND status = 'enabled'
+                 AND enabled = true
                  AND (events @> '"placement_test.completed"'::jsonb
                       OR events @> '"*"'::jsonb)"#,
         )
@@ -511,12 +544,15 @@ impl PlacementEngine {
                     delivery_count += 1;
                 }
 
-                // Authentication checks (only count if we have data).
-                if row.spf_pass.is_some() {
-                    if row.spf_pass == Some(true) {
-                        spf_ok += 1;
-                    }
+                // Authentication checks (only count if we have data). A row
+                // counts once toward auth_count when ANY mechanism has a
+                // verdict, so the per-mechanism rates stay normalized
+                // (ok_count / rows_with_auth_data).
+                if row.spf_pass.is_some() || row.dkim_pass.is_some() || row.dmarc_pass.is_some() {
                     auth_count += 1;
+                }
+                if row.spf_pass == Some(true) {
+                    spf_ok += 1;
                 }
                 if row.dkim_pass.is_some() && row.dkim_pass == Some(true) {
                     dkim_ok += 1;
@@ -850,6 +886,68 @@ impl std::fmt::Display for ProviderName {
     }
 }
 
+// ── Authentication-Results parsing ─────────────────────────────────
+
+/// Parse SPF/DKIM/DMARC verdicts from a message's raw headers.
+///
+/// Scans every `Authentication-Results` header (RFC 8601), unfolding
+/// continuation lines, and extracts the first `spf=`, `dkim=` and `dmarc=`
+/// verdicts. The receiving server's verdict (usually the first header) wins;
+/// later headers only fill mechanisms the first one omitted.
+///
+/// Verdict mapping: `pass` → `Some(true)`; `fail`/`softfail`/`hardfail`/
+/// `temperror`/`permerror` → `Some(false)`; `none`/`neutral`/absent → `None`.
+fn parse_auth_results(raw_headers: &str) -> (Option<bool>, Option<bool>, Option<bool>) {
+    // Unfold headers: continuation lines begin with SP/TAB.
+    let mut blocks: Vec<String> = Vec::new();
+    for line in raw_headers.lines() {
+        let trimmed_start = line.trim_start_matches([' ', '\t']);
+        let is_continuation = line.len() != trimmed_start.len();
+        if is_continuation {
+            if let Some(last) = blocks.last_mut() {
+                last.push(' ');
+                last.push_str(trimmed_start);
+            }
+        } else {
+            blocks.push(line.to_string());
+        }
+    }
+
+    let mut spf: Option<Option<bool>> = None;
+    let mut dkim: Option<Option<bool>> = None;
+    let mut dmarc: Option<Option<bool>> = None;
+
+    for block in &blocks {
+        if !block
+            .to_ascii_lowercase()
+            .starts_with("authentication-results:")
+        {
+            continue;
+        }
+        // Tokenize on whitespace and semicolons, then look for the
+        // `mechanism=verdict` tokens.
+        for token in block.split([' ', '\t', ';']) {
+            let Some((mech, verdict)) = token.split_once('=') else {
+                continue;
+            };
+            let value = match verdict.to_ascii_lowercase().as_str() {
+                "pass" => Some(true),
+                "fail" | "softfail" | "hardfail" | "temperror" | "permerror" => Some(false),
+                // none / neutral / policy-specific tokens carry no verdict
+                _ => None,
+            };
+            match mech.to_ascii_lowercase().as_str() {
+                "spf" if spf.is_none() => spf = Some(value),
+                "dkim" if dkim.is_none() => dkim = Some(value),
+                "dmarc" if dmarc.is_none() => dmarc = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    (spf.flatten(), dkim.flatten(), dmarc.flatten())
+}
+
 // ── Recommendation Logic ──────────────────────────────────────────
 
 /// Generate a brief recommendation for a provider based on inbox rate.
@@ -900,5 +998,53 @@ fn build_encryptor(config: &PlacementConfig) -> Option<Arc<FieldEncryptor>> {
             tracing::error!(error = %e, "Failed to derive PLACEMENT_ENCRYPTION_SECRET; password decryption disabled");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_auth_results_gmail_style_pass() {
+        let headers = "Received: from mail.example.com\r\n\
+Authentication-Results: mx.google.com;\r\n\
+\tdkim=pass header.i=@apexmail.ee header.s=2024;\r\n\
+\tspf=pass (google.com: domain of bounce@apexmail.ee designates 1.2.3.4 as permitted sender) smtp.mailfrom=apexmail.ee;\r\n\
+\tdmarc=pass (p=QUARANTINE sp=NONE dis=NONE) header.from=apexmail.ee\r\n\
+Date: Mon, 1 Jan 2025 00:00:00 +0000\r\n";
+        assert_eq!(
+            parse_auth_results(headers),
+            (Some(true), Some(true), Some(true))
+        );
+    }
+
+    #[test]
+    fn parse_auth_results_fail_verdicts() {
+        let headers = "Authentication-Results: mx.outlook.com; spf=fail smtp.mailfrom=evil.example; dkim=fail header.d=evil.example; dmarc=fail\r\n";
+        assert_eq!(
+            parse_auth_results(headers),
+            (Some(false), Some(false), Some(false))
+        );
+    }
+
+    #[test]
+    fn parse_auth_results_partial_mechanisms() {
+        let headers = "Authentication-Results: mx.example.com; dkim=pass header.d=apexmail.ee; dmarc=none\r\n";
+        // dkim present and passing; spf absent; dmarc none carries no verdict.
+        assert_eq!(parse_auth_results(headers), (None, Some(true), None));
+    }
+
+    #[test]
+    fn parse_auth_results_ignores_other_headers() {
+        let headers = "From: spf=pass@example.com\r\nSubject: dkim=pass\r\nX-Spam: dmarc=pass\r\n";
+        assert_eq!(parse_auth_results(headers), (None, None, None));
+    }
+
+    #[test]
+    fn parse_auth_results_mixed_headers_first_wins() {
+        let headers = "Authentication-Results: mx.a.com; spf=pass\r\n\
+Authentication-Results: mx.b.com; spf=fail; dkim=pass\r\n";
+        assert_eq!(parse_auth_results(headers), (Some(true), Some(true), None));
     }
 }

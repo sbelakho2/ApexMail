@@ -157,10 +157,33 @@ async fn main() -> Result<()> {
 
     // Start email processor
     if run_email {
+        // Choose transport backend via EMAIL_TRANSPORT_TYPE env var.
+        // Values:"ses" (default), "smtp" / "self-hosted" / "direct".
+        let transport_type = env::var("EMAIL_TRANSPORT_TYPE")
+            .map(|v| TransportType::from_env(&v))
+            .unwrap_or_default();
+
+        info!(transport = ?transport_type, "Email transport backend selected");
+
+        // Only require SMTP_HOST when the SMTP transport is actually in use.
+        // With the SES transport the SMTP settings are never exercised, so we
+        // fall back to a harmless local default instead of crash-looping the
+        // whole worker binary at startup.
+        let smtp_host = match env::var("SMTP_HOST") {
+            Ok(h) if !h.is_empty() => h,
+            Ok(_) | Err(_) => {
+                if transport_type == TransportType::Smtp {
+                    return Err(anyhow::anyhow!(
+                        "SMTP_HOST environment variable must be set when EMAIL_TRANSPORT_TYPE=smtp"
+                    ));
+                }
+                warn!("SMTP_HOST not set; SES transport selected, defaulting SMTP host to localhost:25");
+                "localhost".to_string()
+            }
+        };
+
         let smtp_config = SmtpConfig {
-            host: env::var("SMTP_HOST").map_err(|_| {
-                anyhow::anyhow!("SMTP_HOST environment variable must be set for email processing")
-            })?,
+            host: smtp_host,
             port: env::var("SMTP_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -177,14 +200,6 @@ async fn main() -> Result<()> {
                 .map(zeroize::Zeroizing::new),
             ..Default::default()
         };
-
-        // Choose transport backend via EMAIL_TRANSPORT_TYPE env var.
-        // Values:"ses" (default), "smtp" / "self-hosted" / "direct".
-        let transport_type = env::var("EMAIL_TRANSPORT_TYPE")
-            .map(|v| TransportType::from_env(&v))
-            .unwrap_or_default();
-
-        info!(transport = ?transport_type, "Email transport backend selected");
 
         let config = EmailConfig {
             base: ProcessorConfig {

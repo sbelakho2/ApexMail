@@ -184,6 +184,15 @@ async fn issue_challenge_handler(
         auto_tune_min_bits: state.config.kiwi_auto_tune_min_bits,
         auto_tune_max_bits: state.config.kiwi_auto_tune_max_bits,
         binding_mode: kiwicaptcha::BindingMode::Bound,
+        // Policy epoch 1: stamped into every issued record so outstanding
+        // challenges can be invalidated wholesale on a future policy change
+        // (verification currently does not pin an expected version).
+        policy_version: 1,
+        // Single-region, single-key deployment: no region/issuer binding and
+        // kid 1 (the primary key) signs every challenge.
+        region: None,
+        issuer: None,
+        kid: 1,
     };
 
     // Serve repeat requests from the same client (IP hash + scope) within the
@@ -194,7 +203,11 @@ async fn issue_challenge_handler(
         return Ok(Json(challenge_response(issued)));
     }
 
-    let issued = kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix, now_ns, 0)
+    // active_solves = 0: no solver-load accounting is wired up here, so
+    // auto-tuning (when enabled via config) always sees an idle deployment.
+    // request_binding = None: no application transaction is correlated with
+    // the challenge at issuance.
+    let issued = kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix, now_ns, 0, None)
         .map_err(|_| ApiError::Internal("failed to issue KiwiCaptcha challenge".into()))?;
 
     // Store the challenge record in Redis, keyed by nonce, with TTL.

@@ -12,9 +12,11 @@ use crate::imap_poller::ImapPoller;
 /// executes them.
 ///
 /// The scheduler runs a `tokio::spawn`ed loop that:
-/// - Queries `placement_tests` for rows with status `'Pending'` or `'Running'`
+/// - Queries `placement_tests` for rows with status `'pending'` or `'running'`
 ///   at every `config.polling_interval_secs` interval.
-/// - Invokes [`PlacementEngine::execute_test`] for each pending test.
+/// - Invokes [`PlacementEngine::execute_test`] for each due pending test
+///   (`scheduled_for <= NOW()` or NULL).
+/// - Reaps tests stuck in `'running'` past `stuck_test_timeout_secs`.
 /// - Respects the `max_tests_per_hour` rate limit by not starting more tests
 ///   than the configured ceiling would allow in the current sliding window.
 /// - Logs progress via `tracing`.
@@ -74,6 +76,10 @@ impl PlacementScheduler {
                 if cancel.is_cancelled() {
                     break;
                 }
+
+                // Reap tests stuck in 'running' (crashed runs) before claiming
+                // new work so they can never wedge the rate-limit count.
+                Self::reap_stuck_tests(&engine, &config).await;
 
                 // Query for pending / running tests.
                 let tests = match Self::fetch_pending_tests(&engine, &config).await {
@@ -244,7 +250,7 @@ impl PlacementScheduler {
         let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
         let active_count: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM placement_tests \
-             WHERE status IN ('Running', 'Pending') \
+             WHERE status IN ('running', 'pending') \
              AND created_at >= $1",
         )
         .bind(one_hour_ago)
@@ -263,9 +269,12 @@ impl PlacementScheduler {
         // Allow room for more tests within the rate limit.
         let remaining = (config.max_tests_per_hour as i64).saturating_sub(active_count.0);
 
+        // Claim only due tests: scheduled_for must be NULL (immediate) or in
+        // the past — future-scheduled tests must not start early.
         let rows: Vec<(Uuid,)> = sqlx::query_as(
             "SELECT id FROM placement_tests \
-             WHERE status = 'Pending' \
+             WHERE status = 'pending' \
+               AND (scheduled_for IS NULL OR scheduled_for <= NOW()) \
              ORDER BY created_at ASC \
              LIMIT $1",
         )
@@ -274,6 +283,46 @@ impl PlacementScheduler {
         .await?;
 
         Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    /// Reap placement tests stuck in `running`.
+    ///
+    /// If the process dies mid-test the row stays `running` forever (the
+    /// execution loop only claims `pending` rows), so tests whose `created_at`
+    /// is older than `config.stuck_test_timeout_secs` and that never reached a
+    /// terminal state are marked `failed` with a timeout error. The schema has
+    /// no `updated_at` column on `placement_tests` (migration 035), so
+    /// `created_at` is the liveness signal; the default 2 h threshold exceeds
+    /// the worst-case per-account polling cycle
+    /// (`max_polling_attempts × polling_interval_secs` = 1 h).
+    async fn reap_stuck_tests(engine: &PlacementEngine, config: &PlacementConfig) {
+        let cutoff = chrono::Utc::now()
+            - chrono::Duration::seconds(config.stuck_test_timeout_secs as i64);
+
+        let result = sqlx::query(
+            "UPDATE placement_tests \
+             SET status = 'failed', completed_at = NOW() \
+             WHERE status = 'running' \
+               AND completed_at IS NULL \
+               AND created_at < $1",
+        )
+        .bind(cutoff)
+        .execute(&engine.db)
+        .await;
+
+        match result {
+            Ok(res) if res.rows_affected() > 0 => {
+                tracing::warn!(
+                    reaped = res.rows_affected(),
+                    timeout_secs = config.stuck_test_timeout_secs,
+                    "Marked stuck 'running' placement tests as failed"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to reap stuck placement tests");
+            }
+        }
     }
 }
 

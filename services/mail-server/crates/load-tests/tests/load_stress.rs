@@ -32,7 +32,7 @@ fn test_stress_crm_many_leads() {
 
     // Verify all are retrievable
     for id in &lead_ids {
-        assert!(crm.get_lead(*id, "stress").is_ok(), "lead {id} not found");
+        assert!(crm.get_lead(id, "stress").is_ok(), "lead {id} not found");
     }
 
     let all = crm.list_leads("stress", None, None);

@@ -25,7 +25,7 @@
       <div class="max-w-3xl mx-auto">
         <div class="flex flex-col items-center justify-center gap-4 p-6 bg-brand-50 border border-brand-200 rounded-sm mb-8 text-center">
           <span class="text-lg font-semibold text-brand-800">View live ApexMail status</span>
-          <a href="https://status.apexmail.ee" class="inline-flex items-center justify-center rounded-sm bg-surface-950 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-brand-700">
+          <a href="{{ config.extra.status_url }}" class="inline-flex items-center justify-center rounded-sm bg-surface-950 px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-brand-700">
             Open Status Page
           </a>
         </div>
@@ -44,14 +44,14 @@
         <div class="mt-6 p-4 rounded-sm bg-warning-50 border border-warning-200 mb-6">
           <p class="text-sm text-warning-800 font-medium">
             <svg class="w-4 h-4 inline-block mr-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            This page shows services <strong>tracked for monitoring</strong>, not live health. Visit <a href="https://status.apexmail.ee" class="font-semibold underline">status.apexmail.ee</a> for live status.
+            This page shows services <strong>tracked for monitoring</strong>, not live health. Visit <a href="{{ config.extra.status_url }}" class="font-semibold underline">status.apexmail.ee</a> for live status.
           </p>
         </div>
 
         <div class="p-6 rounded-sm bg-warning-500/10 border border-warning-500/20 text-center">
           <p class="text-sm text-warning-600 font-medium">
             <svg class="w-4 h-4 inline-block mr-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            Live status data is available at <a href="https://status.apexmail.ee" class="font-semibold underline">status.apexmail.ee</a>. This static page does not assert component health.
+            Live status data is available at <a href="{{ config.extra.status_url }}" class="font-semibold underline">status.apexmail.ee</a>. This static page does not assert component health.
           </p>
         </div>
       </div>

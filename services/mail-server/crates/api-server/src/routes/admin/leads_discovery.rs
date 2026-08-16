@@ -52,6 +52,7 @@ async fn get_discovery(
     auth: AuthUser,
 ) -> Result<Json<DiscoveryResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     // Check table exists
     let exists: Option<(bool,)> = sqlx::query_as(
@@ -105,7 +106,9 @@ async fn get_discovery(
             chrono::DateTime<chrono::Utc>,
         ),
     >(
-        "SELECT id::text, company_name, domain, source, stage, description, created_at
+        // `description` does not exist on sales_leads (migration 006 defines
+        // `industry`); use it as the stand-in for the lead description.
+        "SELECT id::text, company_name, domain, source, stage, COALESCE(industry, ''), created_at
          FROM sales_leads ORDER BY created_at DESC LIMIT 100",
     )
     .fetch_all(&state.db)

@@ -13,10 +13,8 @@
 >
   <nav class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["main_nav"] %}{{ i18n_data[l]["header"]["main_nav"] }}{% else %}Main navigation{% endif %}">
     <div class="flex items-center justify-between h-16 lg:h-20">
-      {# ── Logo ─────────────────────────────────────── #}
-      <a href="/" class="flex items-center gap-2 group">
-        <span class="text-xl font-bold tracking-tighter"><span class="text-brand-500">Apex</span><span class="text-surface-950">Mail</span></span>
-      </a>
+      {# ── Logo (kiwi brand lockup) ───────────────── #}
+      {% include "partials/kiwi-logo.html" %}
 
       {# ── Desktop Navigation ─────────────────────── #}
       <div class="hidden lg:flex items-center gap-2">

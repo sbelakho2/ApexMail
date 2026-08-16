@@ -166,18 +166,38 @@ pub async fn create_credit_note(
         Some(row) => {
             // First-time insert — also credit the wallet in the same
             // transaction so that wallet + credit_note are consistent.
+            // Wallet credit in two sequential statements within the same tx:
+            // 1. Ensure a wallet row exists (balance 0, idempotent).
+            // 2. Increment the balance via UPDATE ... RETURNING and record the
+            //    transaction using the RETURNING balance as `balance_after`.
+            // Sequential statements (not sibling CTEs) because data-modifying
+            // CTEs cannot see each other's writes — the UPDATE would miss a
+            // wallet created in the same statement.
             sqlx::query(
                 r#"
-                WITH ensure_wallet AS (
-                    INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
-                    VALUES ($1, 0, 0, 'eur', NOW(), NOW())
-                    ON CONFLICT (tenant_id) DO UPDATE SET updated_at = wallets.updated_at
+                INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+                VALUES ($1, 0, 0, 'eur', NOW(), NOW())
+                ON CONFLICT (tenant_id) DO NOTHING
+                "#,
+            )
+            .bind(&input.tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(CreditNoteError::Db)?;
+
+            sqlx::query(
+                r#"
+                WITH credit_wallet AS (
+                    UPDATE wallets
+                    SET balance = balance + $2::int4,
+                        updated_at = NOW()
+                    WHERE tenant_id = $1
                     RETURNING id, balance
                 )
                 INSERT INTO wallet_transactions
                     (wallet_id, tenant_id, type, amount, balance_after, description, reference, created_at)
                 SELECT id, $1, 'credit', $2::int4, balance, $3, $4, $5
-                FROM ensure_wallet
+                FROM credit_wallet
                 "#,
             )
             .bind(&input.tenant_id)

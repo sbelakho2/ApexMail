@@ -861,9 +861,17 @@ async fn export_pdf(
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| ApiError::Internal(format!("http client error: {e}")))?;
-    let resp = http_client
+    let mut req = http_client
         .post(format!("{pdf_renderer_url}/v1/pdf/render"))
-        .json(&render_request)
+        .json(&render_request);
+    // pdf-renderer requires the shared internal service token; only attach the
+    // header when one is configured (empty token would 401 anyway).
+    if let Some(token) = state.config.internal_service_token.as_deref() {
+        if !token.is_empty() {
+            req = req.header("x-api-key", token);
+        }
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| ApiError::Internal(format!("PDF renderer error: {e}")))?;

@@ -11,9 +11,9 @@ BEGIN;
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'uq_wallet_transactions_reference'
-          AND conrelid = 'public.wallet_transactions'::regclass
+        SELECT 1 FROM pg_class
+        WHERE relname = 'uq_wallet_transactions_reference'
+          AND relnamespace = 'public'::regnamespace
     ) AND to_regclass('public.wallet_transactions') IS NOT NULL THEN
         -- Filter out NULLs so non-idempotent transactions still work.
         CREATE UNIQUE INDEX uq_wallet_transactions_reference
@@ -48,9 +48,9 @@ END $$;
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'uq_stripe_subscriptions_tenant'
-          AND conrelid = 'public.stripe_subscriptions'::regclass
+        SELECT 1 FROM pg_class
+        WHERE relname = 'uq_stripe_subscriptions_tenant'
+          AND relnamespace = 'public'::regnamespace
     ) AND to_regclass('public.stripe_subscriptions') IS NOT NULL THEN
         CREATE UNIQUE INDEX uq_stripe_subscriptions_tenant
             ON stripe_subscriptions(tenant_id)
@@ -79,9 +79,9 @@ DO $$
 BEGIN
     IF to_regclass('public.domains') IS NOT NULL THEN
         IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint
-            WHERE conname = 'uq_domains_tenant_name'
-              AND conrelid = 'public.domains'::regclass
+            SELECT 1 FROM pg_class
+        WHERE relname = 'uq_domains_tenant_name'
+          AND relnamespace = 'public'::regnamespace
         ) THEN
             -- Create index if it doesn't already exist outside of constraint
             BEGIN
@@ -100,9 +100,9 @@ DO $$
 BEGIN
     IF to_regclass('public.webhooks') IS NOT NULL THEN
         IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint
-            WHERE conname = 'uq_webhooks_tenant_url'
-              AND conrelid = 'public.webhooks'::regclass
+            SELECT 1 FROM pg_class
+        WHERE relname = 'uq_webhooks_tenant_url'
+          AND relnamespace = 'public'::regnamespace
         ) THEN
             BEGIN
                 CREATE UNIQUE INDEX uq_webhooks_tenant_url

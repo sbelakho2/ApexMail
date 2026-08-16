@@ -36,9 +36,11 @@ BEGIN
         IF NOT EXISTS (
             SELECT 1 FROM pg_class WHERE relname = 'idx_throttle_decisions_cleanup'
         ) THEN
+            -- NOW() is STABLE, not IMMUTABLE — invalid in an index
+            -- predicate. Plain unfiltered index on decided_at serves the
+            -- cleanup range scan identically.
             EXECUTE 'CREATE INDEX IF NOT EXISTS idx_throttle_decisions_cleanup
-                     ON outbound_throttle_decisions (decided_at)
-                     WHERE decided_at < NOW() - INTERVAL ''90 days''';
+                     ON outbound_throttle_decisions (decided_at)';
             RAISE NOTICE 'DB-111: Created idx_throttle_decisions_cleanup for retention cleanup';
         END IF;
     END IF;
@@ -68,7 +70,7 @@ BEGIN
 END;
 $func$;
 
-RAISE NOTICE 'DB-111: Created cleanup_outbound_throttle_decisions(INT) function';
+-- (bare RAISE outside a DO block is invalid SQL; notice dropped)
 
 -- =============================================================================
 -- Section 2: DB-112 — Partition metering_events table
@@ -126,8 +128,8 @@ BEGIN
     ) PARTITION BY RANGE (timestamp);
 
     -- Create monthly partitions for current period
-    v_current_month := to_char(NOW(), 'YYYY-MM');
-    v_next_month := to_char(NOW() + INTERVAL '1 month', 'YYYY-MM');
+    v_current_month := to_char(NOW(), 'YYYY_MM');
+    v_next_month := to_char(NOW() + INTERVAL '1 month', 'YYYY_MM');
 
     -- Create partitions for current month + 2 future months
     EXECUTE format(
@@ -149,7 +151,7 @@ BEGIN
     EXECUTE format(
         'CREATE TABLE metering_events_%s PARTITION OF metering_events
          FOR VALUES FROM (%L) TO (%L)',
-        to_char(NOW() + INTERVAL '2 months', 'YYYY-MM'),
+        to_char(NOW() + INTERVAL '2 months', 'YYYY_MM'),
         date_trunc('month', NOW()) + INTERVAL '2 months',
         date_trunc('month', NOW()) + INTERVAL '3 months'
     );

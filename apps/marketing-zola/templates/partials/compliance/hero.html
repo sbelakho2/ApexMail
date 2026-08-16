@@ -57,11 +57,11 @@
           {% set badges = ["GDPR DSR", "HIPAA BAA", "SIG / CAIQ", "HECVAT"] %}
           <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
             {% for badge in badges %}
-            <div class="animate-in aspect-square rounded-sm bg-surface-100 border border-surface-200 flex flex-col items-center justify-center p-4 hover:border-surface-300 transition-colors">
-              <div class="w-10 h-10 rounded-sm bg-white flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
+            <div class="animate-in min-h-[8rem] rounded-2xl bg-surface-100 border border-surface-200 flex flex-col items-center justify-center p-4 hover:border-surface-300 transition-colors">
+              <div class="w-10 h-10 rounded-md bg-white flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
                 <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
               </div>
-              <span class="text-[14px] font-semibold text-surface-950">{{ badge }}</span>
+              <span class="text-[14px] font-semibold text-surface-950 text-balance max-w-full text-center">{{ badge }}</span>
             </div>
             {% endfor %}
           </div>

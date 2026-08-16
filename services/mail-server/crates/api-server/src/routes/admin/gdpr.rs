@@ -50,17 +50,13 @@ fn default_limit() -> i64 {
 #[derive(Debug, Serialize, sqlx::FromRow)]
 struct GdprRequestRow {
     id: String,
-    #[sqlx(rename = "type")]
     request_type: String,
     status: String,
     email: String,
     tenant_id: String,
     tenant_name: String,
     created_at: chrono::DateTime<chrono::Utc>,
-    verified_at: Option<chrono::DateTime<chrono::Utc>>,
-    completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    sla_deadline: chrono::DateTime<chrono::Utc>,
-    notes: Option<String>,
+    fulfilled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,10 +70,7 @@ pub struct GdprRequestResponse {
     pub tenant_id: String,
     pub tenant_name: String,
     pub created_at: String,
-    pub verified_at: Option<String>,
     pub completed_at: Option<String>,
-    pub sla_deadline: String,
-    pub notes: Option<String>,
 }
 
 async fn list_gdpr_requests(
@@ -102,10 +95,9 @@ async fn list_gdpr_requests(
 
     let rows = if tenant_scoped {
         sqlx::query_as::<_, GdprRequestRow>(
-            "SELECT g.id, g.type, g.status, g.email, g.tenant_id,
+            "SELECT g.id, g.request_type, g.status, g.email, g.tenant_id,
                 COALESCE(t.name, g.tenant_id) as tenant_name,
-                g.created_at, g.verified_at, g.completed_at,
-                g.sla_deadline, g.notes
+                g.created_at, g.fulfilled_at
          FROM gdpr_requests g
          LEFT JOIN tenants t ON t.id = g.tenant_id
          WHERE g.tenant_id = $3
@@ -119,10 +111,9 @@ async fn list_gdpr_requests(
         .await?
     } else {
         sqlx::query_as::<_, GdprRequestRow>(
-            "SELECT g.id, g.type, g.status, g.email, g.tenant_id,
+            "SELECT g.id, g.request_type, g.status, g.email, g.tenant_id,
                 COALESCE(t.name, g.tenant_id) as tenant_name,
-                g.created_at, g.verified_at, g.completed_at,
-                g.sla_deadline, g.notes
+                g.created_at, g.fulfilled_at
          FROM gdpr_requests g
          LEFT JOIN tenants t ON t.id = g.tenant_id
          ORDER BY g.created_at DESC
@@ -144,10 +135,7 @@ async fn list_gdpr_requests(
             tenant_id: r.tenant_id,
             tenant_name: r.tenant_name,
             created_at: r.created_at.to_rfc3339(),
-            verified_at: r.verified_at.map(|t| t.to_rfc3339()),
-            completed_at: r.completed_at.map(|t| t.to_rfc3339()),
-            sla_deadline: r.sla_deadline.to_rfc3339(),
-            notes: r.notes,
+            completed_at: r.fulfilled_at.map(|t| t.to_rfc3339()),
         })
         .collect();
 
@@ -178,8 +166,7 @@ async fn update_gdpr_request(
         sqlx::query(
             "UPDATE gdpr_requests
          SET status = $2,
-             verified_at = CASE WHEN $2 = 'verified' THEN NOW() ELSE verified_at END,
-             completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE completed_at END
+             fulfilled_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE fulfilled_at END
          WHERE id = $1 AND tenant_id = $3",
         )
         .bind(&body.id)
@@ -191,8 +178,7 @@ async fn update_gdpr_request(
         sqlx::query(
             "UPDATE gdpr_requests
          SET status = $2,
-             verified_at = CASE WHEN $2 = 'verified' THEN NOW() ELSE verified_at END,
-             completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE completed_at END
+             fulfilled_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE fulfilled_at END
          WHERE id = $1",
         )
         .bind(&body.id)

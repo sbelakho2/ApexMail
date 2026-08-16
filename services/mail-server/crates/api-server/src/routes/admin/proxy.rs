@@ -74,13 +74,12 @@ pub struct ProxyResponse {
 }
 
 /// Allowed headers to forward (security allowlist).
-const HEADER_ALLOWLIST: &[&str] = &[
-    "content-type",
-    "accept",
-    "authorization",
-    "x-api-key",
-    "x-request-id",
-];
+///
+/// `authorization` and `x-api-key` are intentionally excluded: forwarding
+/// client-supplied credentials to an arbitrary upstream host would leak the
+/// caller's secrets and could authenticate the proxy request as the caller
+/// against the upstream.
+const HEADER_ALLOWLIST: &[&str] = &["content-type", "accept", "x-request-id"];
 
 async fn proxy_disabled() -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -180,12 +179,25 @@ async fn proxy_request(
     let method = body.method.as_deref().unwrap_or("GET").to_uppercase();
     let host = parsed.host_str().unwrap_or("").to_string();
 
+    // Build a dedicated client that does NOT follow redirects. The SSRF
+    // host/IP allowlist checks only run on the initial URL, so following a
+    // 3xx (e.g. to http://169.254.169.254/) would bypass them entirely.
+    // `state.http_client` follows up to 10 redirects and is therefore unsafe
+    // to use here.
+    let no_redirect_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| {
+            tracing::error!("Failed to build no-redirect proxy client: {e}");
+            ApiError::Internal("proxy client build failed".into())
+        })?;
+
     let mut request = match method.as_str() {
-        "GET" => state.http_client.get(&body.url),
-        "POST" => state.http_client.post(&body.url),
-        "PUT" => state.http_client.put(&body.url),
-        "PATCH" => state.http_client.patch(&body.url),
-        "DELETE" => state.http_client.delete(&body.url),
+        "GET" => no_redirect_client.get(&body.url),
+        "POST" => no_redirect_client.post(&body.url),
+        "PUT" => no_redirect_client.put(&body.url),
+        "PATCH" => no_redirect_client.patch(&body.url),
+        "DELETE" => no_redirect_client.delete(&body.url),
         _ => return Err(ApiError::Validation(vec!["Unsupported HTTP method".into()])),
     };
 
@@ -215,6 +227,14 @@ async fn proxy_request(
             tracing::error!("Proxy request failed: {e}");
             ApiError::Internal("Proxy request failed".into())
         })?;
+
+    // Refuse to follow redirects: a 3xx could point at an internal host that
+    // was never validated by the SSRF checks above.
+    if response.status().is_redirection() {
+        return Err(ApiError::BadRequest(
+            "upstream returned a redirect; the proxy does not follow redirects".into(),
+        ));
+    }
 
     let status = response.status().as_u16();
     log_proxy_audit(

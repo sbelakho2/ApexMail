@@ -396,7 +396,13 @@ pub(crate) fn extract_public_client_ip(
     }
 
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        for part in xff.split(',').map(str::trim) {
+        // Walk XFF right-to-left: the rightmost entry was appended by the
+        // closest proxy, so the first untrusted address encountered from the
+        // right is the real client IP. Leftmost entries are client-supplied
+        // and trivially spoofable (`X-Forwarded-For: 1.2.3.4, real-client,
+        // trusted-proxy`), so a left-to-right scan would let callers pick an
+        // arbitrary rate-limit identity.
+        for part in xff.split(',').rev().map(str::trim) {
             if let Ok(ip) = part.parse::<IpAddr>() {
                 let ip = normalise_ip(ip);
                 if !is_in_trusted(ip, &trusted_networks) {
@@ -555,6 +561,24 @@ mod tests {
         headers.insert(
             "x-forwarded-for",
             HeaderValue::from_static("198.51.100.55, 10.0.0.2"),
+        );
+
+        let trusted = vec!["10.0.0.0/8".to_string()];
+        let ip = extract_public_client_ip(&headers, "10.1.2.3".parse().unwrap(), &trusted);
+
+        assert_eq!(ip, "198.51.100.55");
+    }
+
+    /// The client can inject arbitrary leftmost XFF entries; the walk must
+    /// start from the right (closest proxy) so spoofed prefixes are ignored.
+    #[test]
+    fn test_extract_public_client_ip_ignores_spoofed_leftmost_entries() {
+        let mut headers = HeaderMap::new();
+        // "1.2.3.4" was injected by the client; 198.51.100.55 is the real
+        // client as observed by the trusted proxy 10.0.0.2.
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("1.2.3.4, 198.51.100.55, 10.0.0.2"),
         );
 
         let trusted = vec!["10.0.0.0/8".to_string()];

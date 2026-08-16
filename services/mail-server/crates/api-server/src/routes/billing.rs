@@ -14,9 +14,9 @@ use billing_service::{
 };
 use chrono::{Datelike, Months, NaiveTime, Utc};
 use deadpool_redis::redis::AsyncCommands;
-use hmac::{Hmac, Mac};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -339,6 +339,9 @@ fn map_usage_error(error: usage::UsageError) -> ApiError {
         usage::UsageError::Audit(audit_error) => ApiError::Internal(audit_error),
         usage::UsageError::Redis(pool_error) => ApiError::from(pool_error),
         usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
+        usage::UsageError::InvalidQuantity(quantity) => ApiError::BadRequest(format!(
+            "usage quantity must be positive, got {quantity}"
+        )),
     }
 }
 
@@ -2165,6 +2168,7 @@ fn preview_plan_proration(
 
 // Replaced by billing_common::proration::build_proration_explanation
 
+#[cfg(test)]
 fn generate_audit_log_id() -> String {
     Uuid::new_v4()
         .simple()
@@ -2174,20 +2178,7 @@ fn generate_audit_log_id() -> String {
         .collect()
 }
 
-/// HMAC-SHA256 signature over the audit hash, keyed with the same
-/// `AUDIT_SIGNING_KEY` the compliance crate uses for chain verification.
-fn audit_log_signature(hash: &str) -> String {
-    type HmacSha256 = Hmac<Sha256>;
-    let key = std::env::var("AUDIT_SIGNING_KEY")
-        .unwrap_or_else(|_| "apexmail-audit-fallback-key".to_string());
-    let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
-        Ok(mac) => mac,
-        Err(_) => return String::new(),
-    };
-    mac.update(hash.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
-}
-
+#[cfg(test)]
 fn compute_audit_log_hash(
     tenant_id: &str,
     action: &str,
@@ -2223,49 +2214,23 @@ async fn insert_audit_log(
     metadata: serde_json::Value,
     timestamp: chrono::DateTime<Utc>,
 ) -> Result<(), ApiError> {
-    let previous_hash: Option<String> = sqlx::query_scalar(
-        "SELECT hash FROM audit_logs WHERE tenant_id = $1 ORDER BY timestamp DESC LIMIT 1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-
-    let hash = compute_audit_log_hash(
-        tenant_id,
+    // Delegate to the canonical hash-chained writer (src/audit_log.rs) so
+    // billing audit rows share the same chain-link selection (FOR UPDATE in
+    // the insert transaction) and the fail-closed AUDIT_SIGNING_KEY policy
+    // as every other audit writer. The old local copy silently signed with
+    // a publicly-known fallback key when the env var was unset.
+    crate::audit_log::insert_audit_log_in_tx(
+        tx,
+        Some(tenant_id),
+        None,
         action,
         resource_type,
         resource_id,
-        &metadata,
-        previous_hash.as_deref(),
+        metadata,
+        None,
+        None,
         timestamp,
-    );
-
-    let signature = audit_log_signature(&hash);
-
-    sqlx::query(
-        r#"
-        INSERT INTO audit_logs (
-            id, tenant_id, user_id, session_id, action, resource, resource_id,
-            details, ip_address, user_agent, outcome, error_message,
-            timestamp, hash, previous_hash, signature, created_at
-        ) VALUES (
-            $1, $2, NULL, NULL, $3, $4, $5,
-            $6::jsonb, NULL, NULL, 'success', NULL,
-            $7, $8, $9, $10, $7
-        )
-        "#,
     )
-    .bind(generate_audit_log_id())
-    .bind(tenant_id)
-    .bind(action)
-    .bind(resource_type)
-    .bind(resource_id)
-    .bind(metadata)
-    .bind(timestamp)
-    .bind(hash)
-    .bind(previous_hash)
-    .bind(signature)
-    .execute(&mut **tx)
     .await?;
 
     Ok(())
@@ -3310,12 +3275,7 @@ async fn load_legacy_invoice_detail(
 async fn check_quota(State(state): State<AppState>, auth: AuthUser) -> Result<Response, ApiError> {
     let status = usage::check_quota(&state.db, &state.redis, &auth.tenant_id)
         .await
-        .map_err(|error| match error {
-            usage::UsageError::Db(db_error) => ApiError::from(db_error),
-            usage::UsageError::Audit(audit_error) => ApiError::Internal(audit_error),
-            usage::UsageError::Redis(pool_error) => ApiError::from(pool_error),
-            usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
-        })?;
+        .map_err(map_usage_error)?;
 
     Ok(billing_success_response(serde_json::to_value(status)?))
 }
@@ -3361,7 +3321,7 @@ async fn admin_list_tenants(
                     w.balance AS wallet_balance
                 FROM tenants t
                 LEFT JOIN stripe_subscriptions s ON t.id = s.tenant_id
-                LEFT JOIN plans p ON s.plan_id = p.id
+                LEFT JOIN plans p ON p.name = s.plan
                 LEFT JOIN dunning_states d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
                 WHERE s.status = $1
@@ -3391,7 +3351,7 @@ async fn admin_list_tenants(
                     w.balance AS wallet_balance
                 FROM tenants t
                 LEFT JOIN stripe_subscriptions s ON t.id = s.tenant_id
-                LEFT JOIN plans p ON s.plan_id = p.id
+                LEFT JOIN plans p ON p.name = s.plan
                 LEFT JOIN dunning_states d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
                 ORDER BY t.created_at DESC
@@ -4096,18 +4056,19 @@ async fn admin_get_mrr_report(
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
         FROM (
             SELECT
-                DATE_TRUNC('month', created_at) as month,
-                COUNT(DISTINCT tenant_id) as active_subscriptions,
-                SUM(
+                DATE_TRUNC('month', s.created_at) as month,
+                COUNT(DISTINCT s.tenant_id) as active_subscriptions,
+                COALESCE(SUM(
                     CASE
-                        WHEN billing_interval = 'month' THEN amount
-                        WHEN billing_interval = 'year' THEN amount / 12
+                        WHEN s.billing_interval = 'monthly' THEN COALESCE(p.price_monthly, 0)
+                        WHEN s.billing_interval = 'yearly' THEN COALESCE(p.price_yearly, 0) / 12
                         ELSE 0
                     END
-                ) as mrr
-            FROM stripe_subscriptions
-            WHERE status = 'active'
-            GROUP BY DATE_TRUNC('month', created_at)
+                ), 0) as mrr
+            FROM stripe_subscriptions s
+            LEFT JOIN plans p ON p.name = s.plan
+            WHERE s.status = 'active'
+            GROUP BY DATE_TRUNC('month', s.created_at)
             ORDER BY month DESC
             LIMIT 12
         ) report_row
@@ -4135,18 +4096,19 @@ async fn admin_get_churn_report(
         FROM (
             WITH churned AS (
                 SELECT
-                    DATE_TRUNC('month', canceled_at) as month,
+                    DATE_TRUNC('month', s.canceled_at) as month,
                     COUNT(*) as churned_count,
-                    SUM(
+                    COALESCE(SUM(
                         CASE
-                            WHEN billing_interval = 'month' THEN amount
-                            WHEN billing_interval = 'year' THEN amount / 12
+                            WHEN s.billing_interval = 'monthly' THEN COALESCE(p.price_monthly, 0)
+                            WHEN s.billing_interval = 'yearly' THEN COALESCE(p.price_yearly, 0) / 12
                             ELSE 0
                         END
-                    ) as churned_mrr
-                FROM stripe_subscriptions
-                WHERE status = 'canceled' AND canceled_at IS NOT NULL
-                GROUP BY DATE_TRUNC('month', canceled_at)
+                    ), 0) as churned_mrr
+                FROM stripe_subscriptions s
+                LEFT JOIN plans p ON p.name = s.plan
+                WHERE s.status = 'canceled' AND s.canceled_at IS NOT NULL
+                GROUP BY DATE_TRUNC('month', s.canceled_at)
             ),
             starting AS (
                 SELECT
@@ -4306,12 +4268,16 @@ async fn admin_export_billing_data(
                 SELECT
                     s.tenant_id, t.name as tenant_name,
                     p.name as plan_name, s.status,
-                    s.amount, s.currency, s.billing_interval,
-                    s.current_period_start, s.current_period_end,
+                    CASE
+                        WHEN s.billing_interval = 'yearly' THEN COALESCE(p.price_yearly, 0)
+                        ELSE COALESCE(p.price_monthly, 0)
+                    END as amount,
+                    s.billing_interval,
+                    s.billing_cycle_start as current_period_start, s.current_period_end,
                     s.created_at, s.canceled_at
                 FROM stripe_subscriptions s
                 JOIN tenants t ON s.tenant_id = t.id
-                JOIN plans p ON s.plan_id = p.id
+                LEFT JOIN plans p ON p.name = s.plan
                 WHERE s.created_at >= $1 AND s.created_at < $2
                 ORDER BY s.created_at
             ) export_row

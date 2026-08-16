@@ -3,7 +3,6 @@
 //! Key format:`apexmail:idempotency:{tenant_id}:{key}`
 //! Stores the full serialised response for 24 h by default.
 
-use axum::body::to_bytes;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
@@ -16,6 +15,13 @@ use crate::state::AppState;
 
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 const MAX_BODY_SIZE: usize = 1024 * 1024; // 1 MiB cached response limit
+/// TTL of the in-flight claim marker. Long enough to cover any handler
+/// execution, short enough that a crashed request cannot lock the key for
+/// the full cache TTL.
+const CLAIM_TTL_SECONDS: u64 = 30;
+/// Value stored while a request with this key is executing. Not valid
+/// `CachedResponse` JSON, so `lookup_cached` treats it as a miss.
+const IN_PROGRESS_MARKER: &str = "in_progress";
 
 // ─── Stored response ───────────────────────────────────────────
 
@@ -39,7 +45,11 @@ struct CachedResponse {
 /// If the request contains an `Idempotency-Key` header the middleware will:
 /// 1. Look up the key in Redis. On hit, verify the cached response belongs to
 ///    the same AuthUser, then return the cached response.
-/// 2. On miss, let the request through, capture the response, and store it.
+/// 2. On miss, atomically claim the key (`SET ... NX EX 30`). A concurrent
+///    duplicate gets `409 Conflict` + `Retry-After` instead of executing the
+///    handler a second time (which would double-send emails).
+/// 3. Let the request through, capture the response, and store it (releasing
+///    the claim).
 ///
 /// # Security (L-06)
 /// Cached idempotency responses are bound to the concrete AuthUser principal
@@ -81,11 +91,57 @@ pub async fn idempotency_middleware(
         }
     }
 
-    // 2. Execute the real handler
+    // 2. Atomically claim the key. The check-then-execute race above allowed
+    //    two concurrent duplicates to both miss the cache and both run the
+    //    handler; `SET NX` makes the claim decision in one round-trip.
+    let claimed = match claim_in_flight(&state, &cache_key).await {
+        ClaimOutcome::Claimed => true,
+        ClaimOutcome::RedisUnavailable => {
+            // Best-effort only: proceed without a claim, matching the
+            // middleware's behaviour when Redis is down for the cache.
+            tracing::warn!(cache_key, "idempotency claim unavailable; proceeding unclaimed");
+            false
+        }
+        ClaimOutcome::AlreadyInFlight => {
+            // The key exists but is not necessarily in flight: a concurrent
+            // request may have finished between our cache lookup and the
+            // claim attempt, in which case the key now holds its stored
+            // response. Serve that instead of bouncing a legitimate retry.
+            if let Some(cached) = lookup_cached(&state, &cache_key).await {
+                if principal_matches(current_user.as_ref(), &cached) {
+                    tracing::debug!(
+                        cache_key,
+                        "idempotent response stored during claim race — returning it"
+                    );
+                    return cached_to_response(cached);
+                }
+            }
+            tracing::warn!(
+                cache_key,
+                "idempotency key already in flight — rejecting concurrent duplicate"
+            );
+            return (
+                StatusCode::CONFLICT,
+                [
+                    ("Retry-After", "1"),
+                    ("Cache-Control", "no-store"),
+                ],
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": "CONFLICT",
+                        "message": "a request with this Idempotency-Key is already in flight; retry after a short delay"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Execute the real handler
     let response = next.run(req).await;
 
-    // 3. Store the response (with the current user_id for L-06 re-validation)
-    store_response(&state, &cache_key, ttl, current_user, response).await
+    // 4. Store the response (overwrites — and therefore releases — the claim)
+    store_response(&state, &cache_key, ttl, claimed, current_user, response).await
 }
 
 // ─── Helpers ───────────────────────────────────────────────────
@@ -96,6 +152,44 @@ fn extract_idempotency_key(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+enum ClaimOutcome {
+    /// The key was claimed by this request.
+    Claimed,
+    /// Another request holds the claim right now.
+    AlreadyInFlight,
+    /// Redis is unavailable or errored — idempotency is best-effort, so the
+    /// request proceeds unclaimed rather than failing hard.
+    RedisUnavailable,
+}
+
+/// Atomically claim `key` for the current request.
+///
+/// `SET key "in_progress" NX EX 30` succeeds only when no other request holds
+/// the key, so concurrent duplicates are deduplicated in a single round-trip.
+async fn claim_in_flight(state: &AppState, key: &str) -> ClaimOutcome {
+    let Ok(mut conn) = state.redis.get().await else {
+        return ClaimOutcome::RedisUnavailable;
+    };
+
+    let claimed: Result<Option<()>, _> = deadpool_redis::redis::cmd("SET")
+        .arg(key)
+        .arg(IN_PROGRESS_MARKER)
+        .arg("NX")
+        .arg("EX")
+        .arg(CLAIM_TTL_SECONDS)
+        .query_async(&mut *conn)
+        .await;
+
+    match claimed {
+        Ok(Some(())) => ClaimOutcome::Claimed,
+        Ok(None) => ClaimOutcome::AlreadyInFlight,
+        Err(error) => {
+            tracing::warn!(key, error = %error, "idempotency claim write failed");
+            ClaimOutcome::RedisUnavailable
+        }
+    }
 }
 
 async fn lookup_cached(state: &AppState, key: &str) -> Option<CachedResponse> {
@@ -127,51 +221,121 @@ async fn store_response(
     state: &AppState,
     cache_key: &str,
     ttl: u64,
+    claimed: bool,
     current_user: Option<AuthUser>,
     resp: Response,
 ) -> Response {
     let (parts, body) = resp.into_parts();
 
-    let body_bytes = match to_bytes(body, MAX_BODY_SIZE).await {
-        Ok(b) => b,
-        Err(e) => {
-            // response instead of returning an empty body.
-            tracing::warn!(cache_key, error = %e, "response body too large to cache for idempotency");
-            return (
-                parts.status,
-                axum::Json(serde_json::json!({
-                    "error": {
-                        "code": "INTERNAL_ERROR",
-                        "message": "response too large to cache"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
+    let cached_status = parts.status.as_u16();
 
-    // L-06: Store the concrete authenticated principal so we can re-validate
-    // subsequent requests against the same API key/session/user.
-    let principal_id = current_user.as_ref().map(principal_binding);
-    let cached = CachedResponse {
-        status: parts.status.as_u16(),
-        headers: parts
-            .headers
-            .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
-            .collect(),
-        body: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body_bytes),
-        principal_id,
-        user_id: current_user.and_then(|u| u.user_id),
-    };
-
-    if let Ok(json) = serde_json::to_string(&cached) {
-        if let Ok(mut conn) = state.redis.get().await {
-            let _: Result<(), _> = conn.set_ex(cache_key, &json, ttl).await;
+    // Handler failure (5xx): a server error is not an idempotent result —
+    // caching it would replay the failure to every retry for the full TTL.
+    // Drop the claim instead so the client can re-execute immediately.
+    if cached_status >= 500 {
+        if claimed {
+            release_claim(state, cache_key).await;
         }
+        return Response::from_parts(parts, body);
     }
 
-    Response::from_parts(parts, axum::body::Body::from(body_bytes))
+    let cached_headers: Vec<(String, String)> = parts
+        .headers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|val| (k.to_string(), val.to_string()))
+        })
+        .collect();
+
+    // Tee the body: forward every chunk to the client unchanged while
+    // accumulating up to MAX_BODY_SIZE bytes for the idempotency cache.
+    // A body larger than the cache limit is streamed through UNcached —
+    // a successful response must never be replaced with an error merely
+    // because it is too big to cache.
+    let (mut tx, rx) =
+        futures::channel::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
+
+    let store_state = state.clone();
+    let store_key = cache_key.to_string();
+    tokio::spawn(async move {
+        use futures::SinkExt;
+        use futures::StreamExt;
+
+        let mut stream = body.into_data_stream();
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut cacheable = true;
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if cacheable && buffer.len() + bytes.len() > MAX_BODY_SIZE {
+                        cacheable = false;
+                        tracing::warn!(
+                            cache_key = %store_key,
+                            body_limit = MAX_BODY_SIZE,
+                            "response exceeds idempotency cache limit — passing through uncached"
+                        );
+                    }
+                    if cacheable {
+                        buffer.extend_from_slice(&bytes);
+                    }
+                    if tx.send(Ok(bytes)).await.is_err() {
+                        // Client dropped the response mid-body; a partial
+                        // body must never be cached.
+                        cacheable = false;
+                        break;
+                    }
+                }
+                Err(body_error) => {
+                    cacheable = false;
+                    let _ = tx
+                        .send(Err(std::io::Error::other(body_error)))
+                        .await;
+                    break;
+                }
+            }
+        }
+        drop(tx);
+
+        if cacheable {
+            // L-06: Store the concrete authenticated principal so we can
+            // re-validate subsequent requests against the same
+            // API key/session/user.
+            let principal_id = current_user.as_ref().map(principal_binding);
+            let cached = CachedResponse {
+                status: cached_status,
+                headers: cached_headers,
+                body: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &buffer,
+                ),
+                principal_id,
+                user_id: current_user.as_ref().and_then(|u| u.user_id.clone()),
+            };
+
+            if let Ok(json) = serde_json::to_string(&cached) {
+                if let Ok(mut conn) = store_state.redis.get().await {
+                    let _: Result<(), _> = conn.set_ex(&store_key, &json, ttl).await;
+                }
+            }
+        } else if claimed {
+            // The stored response was never written, so release the in-flight
+            // claim instead of 409-ing retries for the remaining claim TTL.
+            release_claim(&store_state, &store_key).await;
+        }
+    });
+
+    Response::from_parts(parts, axum::body::Body::from_stream(rx))
+}
+
+/// Release an in-flight claim (`DEL key`) so retries can re-execute the
+/// handler instead of receiving 409s for the rest of the claim TTL.
+async fn release_claim(state: &AppState, cache_key: &str) {
+    if let Ok(mut conn) = state.redis.get().await {
+        let _: Result<(), _> = conn.del(cache_key).await;
+    }
 }
 
 fn principal_binding(user: &AuthUser) -> String {

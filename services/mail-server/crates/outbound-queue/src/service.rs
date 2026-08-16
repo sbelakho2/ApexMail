@@ -265,6 +265,12 @@ impl OutboundService for OutboundServiceImpl {
     }
 
     /// Queue bulk emails
+    ///
+    /// Builds the whole batch first and commits it with a SINGLE
+    /// `enqueue_batch` call (one transaction + one multi-row INSERT) instead
+    /// of one sequential `enqueue` per email — the per-email loop both
+    /// round-tripped N times and consumed rate-limit quota at enqueue time,
+    /// permanently failing the tail of every large batch.
     async fn queue_bulk_emails(
         &self,
         request: Request<QueueBulkEmailsRequest>,
@@ -276,12 +282,12 @@ impl OutboundService for OutboundServiceImpl {
                 MAX_BULK_EMAILS
             )));
         }
-        let mut results = Vec::with_capacity(req.emails.len());
-        let mut queued_count = 0i32;
-        let mut failed_count = 0i32;
 
-        for email_req in req.emails {
-            let email = QueuedEmail {
+        let batch_size = req.emails.len();
+        let batch: Vec<QueuedEmail> = req
+            .emails
+            .into_iter()
+            .map(|email_req| QueuedEmail {
                 id: Uuid::new_v4(),
                 from_address: email_req.from,
                 to_addresses: email_req.to,
@@ -320,25 +326,30 @@ impl OutboundService for OutboundServiceImpl {
                 } else {
                     Some(email_req.tenant_id)
                 },
-            };
+            })
+            .collect();
 
-            match self.queue.enqueue(email).await {
-                Ok(id) => {
-                    queued_count += 1;
-                    results.push(QueueEmailResponse {
+        let (results, queued_count, failed_count) = match self.queue.enqueue_batch(batch).await {
+            Ok(ids) => {
+                let results: Vec<QueueEmailResponse> = ids
+                    .into_iter()
+                    .map(|id| QueueEmailResponse {
                         email_id: id.to_string(),
                         status: "queued".to_string(),
-                    });
-                }
-                Err(e) => {
-                    failed_count += 1;
-                    results.push(QueueEmailResponse {
-                        email_id: String::new(),
-                        status: format!("failed: {}", e),
-                    });
-                }
+                    })
+                    .collect();
+                let queued = results.len() as i32;
+                (results, queued, 0)
             }
-        }
+            Err(e) => {
+                error!(error = %e, count = batch_size, "Failed to queue bulk emails");
+                (
+                    Vec::new(),
+                    0,
+                    batch_size as i32, // enqueue_batch is atomic: all-or-nothing
+                )
+            }
+        };
 
         info!(
             queued = queued_count,

@@ -193,17 +193,19 @@ mod simulation {
 
     #[test]
     fn sim_overage_within_limit_is_zero() {
-        assert_eq!(plans::calculate_overage_cost(30_000, 30_000, "pro"), 0);
+        assert_eq!(plans::calculate_overage_cost(30_000, 30_000), 0);
     }
 
     #[test]
     fn sim_overage_unlimited_is_zero() {
-        assert_eq!(plans::calculate_overage_cost(999_999, -1, "enterprise"), 0);
+        assert_eq!(plans::calculate_overage_cost(999_999, -1), 0);
     }
 
     #[test]
     fn sim_overage_above_limit() {
-        assert_eq!(plans::calculate_overage_cost(31_000, 30_000, "pro"), 60);
+        // 1 000 overage emails at $0.40 / 1 000 emails = 40 cents.
+        // Matches plans::overage_above_limit (same pricing constant).
+        assert_eq!(plans::calculate_overage_cost(31_000, 30_000), 40);
     }
 
     #[test]

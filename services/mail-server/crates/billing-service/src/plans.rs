@@ -313,11 +313,12 @@ pub async fn upsert_plan_input(
         INSERT INTO plans (
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features, is_active, sort_order, created_at, updated_at
+            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            is_active, sort_order, created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, $2, $3,
             $4, $5, $6, $7,
-            $8, true, $9, $10, $10
+            $8, $11, $12, true, $9, $10, $10
         )
         ON CONFLICT (name) DO UPDATE SET
             display_name  = EXCLUDED.display_name,
@@ -327,12 +328,14 @@ pub async fn upsert_plan_input(
             email_limit   = EXCLUDED.email_limit,
             api_call_limit= EXCLUDED.api_call_limit,
             features      = EXCLUDED.features,
+            stripe_price_id_monthly = COALESCE(EXCLUDED.stripe_price_id_monthly, plans.stripe_price_id_monthly),
+            stripe_price_id_yearly  = COALESCE(EXCLUDED.stripe_price_id_yearly, plans.stripe_price_id_yearly),
             sort_order    = EXCLUDED.sort_order,
             updated_at    = $10
         RETURNING
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features,
+            features, stripe_price_id_monthly, stripe_price_id_yearly,
             is_active, sort_order, created_at, updated_at
         "#,
     )
@@ -346,6 +349,8 @@ pub async fn upsert_plan_input(
     .bind(&features_json)
     .bind(input.sort_order)
     .bind(now)
+    .bind(&input.stripe_price_id_monthly)
+    .bind(&input.stripe_price_id_yearly)
     .fetch_one(pool)
     .await?;
 
@@ -359,7 +364,7 @@ pub async fn get_active_plans(pool: &PgPool) -> Result<Vec<Plan>, sqlx::Error> {
         SELECT
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features,
+            features, stripe_price_id_monthly, stripe_price_id_yearly,
             is_active, sort_order, created_at, updated_at
         FROM plans
         WHERE is_active = true
@@ -379,7 +384,7 @@ pub async fn get_plan_by_name(pool: &PgPool, name: &str) -> Result<Option<Plan>,
         SELECT
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
-            features,
+            features, stripe_price_id_monthly, stripe_price_id_yearly,
             is_active, sort_order, created_at, updated_at
         FROM plans
         WHERE name = $1
@@ -392,14 +397,29 @@ pub async fn get_plan_by_name(pool: &PgPool, name: &str) -> Result<Option<Plan>,
     Ok(row.map(|r| r.into_plan()))
 }
 
+/// Resolve a tenant's effective plan.
+///
+/// An admin plan override (plan_overrides, migration 069/093) takes
+/// precedence over the tenant's own plan while it is `active` and either
+/// unexpired or without an expiry. Otherwise the tenant's plan is used.
 pub async fn get_plan_for_tenant(
     pool: &PgPool,
     tenant_id: &str,
 ) -> Result<Option<Plan>, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT plan FROM tenants WHERE id = $1")
-        .bind(tenant_id)
-        .fetch_optional(pool)
-        .await?;
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT COALESCE(po.plan, t.plan) AS plan_name
+        FROM tenants t
+        LEFT JOIN plan_overrides po
+          ON po.tenant_id = t.id
+         AND po.active = true
+         AND (po.expires_at IS NULL OR po.expires_at > NOW())
+        WHERE t.id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await?;
 
     match row {
         Some((plan_name,)) => get_plan_by_name(pool, &plan_name).await,
@@ -494,6 +514,8 @@ struct PlanRow {
     email_limit: i64,
     api_call_limit: i64,
     features: Option<serde_json::Value>,
+    stripe_price_id_monthly: Option<String>,
+    stripe_price_id_yearly: Option<String>,
     is_active: bool,
     sort_order: i32,
     created_at: DateTime<Utc>,
@@ -516,8 +538,8 @@ impl PlanRow {
             email_limit: self.email_limit,
             api_call_limit: self.api_call_limit,
             features,
-            stripe_price_id_monthly: None,
-            stripe_price_id_yearly: None,
+            stripe_price_id_monthly: self.stripe_price_id_monthly,
+            stripe_price_id_yearly: self.stripe_price_id_yearly,
             is_active: self.is_active,
             sort_order: self.sort_order,
             created_at: self.created_at,

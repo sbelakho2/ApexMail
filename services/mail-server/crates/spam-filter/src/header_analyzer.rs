@@ -126,20 +126,36 @@ pub fn analyze_headers(email: &EmailHeaders<'_>) -> HeaderScore {
                 penalty: 3.0,
             });
         }
-        // DKIM fail
-        if auth_lower.contains("dkim=fail") || auth_lower.contains("dkim=none") {
+        // DKIM hard failure
+        if auth_lower.contains("dkim=fail") {
             findings.push(HeaderFinding {
                 id: "DKIM_FAIL",
-                description: "DKIM verification failed or absent".into(),
+                description: "DKIM verification failed".into(),
                 penalty: 2.5,
             });
+        } else if auth_lower.contains("dkim=none") {
+            // `none` is a legitimate result for senders that simply do not
+            // publish/sign with DKIM — informational, not a hard failure.
+            findings.push(HeaderFinding {
+                id: "DKIM_NONE",
+                description: "No DKIM signature present".into(),
+                penalty: 0.5,
+            });
         }
-        // DMARC fail
-        if auth_lower.contains("dmarc=fail") || auth_lower.contains("dmarc=none") {
+        // DMARC hard failure
+        if auth_lower.contains("dmarc=fail") {
             findings.push(HeaderFinding {
                 id: "DMARC_FAIL",
-                description: "DMARC verification failed or absent".into(),
+                description: "DMARC verification failed".into(),
                 penalty: 3.0,
+            });
+        } else if auth_lower.contains("dmarc=none") {
+            // `none` means the sender domain publishes no DMARC policy —
+            // informational, not a hard failure.
+            findings.push(HeaderFinding {
+                id: "DMARC_NONE",
+                description: "No DMARC policy published".into(),
+                penalty: 0.5,
             });
         }
     } else {
@@ -244,6 +260,37 @@ mod tests {
         assert!(result.findings.iter().any(|f| f.id == "SPF_FAIL"));
         assert!(result.findings.iter().any(|f| f.id == "DKIM_FAIL"));
         assert!(result.findings.iter().any(|f| f.id == "DMARC_FAIL"));
+    }
+
+    /// `dkim=none`/`dmarc=none` are legitimate results for senders without
+    /// records — they must be informational (0.5 each), not full failures.
+    #[test]
+    fn test_dkim_dmarc_none_informational() {
+        let headers = vec![
+            ("From".into(), "user@example.com".into()),
+            ("Message-ID".into(), "<abc@example.com>".into()),
+            ("Date".into(), "Mon, 1 Jan 2024 00:00:00 +0000".into()),
+            ("Received".into(), "from mx.example.com".into()),
+        ];
+        let result = analyze_headers(&EmailHeaders {
+            headers: &headers,
+            auth_results: Some("spf=pass; dkim=none; dmarc=none"),
+        });
+        let dkim = result
+            .findings
+            .iter()
+            .find(|f| f.id == "DKIM_NONE")
+            .expect("dkim=none should be informational");
+        assert_eq!(dkim.penalty, 0.5);
+        let dmarc = result
+            .findings
+            .iter()
+            .find(|f| f.id == "DMARC_NONE")
+            .expect("dmarc=none should be informational");
+        assert_eq!(dmarc.penalty, 0.5);
+        // Neither must be scored as a hard failure.
+        assert!(!result.findings.iter().any(|f| f.id == "DKIM_FAIL"));
+        assert!(!result.findings.iter().any(|f| f.id == "DMARC_FAIL"));
     }
 
     #[test]

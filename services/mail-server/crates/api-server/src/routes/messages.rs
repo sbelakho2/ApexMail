@@ -157,7 +157,10 @@ pub struct BatchResult {
 
 struct PersistedMessage {
     id: String,
-    status: &'static str,
+    // String (not &'static str) because the idempotent-duplicate re-fetch
+    // path reconstructs this struct from a database row, whose status is
+    // owned data ("queued" | "scheduled" | ...).
+    status: String,
     created_at: DateTime<Utc>,
 }
 
@@ -303,16 +306,26 @@ async fn insert_message_and_queue(
     tenant_id: &str,
     body: &SendMessageRequest,
     metadata: &Option<serde_json::Value>,
+    idempotency_key: Option<&str>,
     domain_id: Option<String>,
-) -> Result<PersistedMessage, sqlx::Error> {
+) -> Result<Option<PersistedMessage>, sqlx::Error> {
     let message_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let status = message_status(body);
 
-    sqlx::query(
+    // Store the idempotency key in the dedicated `idempotency_key` column (not
+    // just inside JSONB metadata) so the UNIQUE(tenant_id, idempotency_key)
+    // index is actually enforced. `ON CONFLICT ... DO NOTHING` is the
+    // race-condition safety net: if a concurrent request already inserted the
+    // same (tenant_id, idempotency_key), this insert is a no-op and we return
+    // `None` so the caller can re-fetch the existing message. NULL keys never
+    // conflict (standard SQL NULL-distinct semantics), so batch sends and any
+    // request without an idempotency key insert normally.
+    let result = sqlx::query(
         "INSERT INTO messages (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
-         subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at)
-         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+         subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key)
+         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
     )
     .bind(&message_id)
     .bind(tenant_id)
@@ -336,8 +349,14 @@ async fn insert_message_and_queue(
     .bind(metadata)
     .bind(body.scheduled_at)
     .bind(created_at)
+    .bind(idempotency_key)
     .execute(&mut **tx)
     .await?;
+
+    // Conflict (concurrent duplicate idempotency key) → nothing inserted.
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
 
     for recipient in delivery_recipients(body) {
         sqlx::query(
@@ -366,11 +385,11 @@ async fn insert_message_and_queue(
         .await?;
     }
 
-    Ok(PersistedMessage {
+    Ok(Some(PersistedMessage {
         id: message_id,
-        status,
+        status: status.to_owned(),
         created_at,
-    })
+    }))
 }
 
 async fn cancel_message_and_queue(
@@ -496,9 +515,76 @@ async fn send_message(
             ApiError::Internal("database error".into())
         })?;
 
-    let persisted = match insert_message_and_queue(&mut tx, &auth.tenant_id, &body, &metadata, domain_id).await
+    // Idempotency key for the send — stored in the dedicated column so the
+    // UNIQUE(tenant_id, idempotency_key) index is enforced inside the insert
+    // (the pre-check above is only a fast path; it cannot close the
+    // concurrent-duplicate race window on its own).
+    let idempotency_key: Option<&str> = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|key| !key.is_empty() && key.len() <= 255);
+
+    let persisted = match insert_message_and_queue(
+        &mut tx,
+        &auth.tenant_id,
+        &body,
+        &metadata,
+        idempotency_key,
+        domain_id,
+    )
+    .await
     {
-        Ok(persisted) => persisted,
+        Ok(Some(persisted)) => persisted,
+        Ok(None) => {
+            // Idempotent duplicate: a concurrent request won the insert race
+            // (the header pre-check missed it). Re-fetch the existing message
+            // so the response returns the original id instead of double-sending.
+            let refetched: Result<Option<(String, String, DateTime<Utc>)>, sqlx::Error> =
+                sqlx::query_as(
+                    "SELECT id::text, status, created_at FROM messages
+                     WHERE tenant_id = $1 AND idempotency_key = $2
+                     LIMIT 1",
+                )
+                .bind(&auth.tenant_id)
+                // A NULL key can never conflict (SQL NULL-distinct semantics),
+                // so reaching this arm implies a key was provided.
+                .bind(idempotency_key.unwrap_or_default())
+                .fetch_optional(&mut *tx)
+                .await;
+
+            let (existing, refetch_error) = match refetched {
+                Ok(existing) => (existing, None),
+                Err(error) => (None, Some(error)),
+            };
+            let Some((id, status, created_at)) = existing else {
+                let _ = tx.rollback().await;
+
+                if let Err(rollback_error) =
+                    rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
+                {
+                    tracing::error!(
+                        error = %rollback_error,
+                        tenant_id = %auth.tenant_id,
+                        event_id = %quota_reservation.event_id,
+                        "failed to roll back reserved email quota after idempotent re-fetch failure"
+                    );
+                }
+
+                record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
+                tracing::error!(
+                    error = ?refetch_error,
+                    tenant_id = %auth.tenant_id,
+                    "failed to re-fetch existing message for idempotent duplicate"
+                );
+                return Err(ApiError::Internal("database error".into()));
+            };
+
+            PersistedMessage {
+                id,
+                status,
+                created_at,
+            }
+        }
         Err(error) => {
             let _ = tx.rollback().await;
 
@@ -563,6 +649,11 @@ async fn send_batch(
         )));
     }
 
+    // Same per-tenant delivery circuit as single sends: refuse the whole
+    // batch while the tenant's circuit is open instead of queueing more
+    // messages into an already-failing pipeline.
+    ensure_tenant_message_circuit_closed(&state, &auth.tenant_id).await?;
+
     let mut accepted = 0usize;
     let mut rejected = 0usize;
     let mut results = Vec::with_capacity(body.messages.len());
@@ -613,8 +704,11 @@ async fn send_batch(
         let domain_id = sender_domain(&msg.from)
             .and_then(|domain| domain_ids.get(&domain).cloned())
             .flatten();
-        match insert_message_and_queue(&mut tx, &auth.tenant_id, msg, &msg.metadata, domain_id).await {
-            Ok(persisted) => {
+        // Batch items carry no idempotency key (and a NULL key can never
+        // conflict), so the ON CONFLICT DO NOTHING path cannot fire here —
+        // Ok(None) is handled defensively below all the same.
+        match insert_message_and_queue(&mut tx, &auth.tenant_id, msg, &msg.metadata, None, domain_id).await {
+            Ok(Some(persisted)) => {
                 accepted += 1;
                 committed_quota_reservations.push(quota_reservation);
                 results.push(BatchResult {
@@ -622,6 +716,29 @@ async fn send_batch(
                     id: Some(persisted.id),
                     status: persisted.status.into(),
                     error: None,
+                });
+            }
+            Ok(None) => {
+                // Nothing was inserted: release the reserved quota (no message
+                // will be delivered) and report the item as a duplicate.
+                if let Err(rollback_error) =
+                    rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
+                {
+                    tracing::error!(
+                        error = %rollback_error,
+                        tenant_id = %auth.tenant_id,
+                        event_id = %quota_reservation.event_id,
+                        batch_index = i,
+                        "failed to roll back reserved email quota after batch duplicate detection"
+                    );
+                }
+                tracing::warn!(batch_index = i, "batch insert skipped idempotent duplicate");
+                rejected += 1;
+                results.push(BatchResult {
+                    index: i,
+                    id: None,
+                    status: "rejected".into(),
+                    error: Some("duplicate message".into()),
                 });
             }
             Err(e) => {
@@ -665,8 +782,13 @@ async fn send_batch(
             }
 
             tracing::error!(error = %error, "failed to commit batch transaction");
+            record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
             return Err(ApiError::Internal("database error".into()));
         }
+
+        // Mirror the single-send path: a committed delivery resets the
+        // tenant's circuit failure counter.
+        record_tenant_message_circuit_success(&state, &auth.tenant_id).await;
     }
 
     Ok(success(BatchSendResponse {
@@ -898,6 +1020,11 @@ async fn validate_send_with_domain_cache(
     } else if !apexmail_lib::validation::is_valid_email(&body.from) {
         errors.push(format!("invalid sender email: {}", body.from));
     }
+    // Header injection: CR/LF in the sender address or subject would let a
+    // caller smuggle extra headers (e.g. Bcc) into the outgoing message.
+    if body.from.contains('\r') || body.from.contains('\n') {
+        errors.push("from must not contain line breaks".into());
+    }
     if body.to.is_empty() {
         errors.push("at least one recipient is required".into());
     }
@@ -914,6 +1041,10 @@ async fn validate_send_with_domain_cache(
 
     if body.subject.is_empty() {
         errors.push("subject is required".into());
+    }
+    // CRLF in a subject breaks header folding and enables header injection.
+    if body.subject.contains('\r') || body.subject.contains('\n') {
+        errors.push("subject must not contain line breaks".into());
     }
     if body.html.is_none() && body.text.is_none() {
         errors.push("html or text body is required".into());
@@ -1316,10 +1447,12 @@ mod tests {
             &tenant_id,
             &body,
             &body.metadata,
+            None,
             Some(domain_id.clone()),
         )
         .await
-        .expect("failed to persist message delivery");
+        .expect("failed to persist message delivery")
+        .expect("fresh insert without idempotency key must persist a message");
         tx.commit()
             .await
             .expect("failed to commit message transaction");
@@ -1592,10 +1725,12 @@ mod tests {
             &tenant_id,
             &body,
             &body.metadata,
+            None,
             Some(domain_id.clone()),
         )
         .await
-        .expect("failed to persist message delivery");
+        .expect("failed to persist message delivery")
+        .expect("fresh insert without idempotency key must persist a message");
         create_tx
             .commit()
             .await

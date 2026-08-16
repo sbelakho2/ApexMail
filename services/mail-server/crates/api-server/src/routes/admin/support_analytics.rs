@@ -80,6 +80,7 @@ async fn get_support_analytics(
     Query(params): Query<SupportAnalyticsQuery>,
 ) -> Result<Json<SupportAnalytics>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let days = params.days.clamp(1, 365);
 

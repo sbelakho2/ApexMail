@@ -231,6 +231,22 @@ async fn main() -> Result<()> {
 
     let queue = Arc::new(queue);
 
+    // Lease reaper: flip rows orphaned in 'processing' (worker crash between
+    // claim and send) back to 'pending' so they are retried. Runs on a 60s
+    // interval as a safety net alongside fetch_pending's inline reclaim.
+    {
+        let reaper_pool = pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                crate::queue::reap_expired_processing(&reaper_pool).await;
+            }
+        });
+        info!("Expired-processing lease reaper started (60s interval)");
+    }
+
     // Start queue processor
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
     let processor_queue = Arc::clone(&queue);

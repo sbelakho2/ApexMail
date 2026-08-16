@@ -5,10 +5,11 @@
 //! process restarts.
 
 use chrono::Utc;
-use sqlx::{PgPool, QueryBuilder, Row};
+use sqlx::{Connection, PgPool, QueryBuilder, Row};
+use tracing::warn;
 use uuid::Uuid;
 
-use crate::crm::CrmService as InMemoryCrmService;
+use crate::crm::{is_valid_transition, CrmService as InMemoryCrmService};
 use crate::types::{Lead, LeadStatus, SalesError};
 
 const LEAD_SELECT_COLUMNS: &str = r#"
@@ -49,19 +50,42 @@ impl SqlxCrmService {
         // Hold the advisory lock on a SINGLE dedicated connection for the full
         // duration of the schema bootstrap (see equivalent reasoning in
         // `routes::initialize_schema`).
+        //
+        // `SET LOCAL lock_timeout` only takes effect inside a transaction, so
+        // the lock acquisition is wrapped in one. If another process already
+        // holds the lock, `pg_advisory_lock` fails after 30s instead of
+        // queuing forever and exhausting the pool.
         let mut lock_conn = self
             .pool
             .acquire()
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
+        let mut tx = lock_conn
+            .begin()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+        sqlx::query("SET LOCAL lock_timeout = '30s'")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
         sqlx::query("SELECT pg_advisory_lock(7723691501421983235)")
-            .execute(&mut *lock_conn)
+            .execute(&mut *tx)
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
         let result = self.initialize_inner().await;
-        let _ = sqlx::query("SELECT pg_advisory_unlock(7723691501421983235)")
-            .execute(&mut *lock_conn)
-            .await;
+        // Session-level advisory locks survive the transaction, so it is safe
+        // to release the lock before rolling back the (empty) transaction.
+        if let Err(e) = sqlx::query("SELECT pg_advisory_unlock(7723691501421983235)")
+            .execute(&mut *tx)
+            .await
+        {
+            warn!(error = %e, "failed to release sales-autopilot schema advisory lock");
+        }
+        // The transaction only carries the SET LOCAL; DDL in
+        // initialize_inner ran on separate pooled connections.
+        if let Err(e) = tx.rollback().await {
+            warn!(error = %e, "failed to roll back advisory-lock transaction");
+        }
         drop(lock_conn);
         result
     }
@@ -105,6 +129,19 @@ impl SqlxCrmService {
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
+        // A tenant cannot hold the same contact email twice. Matching is
+        // case-insensitive because email addresses are case-insensitive in
+        // their domain part (and treated so in practice overall).
+        // NULL contact_email values remain distinct (standard unique-index
+        // semantics), so legacy/api-server rows without an email are unaffected.
+        sqlx::query(
+            r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_leads_tenant_email
+               ON sales_leads(tenant_id, lower(contact_email))"#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
         for statement in [
             "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS company_name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT ''",
@@ -139,6 +176,10 @@ impl SqlxCrmService {
     }
 
     /// Insert a new lead.
+    ///
+    /// Returns [`SalesError::LeadAlreadyExists`] (409) when the tenant
+    /// already has a lead with the same (case-insensitive) contact email,
+    /// enforced by `idx_sales_leads_tenant_email`.
     pub async fn create_lead(
         &self,
         tenant_id: &str,
@@ -148,8 +189,7 @@ impl SqlxCrmService {
         title: String,
         source: String,
     ) -> Result<Lead, SalesError> {
-        let id = Uuid::new_v4();
-        let id_string = id.to_string();
+        let id_string = Uuid::new_v4().to_string();
         let now = Utc::now();
         let domain = email
             .split_once('@')
@@ -160,25 +200,34 @@ impl SqlxCrmService {
         sqlx::query(
             r#"
             INSERT INTO sales_leads (
-                id, tenant_id, contact_email, company_name,
-                domain, score, source, status, created_at, updated_at
+                id, tenant_id, contact_email, contact_name, title,
+                company_name, domain, score, source, status, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, 0, $6, 'new', $7, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, 'new', $9, $9)
         "#,
         )
         .bind(&id_string)
         .bind(tenant_id)
         .bind(&email)
+        .bind(&name)
+        .bind(&title)
         .bind(&company)
         .bind(&domain)
         .bind(&source)
         .bind(now)
         .execute(&self.pool)
         .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+        .map_err(|e| match &e {
+            // 23505 = unique_violation on idx_sales_leads_tenant_email:
+            // this tenant already has a lead with that email.
+            sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+                SalesError::LeadAlreadyExists(email.clone())
+            }
+            _ => SalesError::Database(e.to_string()),
+        })?;
 
         Ok(Lead {
-            id,
+            id: id_string,
             tenant_id: tenant_id.to_string(),
             email,
             name,
@@ -192,17 +241,17 @@ impl SqlxCrmService {
     }
 
     /// Retrieve a lead by id, scoped to tenant.
-    pub async fn get_lead(&self, id: Uuid, tenant_id: &str) -> Result<Lead, SalesError> {
+    pub async fn get_lead(&self, id: &str, tenant_id: &str) -> Result<Lead, SalesError> {
         let query = format!("{LEAD_SELECT_COLUMNS} WHERE id = $1 AND tenant_id = $2");
         let row = sqlx::query(&query)
-            .bind(id.to_string())
+            .bind(id)
             .bind(tenant_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
         row.map(|r| row_to_lead(&r))
-            .ok_or(SalesError::LeadNotFound(id))
+            .ok_or_else(|| SalesError::LeadNotFound(id.to_string()))
     }
 
     /// List leads, scoped to tenant, optionally filtering by status and/or source.
@@ -225,8 +274,10 @@ impl SqlxCrmService {
             query.push(" AND source = ").push_bind(source);
         }
 
+        // `id` tiebreaker keeps OFFSET pagination stable when many leads
+        // share the same created_at timestamp.
         query
-            .push(" ORDER BY created_at DESC LIMIT ")
+            .push(" ORDER BY created_at DESC, id DESC LIMIT ")
             .push_bind(limit)
             .push(" OFFSET ")
             .push_bind(offset);
@@ -241,12 +292,48 @@ impl SqlxCrmService {
     }
 
     /// Transition a lead to a new status, scoped to tenant.
+    ///
+    /// Enforces the lead lifecycle state machine (see [`is_valid_transition`]);
+    /// invalid transitions are rejected with [`SalesError::InvalidInput`].
+    /// The current status is read with `SELECT ... FOR UPDATE` inside the
+    /// same transaction as the update so concurrent writers cannot slip an
+    /// invalid transition through the check.
     pub async fn update_lead_status(
         &self,
-        id: Uuid,
+        id: &str,
         new_status: LeadStatus,
         tenant_id: &str,
     ) -> Result<Lead, SalesError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        let current_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = $2 FOR UPDATE")
+                .bind(id)
+                .bind(tenant_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        let current_status = current_status
+            .ok_or_else(|| SalesError::LeadNotFound(id.to_string()))?;
+        let current = parse_lead_status(&current_status);
+        if !is_valid_transition(&current, &new_status) {
+            warn!(
+                lead_id = %id,
+                tenant_id = %tenant_id,
+                from = %current,
+                to = %new_status,
+                "rejected invalid lead status transition"
+            );
+            return Err(SalesError::InvalidInput(format!(
+                "invalid lead status transition: {current} -> {new_status}"
+            )));
+        }
+
         let result = sqlx::query(
             r#"
             UPDATE sales_leads SET status = $2, updated_at = NOW()
@@ -264,16 +351,18 @@ impl SqlxCrmService {
                 created_at
         "#,
         )
-        .bind(id.to_string())
+        .bind(id)
         .bind(new_status.to_string())
         .bind(tenant_id)
-        .fetch_optional(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        result
-            .map(|r| row_to_lead(&r))
-            .ok_or(SalesError::LeadNotFound(id))
+        tx.commit()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        Ok(row_to_lead(&result))
     }
 
     /// Full-text search over lead name, email, and company, scoped to tenant.
@@ -285,8 +374,12 @@ impl SqlxCrmService {
     /// this enables timing side-channel extraction of data.
     ///
     /// **Fix**: Replaced `LOWER(col) LIKE $2` with PostgreSQL full-text search
-    /// (`to_tsvector` / `plainto_tsquery`), which can use a GIN index on the
-    /// concatenated tsvector column. The search is scoped to tenant_id.
+    /// (`to_tsvector` / `plainto_tsquery`). The WHERE/ORDER BY expressions use
+    /// EXACTLY the same `to_tsvector('english', a || ' ' || b || ' ' || c)`
+    /// expression as the `idx_sales_leads_fts_gin` GIN index — concatenating
+    /// per-column tsvectors instead would be syntactically different from the
+    /// indexed expression, preventing the planner from matching the index.
+    /// The search is scoped to tenant_id.
     pub async fn search_leads(
         &self,
         tenant_id: &str,
@@ -309,19 +402,22 @@ impl SqlxCrmService {
                 created_at
             FROM sales_leads
             WHERE tenant_id = $1
-              AND (
-                  to_tsvector('english', COALESCE(contact_name, ''))
-                  || to_tsvector('english', COALESCE(email, contact_email, ''))
-                  || to_tsvector('english', COALESCE(company_name, ''))
-              ) @@ plainto_tsquery('english', $2)
+              AND to_tsvector('english',
+                    COALESCE(contact_name, '') || ' ' ||
+                    COALESCE(email, contact_email, '') || ' ' ||
+                    COALESCE(company_name, '')
+                ) @@ plainto_tsquery('english', $2)
             ORDER BY
                   ts_rank(
-                      to_tsvector('english', COALESCE(contact_name, ''))
-                      || to_tsvector('english', COALESCE(email, contact_email, ''))
-                      || to_tsvector('english', COALESCE(company_name, '')),
+                      to_tsvector('english',
+                          COALESCE(contact_name, '') || ' ' ||
+                          COALESCE(email, contact_email, '') || ' ' ||
+                          COALESCE(company_name, '')
+                      ),
                       plainto_tsquery('english', $2)
                   ) DESC,
-                  created_at DESC
+                  created_at DESC,
+                  id DESC
             LIMIT $3 OFFSET $4
         "#,
         )
@@ -344,14 +440,14 @@ impl SqlxCrmService {
     /// Update a lead's score in the database, scoped to tenant.
     pub async fn set_lead_score(
         &self,
-        id: Uuid,
+        id: &str,
         score: u8,
         tenant_id: &str,
     ) -> Result<(), SalesError> {
         let result = sqlx::query(
             "UPDATE sales_leads SET score = $2, updated_at = NOW() WHERE id = $1 AND tenant_id = $3",
         )
-        .bind(id.to_string())
+        .bind(id)
         .bind(score as i32)
         .bind(tenant_id)
         .execute(&self.pool)
@@ -359,41 +455,84 @@ impl SqlxCrmService {
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
         if result.rows_affected() == 0 {
-            return Err(SalesError::LeadNotFound(id));
+            return Err(SalesError::LeadNotFound(id.to_string()));
         }
         Ok(())
     }
 
     /// Delete a lead, scoped to tenant.
-    pub async fn delete_lead(&self, id: Uuid, tenant_id: &str) -> Result<(), SalesError> {
-        let result = sqlx::query("DELETE FROM sales_leads WHERE id = $1 AND tenant_id = $2")
-            .bind(id.to_string())
+    ///
+    /// Runs in a transaction: conversions referencing the lead are deleted
+    /// first so no orphaned conversion rows are left behind. `sales_leads.id`
+    /// is TEXT while `sales_conversions.lead_id` is UUID, so the conversion
+    /// delete compares on `lead_id::text` (valid for every lead id format).
+    pub async fn delete_lead(&self, id: &str, tenant_id: &str) -> Result<(), SalesError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        sqlx::query("DELETE FROM sales_conversions WHERE lead_id::text = $1 AND tenant_id = $2")
+            .bind(id)
             .bind(tenant_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        let result = sqlx::query("DELETE FROM sales_leads WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .execute(&mut *tx)
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
         if result.rows_affected() == 0 {
-            return Err(SalesError::LeadNotFound(id));
+            // Rolling back also undoes the conversion deletes above.
+            return Err(SalesError::LeadNotFound(id.to_string()));
         }
+
+        tx.commit()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
         Ok(())
     }
 }
 
+/// Parse a lead status from its snake_case string representation.
+///
+/// Known values map to their variants — including `snoozed`/`interested`,
+/// which the reply-handler workers write directly via SQL. An empty/blank
+/// value defaults to `New` (with a warning); any other unrecognised value is
+/// preserved as [`LeadStatus::Unknown`] rather than being silently coerced
+/// to `New`, which previously masked data corruption and worker typos.
 fn parse_lead_status(s: &str) -> LeadStatus {
     match s {
+        "new" => LeadStatus::New,
         "contacted" => LeadStatus::Contacted,
         "qualified" => LeadStatus::Qualified,
         "converted" => LeadStatus::Converted,
         "lost" => LeadStatus::Lost,
-        _ => LeadStatus::New,
+        "snoozed" => LeadStatus::Snoozed,
+        "interested" => LeadStatus::Interested,
+        other if other.trim().is_empty() => {
+            warn!("empty lead status value in database, defaulting to New");
+            LeadStatus::New
+        }
+        other => {
+            warn!(status = %other, "unknown lead status value in database");
+            LeadStatus::Unknown(other.to_string())
+        }
     }
 }
 
 fn row_to_lead(row: &sqlx::postgres::PgRow) -> Lead {
-    let id_value: String = row.get("id");
+    // `sales_leads.id` is TEXT and lead ids come from several services with
+    // different formats (UUID, nanoid, "lead_<ts>"). Use the raw string;
+    // coercing non-UUID ids to the nil UUID used to collapse them all into
+    // one identity.
     Lead {
-        id: Uuid::parse_str(&id_value).unwrap_or_else(|_| Uuid::nil()),
+        id: row.get("id"),
         tenant_id: row.get("tenant_id"),
         email: row.get("email"),
         name: row.get("name"),
@@ -428,36 +567,75 @@ mod tests {
         assert_eq!(parse_lead_status("qualified"), LeadStatus::Qualified);
         assert_eq!(parse_lead_status("converted"), LeadStatus::Converted);
         assert_eq!(parse_lead_status("lost"), LeadStatus::Lost);
+        // Written by the reply-handler workers via direct SQL updates.
+        assert_eq!(parse_lead_status("snoozed"), LeadStatus::Snoozed);
+        assert_eq!(parse_lead_status("interested"), LeadStatus::Interested);
     }
 
     #[test]
-    fn test_parse_lead_status_unknown_defaults_to_new() {
-        assert_eq!(parse_lead_status("INVALID"), LeadStatus::New);
+    fn test_parse_lead_status_empty_defaults_to_new() {
+        // Only empty/blank values default to New.
         assert_eq!(parse_lead_status(""), LeadStatus::New);
         assert_eq!(parse_lead_status("  "), LeadStatus::New);
     }
 
     #[test]
-    fn test_parse_lead_status_case_sensitive() {
-        // Upper-case variants should default to New (not match)
-        assert_eq!(parse_lead_status("Contacted"), LeadStatus::New);
-        assert_eq!(parse_lead_status("QUALIFIED"), LeadStatus::New);
-        assert_eq!(parse_lead_status("Lost"), LeadStatus::New);
+    fn test_parse_lead_status_unknown_is_preserved() {
+        // Genuinely unknown values must not be coerced to New.
+        assert_eq!(
+            parse_lead_status("INVALID"),
+            LeadStatus::Unknown("INVALID".into())
+        );
+        assert_eq!(
+            parse_lead_status("Contacted"),
+            LeadStatus::Unknown("Contacted".into())
+        );
+        assert_eq!(
+            parse_lead_status("QUALIFIED"),
+            LeadStatus::Unknown("QUALIFIED".into())
+        );
+        assert_eq!(
+            parse_lead_status("Lost"),
+            LeadStatus::Unknown("Lost".into())
+        );
     }
 
     #[test]
     fn test_parse_lead_status_with_whitespace() {
-        // Leading/trailing whitespace should NOT match
-        assert_eq!(parse_lead_status(" contacted "), LeadStatus::New);
-        assert_eq!(parse_lead_status("qualified\n"), LeadStatus::New);
+        // Leading/trailing whitespace should NOT match a known variant
+        assert_eq!(
+            parse_lead_status(" contacted "),
+            LeadStatus::Unknown(" contacted ".into())
+        );
+        assert_eq!(
+            parse_lead_status("qualified\n"),
+            LeadStatus::Unknown("qualified\n".into())
+        );
     }
 
     #[test]
     fn test_parse_lead_status_sql_injection_attempt() {
         assert_eq!(
             parse_lead_status("'; DROP TABLE sales_leads; --"),
-            LeadStatus::New
+            LeadStatus::Unknown("'; DROP TABLE sales_leads; --".into())
         );
+    }
+
+    #[test]
+    fn test_parse_lead_status_round_trips() {
+        // Display must round-trip through parse for every representable status.
+        for status in [
+            LeadStatus::New,
+            LeadStatus::Contacted,
+            LeadStatus::Qualified,
+            LeadStatus::Converted,
+            LeadStatus::Lost,
+            LeadStatus::Snoozed,
+            LeadStatus::Interested,
+            LeadStatus::Unknown("custom_status".into()),
+        ] {
+            assert_eq!(parse_lead_status(&status.to_string()), status);
+        }
     }
 
     // -----------------------------------------------------------------------

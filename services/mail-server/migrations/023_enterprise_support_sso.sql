@@ -6,7 +6,6 @@ BEGIN;
 -- H-12: Own the sequence to the number column so it's cleaned up if the
 -- table is dropped.
 CREATE SEQUENCE IF NOT EXISTS ent_support_ticket_number_seq START WITH 1000;
-ALTER SEQUENCE ent_support_ticket_number_seq OWNED BY ent_support_tickets.number;
 
 CREATE TABLE IF NOT EXISTS ent_support_agents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -61,6 +60,8 @@ CREATE TABLE IF NOT EXISTS ent_support_tickets (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER SEQUENCE ent_support_ticket_number_seq OWNED BY ent_support_tickets.number;
 
 CREATE INDEX IF NOT EXISTS idx_ent_support_tickets_tenant_created
     ON ent_support_tickets(tenant_id, created_at DESC);
@@ -240,18 +241,30 @@ BEGIN
     IF to_regclass('public.tenants') IS NOT NULL THEN
         -- ent_support_tickets
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ent_support_tickets_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE ent_support_tickets ADD CONSTRAINT ent_support_tickets_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE ent_support_tickets ADD CONSTRAINT ent_support_tickets_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK ent_support_tickets_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- ent_sso_configurations
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ent_sso_configurations_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE ent_sso_configurations ADD CONSTRAINT ent_sso_configurations_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE ent_sso_configurations ADD CONSTRAINT ent_sso_configurations_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK ent_sso_configurations_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- ent_sso_sessions
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ent_sso_sessions_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE ent_sso_sessions ADD CONSTRAINT ent_sso_sessions_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE ent_sso_sessions ADD CONSTRAINT ent_sso_sessions_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK ent_sso_sessions_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
     ELSE
         RAISE WARNING 'Migration 023: tenants table does not exist — skipping FK constraints.';

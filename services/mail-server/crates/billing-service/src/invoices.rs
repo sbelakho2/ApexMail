@@ -289,10 +289,17 @@ pub async fn generate_invoice_pdf(
     });
 
     // Call pdf-renderer service
-    let resp = http_client
+    let mut request = http_client
         .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
         .json(&render_request)
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(30));
+    // pdf-renderer requires the shared internal service token; only attach
+    // the header when one is configured (empty token would 401 anyway).
+    let service_token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
+    if !service_token.is_empty() {
+        request = request.header("x-api-key", service_token);
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| InvoiceError::PdfGeneration(format!("HTTP request failed: {e}")))?;

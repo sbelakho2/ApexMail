@@ -163,7 +163,7 @@ BEGIN
                  ''DKIM private key stored as encrypted BYTEA. Must be encrypted
                   at the application layer before storage. Never store raw PEM/PKCS8
                   keys. Use AES-256-GCM or equivalent envelope encryption with
-                  a KMS-managed key.'';
+                  a KMS-managed key.''';
         RAISE NOTICE 'DB-106: Added encryption comment on dkim_keys.private_key_encrypted';
     END IF;
 
@@ -172,7 +172,7 @@ BEGIN
                  ''DKIM private key stored as encrypted BYTEA. Must be encrypted
                   at the application layer before storage. Never store raw PEM/PKCS8
                   keys. Use AES-256-GCM or equivalent envelope encryption with
-                  a KMS-managed key.'';
+                  a KMS-managed key.''';
         RAISE NOTICE 'DB-106: Added encryption comment on self_hosted_dkim_keys.private_key_enc';
     END IF;
 END $$;

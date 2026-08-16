@@ -29,11 +29,17 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/", get(get_autopilot).post(post_autopilot))
 }
 
-async fn log_autopilot_audit(db: &sqlx::PgPool, action: &str, metadata: serde_json::Value) {
+async fn log_autopilot_audit(
+    db: &sqlx::PgPool,
+    tenant_id: Option<&str>,
+    user_id: Option<&str>,
+    action: &str,
+    metadata: serde_json::Value,
+) {
     crate::audit_log::insert_audit_log_best_effort(
         db,
-        None,
-        None,
+        tenant_id,
+        user_id,
         action,
         "sales_autopilot",
         Some("default"),
@@ -45,7 +51,6 @@ async fn log_autopilot_audit(db: &sqlx::PgPool, action: &str, metadata: serde_js
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AutopilotQuery {
     pub section: Option<String>,
 }
@@ -206,6 +211,8 @@ async fn process_autopilot_cycle(
     if !approved_ids.is_empty() {
         log_autopilot_audit(
             &state.db,
+            Some(tenant_id),
+            None,
             "control_plane.autopilot.cycle_applied",
             json!({
                 "approved": approved_ids.len(),
@@ -272,7 +279,12 @@ async fn stop_autopilot_worker() {
     }
 }
 
-async fn pending_candidates(db: &sqlx::PgPool) -> Result<Vec<serde_json::Value>, ApiError> {
+/// Pending approval candidates, scoped to `tenant_id` so that what the CP
+/// shows matches what the approve/reject mutations can actually act on.
+async fn pending_candidates(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+) -> Result<Vec<serde_json::Value>, ApiError> {
     if !table_exists(db, "sales_leads").await {
         return Ok(Vec::new());
     }
@@ -285,7 +297,8 @@ async fn pending_candidates(db: &sqlx::PgPool) -> Result<Vec<serde_json::Value>,
         Option<i32>,
         Option<String>,
         DateTime<Utc>,
-    )> = sqlx::query_as(build_pending_candidates_sql(false))
+    )> = sqlx::query_as(build_pending_candidates_sql(true))
+        .bind(tenant_id)
         .bind(PENDING_APPROVAL_SCORE)
         .fetch_all(db)
         .await?;
@@ -338,31 +351,6 @@ fn map_pending_candidates(
             },
         )
         .collect()
-}
-
-async fn pending_candidates_for_tenant(
-    db: &sqlx::PgPool,
-    tenant_id: &str,
-) -> Result<Vec<serde_json::Value>, ApiError> {
-    if !table_exists(db, "sales_leads").await {
-        return Ok(Vec::new());
-    }
-
-    let rows: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i32>,
-        Option<String>,
-        DateTime<Utc>,
-    )> = sqlx::query_as(build_pending_candidates_sql(true))
-        .bind(tenant_id)
-        .bind(PENDING_APPROVAL_SCORE)
-        .fetch_all(db)
-        .await?;
-
-    Ok(map_pending_candidates(rows))
 }
 
 async fn load_sales_settings(db: &sqlx::PgPool) -> Result<serde_json::Value, ApiError> {
@@ -532,6 +520,7 @@ async fn get_autopilot(
     Query(params): Query<AutopilotQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let section = params.section.as_deref().unwrap_or("overview");
     let allowed = [
@@ -549,11 +538,16 @@ async fn get_autopilot(
     }
 
     let autopilot = load_autopilot_state(&state.db).await?;
-    let pending = if auth.tenant_id == "system" {
-        pending_candidates(&state.db).await?
-    } else {
-        pending_candidates_for_tenant(&state.db, &auth.tenant_id).await?
-    };
+
+    // If the DB says autopilot is running but this process has no live worker
+    // (e.g. after a process restart), re-spawn it so cycles actually resume.
+    if autopilot.status == "running" {
+        ensure_autopilot_worker_running(state.clone(), auth.tenant_id.clone()).await;
+    }
+
+    // Pending candidates are scoped to the caller's tenant so they match the
+    // tenant-scoped approve/reject mutations.
+    let pending = pending_candidates(&state.db, &auth.tenant_id).await?;
 
     let payload = match section {
         "overview" => {
@@ -633,6 +627,7 @@ async fn post_autopilot(
     Json(body): Json<AutopilotAction>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let allowed = [
         "start",
@@ -667,6 +662,8 @@ async fn post_autopilot(
 
             log_autopilot_audit(
                 &state.db,
+                Some(auth.tenant_id.as_str()),
+                auth.user_id.as_deref(),
                 "control_plane.autopilot.started",
                 json!({
                     "safeMode": updated.safe_mode,
@@ -691,6 +688,8 @@ async fn post_autopilot(
 
             log_autopilot_audit(
                 &state.db,
+                Some(auth.tenant_id.as_str()),
+                auth.user_id.as_deref(),
                 "control_plane.autopilot.stopped",
                 json!({ "previousStatus": current.status }),
             )
@@ -728,6 +727,8 @@ async fn post_autopilot(
             persist_autopilot_state(&state.db, &current, "approve", None, None, None).await?;
             log_autopilot_audit(
                 &state.db,
+                Some(auth.tenant_id.as_str()),
+                auth.user_id.as_deref(),
                 "control_plane.autopilot.approved",
                 json!({ "candidateId": candidate_id }),
             )
@@ -760,6 +761,8 @@ async fn post_autopilot(
             persist_autopilot_state(&state.db, &current, "reject", None, None, None).await?;
             log_autopilot_audit(
                 &state.db,
+                Some(auth.tenant_id.as_str()),
+                auth.user_id.as_deref(),
                 "control_plane.autopilot.rejected",
                 json!({ "candidateId": candidate_id }),
             )
@@ -789,6 +792,8 @@ async fn post_autopilot(
             persist_autopilot_state(&state.db, &current, "approve-all", None, None, None).await?;
             log_autopilot_audit(
                 &state.db,
+                Some(auth.tenant_id.as_str()),
+                auth.user_id.as_deref(),
                 "control_plane.autopilot.approved_all",
                 json!({ "approved": result.rows_affected() }),
             )
@@ -811,6 +816,8 @@ async fn post_autopilot(
 
             log_autopilot_audit(
                 &state.db,
+                Some(auth.tenant_id.as_str()),
+                auth.user_id.as_deref(),
                 "control_plane.autopilot.exited_safe_mode",
                 json!({ "status": updated.status }),
             )

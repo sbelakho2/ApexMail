@@ -45,10 +45,10 @@ jobs:
       - name: Run mobile test
         run: |
           chmod +x deploy/tests/mobile-test.sh
-          bash deploy/tests/mobile-test.sh || true
+          bash deploy/tests/mobile-test.sh
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@fe9530cd28e02193eced3282e22f38e03d99fa02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mobile-qa-report
           path: deploy/tests/.mobile-test-report.json

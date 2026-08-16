@@ -229,6 +229,7 @@ async fn get_analytics(
     Query(params): Query<AnalyticsQuery>,
 ) -> Result<Json<AnalyticsResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let range = parse_analytics_range(&params.range);
     let columns = detect_event_columns(&state).await;

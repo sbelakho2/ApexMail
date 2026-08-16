@@ -18,6 +18,19 @@ pub struct PlacementConfig {
     /// Number of consecutive IMAP failures after which a seed account is
     /// auto-disabled (`is_active = false`).
     pub seed_account_failure_threshold: u32,
+    /// Platform SMTP relay used to send placement test messages
+    /// (internal MTA hostname; compose service name is `mta`).
+    pub smtp_host: String,
+    /// Port on the platform SMTP relay (25 = internal delivery port).
+    pub smtp_port: u16,
+    /// Optional SMTP AUTH username for the relay. When unset the relay is
+    /// used unauthenticated (internal network, e.g. `mta:25`).
+    pub smtp_user: Option<String>,
+    /// Optional SMTP AUTH password for the relay.
+    pub smtp_pass: Option<String>,
+    /// Age (seconds) after which a `running` placement test with no progress
+    /// is reaped (marked `failed` with a timeout error).
+    pub stuck_test_timeout_secs: u64,
 }
 
 impl Default for PlacementConfig {
@@ -33,6 +46,11 @@ impl Default for PlacementConfig {
             encryption_secret: None,
             health_check_interval_secs: 1800,
             seed_account_failure_threshold: 3,
+            smtp_host: "mta".to_string(),
+            smtp_port: 25,
+            smtp_user: None,
+            smtp_pass: None,
+            stuck_test_timeout_secs: 7200,
         }
     }
 }
@@ -79,6 +97,23 @@ impl PlacementConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3),
+            // Platform SMTP relay (compose service `mta`, internal port 25).
+            smtp_host: env::var("PLACEMENT_SMTP_HOST")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "mta".to_string()),
+            smtp_port: env::var("PLACEMENT_SMTP_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(25),
+            smtp_user: env::var("PLACEMENT_SMTP_USER").ok().filter(|v| !v.is_empty()),
+            smtp_pass: env::var("PLACEMENT_SMTP_PASS").ok().filter(|v| !v.is_empty()),
+            // Default 2h comfortably exceeds the worst-case per-account polling
+            // cycle (max_polling_attempts × polling_interval_secs = 1h).
+            stuck_test_timeout_secs: env::var("PLACEMENT_STUCK_TEST_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(7200),
         }
     }
 }

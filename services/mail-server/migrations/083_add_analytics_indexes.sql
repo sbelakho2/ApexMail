@@ -32,7 +32,7 @@ DO $$
 BEGIN
   IF to_regclass('public.events') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_events_tenant_type_ts') THEN
-    EXECUTE format('CREATE INDEX idx_events_tenant_type_ts
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_events_tenant_type_ts
       ON events (tenant_id, event_type, timestamp)');
   END IF;
 END $$;
@@ -48,7 +48,7 @@ DO $$
 BEGIN
   IF to_regclass('public.events') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_events_message_ts_desc') THEN
-    EXECUTE format('CREATE INDEX idx_events_message_ts_desc
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_events_message_ts_desc
       ON events (message_id, timestamp DESC)');
   END IF;
 END $$;
@@ -72,7 +72,7 @@ BEGIN
          AND column_name = 'status'
      )
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_tenants_status_created') THEN
-    EXECUTE format('CREATE INDEX idx_tenants_status_created
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_tenants_status_created
       ON tenants (status, created_at)');
   END IF;
 END $$;
@@ -94,7 +94,7 @@ BEGIN
          AND column_name = 'plan'
      )
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_tenants_plan_status_created') THEN
-    EXECUTE format('CREATE INDEX idx_tenants_plan_status_created
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_tenants_plan_status_created
       ON tenants (plan, status, created_at)');
   END IF;
 END $$;
@@ -116,7 +116,7 @@ BEGIN
          AND column_name = 'updated_at'
      )
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_subscriptions_status_updated') THEN
-    EXECUTE format('CREATE INDEX idx_subscriptions_status_updated
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_subscriptions_status_updated
       ON subscriptions (status, updated_at)');
   END IF;
 END $$;
@@ -132,7 +132,7 @@ DO $$
 BEGIN
   IF to_regclass('public.subscriptions') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_subscriptions_status_created') THEN
-    EXECUTE format('CREATE INDEX idx_subscriptions_status_created
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_subscriptions_status_created
       ON subscriptions (status, created_at)');
   END IF;
 END $$;
@@ -149,7 +149,7 @@ END $$;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_email_queue_status_created') THEN
-    EXECUTE format('CREATE INDEX idx_email_queue_status_created
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_email_queue_status_created
       ON email_queue (status, created_at)');
   END IF;
 END $$;
@@ -165,7 +165,7 @@ END $$;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_email_queue_sent_at_status') THEN
-    EXECUTE format('CREATE INDEX idx_email_queue_sent_at_status
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_email_queue_sent_at_status
       ON email_queue (sent_at, status)');
   END IF;
 END $$;
@@ -182,7 +182,7 @@ DO $$
 BEGIN
   IF to_regclass('public.email_delivery_log') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_email_delivery_log_attempted_success') THEN
-    EXECUTE format('CREATE INDEX idx_email_delivery_log_attempted_success
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_email_delivery_log_attempted_success
       ON email_delivery_log (attempted_at, success)');
   END IF;
 END $$;
@@ -203,7 +203,7 @@ BEGIN
          AND column_name = 'sent_at'
      )
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_messages_tenant_sent_at') THEN
-    EXECUTE format('CREATE INDEX idx_messages_tenant_sent_at
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_messages_tenant_sent_at
       ON messages (tenant_id, sent_at DESC)');
   END IF;
 END $$;
@@ -221,7 +221,7 @@ DO $$
 BEGIN
   IF to_regclass('public.messages') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_messages_tenant_status_created') THEN
-    EXECUTE format('CREATE INDEX idx_messages_tenant_status_created
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_messages_tenant_status_created
       ON messages (tenant_id, status, created_at)');
   END IF;
 END $$;
@@ -237,7 +237,7 @@ DO $$
 BEGIN
   IF to_regclass('public.sales_leads') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_sales_leads_status_created') THEN
-    EXECUTE format('CREATE INDEX idx_sales_leads_status_created
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_sales_leads_status_created
       ON sales_leads (status, created_at DESC)');
   END IF;
 END $$;
@@ -261,7 +261,7 @@ BEGIN
          AND column_name = 'created_at'
      )
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_tenant_created') THEN
-    EXECUTE format('CREATE INDEX idx_audit_logs_tenant_created
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created
       ON audit_logs (tenant_id, created_at DESC)');
   END IF;
 END $$;
@@ -278,7 +278,7 @@ DO $$
 BEGIN
   IF to_regclass('public.subscriptions') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_subscriptions_tenant_status_created') THEN
-    EXECUTE format('CREATE INDEX idx_subscriptions_tenant_status_created
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_subscriptions_tenant_status_created
       ON subscriptions (tenant_id, status, created_at)');
   END IF;
 END $$;
@@ -294,7 +294,7 @@ DO $$
 BEGIN
   IF to_regclass('public.system_alerts') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_system_alerts_acknowledged_severity') THEN
-    EXECUTE format('CREATE INDEX idx_system_alerts_acknowledged_severity
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_system_alerts_acknowledged_severity
       ON system_alerts (acknowledged, severity)');
   END IF;
 END $$;
@@ -316,9 +316,9 @@ BEGIN
       WHERE table_schema = 'public' AND table_name = 'domains'
         AND column_name = 'is_verified'
     ) AND NOT EXISTS (
-      SELECT 1 FROM pg_class WHERE relname = 'idx_domains_tenant_verified'
+      SELECT 1 FROM pg_class WHERE relname = 'idx_domains_tenant_verified_v2'
     ) THEN
-      EXECUTE format('CREATE INDEX idx_domains_tenant_verified
+      EXECUTE format('CREATE INDEX IF NOT EXISTS idx_domains_tenant_verified
         ON domains (tenant_id, is_verified)');
     -- Fall back to 'verified' column name
     ELSIF EXISTS (
@@ -326,9 +326,9 @@ BEGIN
       WHERE table_schema = 'public' AND table_name = 'domains'
         AND column_name = 'verified'
     ) AND NOT EXISTS (
-      SELECT 1 FROM pg_class WHERE relname = 'idx_domains_tenant_verified'
+      SELECT 1 FROM pg_class WHERE relname = 'idx_domains_tenant_verified_v2'
     ) THEN
-      EXECUTE format('CREATE INDEX idx_domains_tenant_verified_v2
+      EXECUTE format('CREATE INDEX IF NOT EXISTS idx_domains_tenant_verified_v2
         ON domains (tenant_id, verified)');
     END IF;
   END IF;
@@ -348,7 +348,7 @@ DO $$
 BEGIN
   IF to_regclass('public.messages') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_messages_created_status') THEN
-    EXECUTE format('CREATE INDEX idx_messages_created_status
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_messages_created_status
       ON messages (created_at, status)');
   END IF;
 END $$;

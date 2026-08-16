@@ -2,7 +2,7 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::types::{InboxMessage, MessageCategory};
+use crate::types::{InboxMessage, MessageCategory, SalesError};
 
 /// Inbox monitoring / sentinel service backed by PostgreSQL.
 /// Categorises inbound messages into Lead / Customer / Support / Spam / Other
@@ -94,13 +94,16 @@ impl InboxManager {
     }
 
     /// List messages belonging to a given category, scoped to tenant.
+    ///
+    /// Returns `Err` on database failure — previously errors were logged and
+    /// silently converted into an empty list.
     pub async fn list_by_category(
         &self,
         tenant_id: &str,
         cat: MessageCategory,
         limit: i64,
         offset: i64,
-    ) -> Vec<InboxMessage> {
+    ) -> Result<Vec<InboxMessage>, SalesError> {
         let rows = sqlx::query_as::<_, InboxMessageRow>(
             "SELECT id, tenant_id, sender, subject, received_at, category, replied FROM sales_inbox_messages WHERE tenant_id = $1 AND category = $2 ORDER BY received_at DESC LIMIT $3 OFFSET $4",
         )
@@ -109,19 +112,22 @@ impl InboxManager {
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.db)
-        .await;
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        match rows {
-            Ok(rows) => rows.into_iter().map(|r| r.into_message()).collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to list inbox messages by category");
-                Vec::new()
-            }
-        }
+        Ok(rows.into_iter().map(|r| r.into_message()).collect())
     }
 
     /// List all messages regardless of category, scoped to tenant.
-    pub async fn list_all(&self, tenant_id: &str, limit: i64, offset: i64) -> Vec<InboxMessage> {
+    ///
+    /// Returns `Err` on database failure — previously errors were logged and
+    /// silently converted into an empty list.
+    pub async fn list_all(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<InboxMessage>, SalesError> {
         let rows = sqlx::query_as::<_, InboxMessageRow>(
             "SELECT id, tenant_id, sender, subject, received_at, category, replied FROM sales_inbox_messages WHERE tenant_id = $1 ORDER BY received_at DESC LIMIT $2 OFFSET $3",
         )
@@ -129,28 +135,32 @@ impl InboxManager {
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.db)
-        .await;
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        match rows {
-            Ok(rows) => rows.into_iter().map(|r| r.into_message()).collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to list inbox messages");
-                Vec::new()
-            }
-        }
+        Ok(rows.into_iter().map(|r| r.into_message()).collect())
     }
 
     /// Mark a message as replied (scoped to tenant).
-    pub async fn mark_replied(&self, tenant_id: &str, id: Uuid) -> bool {
+    ///
+    /// Returns `Err(SalesError::MessageNotFound)` when no matching message
+    /// exists for this tenant, and `Err(SalesError::Database(..))` on
+    /// database failure — previously both cases collapsed into a bare
+    /// `false` that callers could not distinguish.
+    pub async fn mark_replied(&self, tenant_id: &str, id: Uuid) -> Result<(), SalesError> {
         let result = sqlx::query(
             "UPDATE sales_inbox_messages SET replied = true WHERE tenant_id = $1 AND id = $2",
         )
         .bind(tenant_id)
         .bind(id)
         .execute(&self.db)
-        .await;
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        matches!(result, Ok(r) if r.rows_affected() > 0)
+        if result.rows_affected() == 0 {
+            return Err(SalesError::MessageNotFound(id));
+        }
+        Ok(())
     }
 
     /// Return the reply rate (0.0–1.0) scoped to a tenant.
@@ -269,11 +279,12 @@ mod tests {
 
         let leads = mgr
             .list_by_category("tenant-1", MessageCategory::Lead, 100, 0)
-            .await;
+            .await
+            .unwrap();
         assert_eq!(leads.len(), 1);
 
-        assert!(mgr.mark_replied("tenant-1", m.id).await);
-        assert!(!mgr.mark_replied("tenant-1", Uuid::new_v4()).await); // non-existent
+        mgr.mark_replied("tenant-1", m.id).await.unwrap();
+        assert!(mgr.mark_replied("tenant-1", Uuid::new_v4()).await.is_err()); // non-existent
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
@@ -289,7 +300,7 @@ mod tests {
         let _m2 = mgr
             .categorize_message("tenant-1", "c@d.com".into(), "World".into())
             .await;
-        mgr.mark_replied("tenant-1", m1.id).await;
+        mgr.mark_replied("tenant-1", m1.id).await.unwrap();
 
         let rate = mgr.get_reply_rate("tenant-1").await;
         assert!((rate - 0.5).abs() < f64::EPSILON);

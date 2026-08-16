@@ -207,8 +207,9 @@ async fn calendar_within_working_hours() {
     };
     let svc = CalendarService::new(db);
     let tenant_id = unique_tenant("tenant-calendar-working-hours");
-    let start = date(2026, 3, 2, 10, 0);
-    let end = date(2026, 3, 2, 10, 30);
+    // 2037-03-02 is a Monday and in the future (past events are rejected).
+    let start = date(2037, 3, 2, 10, 0);
+    let end = date(2037, 3, 2, 10, 30);
     let evt = svc
         .create_event(
             tenant_id,
@@ -225,8 +226,9 @@ async fn calendar_within_working_hours() {
 #[tokio::test]
 async fn calendar_outside_working_hours_rejected() {
     let svc = CalendarService::new(lazy_db());
-    let start = date(2026, 3, 2, 20, 0); // 8 PM
-    let end = date(2026, 3, 2, 20, 30);
+    // 2037-03-02 is a Monday, in the future.
+    let start = date(2037, 3, 2, 20, 0); // 8 PM
+    let end = date(2037, 3, 2, 20, 30);
     let res = svc
         .create_event(
             "tenant-a".into(),
@@ -247,8 +249,9 @@ async fn calendar_overlap_rejected() {
     };
     let svc = CalendarService::new(db);
     let tenant_id = unique_tenant("tenant-calendar-overlap");
-    let s = date(2026, 3, 2, 10, 0);
-    let e = date(2026, 3, 2, 10, 30);
+    // 2037-03-02 is a Monday, in the future.
+    let s = date(2037, 3, 2, 10, 0);
+    let e = date(2037, 3, 2, 10, 30);
     svc.create_event(tenant_id.clone(), "A".into(), vec![], s, e, None)
         .await
         .unwrap();

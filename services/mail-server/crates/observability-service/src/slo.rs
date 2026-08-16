@@ -18,8 +18,9 @@ use crate::types::SloTarget;
 pub struct SloComplianceResult {
     pub name: String,
     pub compliant: bool,
-    /// Current success percentage (0.0–100.0).
-    pub current_pct: f64,
+    /// Current success percentage (0.0–100.0). `None` when no traffic was
+    /// observed — compliance is unknown, not 100 %, and serializes as `null`.
+    pub current_pct: Option<f64>,
     /// Target percentage (0.0–100.0).
     pub target_pct: f64,
     /// Fraction of the error budget still remaining (0.0–1.0).
@@ -79,12 +80,15 @@ impl SloMonitor {
         let guard = self.targets.read();
         let target = guard.iter().find(|t| t.name == name)?;
 
-        let current_ratio = if total_requests == 0 {
-            1.0
+        // With zero observed requests the compliance percentage is unknown —
+        // report `None` (serializes as null) instead of an implied 100 %.
+        // The SLO is vacuously compliant and the error budget untouched.
+        let (current_ratio, current_pct) = if total_requests == 0 {
+            (1.0, None)
         } else {
-            1.0 - (error_requests as f64 / total_requests as f64)
+            let ratio = 1.0 - (error_requests as f64 / total_requests as f64);
+            (ratio, Some(ratio * 100.0))
         };
-        let current_pct = current_ratio * 100.0;
         let target_pct = target.target * 100.0;
 
         let allowed_errors = (1.0 - target.target) * total_requests as f64;
@@ -147,7 +151,7 @@ mod tests {
         // 10 000 requests, 5 errors → 99.95% (above 99.9% target)
         let result = mon.check_compliance("availability", 10_000, 5).unwrap();
         assert!(result.compliant);
-        assert!(result.current_pct > 99.9);
+        assert!(result.current_pct.expect("traffic observed") > 99.9);
         assert!(result.error_budget_remaining > 0.0);
     }
 
@@ -160,10 +164,26 @@ mod tests {
         // Allowed errors = 10, actual = 20 → budget = 1 - 20/10 = -1.0
         let result = mon.check_compliance("availability", 10_000, 20).unwrap();
         assert!(!result.compliant);
-        assert!(result.current_pct < 99.9);
+        assert!(result.current_pct.expect("traffic observed") < 99.9);
         assert!(result.error_budget_remaining < 0.0);
 
         // Non-existent SLO
         assert!(mon.check_compliance("nonexistent", 100, 1).is_none());
+    }
+
+    #[test]
+    fn test_zero_traffic_reports_unknown_compliance() {
+        let mon = SloMonitor::new();
+        mon.define_slo("availability", 99.9, 30);
+
+        // No traffic → compliance percentage must be null (unknown), not 100%.
+        let result = mon.check_compliance("availability", 0, 0).unwrap();
+        assert!(result.current_pct.is_none());
+        assert!(result.compliant); // vacuously compliant, budget untouched
+        assert_eq!(result.error_budget_remaining, 1.0);
+
+        // Serializes as null for the /slos response shape.
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json["current_pct"].is_null());
     }
 }

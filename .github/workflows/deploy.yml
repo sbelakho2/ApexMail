@@ -99,10 +99,10 @@ jobs:
               statusMsg += `\n⏳ Pending checks:\n${pending.map(c => `  - ${c}`).join('\n')}`;
             }
             if (missing.length > 0) {
-              statusMsg += `\n⚠️  Missing checks:\n${missing.map(c => `  - ${c}`).join('\n')}`;
+              statusMsg += `\n❌ Missing checks:\n${missing.map(c => `  - ${c}`).join('\n')}`;
             }
 
-            if (failed.length > 0) {
+            if (failed.length > 0 || missing.length > 0) {
               core.setFailed(statusMsg);
             } else if (pending.length > 0) {
               core.warning(statusMsg);
@@ -130,10 +130,11 @@ jobs:
           # Mirrors deploy/DEPLOYMENT.md exactly — update both together.
           # Must cover EVERY ghcr.io image referenced in docker-compose.prod.yml
           # (api-server mta imap-server mailstore worker enterprise
-          #  tracking-service observability marketing status-server).
+          #  tracking-service observability marketing status-server
+          #  billing-service).
           canonical=(
             api-server mta imap-server mailstore worker enterprise tracking-service
-            observability marketing status-server
+            observability marketing status-server billing-service
           )
           # Third-party images that are allowed as-is (pinned upstream images).
           allowed_third_party=(
@@ -345,6 +346,21 @@ jobs:
             type=sbom,enabled=true
             type=provenance,enabled=true
 
+      - name: Build and push billing-service image
+        uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
+        with:
+          context: .
+          file: services/mail-server/Dockerfile
+          push: true
+          target: billing-service
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/billing-service:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/billing-service:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          attestations: |
+            type=sbom,enabled=true
+            type=provenance,enabled=true
+
       - name: Build and push observability image
         uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
         with:
@@ -418,7 +434,7 @@ jobs:
       # ── Container Image Vulnerability Scanning ──────────────────────────────
       # H5: Uses Trivy (open-source, no rate limits) to scan the API server image
       - name: Run Trivy vulnerability scanner (api-server)
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api-server:${{ github.sha }}
           format: sarif
@@ -428,14 +444,14 @@ jobs:
           exit-code: 1
 
       - name: Upload Trivy scan results to GitHub Security
-        uses: github/codeql-action/upload-sarif@1521896cd211af95be3f02edf6f436e10b819c27 # v3.35.4
+        uses: github/codeql-action/upload-sarif@7fd177fa680c9881b53cdab4d346d32574c9f7f4 # v3.35.4
         if: hashFiles('trivy-api-server-results.sarif') != ''
         continue-on-error: true
         with:
           sarif_file: trivy-api-server-results.sarif
 
       - name: Run Trivy vulnerability scanner (MTA)
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mta:${{ github.sha }}
           format: sarif
@@ -445,7 +461,7 @@ jobs:
           exit-code: 1
 
       - name: Upload Trivy scan results to GitHub Security (MTA)
-        uses: github/codeql-action/upload-sarif@1521896cd211af95be3f02edf6f436e10b819c27 # v3.35.4
+        uses: github/codeql-action/upload-sarif@7fd177fa680c9881b53cdab4d346d32574c9f7f4 # v3.35.4
         if: hashFiles('trivy-mta-results.sarif') != ''
         continue-on-error: true
         with:

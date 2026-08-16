@@ -26,7 +26,7 @@ use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
-use crate::middleware::auth::AuthUser;
+use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -69,6 +69,26 @@ async fn create_stream_token(
     auth_user: AuthUser,
     Json(body): Json<CreateStreamTokenRequest>,
 ) -> Result<(StatusCode, Json<StreamTokenResponse>), ApiError> {
+    // Reading the live event stream is read-level access to message data.
+    require_scopes(&auth_user, &["messages:read"])?;
+
+    // The token's `sub` must identify a concrete principal. Without this
+    // check an identity carrying neither user_id nor api_key_id would
+    // mint a token with an empty `sub`.
+    let sub = match (auth_user.user_id.as_deref(), auth_user.api_key_id.as_deref()) {
+        (Some(user_id), _) => user_id.to_string(),
+        (None, Some(api_key_id)) => api_key_id.to_string(),
+        (None, None) => {
+            tracing::warn!(
+                tenant_id = %auth_user.tenant_id,
+                "stream token request without a user or API key identity — rejected"
+            );
+            return Err(ApiError::Unauthorized(
+                "stream tokens require an authenticated user or API key".into(),
+            ));
+        }
+    };
+
     // Clamp TTL:60s minimum, 3600s maximum
     let ttl = body.ttl_seconds.clamp(60, 3600);
 
@@ -80,13 +100,15 @@ async fn create_stream_token(
 
     // Build JWT claims
     let claims = StreamTokenClaims {
-        sub: auth_user
-            .user_id
-            .unwrap_or_else(|| auth_user.api_key_id.unwrap_or_default()),
+        sub,
         tenant_id: auth_user.tenant_id.clone(),
         scopes: vec!["stream".to_string()],
         exp,
         iat: now,
+        // Discriminates stream tokens from session tokens: the api-server
+        // rejects any Bearer token whose typ is set and != "session", so a
+        // stream token can never be replayed as an API session token.
+        typ: "stream",
         events: body.events,
         message_id: body.message_id,
     };
@@ -124,6 +146,8 @@ struct StreamTokenClaims {
     pub exp: u64,
     /// Issued-at (Unix timestamp).
     pub iat: u64,
+    /// Token type — always "stream" (session tokens use "session").
+    pub typ: &'static str,
     /// Optional event type filter (informational, also enforced client-side).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub events: Option<Vec<String>>,

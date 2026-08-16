@@ -215,7 +215,22 @@ pub struct PlacementScore {
 
 impl PlacementScore {
     /// Calculate placement score from per-provider results.
-    /// Weights: Inbox 40%, Promotions 20%, Spam -25%, Absent -15%, Auth 20%, Speed 10%
+    ///
+    /// A perfect run (100 % inbox, full auth, instant delivery) scores
+    /// exactly 100; no combination can exceed 100:
+    /// - Inbox rate: 60 % (max 60)
+    /// - Promotions rate: 20 % — *partial credit* for tabbed placement, so a
+    ///   mixed run scores less than pure inbox but is not treated as failure
+    /// - Authentication (SPF/DKIM/DMARC avg): 20 %
+    /// - Speed (linear falloff, 0 at ≥ 5 s): 20 %
+    ///
+    /// The placement component is bounded at 60 because `inbox_pct ≤ 100`
+    /// on its own caps it (promotions credit is extra, but a 100 %-promotions
+    /// run only earns 20 of it), so `60 + 20 + 20 = 100` is the ceiling.
+    ///
+    /// Penalties subtract from the total:
+    /// - Spam penalty: up to 25 (spam rate × 0.25)
+    /// - Absent penalty: up to 15 (absent rate × 0.15)
     pub fn calculate(results: &[ProviderResult]) -> Self {
         if results.is_empty() {
             return Self {
@@ -252,6 +267,7 @@ impl PlacementScore {
         let spam_pct = (total_spam as f64 / total_accounts as f64) * 100.0;
         let absent_pct = (total_absent as f64 / total_accounts as f64) * 100.0;
 
+        // avg_auth is a 0.0–1.0 rate: convert to a percentage before weighting.
         let avg_auth = results
             .iter()
             .map(|r| (r.spf_pass_rate + r.dkim_pass_rate + r.dmarc_pass_rate) / 3.0)
@@ -260,12 +276,20 @@ impl PlacementScore {
         let avg_speed_ms =
             results.iter().map(|r| r.avg_delivery_time_ms).sum::<f64>() / results.len() as f64;
 
-        let inbox_rate_score = (inbox_pct * 0.4) as u16;
-        let promotions_score = (promotions_pct * 0.2) as u16;
-        let spam_penalty = ((spam_pct * 2.5).min(100.0)) as u16;
-        let absent_penalty = ((absent_pct * 1.67).min(100.0)) as u16;
-        let auth_score = (avg_auth * 0.2) as u16;
-        let speed_score = ((100.0 - (avg_speed_ms / 100.0) * 2.0).clamp(0.0, 100.0) * 0.1) as u16;
+        // Speed curve: 100 % at 0 ms falling linearly to 0 % at 5 s
+        // (anything slower than 5 s scores 0).
+        let speed_pct = if avg_speed_ms >= 5000.0 {
+            0.0
+        } else {
+            100.0 * (1.0 - avg_speed_ms / 5000.0)
+        };
+
+        let inbox_rate_score = (inbox_pct * 0.60) as u16; // max 60
+        let promotions_score = (promotions_pct * 0.20) as u16; // max 20 (partial credit)
+        let spam_penalty = (spam_pct * 0.25) as u16; // max 25
+        let absent_penalty = (absent_pct * 0.15) as u16; // max 15
+        let auth_score = (avg_auth * 100.0 * 0.20) as u16; // max 20
+        let speed_score = (speed_pct * 0.20) as u16; // max 20
 
         let raw = inbox_rate_score as i32 + promotions_score as i32
             - spam_penalty as i32
@@ -284,5 +308,89 @@ impl PlacementScore {
             auth_score,
             speed_score,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider_result(inbox: i32, promotions: i32, spam: i32, absent: i32) -> ProviderResult {
+        ProviderResult {
+            provider: "gmail".into(),
+            accounts_tested: inbox + promotions + spam + absent,
+            inbox,
+            promotions,
+            spam,
+            absent,
+            avg_delivery_time_ms: 0.0,
+            spf_pass_rate: 1.0,
+            dkim_pass_rate: 1.0,
+            dmarc_pass_rate: 1.0,
+            recommendation: String::new(),
+        }
+    }
+
+    #[test]
+    fn perfect_run_scores_100() {
+        let score = PlacementScore::calculate(&[provider_result(10, 0, 0, 0)]);
+        assert_eq!(score.inbox_rate_score, 60);
+        assert_eq!(score.promotions_score, 0);
+        assert_eq!(score.auth_score, 20);
+        assert_eq!(score.speed_score, 20);
+        assert_eq!(score.spam_penalty, 0);
+        assert_eq!(score.absent_penalty, 0);
+        assert_eq!(score.overall, 100);
+    }
+
+    #[test]
+    fn promotions_only_run_earns_partial_credit() {
+        // Everything tabbed into Promotions: placement credit is only the
+        // 20-point promotions component (never more than pure inbox).
+        let score = PlacementScore::calculate(&[provider_result(0, 10, 0, 0)]);
+        assert_eq!(score.inbox_rate_score, 0);
+        assert_eq!(score.promotions_score, 20);
+        assert_eq!(score.overall, 60); // 20 + auth 20 + speed 20
+    }
+
+    #[test]
+    fn auth_score_is_percentage_weighted() {
+        // avg_auth = 0.5 → auth_score = 0.5 * 100 * 0.2 = 10 (not 0).
+        let mut r = provider_result(0, 0, 0, 10);
+        r.spf_pass_rate = 1.0;
+        r.dkim_pass_rate = 0.5;
+        r.dmarc_pass_rate = 0.0;
+        let score = PlacementScore::calculate(&[r]);
+        assert_eq!(score.auth_score, 10);
+    }
+
+    #[test]
+    fn speed_falls_off_linearly_to_zero_at_5s() {
+        let mut r = provider_result(0, 0, 0, 1);
+        r.avg_delivery_time_ms = 2500.0; // half-way → speed_pct 50 → score 10
+        assert_eq!(PlacementScore::calculate(&[r.clone()]).speed_score, 10);
+
+        r.avg_delivery_time_ms = 5000.0; // exactly 5 s → 0
+        assert_eq!(PlacementScore::calculate(&[r.clone()]).speed_score, 0);
+
+        r.avg_delivery_time_ms = 60_000.0; // way past 5 s → still 0
+        assert_eq!(PlacementScore::calculate(&[r]).speed_score, 0);
+    }
+
+    #[test]
+    fn spam_and_absent_penalties_are_capped() {
+        let score = PlacementScore::calculate(&[provider_result(0, 0, 10, 0)]);
+        assert_eq!(score.spam_penalty, 25);
+        assert_eq!(score.absent_penalty, 0);
+
+        let score = PlacementScore::calculate(&[provider_result(0, 0, 0, 10)]);
+        assert_eq!(score.spam_penalty, 0);
+        assert_eq!(score.absent_penalty, 15);
+    }
+
+    #[test]
+    fn empty_results_score_zero() {
+        let score = PlacementScore::calculate(&[]);
+        assert_eq!(score.overall, 0);
     }
 }

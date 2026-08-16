@@ -55,6 +55,35 @@ check_url() {
         '{url:$url,source:$source,element:$element,status:$status,http_code:$http_code,effective_url:$effective_url,issue:$issue,checked_at:$checked_at}'
 }
 
+# Internal link (leading '/', not protocol-relative): resolve against the
+# local BUILD_DIR so CI checks the artifact under test instead of the live
+# production site. A link with no corresponding local artifact is reported
+# as broken; only external http(s) links are checked over the network.
+check_internal_link() {
+    local link="$1" source="$2"
+    local path="$link"
+    path="${path%%\#*}"
+    path="${path%%\?*}"
+    local candidate
+    for candidate in "${BUILD_DIR}${path}" \
+                     "${BUILD_DIR}${path%/}/index.html" \
+                     "${BUILD_DIR}${path%/}.html"; do
+        if [[ -f "$candidate" || -d "$candidate" ]]; then
+            jq -n --arg url "${BASE_URL}${link}" --arg source "$source" --arg element "$link" \
+                --arg status "ok" --arg http_code "200" \
+                --arg effective_url "${BASE_URL}${link}" --arg issue "" \
+                --arg checked_at "$TIMESTAMP" \
+                '{url:$url,source:$source,element:$element,status:$status,http_code:$http_code,effective_url:$effective_url,issue:$issue,checked_at:$checked_at}'
+            return 0
+        fi
+    done
+    jq -n --arg url "${BASE_URL}${link}" --arg source "$source" --arg element "$link" \
+        --arg status "fail" --arg http_code "404" \
+        --arg effective_url "${BASE_URL}${link}" --arg issue "not found in local build (BUILD_DIR)" \
+        --arg checked_at "$TIMESTAMP" \
+        '{url:$url,source:$source,element:$element,status:$status,http_code:$http_code,effective_url:$effective_url,issue:$issue,checked_at:$checked_at}'
+}
+
 extract_links() {
     local html_file="$1" route="$2"
     grep -oP '(?:href|src)="([^"]+)"' "$html_file" 2>/dev/null | \
@@ -91,10 +120,14 @@ main() {
 
         [[ -z "$route" ]] && route="/"
 
-        extract_links "$html_file" "$route" | while IFS='|' read -r url source element; do
+        while IFS='|' read -r url source element; do
             TOTAL_LINKS=$((TOTAL_LINKS+1))
             local r
-            r="$(check_url "$url" "$source" "$element")"
+            if [[ "$element" == /* && "$element" != //* ]]; then
+                r="$(check_internal_link "$element" "$source")"
+            else
+                r="$(check_url "$url" "$source" "$element")"
+            fi
             results="$(echo "$results" | jq ". + [$r]")"
             local st
             st="$(echo "$r" | jq -r '.status')"
@@ -104,13 +137,13 @@ main() {
             elif [[ "$st" == "warn" ]]; then
                 echo "  WARN: $url (from $source) — $(echo "$r" | jq -r '.issue')"
             fi
-        done
+        done < <(extract_links "$html_file" "$route")
     done < "$routes_file"
 
     # Check anchors
     echo ""
     echo "=== Anchor Validation ==="
-    find "${BUILD_DIR}" -name '*.html' | while read -r f; do
+    while read -r f; do
         local anchors
         anchors="$(grep -oP 'id="([^"]+)"' "$f" 2>/dev/null | sed 's/id="//;s/"$//' || true)"
         local href_anchors
@@ -122,7 +155,12 @@ main() {
                 TOTAL_FAILED=$((TOTAL_FAILED+1))
             fi
         done <<< "$href_anchors"
-    done
+    done < <(find "${BUILD_DIR}" -name '*.html')
+
+    # Derive the critical count from the collected results: check_url runs in
+    # a command-substitution subshell, so its CRITICAL_FAILURES increments
+    # would otherwise never reach this shell.
+    CRITICAL_FAILURES="$(echo "$results" | jq '[.[] | select(.status == "fail")] | length')"
 
     # Save report
     jq -n --argjson results "$results" \

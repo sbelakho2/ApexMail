@@ -66,7 +66,7 @@ BEGIN
             SELECT 1 FROM information_schema.columns
             WHERE table_name = 'mail_accounts' AND column_name = 'display_name'
         ) THEN
-            EXECUTE 'ALTER TABLE mail_accounts ALTER COLUMN display_name SET DEFAULT '''''';
+            EXECUTE 'ALTER TABLE mail_accounts ALTER COLUMN display_name SET DEFAULT ''''';
             RAISE NOTICE 'M-03: Set DEFAULT on mail_accounts.display_name';
         END IF;
     ELSE
@@ -477,6 +477,9 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('public.isp_warmup_templates') IS NOT NULL THEN
+        -- 042's schema lacks these columns; add them (idempotent) first.
+        ALTER TABLE isp_warmup_templates ADD COLUMN IF NOT EXISTS daily_volume_cap INTEGER;
+        ALTER TABLE isp_warmup_templates ADD COLUMN IF NOT EXISTS warmup_days INTEGER;
         UPDATE isp_warmup_templates 
         SET mx_patterns = '["*.google.com", "*.googlemail.com"]'::jsonb,
             daily_volume_cap = 5000,
@@ -500,13 +503,13 @@ END $$;
 -- =============================================================================
 -- Section 19: L-05 — Graceful sso_oidc_state cleanup
 -- =============================================================================
-DO $$
+DO $outer$
 BEGIN
     IF to_regclass('public.sso_oidc_state') IS NOT NULL THEN
         CREATE OR REPLACE FUNCTION cleanup_old_sso_oidc_state()
         RETURNS INTEGER
         LANGUAGE plpgsql
-        AS $$
+        AS $func$
         DECLARE
             v_deleted INTEGER;
         BEGIN
@@ -515,12 +518,12 @@ BEGIN
             GET DIAGNOSTICS v_deleted = ROW_COUNT;
             RETURN v_deleted;
         END;
-        $$;
+        $func$;
         RAISE NOTICE 'L-05: Created cleanup_old_sso_oidc_state() function';
     ELSE
         RAISE NOTICE 'L-05: sso_oidc_state table does not exist';
     END IF;
-END $$;
+END $outer$;
 
 -- =============================================================================
 -- Section 20: L-06 — Add simple GIN index for multi-language FTS

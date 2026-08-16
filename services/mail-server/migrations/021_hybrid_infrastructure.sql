@@ -282,33 +282,57 @@ BEGIN
     IF to_regclass('public.tenants') IS NOT NULL THEN
         -- dedicated_ips.tenant_id -> tenants(id)
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dedicated_ips_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE dedicated_ips ADD CONSTRAINT dedicated_ips_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE dedicated_ips ADD CONSTRAINT dedicated_ips_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK dedicated_ips_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- transport_routing_cache.tenant_id -> tenants(id)
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'transport_routing_cache_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE transport_routing_cache ADD CONSTRAINT transport_routing_cache_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE transport_routing_cache ADD CONSTRAINT transport_routing_cache_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK transport_routing_cache_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- self_hosted_bounces.tenant_id -> tenants(id)
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_bounces_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE self_hosted_bounces ADD CONSTRAINT self_hosted_bounces_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE self_hosted_bounces ADD CONSTRAINT self_hosted_bounces_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK self_hosted_bounces_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- self_hosted_complaints.tenant_id -> tenants(id)
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_complaints_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE self_hosted_complaints ADD CONSTRAINT self_hosted_complaints_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE self_hosted_complaints ADD CONSTRAINT self_hosted_complaints_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK self_hosted_complaints_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- self_hosted_dkim_keys.tenant_id -> tenants(id)
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_dkim_keys_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE self_hosted_dkim_keys ADD CONSTRAINT self_hosted_dkim_keys_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE self_hosted_dkim_keys ADD CONSTRAINT self_hosted_dkim_keys_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK self_hosted_dkim_keys_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         -- self_hosted_send_stats.tenant_id -> tenants(id)
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_send_stats_tenant_id_fkey') THEN
-            EXECUTE 'ALTER TABLE self_hosted_send_stats ADD CONSTRAINT self_hosted_send_stats_tenant_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE self_hosted_send_stats ADD CONSTRAINT self_hosted_send_stats_tenant_id_fkey
                 FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK self_hosted_send_stats_tenant_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
     ELSE
         RAISE WARNING 'Migration 021: tenants table does not exist — skipping FK constraints.';
@@ -320,12 +344,20 @@ DO $$
 BEGIN
     IF to_regclass('public.messages') IS NOT NULL THEN
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_bounces_message_id_fkey') THEN
-            EXECUTE 'ALTER TABLE self_hosted_bounces ADD CONSTRAINT self_hosted_bounces_message_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE self_hosted_bounces ADD CONSTRAINT self_hosted_bounces_message_id_fkey
                 FOREIGN KEY (message_id) REFERENCES messages(id)';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK self_hosted_bounces_message_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_complaints_message_id_fkey') THEN
-            EXECUTE 'ALTER TABLE self_hosted_complaints ADD CONSTRAINT self_hosted_complaints_message_id_fkey
+            BEGIN
+                EXECUTE 'ALTER TABLE self_hosted_complaints ADD CONSTRAINT self_hosted_complaints_message_id_fkey
                 FOREIGN KEY (message_id) REFERENCES messages(id)';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'FK self_hosted_complaints_message_id_fkey skipped (%)', SQLERRM;
+            END;
         END IF;
     ELSE
         RAISE WARNING 'Migration 021: messages table does not exist — skipping FK constraints on self_hosted_bounces/complaints.';

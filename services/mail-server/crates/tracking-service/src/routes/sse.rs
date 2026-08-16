@@ -128,15 +128,16 @@ pub async fn handle_stream(
             .query_async(&mut *conn)
             .await
             .map_err(|e| format!("Redis INCR: {e}"))?;
-        // Set expiry on first increment to auto-cleanup on crash
-        if count == 1 {
-            let _: () = redis::cmd("EXPIRE")
-                .arg(&conn_key)
-                .arg(3700u64) // slightly longer than max 1h session
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e| format!("Redis EXPIRE: {e}"))?;
-        }
+        // Refresh the TTL on EVERY increment so the counter self-heals after
+        // a crash (a key only set on the first INCR could keep a stale high
+        // count alive if the process died between INCR and EXPIRE, or outlive
+        // its window when connections keep coming).
+        let _: () = redis::cmd("EXPIRE")
+            .arg(&conn_key)
+            .arg(3700u64) // slightly longer than max 1h session
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| format!("Redis EXPIRE: {e}"))?;
         if count > 5 {
             // Decrement back since we won't actually use the slot
             let _: () = redis::cmd("DECR")
@@ -227,6 +228,11 @@ fn make_event_stream(
     cleanup_key: String,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
+    // ── Connection-count guard ───────────────────────────────────
+    // Takes ownership of the slot for the lifetime of the stream; decrements
+    // on drop (client disconnect, timeout, error or normal end).
+            let _guard = ConnCountGuard::new(cleanup_redis, cleanup_key);
+
     // ── Initial connection event ──────────────────────────────────
             yield Ok(Event::default()
                 .event("connected")
@@ -248,7 +254,6 @@ fn make_event_stream(
                     yield Ok(Event::default()
                         .event("error")
                         .data(r#"{"error":"internal_error","message":"Failed to connect to event bus"}"#));
-                    decrement_conn_count(&cleanup_redis, &cleanup_key).await;
                     return;
                 }
             };
@@ -260,7 +265,6 @@ fn make_event_stream(
                     yield Ok(Event::default()
                         .event("error")
                         .data(r#"{"error":"internal_error","message":"Failed to subscribe to event bus"}"#));
-                    decrement_conn_count(&cleanup_redis, &cleanup_key).await;
                     return;
                 }
             };
@@ -270,7 +274,6 @@ fn make_event_stream(
                 yield Ok(Event::default()
                     .event("error")
                     .data(r#"{"error":"internal_error","message":"Failed to subscribe to channel"}"#));
-                decrement_conn_count(&cleanup_redis, &cleanup_key).await;
                 return;
             }
 
@@ -353,8 +356,9 @@ fn make_event_stream(
                 }
             }
 
-    // Cleanup:decrement connection count
-            decrement_conn_count(&cleanup_redis, &cleanup_key).await;
+    // Cleanup:release the connection slot via the guard (drop decrements on
+    // every exit path; the explicit release simply runs it inline).
+            let _ = _guard.release().await;
             info!(tenant_id = %tenant_id, "SSE stream disconnected");
         }
 }
@@ -363,6 +367,60 @@ fn make_event_stream(
 async fn decrement_conn_count(pool: &deadpool_redis::Pool, key: &str) {
     if let Ok(mut conn) = pool.get().await {
         let _: Result<(), _> = redis::cmd("DECR").arg(key).query_async(&mut *conn).await;
+    }
+}
+
+/// RAII guard that decrements the per-tenant connection counter exactly once
+/// when the SSE stream is dropped.
+///
+/// The old implementation decremented after the streaming loop, which never
+/// ran when the client disconnected mid-stream (axum drops the `Sse` body
+/// without polling the generator to completion) — the Redis counter leaked
+/// until the key's TTL expired and the tenant hit `TOO_MANY_CONNECTIONS`.
+/// Dropping the guard covers *every* exit path: client disconnect, 1-hour
+/// timeout, Redis errors and normal end-of-stream.
+struct ConnCountGuard {
+    pool: deadpool_redis::Pool,
+    key: String,
+    /// Set when the decrement has already been performed (or explicitly
+    /// deferred) so Drop never decrements twice.
+    released: bool,
+}
+
+impl ConnCountGuard {
+    fn new(pool: deadpool_redis::Pool, key: String) -> Self {
+        Self {
+            pool,
+            key,
+            released: false,
+        }
+    }
+
+    /// Release the slot asynchronously (used on graceful stream end so the
+    /// decrement happens inline rather than via a spawned task).
+    async fn release(mut self) {
+        self.released = true;
+        decrement_conn_count(&self.pool, &self.key).await;
+    }
+}
+
+impl Drop for ConnCountGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        // Drop is synchronous — fire the async decrement on the current
+        // runtime. Outside a runtime (e.g. dropped during shutdown) there is
+        // nothing we can do; the counter key's TTL is the backstop.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pool = self.pool.clone();
+            let key = self.key.clone();
+            handle.spawn(async move {
+                decrement_conn_count(&pool, &key).await;
+            });
+        } else {
+            warn!(key = %self.key, "SSE conn-count guard dropped outside runtime; relying on key TTL");
+        }
     }
 }
 

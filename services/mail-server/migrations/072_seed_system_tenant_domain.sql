@@ -7,6 +7,15 @@ INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_a
 VALUES ('system_internal_tenant01', 'ApexMail System', 'system', 'enterprise', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
 ON CONFLICT (id) DO NOTHING;
 
+-- domains.id is UUID (052/056); a non-UUID literal aborts the insert.
+-- Seed with a stable derived UUID and conflict on the (tenant_id, name) shape.
 INSERT INTO domains (id, tenant_id, name, status, created_at, updated_at)
-VALUES ('dom_system_apexmail', 'system_internal_tenant01', 'apexmail.ee', 'verified', NOW(), NOW())
+VALUES (
+    '00000000-0000-0000-0000-0000000000d1'::uuid,
+    'system_internal_tenant01',
+    'apexmail.ee',
+    'verified',
+    NOW(),
+    NOW()
+)
 ON CONFLICT DO NOTHING;

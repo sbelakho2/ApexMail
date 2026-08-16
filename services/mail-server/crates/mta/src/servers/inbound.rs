@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
+use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls::TlsAcceptor;
@@ -29,6 +29,8 @@ use crate::config::{InboundConfig, RateLimitConfig};
 use mail_proto::mailstore_service_client::MailstoreServiceClient;
 use mail_proto::{GetAccountRequest, MessageFlags, StoreMessageRequest};
 use tonic::transport::Channel;
+
+use super::util::{read_line_capped, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE};
 
 // Shared resolver to avoid allocating a new DNS client per PTR verification.
 static INBOUND_RDNS_RESOLVER: LazyLock<TokioAsyncResolver> =
@@ -282,10 +284,18 @@ impl InboundServer {
         let mut line = String::new();
         loop {
             line.clear();
-            match tokio::time::timeout(Duration::from_secs(300), stream.read_line(&mut line)).await
+            match tokio::time::timeout(
+                Duration::from_secs(300),
+                read_line_capped(stream, MAX_COMMAND_LINE),
+            )
+            .await
             {
-                Ok(Ok(0)) | Err(_) => break,
-                Ok(Ok(_)) => {}
+                Ok(Ok(LineRead::Eof)) | Err(_) => break,
+                Ok(Ok(LineRead::TooLong)) => {
+                    let _ = write_line_buf(stream, "500 5.5.2 Line too long\r\n").await;
+                    continue;
+                }
+                Ok(Ok(LineRead::Line(l))) => line = l,
                 Ok(Err(e)) => {
                     debug!(error = %e, "Read error");
                     break;
@@ -326,6 +336,11 @@ impl InboundServer {
                 // #137:Track total DATA deadline (10 min) to prevent slow-loris attacks
                 let data_deadline = tokio::time::Instant::now() + Duration::from_secs(600);
                 let mut data_timed_out = false;
+                // A message is only complete when the client sent <CRLF>.<CRLF>.
+                // Anything else (EOF, read error mid-DATA) is a truncated
+                // message that must be discarded, never processed.
+                let mut terminated = false;
+                let mut aborted = false;
                 loop {
                     line.clear();
                     let remaining = data_deadline
@@ -336,15 +351,31 @@ impl InboundServer {
                         break;
                     }
                     let per_line_timeout = remaining.min(Duration::from_secs(300));
-                    match tokio::time::timeout(per_line_timeout, stream.read_line(&mut line)).await
+                    match tokio::time::timeout(
+                        per_line_timeout,
+                        read_line_capped(stream, MAX_DATA_LINE),
+                    )
+                    .await
                     {
                         Err(_) => {
                             data_timed_out = true;
                             break;
                         }
-                        Ok(Ok(0)) => break,
-                        Ok(Ok(_)) => {
+                        Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => {
+                            // Client disconnected / stream failed mid-DATA.
+                            aborted = true;
+                            break;
+                        }
+                        Ok(Ok(LineRead::TooLong)) => {
+                            // A single line over the per-line cap cannot be
+                            // part of a message we are willing to store.
+                            too_large = true;
+                            message.clear();
+                        }
+                        Ok(Ok(LineRead::Line(l))) => {
+                            line = l;
                             if line.trim() == "." {
+                                terminated = true;
                                 break;
                             }
                             // #141:Check size BEFORE extending to prevent temporary overallocation
@@ -362,7 +393,6 @@ impl InboundServer {
                                 }
                             }
                         }
-                        Ok(Err(_)) => break,
                     }
                 }
 
@@ -372,17 +402,38 @@ impl InboundServer {
                     break;
                 }
 
+                if aborted {
+                    // Truncated message: discard the whole transaction and
+                    // tell the client to retry rather than accepting (and
+                    // relaying) a partial message.
+                    let _ = write_line_buf(stream, "451 4.3.0 Temporary failure\r\n").await;
+                    ctx.mail_from = None;
+                    ctx.rcpt_to.clear();
+                    continue;
+                }
+
                 if too_large {
                     let _ = write_line_buf(stream, "552 Message too large\r\n").await;
                     ctx.mail_from = None;
                     ctx.rcpt_to.clear();
-                } else if message.len() <= self.config.max_message_size {
+                } else if terminated {
                     let result = self.process_message(ctx, &message).await;
                     let resp = format_data_response(&result);
                     let _ = write_line_buf(stream, &resp).await;
                     ctx.message_count += 1;
                     ctx.mail_from = None;
                     ctx.rcpt_to.clear();
+                    // Enforce the per-connection message budget: once the
+                    // client reached max_messages_per_connection, close the
+                    // session instead of accepting unbounded mail.
+                    if ctx.message_count >= self.rate_limit_config.max_messages_per_connection {
+                        let _ = write_line_buf(
+                            stream,
+                            "421 4.7.0 Too many messages, closing connection\r\n",
+                        )
+                        .await;
+                        break;
+                    }
                 }
             }
         }
@@ -512,6 +563,10 @@ impl InboundServer {
                 return "550 Reverse DNS lookup required\r\n".into();
             }
             let addr = extract_address(raw_line);
+            // RFC 5321 §4.1.4: a MAIL FROM implicitly resets any prior
+            // transaction's recipients — a new reverse-path starts a new
+            // transaction.
+            ctx.rcpt_to.clear();
             ctx.mail_from = Some(addr);
             "250 OK\r\n".into()
         } else if cmd_upper.starts_with("RCPT TO") {
@@ -560,7 +615,9 @@ impl InboundServer {
     // ── message processing ─────────────────────────────────────────────────────
 
     async fn process_message(&self, ctx: &SessionContext, raw: &[u8]) -> anyhow::Result<String> {
-        let message_id = Uuid::new_v4().to_string();
+        // inbound_messages.id is VARCHAR(26): "inb_" + 22 hex chars fits
+        // exactly (a 36-char UUID string would overflow the column).
+        let message_id = format!("inb_{}", &Uuid::new_v4().simple().to_string()[..22]);
         let mail_from = ctx.mail_from.as_deref().unwrap_or("<>");
         let helo = &ctx.helo_hostname;
 
@@ -581,8 +638,10 @@ impl InboundServer {
             crate::auth::MessageDisposition::Accept => {}
         }
 
-        // 2. Detect VERP reply
-        let is_verp = ctx.rcpt_to.iter().any(|r| r.contains("bounces+"));
+        // 2. Detect VERP reply. Exact local-part prefix match: a substring
+        //    match would also flag innocent addresses that merely contain
+        //    "bounces+" anywhere (e.g. "user+bounces+tag@dom").
+        let is_verp = ctx.rcpt_to.iter().any(|r| r.starts_with("bounces+"));
 
         // 3. Resolve the tenant that owns the first recipient's domain
         //    (nullable: rows with an unknown/local-only recipient stay untagged).
@@ -598,36 +657,15 @@ impl InboundServer {
             None => None,
         };
 
-        // 4. Parse the raw message into the canonical inbound_messages columns
-        let parsed = mail_parser::MessageParser::default().parse(raw);
-        let subject = parsed
-            .as_ref()
-            .and_then(|m| m.subject())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "(no subject)".to_string());
-        let text_body = parsed
-            .as_ref()
-            .and_then(|m| m.body_text(0))
-            .map(|b| b.into_owned());
-        let html_body = parsed
-            .as_ref()
-            .and_then(|m| m.body_html(0))
-            .map(|b| b.into_owned());
-        let headers = parsed.as_ref().map(|m| {
-            let mut map = serde_json::Map::new();
-            for (name, value) in m.headers_raw() {
-                map.entry(name.to_string())
-                    .or_insert_with(|| serde_json::Value::Array(Vec::new()))
-                    .as_array_mut()
-                    .expect("array just inserted")
-                    .push(serde_json::Value::String(value.to_string()));
-            }
-            serde_json::Value::Object(map)
-        });
-
-        // inbound_messages.to_email is a single NOT NULL column; store the
-        // first envelope recipient (inbound mail is typically single-recipient).
-        let to_email = ctx.rcpt_to.first().cloned().unwrap_or_default();
+        // 4. Persist the message using ONLY the columns migration 088
+        //    guarantees on inbound_messages (tenant_id, mail_from, rcpt_to,
+        //    client_ip, helo_hostname, raw_message, raw_size, auth_results,
+        //    spf_result, disposition, is_verp_reply). The previously written
+        //    from_email/to_email/subject/body_text/body_html/headers/
+        //    created_at family exists in NO deployed migration — that INSERT
+        //    failed with "column does not exist" and 451-rejected every
+        //    inbound message. The full raw MIME is preserved in raw_message
+        //    for downstream consumers.
         let sender = if mail_from == "<>" { "" } else { mail_from };
 
         // 5. Store the message (full raw MIME preserved in raw_message)
@@ -635,10 +673,8 @@ impl InboundServer {
             r#"INSERT INTO inbound_messages (
                 id, tenant_id, mail_from, rcpt_to, client_ip, helo_hostname,
                 raw_message, raw_size, auth_results, spf_result, disposition,
-                is_verp_reply, from_email, to_email, subject, body_text,
-                body_html, headers, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                      $13, $14, $15, $16, $17, $18, NOW())
+                is_verp_reply
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (id) DO NOTHING"#,
         )
         .bind(&message_id)
@@ -653,12 +689,6 @@ impl InboundServer {
         .bind(format!("{:?}", auth_results.spf.result).to_lowercase())
         .bind(format!("{:?}", disposition).to_lowercase())
         .bind(is_verp)
-        .bind(sender)
-        .bind(&to_email)
-        .bind(subject)
-        .bind(text_body)
-        .bind(html_body)
-        .bind(headers)
         .execute(&self.pool)
         .await?;
 
@@ -737,8 +767,12 @@ impl InboundServer {
         auth_results_header: &str,
     ) {
         let mut client = self.mailstore.clone();
-        let mut final_message = Vec::with_capacity(auth_results_header.len() + raw.len());
+        let mut final_message = Vec::with_capacity(auth_results_header.len() + raw.len() + 2);
+        // The Authentication-Results header has no trailing CRLF of its own;
+        // without one it would fuse with the message's first header line and
+        // corrupt the stored MIME (e.g. "…dmarc=passFrom: a@b.com").
         final_message.extend_from_slice(auth_results_header.as_bytes());
+        final_message.extend_from_slice(b"\r\n");
         final_message.extend_from_slice(raw);
 
         for recipient in &ctx.rcpt_to {
@@ -995,10 +1029,11 @@ impl InboundServer {
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 fn extract_address(line: &str) -> String {
-    if let Some(start) = line.find('<') {
-        if let Some(end) = line.find('>') {
-            return line[start + 1..end].to_string();
-        }
+    // Shared panic-safe helper: the closing '>' is always searched after
+    // the opening '<' — a '>' earlier in the line used to slice out of
+    // bounds and kill the session task (remote panic).
+    if let Some(addr) = super::util::extract_addr_safe(line) {
+        return addr.to_string();
     }
     // Fallback:last token
     line.split_whitespace()

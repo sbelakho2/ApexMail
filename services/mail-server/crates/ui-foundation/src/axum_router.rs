@@ -43,35 +43,39 @@ fn parse_query_params(query: Option<&str>) -> UiQueryParams {
 }
 
 fn decode_query_component(input: &str) -> String {
+    // Percent-decode into a byte buffer first, then interpret as UTF-8.
+    // Pushing each decoded byte through `char` (the previous approach)
+    // mangled multibyte sequences: "%C3%B5" decoded to the two Latin-1
+    // codepoints "Ãµ" instead of "õ".
     let bytes = input.as_bytes();
-    let mut decoded = String::with_capacity(input.len());
+    let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
 
     while index < bytes.len() {
         match bytes[index] {
             b'+' => {
-                decoded.push(' ');
+                decoded.push(b' ');
                 index += 1;
             }
             b'%' if index + 2 < bytes.len() => {
                 let hi = bytes[index + 1] as char;
                 let lo = bytes[index + 2] as char;
                 if let (Some(hi), Some(lo)) = (hi.to_digit(16), lo.to_digit(16)) {
-                    decoded.push(((hi * 16 + lo) as u8) as char);
+                    decoded.push((hi * 16 + lo) as u8);
                     index += 3;
                 } else {
-                    decoded.push('%');
+                    decoded.push(b'%');
                     index += 1;
                 }
             }
             byte => {
-                decoded.push(byte as char);
+                decoded.push(byte);
                 index += 1;
             }
         }
     }
 
-    decoded
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> {
@@ -210,7 +214,44 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+/// Bounded memo for `normalize_marketing_static_document`: the documents are
+/// static (Zola build output), so the same normalization is recomputed on
+/// every request otherwise (trim + 8 whole-document replaces + two
+/// case-insensitive scans). Keyed by (len, first 64 bytes) which uniquely
+/// identifies every document in the static set; capped at 32 entries to stay
+/// small even if the caller ever passes dynamic content.
+fn marketing_normalize_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<(usize, String), String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(usize, String), String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 fn normalize_marketing_static_document(document: &str) -> String {
+    let cache_key = (
+        document.len(),
+        document.as_bytes()[..document.len().min(64)].to_vec(),
+    );
+    let cache_key = (cache_key.0, String::from_utf8_lossy(&cache_key.1).into_owned());
+    if let Ok(cache) = marketing_normalize_cache().lock() {
+        if let Some(cached) = cache.get(&cache_key) {
+            return cached.clone();
+        }
+    }
+
+    let normalized = normalize_marketing_static_document_uncached(document);
+
+    if let Ok(mut cache) = marketing_normalize_cache().lock() {
+        if cache.len() >= 32 {
+            cache.clear();
+        }
+        cache.insert(cache_key, normalized.clone());
+    }
+
+    normalized
+}
+
+fn normalize_marketing_static_document_uncached(document: &str) -> String {
     let mut normalized = document.trim().to_string();
 
     // Rewrite absolute asset URLs that the Zola build bakes in (using its

@@ -125,21 +125,51 @@ async fn list_automations(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<ListAutomationsQuery>,
-) -> Result<Json<Vec<AutomationResponse>>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["automations:read"])?;
 
+    let limit = clamp_limit(params.limit, 100);
     let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+
+    let total: i64 =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM automations WHERE tenant_id = $1")
+            .bind(&auth.tenant_id)
+            .fetch_one(&state.db)
+            .await?;
+
+    // Fetch limit + 1 rows so we can detect whether another page exists.
     let rows = sqlx::query_as::<_, AutomationRow>(
         "SELECT id, name, trigger_config, actions, conditions, status, created_at, updated_at
          FROM automations WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(&auth.tenant_id)
-    .bind(clamp_limit(params.limit, 100))
+    .bind(limit + 1)
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(rows.into_iter().map(Into::into).collect()))
+    let mut details: Vec<AutomationResponse> = rows.into_iter().map(Into::into).collect();
+    let has_more = details.len() as i64 > limit;
+    if has_more {
+        details.truncate(limit as usize);
+    }
+
+    let next_cursor = if has_more {
+        Some(offset + limit)
+    } else {
+        None
+    };
+
+    // Wrap in the standard {data, error, meta} envelope with pagination meta.
+    Ok(Json(serde_json::json!({
+        "data": details,
+        "error": null,
+        "meta": {
+            "total": total,
+            "hasMore": has_more,
+            "nextCursor": next_cursor,
+        },
+    })))
 }
 
 async fn get_automation(

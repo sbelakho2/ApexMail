@@ -161,15 +161,25 @@ struct LogsQuery {
     limit: Option<usize>,
 }
 
+/// Alertmanager webhook envelope.
+///
+/// No `deny_unknown_fields`: real Alertmanager payloads carry additional
+/// envelope fields (receiver, groupLabels, commonLabels, commonAnnotations,
+/// externalURL, version, truncatedAlerts, …) that must not 422 the ingest.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct AlertmanagerWebhook {
+    #[serde(default)]
     alerts: Vec<AlertmanagerAlert>,
 }
 
+/// A single Alertmanager alert.
+///
+/// No `deny_unknown_fields`: beyond the fields we consume, alerts carry
+/// generatorURL, valueString and future Alertmanager additions. Unknown
+/// fields are ignored so upgrades of Alertmanager never break ingestion.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct AlertmanagerAlert {
+    #[serde(default = "default_alert_status")]
     status: String,
     #[serde(default)]
     labels: HashMap<String, String>,
@@ -180,6 +190,18 @@ struct AlertmanagerAlert {
     #[serde(rename = "endsAt")]
     ends_at: Option<DateTime<Utc>>,
     fingerprint: Option<String>,
+    // Commonly-present Alertmanager fields we accept but do not consume;
+    // declared so the accepted schema is documented and stays deserializable.
+    #[serde(rename = "generatorURL", default)]
+    #[allow(dead_code)]
+    generator_url: Option<String>,
+    #[serde(rename = "valueString", default)]
+    #[allow(dead_code)]
+    value_string: Option<String>,
+}
+
+fn default_alert_status() -> String {
+    "firing".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +601,9 @@ mod tests {
         assert_eq!(json.len(), 1);
         assert_eq!(json[0]["name"], "uptime");
         assert!(json[0]["compliant"].as_bool().unwrap());
+        // Zero observed traffic → compliance percentage is unknown (null),
+        // never an implied 100%.
+        assert!(json[0]["current_pct"].is_null());
     }
 
     #[tokio::test]
@@ -656,14 +681,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_alertmanager_webhook_rejects_unknown_fields() {
-        let app = router(test_state());
+    async fn test_alertmanager_webhook_accepts_unknown_fields() {
+        // Real Alertmanager payloads include envelope fields (receiver,
+        // version, externalURL, groupLabels, …) and per-alert fields we do
+        // not consume (generatorURL, valueString, unexpected). Ingestion
+        // must accept them instead of answering 422.
+        let state = test_state();
+        let app = router(state.clone());
         let payload = json!({
+            "receiver": "apexmail-observability",
+            "status": "firing",
+            "externalURL": "https://alertmanager.example",
+            "version": "0.27.0",
+            "groupLabels": { "alertname": "SchemaAlert", "service": "tracking" },
+            "commonLabels": { "alertname": "SchemaAlert" },
+            "commonAnnotations": { "summary": "Schema validation" },
+            "truncatedAlerts": 0,
             "alerts": [
                 {
                     "status": "firing",
                     "labels": { "alertname": "SchemaAlert" },
                     "annotations": { "summary": "Schema validation" },
+                    "startsAt": "2026-04-27T10:00:00.123456789Z",
+                    "endsAt": "0001-01-01T00:00:00Z",
+                    "generatorURL": "https://prometheus.example/graph",
+                    "valueString": "42.5",
+                    "fingerprint": "schema-alert-1",
                     "unexpected": "value"
                 }
             ]
@@ -677,7 +720,23 @@ mod tests {
             .body(Body::from(payload.to_string()))
             .unwrap();
 
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let req = Request::builder()
+            .uri("/alerts")
+            .header("x-api-key", "test-token")
+            .body(Body::empty())
+            .unwrap();
+
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["rule_name"], "SchemaAlert");
     }
 }

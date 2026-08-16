@@ -78,9 +78,13 @@ impl CampaignEmailDispatcher for NoopCampaignDispatcher {
                 campaign_id = %campaign_id,
                 template_id = %template_id,
                 recipient_count = count,
-                "NoopCampaignDispatcher: campaign emails NOT dispatched. Inject a real CampaignEmailDispatcher to enable sending."
+                "NoopCampaignDispatcher: no email dispatcher configured"
             );
-            Ok(0)
+            // Fail explicitly instead of returning Ok(0): a silent zero
+            // made `start_campaign` report success while nothing was sent.
+            Err(SalesError::Internal(anyhow::anyhow!(
+                "no email dispatcher configured"
+            )))
         })
     }
 
@@ -187,7 +191,16 @@ impl CampaignManager {
     }
 
     /// List all campaigns for a tenant.
-    pub async fn list_campaigns(&self, tenant_id: &str, limit: i64, offset: i64) -> Vec<Campaign> {
+    ///
+    /// Returns `Err` on database failure — previously errors were logged and
+    /// silently converted into an empty list, which callers could not
+    /// distinguish from "no campaigns".
+    pub async fn list_campaigns(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Campaign>, SalesError> {
         let rows = sqlx::query_as::<_, CampaignRow>(
             "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at FROM sales_campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
         )
@@ -195,18 +208,12 @@ impl CampaignManager {
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.db)
-        .await;
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        match rows {
-            Ok(rows) => rows
-                .into_iter()
-                .filter_map(|r| r.into_campaign().ok())
-                .collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to list campaigns");
-                Vec::new()
-            }
-        }
+        rows.into_iter()
+            .map(|r| r.into_campaign())
+            .collect::<Result<Vec<_>, _>>()
     }
 
     /// Transition a draft/paused campaign to Active.
@@ -245,6 +252,33 @@ impl CampaignManager {
 
         match campaign.status {
             CampaignStatus::Draft | CampaignStatus::Paused => {
+                // Enforce the max-active-campaigns limit at start time as well.
+                //
+                // `create_campaign` only counts ACTIVE campaigns, so a tenant
+                // can create unlimited drafts and then start them all — the
+                // create-time check alone is bypassable. The count and the
+                // status UPDATE below run inside a single transaction so that
+                // concurrent starts cannot both pass the count check (TOCTOU).
+                let mut tx = self
+                    .db
+                    .begin()
+                    .await
+                    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+                let active_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM sales_campaigns WHERE tenant_id = $1 AND status = 'active'",
+                )
+                .bind(tenant_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| SalesError::Database(e.to_string()))?;
+
+                if active_count >= self.max_campaigns as i64 {
+                    // Nothing written in this transaction yet — dropping it
+                    // rolls back (a no-op).
+                    return Err(SalesError::MaxCampaignsReached(self.max_campaigns));
+                }
+
                 // Atomic conditional UPDATE: tenant filter + expected status
                 // eliminate the TOCTOU race window (SA-13).
                 let expected_status = campaign.status.to_string();
@@ -256,7 +290,7 @@ impl CampaignManager {
                     .bind(id)
                     .bind(tenant_id)
                     .bind(&expected_status)
-                    .fetch_optional(&self.db),
+                    .fetch_optional(&mut *tx),
                 )
                 .await
                 .map_err(|_| SalesError::Database("campaign start query timed out".into()))?
@@ -271,8 +305,16 @@ impl CampaignManager {
                     }
                 };
 
+                tx.commit()
+                    .await
+                    .map_err(|e| SalesError::Database(e.to_string()))?;
+
                 // SA-5: Dispatch campaign emails to the outbound queue.
-                // Fetch recipients and call the email dispatcher (if configured).
+                // Fetch the recipients that have NOT been sent to yet (see
+                // `get_recipients`) and call the email dispatcher (if
+                // configured). Dispatching happens after the status commit;
+                // if it fails we surface the error instead of pretending the
+                // start succeeded silently.
                 if let Some(ref dispatcher) = self.email_dispatcher {
                     match self.get_recipients(tenant_id, id).await {
                         Ok(emails) if !emails.is_empty() => {
@@ -286,12 +328,36 @@ impl CampaignManager {
                                 total_recipients = emails.len(),
                                 "Campaign emails dispatched to outbound queue"
                             );
+                            // Advance the send ledger only when the dispatcher
+                            // accepted every recipient; partial enqueues are
+                            // ambiguous (the dispatcher reports only a count),
+                            // so we retry the full batch on the next start
+                            // rather than risk skipping recipients.
+                            if enqueued == emails.len() {
+                                if let Err(mark_err) = self.mark_recipients_sent(id, &emails).await
+                                {
+                                    tracing::warn!(
+                                        error = %mark_err,
+                                        tenant_id = %tenant_id,
+                                        campaign_id = %id,
+                                        "failed to record sent_at send ledger — dispatched recipients may be re-dispatched on the next start"
+                                    );
+                                }
+                            } else {
+                                tracing::warn!(
+                                    tenant_id = %tenant_id,
+                                    campaign_id = %id,
+                                    enqueued = enqueued,
+                                    requested = emails.len(),
+                                    "dispatcher enqueued fewer emails than requested — send ledger not advanced"
+                                );
+                            }
                         }
                         Ok(_) => {
                             tracing::warn!(
                                 tenant_id = %tenant_id,
                                 campaign_id = %id,
-                                "Campaign started with zero recipients — no emails dispatched"
+                                "Campaign started with zero unsent recipients — no emails dispatched"
                             );
                         }
                         Err(e) => {
@@ -301,6 +367,9 @@ impl CampaignManager {
                                 campaign_id = %id,
                                 "Failed to fetch campaign recipients for email dispatch"
                             );
+                            // The status transition above is already committed;
+                            // still surface the failure instead of returning Ok.
+                            return Err(e);
                         }
                     }
                 } else {
@@ -321,7 +390,16 @@ impl CampaignManager {
         }
     }
 
-    /// Fetch all recipient emails for a campaign, scoped to tenant.
+    /// Fetch the recipient emails for a campaign that have **not yet been
+    /// dispatched**, scoped to tenant.
+    ///
+    /// Send-ledger semantics: `sales_campaign_recipients.sent_at` (added in
+    /// `initialize_schema`) records which recipients have already been sent
+    /// to. Filtering on `sent_at IS NULL` means that pausing a campaign and
+    /// re-starting it only dispatches the recipients that were never sent —
+    /// previously every (re-)start re-dispatched the entire list, spamming
+    /// everyone on each pause/start cycle. `mark_recipients_sent` stamps the
+    /// ledger after a successful dispatch.
     async fn get_recipients(
         &self,
         tenant_id: &str,
@@ -330,7 +408,7 @@ impl CampaignManager {
         let rows = sqlx::query_as::<_, (String,)>(
             "SELECT r.email FROM sales_campaign_recipients r \
              JOIN sales_campaigns c ON r.campaign_id = c.id \
-             WHERE r.campaign_id = $1 AND c.tenant_id = $2",
+             WHERE r.campaign_id = $1 AND c.tenant_id = $2 AND r.sent_at IS NULL",
         )
         .bind(campaign_id)
         .bind(tenant_id)
@@ -339,6 +417,25 @@ impl CampaignManager {
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
         Ok(rows.into_iter().map(|(email,)| email).collect())
+    }
+
+    /// Stamp the send ledger: mark the given recipients as dispatched for a
+    /// campaign (see `get_recipients` for why this matters).
+    async fn mark_recipients_sent(
+        &self,
+        campaign_id: Uuid,
+        emails: &[String],
+    ) -> Result<u64, SalesError> {
+        let result = sqlx::query(
+            "UPDATE sales_campaign_recipients SET sent_at = NOW() WHERE campaign_id = $1 AND email = ANY($2) AND sent_at IS NULL",
+        )
+        .bind(campaign_id)
+        .bind(emails)
+        .execute(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        Ok(result.rows_affected())
     }
 
     /// Pause an active campaign.
@@ -460,23 +557,50 @@ impl CampaignManager {
             if normalized.is_empty() {
                 continue;
             }
+            // Reject syntactically invalid addresses instead of silently
+            // persisting garbage that would later bounce.
+            if !is_valid_recipient_email(&normalized) {
+                return Err(SalesError::InvalidInput(format!(
+                    "invalid recipient email: {email}"
+                )));
+            }
             let result = sqlx::query(
                 "INSERT INTO sales_campaign_recipients (campaign_id, email) VALUES ($1, $2) ON CONFLICT DO NOTHING",
             )
             .bind(id)
             .bind(&normalized)
             .execute(&self.db)
-            .await;
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
-            if let Ok(res) = result {
-                if res.rows_affected() > 0 {
-                    added += 1;
-                }
+            if result.rows_affected() > 0 {
+                added += 1;
             }
         }
 
         Ok(added)
     }
+}
+
+/// Basic syntactic validation for recipient email addresses.
+///
+/// Checks: total length < 320, no whitespace, exactly one `@`, a non-empty
+/// local part, and a domain part containing at least one `.` that is not at
+/// the start or end. Deliberately minimal — full RFC 5321/5322 validation is
+/// out of scope for this service.
+fn is_valid_recipient_email(email: &str) -> bool {
+    if email.len() >= 320 || email.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
 }
 
 // ---------------------------------------------------------------------------
@@ -560,9 +684,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(c.status, CampaignStatus::Draft);
-        let list = mgr.list_campaigns("tenant-a", 100, 0).await;
+        let list = mgr.list_campaigns("tenant-a", 100, 0).await.unwrap();
         assert!(!list.is_empty());
-        assert!(mgr.list_campaigns("tenant-b", 100, 0).await.is_empty());
+        assert!(mgr.list_campaigns("tenant-b", 100, 0).await.unwrap().is_empty());
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
@@ -611,6 +735,40 @@ mod tests {
             .create_campaign("tenant-a".into(), "C2".into(), "t".into(), "a".into())
             .await;
         assert!(c2.is_err());
+    }
+
+    /// Integration test requiring local Postgres. Run with infrastructure.
+    ///
+    /// The create-time limit counts only ACTIVE campaigns, so a tenant can
+    /// stockpile drafts. The limit must therefore be re-checked when the
+    /// campaign is started.
+    #[ignore]
+    #[tokio::test]
+    async fn test_max_campaigns_enforced_at_start() {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let mgr = CampaignManager::new(1, db);
+
+        // Two drafts both pass the create-time check (zero active campaigns).
+        let c1 = mgr
+            .create_campaign("tenant-x".into(), "C1".into(), "t".into(), "a".into())
+            .await
+            .unwrap();
+        let c2 = mgr
+            .create_campaign("tenant-x".into(), "C2".into(), "t".into(), "a".into())
+            .await
+            .unwrap();
+
+        mgr.start_campaign("tenant-x", c1.id).await.unwrap();
+
+        // Starting the second draft must be rejected by the start-time check.
+        assert!(matches!(
+            mgr.start_campaign("tenant-x", c2.id).await,
+            Err(SalesError::MaxCampaignsReached(1))
+        ));
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
@@ -694,5 +852,36 @@ mod tests {
         assert_eq!(added, 2);
         let stats = mgr.get_stats("tenant-a", campaign.id).await.unwrap();
         assert_eq!(stats["recipients"], 2);
+    }
+
+    #[test]
+    fn test_recipient_email_validation() {
+        assert!(is_valid_recipient_email("alice@example.com"));
+        assert!(is_valid_recipient_email("a+b_tag@sub.domain.co"));
+        // missing @ / missing dot in domain / empty parts
+        assert!(!is_valid_recipient_email("no-at-sign.com"));
+        assert!(!is_valid_recipient_email("@example.com"));
+        assert!(!is_valid_recipient_email("alice@"));
+        assert!(!is_valid_recipient_email("alice@example"));
+        assert!(!is_valid_recipient_email("alice@.example.com"));
+        assert!(!is_valid_recipient_email("alice@example.com."));
+        // multiple @ and whitespace are rejected
+        assert!(!is_valid_recipient_email("a@b@example.com"));
+        assert!(!is_valid_recipient_email("a lice@example.com"));
+        // total length must stay under 320
+        let long_local = "x".repeat(315);
+        assert!(!is_valid_recipient_email(&format!("{long_local}@example.com")));
+    }
+
+    #[tokio::test]
+    async fn test_noop_dispatcher_fails_explicitly() {
+        // The noop dispatcher must fail loudly instead of reporting Ok(0),
+        // which previously made `start_campaign` look successful while no
+        // email was ever dispatched.
+        let dispatcher = NoopCampaignDispatcher;
+        let result = dispatcher
+            .dispatch("tenant-a", Uuid::new_v4(), "tmpl_1", &["a@x.com".into()])
+            .await;
+        assert!(result.is_err());
     }
 }

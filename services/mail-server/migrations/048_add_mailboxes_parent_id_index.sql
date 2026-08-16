@@ -6,6 +6,6 @@
 -- Uses CONCURRENTLY to avoid blocking writes during migration.
 -- H-10: Use partial index WHERE parent_id IS NOT NULL since most rows
 -- have NULL parent_id (top-level mailboxes), making the index smaller/faster.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_mail_mailboxes_parent_id
+CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_parent_id
   ON mail_mailboxes (parent_id)
   WHERE parent_id IS NOT NULL;

@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
     let service_token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
     if service_token.is_empty() {
-        warn!("INTERNAL_SERVICE_TOKEN is not set — internal auth is effectively disabled");
+        warn!("INTERNAL_SERVICE_TOKEN is not set — all authenticated routes will reject requests (401); set INTERNAL_SERVICE_TOKEN to enable internal auth");
     }
 
     let app = pdf_router(service_token);

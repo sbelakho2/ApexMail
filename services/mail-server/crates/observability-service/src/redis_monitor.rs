@@ -11,7 +11,7 @@
 //! | `redis_used_memory_bytes` | Gauge | Current `used_memory` from Redis INFO |
 //! | `redis_maxmemory_bytes` | Gauge | `maxmemory` configured on the Redis server (0 = no limit) |
 //! | `redis_memory_utilization_ratio` | Gauge | `used_memory / maxmemory` (0.0 when maxmemory is 0) |
-//! | `redis_evicted_keys_total` | Counter | Cumulative `evicted_keys` from Redis INFO |
+//! | `redis_evicted_keys_total` | Counter | `evicted_keys` delta since the previous poll |
 //! | `redis_eviction_rate_per_minute` | Gauge | Evicted keys per minute (computed from delta) |
 //! | `redis_info_poll_errors_total` | Counter | Number of failed `INFO memory` calls |
 //!
@@ -204,6 +204,17 @@ impl RedisKeyMonitor {
     /// Returns `true` if the eviction rate exceeded the threshold (warning
     /// condition active), `false` otherwise.
     pub fn process_info_response(&self, info: &InfoMemoryResponse, now: Instant) -> bool {
+        // --- Capture the delta since the last poll ---
+
+        // `evicted_keys` from Redis INFO is cumulative since server start, so
+        // only the delta since the previous poll may be added to the counter
+        // (incrementing by the cumulative value would double-count on every
+        // poll and grow the counter quadratically).
+        let previous = self
+            .last_evicted_keys
+            .swap(info.evicted_keys, Ordering::AcqRel);
+        let delta = info.evicted_keys.saturating_sub(previous);
+
         // --- Update Prometheus gauges ---
 
         // used_memory
@@ -216,10 +227,14 @@ impl RedisKeyMonitor {
         let utilization = info.utilization_ratio();
         metrics::gauge!("redis_memory_utilization_ratio").set(utilization);
 
-        // cumulative evicted_keys as a counter
-        metrics::counter!("redis_evicted_keys_total").increment(info.evicted_keys);
+        // evicted keys since the last poll
+        metrics::counter!("redis_evicted_keys_total").increment(delta);
 
         // --- Mirror into the in-memory collector (if attached) ---
+
+        // Note: redis_evicted_keys_total is intentionally NOT mirrored —
+        // MetricsCollector would export a second, divergent series for the
+        // same counter on /metrics.
 
         if let Some(collector) = &self.collector {
             collector.record_gauge(
@@ -237,18 +252,9 @@ impl RedisKeyMonitor {
                 utilization,
                 "used_memory / maxmemory (0.0 when maxmemory is 0)",
             );
-            collector.record_counter(
-                "redis_evicted_keys_total",
-                info.evicted_keys as f64,
-                "Cumulative evicted_keys from Redis INFO",
-            );
         }
 
         // --- Compute eviction rate ---
-
-        let previous = self
-            .last_evicted_keys
-            .swap(info.evicted_keys, Ordering::AcqRel);
 
         // Determine elapsed time in minutes for rate computation
         let elapsed_minutes = {
@@ -270,7 +276,6 @@ impl RedisKeyMonitor {
         };
 
         // Compute eviction rate
-        let delta = info.evicted_keys.saturating_sub(previous);
         let rate_per_minute = if elapsed_minutes > 0.0 {
             delta as f64 / elapsed_minutes
         } else {

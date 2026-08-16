@@ -15,8 +15,18 @@ pub struct InboxPollResult {
     pub folder: Option<String>,
     /// Approximate response time in milliseconds (time until the message appeared).
     pub response_time_ms: Option<i64>,
+    /// Raw RFC822 headers of the delivered message (used to parse
+    /// `Authentication-Results` verdicts downstream).
+    pub raw_headers: Option<String>,
     /// A human-readable error description if polling failed.
     pub error: Option<String>,
+}
+
+/// A located test message.
+struct Hit {
+    folder: String,
+    response_time_ms: Option<i64>,
+    raw_headers: Option<String>,
 }
 
 /// Polls seed account IMAP inboxes to detect delivery of test messages.
@@ -77,12 +87,13 @@ impl ImapPoller {
                 .poll_once(&imap_host, imap_port, account, password, &subject_pattern)
                 .await
             {
-                Ok(Some((folder_name, response_time))) => {
+                Ok(Some(hit)) => {
                     let elapsed = start.elapsed().as_millis() as i64;
                     return Ok(InboxPollResult {
                         delivered: true,
-                        folder: Some(folder_name),
-                        response_time_ms: Some(response_time.unwrap_or(elapsed)),
+                        folder: Some(hit.folder),
+                        response_time_ms: Some(hit.response_time_ms.unwrap_or(elapsed)),
+                        raw_headers: hit.raw_headers,
                         error: None,
                     });
                 }
@@ -109,6 +120,7 @@ impl ImapPoller {
                             delivered: false,
                             folder: None,
                             response_time_ms: None,
+                            raw_headers: None,
                             error: Some(format!(
                                 "IMAP poll failed after {} attempts: {}",
                                 max_attempts, e
@@ -125,14 +137,23 @@ impl ImapPoller {
             delivered: false,
             folder: None,
             response_time_ms: Some(elapsed),
+            raw_headers: None,
             error: None,
         })
     }
 
+    /// A located test message.
+    ///
     /// Perform a single IMAP connection, login, and search.
     ///
-    /// Returns `Ok(Some((folder_name, response_time_ms)))` if the message was
-    /// found, or `Ok(None)` if it was not yet visible.
+    /// Folders to search are derived from the server's `LIST` response:
+    /// `INBOX` plus every folder whose name matches a spam/junk/bulk/
+    /// promotions convention (case-insensitive). This replaces a hardcoded
+    /// INBOX-only folder list that made every spam delivery look "absent".
+    ///
+    /// Returns `Ok(Some(hit))` if the message was found (with its folder,
+    /// delivery latency from INTERNALDATE, and raw headers), or `Ok(None)` if
+    /// it was not yet visible.
     async fn poll_once(
         &self,
         host: &str,
@@ -140,7 +161,7 @@ impl ImapPoller {
         account: &SeedAccount,
         password: &str,
         subject_pattern: &str,
-    ) -> Result<Option<(String, Option<i64>)>, String> {
+    ) -> Result<Option<Hit>, String> {
         // The `imap` crate's API is synchronous, so we wrap it in spawn_blocking.
         let host_owned = host.to_owned();
         let email = account.email.clone();
@@ -165,24 +186,64 @@ impl ImapPoller {
                 .login(&username, &password_owned)
                 .map_err(|(e, _)| format!("IMAP login error for {}: {}", email, e))?;
 
-            // Try common folders; start with INBOX.
-            let folders_to_check = vec!["INBOX", "Inbox", "inbox"];
+            // Discover folders from LIST: INBOX first, then provider spam/
+            // junk/bulk/promotions folders, then every other folder. Search
+            // order follows classification priority so a copy sitting in both
+            // INBOX and a spam folder is reported from INBOX. Non-conventional
+            // folders are classified downstream via the provider classifier.
+            let folders_to_check = discover_folders(&mut session);
 
             for folder in &folders_to_check {
-                match session.select(*folder) {
+                match session.select(folder) {
                     Ok(_) => {
-                        // Search for messages from our own email address with matching subject.
-                        let search_query =
-                            format!("(FROM \"{}\" SUBJECT \"{}\")", email, subject_owned);
+                        // Search for the message by subject: it embeds the
+                        // unique test id, which is sufficient to locate it.
+                        let search_query = format!("(SUBJECT \"{}\")", subject_owned);
 
                         match session.search(&search_query) {
                             Ok(ids) if !ids.is_empty() => {
-                                // Message found — determine which folder it's actually in.
-                                // (The `select` already sets the current mailbox to this folder.)
-                                let start_time = std::time::Instant::now();
+                                // Message found. Fetch its headers (for
+                                // Authentication-Results parsing) and
+                                // INTERNALDATE (true delivery latency).
+                                let mut raw_headers = None;
+                                let mut response_time = None;
+                                if let Some(first) = ids.iter().min() {
+                                    match session.fetch(
+                                        first.to_string(),
+                                        "(RFC822.HEADER INTERNALDATE)",
+                                    ) {
+                                        Ok(fetches) => {
+                                            if let Some(f) = fetches.iter().next() {
+                                                if let Some(hdr) = f.header() {
+                                                    raw_headers =
+                                                        Some(String::from_utf8_lossy(hdr).into_owned());
+                                                }
+                                                if let Some(date) = f.internal_date() {
+                                                    let latency = chrono::Utc::now()
+                                                        .signed_duration_since(
+                                                            date.with_timezone(&chrono::Utc),
+                                                        )
+                                                        .num_milliseconds();
+                                                    response_time = Some(latency.max(0));
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                folder = %folder,
+                                                error = %e,
+                                                "IMAP fetch headers failed"
+                                            );
+                                        }
+                                    }
+                                }
+
                                 let _ = session.logout();
-                                let elapsed = start_time.elapsed().as_millis() as i64;
-                                return Ok(Some((folder.to_string(), Some(elapsed))));
+                                return Ok(Some(Hit {
+                                    folder: folder.clone(),
+                                    response_time_ms: response_time,
+                                    raw_headers,
+                                }));
                             }
                             Ok(_) => {
                                 // Not found in this folder; try next.
@@ -231,6 +292,69 @@ fn extract_domain(email: &str) -> Option<String> {
         return None;
     }
     Some(domain)
+}
+
+/// True when a folder name matches a provider spam/junk convention.
+fn is_spam_like(folder: &str) -> bool {
+    let lower = folder.to_lowercase();
+    lower.contains("spam")
+        || lower.contains("junk")
+        || lower.contains("bulk")
+        || lower.contains("promotions")
+}
+
+/// Derive the folder search list from a `LIST` response.
+///
+/// Order matters — the poller returns on the first folder containing the
+/// message, so folders are searched in classification priority:
+///
+/// 1. `INBOX` (canonical, always first),
+/// 2. every spam/junk/bulk/promotions folder (case-insensitive, deduplicated),
+/// 3. every other listed folder (Archive, custom folders, …) so a delivery
+///    that lands outside the conventional folders is still found. Those
+///    "other" folders are classified downstream via the provider classifier
+///    ([`crate::classifier::classify_folder`]) as a fallback.
+fn select_folders_from_list(listed: &[String]) -> Vec<String> {
+    let mut folders: Vec<String> = vec!["INBOX".to_string()];
+    let mut others: Vec<String> = Vec::new();
+    for name in listed {
+        // Skip duplicates of folders already queued (case-insensitive — IMAP
+        // folder names are case-sensitive but INBOX is matched case-insensitively
+        // by every provider).
+        if folders.iter().any(|f| f.eq_ignore_ascii_case(name))
+            || others.iter().any(|f| f.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        if is_spam_like(name) {
+            folders.push(name.clone());
+        } else {
+            others.push(name.clone());
+        }
+    }
+    folders.extend(others);
+    folders
+}
+
+/// Run LIST on the session and build the folder search list.
+fn discover_folders(session: &mut imap::Session<native_tls::TlsStream<std::net::TcpStream>>) -> Vec<String> {
+    match session.list(None, Some("*")) {
+        Ok(names) => {
+            let listed: Vec<String> = names.iter().map(|n| n.name().to_string()).collect();
+            select_folders_from_list(&listed)
+        }
+        Err(e) => {
+            // LIST is required by RFC 3501; if a server misbehaves, fall back
+            // to INBOX plus the conventional names.
+            tracing::warn!(error = %e, "IMAP LIST failed; falling back to INBOX");
+            vec![
+                "INBOX".to_string(),
+                "Spam".to_string(),
+                "Junk".to_string(),
+                "Bulk Mail".to_string(),
+            ]
+        }
+    }
 }
 
 impl ImapPoller {
@@ -292,5 +416,57 @@ mod tests {
             Some("outlook.com".into())
         );
         assert_eq!(extract_domain("noatsign"), None);
+    }
+
+    #[test]
+    fn test_folder_selection_includes_spam_folders() {
+        let listed = vec![
+            "INBOX".to_string(),
+            "[Gmail]/Sent Mail".to_string(),
+            "[Gmail]/Spam".to_string(),
+            "[Gmail]/Promotions".to_string(),
+            "[Gmail]/Trash".to_string(),
+        ];
+        let folders = select_folders_from_list(&listed);
+        // INBOX is canonical and dedupes case-insensitively against "Inbox".
+        assert_eq!(folders[0], "INBOX");
+        // Spam-like folders are searched before the rest.
+        assert_eq!(folders[1], "[Gmail]/Spam");
+        assert_eq!(folders[2], "[Gmail]/Promotions");
+        // Other folders are still searched (after spam), classified via the
+        // provider classifier fallback downstream.
+        assert!(folders.contains(&"[Gmail]/Sent Mail".to_string()));
+        assert!(folders.contains(&"[Gmail]/Trash".to_string()));
+        assert_eq!(folders.len(), 5);
+    }
+
+    #[test]
+    fn test_folder_selection_handles_provider_variants() {
+        let listed = vec![
+            "Inbox".to_string(),
+            "Junk".to_string(),          // Outlook
+            "Bulk Mail".to_string(),     // Yahoo/AOL
+            "Junk E-mail".to_string(),   // Outlook alternate
+            "Deleted Items".to_string(),
+        ];
+        let folders = select_folders_from_list(&listed);
+        // "Inbox" dedupes into the canonical INBOX entry (case-insensitive).
+        assert_eq!(folders[0], "INBOX");
+        // Spam-like variants are searched right after INBOX, others last.
+        assert_eq!(folders[1], "Junk");
+        assert!(folders.contains(&"Bulk Mail".to_string()));
+        assert!(folders.contains(&"Junk E-mail".to_string()));
+        assert!(folders.contains(&"Deleted Items".to_string()));
+        assert_eq!(folders.len(), 5);
+    }
+
+    #[test]
+    fn test_spam_like_matching() {
+        assert!(is_spam_like("[Gmail]/Spam"));
+        assert!(is_spam_like("JUNK"));
+        assert!(is_spam_like("Bulk Mail"));
+        assert!(is_spam_like("Promotions"));
+        assert!(!is_spam_like("INBOX"));
+        assert!(!is_spam_like("Sent Mail"));
     }
 }

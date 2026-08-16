@@ -59,10 +59,14 @@ deploy:
 	@# (audit §6). Fails fast before any sync.
 	@bash tools/check-kiwi-marketing-isolation.sh
 	@echo "==> Syncing ALL code to server (clean — stale files removed)..."
+	@# NOTE: do NOT --exclude 'public' — apps/marketing-zola/public is a
+	@# COMMITTED build input (the api-server Docker stage COPYs it); the only
+	@# other sync excludes are build outputs (target/, node_modules/, vendor/)
+	@# and the live LE cert store (deploy/nginx/ssl).
 	@for dir in $(SYNC_DIRS); do \
 		echo "  $$dir/"; \
 		$(RSYNC) --delete \
-			--exclude='target' --exclude='node_modules' --exclude='public' --exclude='vendor' \
+			--exclude='target' --exclude='node_modules' --exclude='vendor' \
 			--exclude='ssl' \
 			$(RSYNC_SSH) ./$$dir/ $(SERVER_HOST):/opt/apexmail/$$dir/; \
 	done
@@ -82,15 +86,17 @@ deploy-service:
 	@echo "==> Partial deploy: $(S)"
 	@echo "==> Syncing only changed code directories..."
 	@$(RSYNC) --delete \
-		--exclude='target' --exclude='node_modules' --exclude='public' --exclude='vendor' \
+		--exclude='target' --exclude='node_modules' --exclude='vendor' \
 		$(RSYNC_SSH) \
 		./services/mail-server/ \
 		$(SERVER_HOST):/opt/apexmail/services/mail-server/
 	@$(RSYNC) --delete $(RSYNC_SSH) \
 		./packages/kiwicaptcha/ \
 		$(SERVER_HOST):/opt/apexmail/packages/kiwicaptcha/
+	@# apps/marketing-zola/public must sync — it is committed source the
+	@# api-server and marketing Docker builds COPY (no 'public' exclude).
 	@$(RSYNC) --delete \
-		--exclude='target' --exclude='node_modules' --exclude='public' --exclude='vendor' \
+		--exclude='target' --exclude='node_modules' --exclude='vendor' \
 		$(RSYNC_SSH) \
 		./apps/marketing-zola/ \
 		$(SERVER_HOST):/opt/apexmail/apps/marketing-zola/

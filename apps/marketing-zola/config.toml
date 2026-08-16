@@ -57,6 +57,11 @@ github_url = "https://github.com/Bel-Consulting-OU/ApexMail"
 docs_url = "https://apexmail.ee/docs"
 app_url = "https://app.apexmail.ee"
 api_url = "https://api.apexmail.ee"
+status_url = "https://status.apexmail.ee"
+# Public status JSON endpoint (served by the main site, not the status vhost).
+# Used by the footer status indicator. Kept under [extra] so templates can
+# route it through config.extra.* instead of hardcoding (audit 2.4).
+status_api_url = "https://apexmail.ee/api/status-data"
 pricing_as_of = "2026-07-30"
 build_id = "2026-07-29-prod-1"
 asset_cdn_base_url = "https://cdn.apexmail.ee"

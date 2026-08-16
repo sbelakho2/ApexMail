@@ -196,12 +196,16 @@ BEGIN
         FROM _tenant_related_fk
         ORDER BY table_schema, table_name, constraint_name
     LOOP
-        EXECUTE format(
-            'ALTER TABLE %I.%I DROP CONSTRAINT %I',
-            rec.table_schema,
-            rec.table_name,
-            rec.constraint_name
-        );
+        BEGIN
+            EXECUTE format(
+                'ALTER TABLE %I.%I DROP CONSTRAINT %I',
+                rec.table_schema,
+                rec.table_name,
+                rec.constraint_name
+            );
+        EXCEPTION WHEN undefined_object OR undefined_table THEN
+            RAISE NOTICE '064: constraint %.% already absent', rec.table_name, rec.constraint_name;
+        END;
     END LOOP;
 END;
 $$;
@@ -287,13 +291,17 @@ BEGIN
         FROM _tenant_related_fk
         ORDER BY table_schema, table_name, constraint_name
     LOOP
-        EXECUTE format(
-            'ALTER TABLE %I.%I ADD CONSTRAINT %I %s',
-            rec.table_schema,
-            rec.table_name,
-            rec.constraint_name,
-            rec.constraint_def
-        );
+        BEGIN
+            EXECUTE format(
+                'ALTER TABLE %I.%I ADD CONSTRAINT %I %s',
+                rec.table_schema,
+                rec.table_name,
+                rec.constraint_name,
+                rec.constraint_def
+            );
+        EXCEPTION WHEN duplicate_object OR undefined_object OR undefined_table THEN
+            RAISE NOTICE '064: FK %.% not re-added (%)', rec.table_name, rec.constraint_name, SQLERRM;
+        END;
     END LOOP;
 END;
 $$;

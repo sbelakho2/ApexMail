@@ -11,13 +11,18 @@ use bytes::BytesMut;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
+use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::BounceConfig;
+
+use super::util::{read_line_capped, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE};
+
+/// Per-line timeout while receiving bounce DATA.
+const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
 
 // #142:Pre-compiled regex for RFC 3463 enhanced status codes
 static BOUNCE_STATUS_RE: LazyLock<Option<regex::Regex>> =
@@ -139,13 +144,16 @@ impl BounceServer {
             line.clear();
             match tokio::time::timeout(
                 std::time::Duration::from_secs(120),
-                stream.read_line(&mut line),
+                read_line_capped(&mut stream, MAX_COMMAND_LINE),
             )
             .await
             {
-                Ok(Ok(0)) | Err(_) => break,
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) => break,
+                Ok(Ok(LineRead::Eof)) | Err(_) | Ok(Err(_)) => break,
+                Ok(Ok(LineRead::TooLong)) => {
+                    let _ = write_line(&mut stream, "500 5.5.2 Line too long\r\n").await;
+                    continue;
+                }
+                Ok(Ok(LineRead::Line(l))) => line = l,
             }
 
             let cmd = line.trim().to_uppercase();
@@ -156,7 +164,9 @@ impl BounceServer {
             } else if cmd.starts_with("MAIL FROM") {
                 let addr = extract_addr(&line);
                 // RFC 5321:bounces (DSNs) must have exactly the null sender.
-                // Anything else — including an empty address — is rejected.
+                // `extract_addr("MAIL FROM:<>")` yields the EMPTY string (the
+                // angle brackets are stripped), so the null sender check must
+                // accept "" — anything non-empty is a real sender and rejected.
                 if !null_sender_ok(&addr) {
                     let _ =
                         write_line(&mut stream, "550 Bounce MAIL FROM must be null (<>)\r\n").await;
@@ -195,23 +205,56 @@ impl BounceServer {
                 let _ = write_line(&mut stream, "354 Go ahead\r\n").await;
                 let mut message = BytesMut::new();
                 let mut too_large = false;
+                // A bounce is only complete when the client sent the
+                // <CRLF>.<CRLF> terminator; EOF/read-error mid-DATA yields a
+                // truncated payload that must never be processed.
+                let mut terminated = false;
+                let mut timed_out = false;
                 loop {
                     line.clear();
-                    match stream.read_line(&mut line).await {
-                        Ok(0) => break,
-                        Ok(_) => {
+                    match tokio::time::timeout(
+                        DATA_LINE_TIMEOUT,
+                        read_line_capped(&mut stream, MAX_DATA_LINE),
+                    )
+                    .await
+                    {
+                        Err(_) => {
+                            timed_out = true;
+                            break;
+                        }
+                        Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
+                        Ok(Ok(LineRead::TooLong)) => {
+                            // A single line over the per-line cap cannot be
+                            // part of a payload we are willing to store.
+                            too_large = true;
+                        }
+                        Ok(Ok(LineRead::Line(l))) => {
+                            line = l;
                             if line.trim() == "." {
+                                terminated = true;
                                 break;
                             }
-                            if !append_data_line(&mut message, &line, self.config.max_message_size) {
+                            if !too_large
+                                && !append_data_line(&mut message, &line, self.config.max_message_size)
+                            {
                                 too_large = true;
                                 // Drain the remainder without buffering it.
                                 loop {
                                     line.clear();
-                                    match stream.read_line(&mut line).await {
-                                        Ok(0) | Err(_) => break,
-                                        Ok(_) => {
-                                            if line.trim() == "." {
+                                    match tokio::time::timeout(
+                                        DATA_LINE_TIMEOUT,
+                                        read_line_capped(&mut stream, MAX_DATA_LINE),
+                                    )
+                                    .await
+                                    {
+                                        Err(_) => {
+                                            timed_out = true;
+                                            break;
+                                        }
+                                        Ok(Ok(LineRead::Eof)) | Ok(Err(_)) => break,
+                                        Ok(Ok(LineRead::TooLong)) => {}
+                                        Ok(Ok(LineRead::Line(dl))) => {
+                                            if dl.trim() == "." {
                                                 break;
                                             }
                                         }
@@ -220,13 +263,16 @@ impl BounceServer {
                                 break;
                             }
                         }
-                        Err(_) => break,
                     }
                 }
 
-                if too_large {
+                if timed_out {
+                    // Slow/stalled client mid-DATA: refuse rather than wait
+                    // forever (and never accept the partial payload).
+                    let _ = write_line(&mut stream, "421 4.4.2 Data timeout exceeded\r\n").await;
+                } else if too_large {
                     let _ = write_line(&mut stream, "552 5.3.4 Message size exceeds fixed limit\r\n").await;
-                } else {
+                } else if terminated {
                     match self.process_bounce(&rcpt_to, &message).await {
                         Ok(id) => {
                             let _ = write_line(&mut stream, &format!("250 OK id={id}\r\n")).await;
@@ -272,7 +318,9 @@ impl BounceServer {
     // ── bounce processing ──────────────────────────────────────────────────────
 
     async fn process_bounce(&self, rcpt_to: &[String], raw: &[u8]) -> anyhow::Result<String> {
-        let bounce_id = Uuid::new_v4().to_string();
+        // bounce_events.id is a UUID column (migration 093) — bind the Uuid
+        // itself, not its String form.
+        let bounce_id = Uuid::new_v4();
         let message = String::from_utf8_lossy(raw);
 
         // 1. Try to match via VERP address
@@ -321,7 +369,7 @@ impl BounceServer {
             WHERE original_message_id IS NOT NULL AND original_recipient IS NOT NULL
             DO NOTHING"#,
         )
-        .bind(&bounce_id)
+        .bind(bounce_id)
         .bind(&original_message_id)
         .bind(&original_recipient)
         .bind(format!("{:?}", bounce_info.bounce_type))
@@ -335,7 +383,7 @@ impl BounceServer {
 
         if !inserted {
             debug!(msg_id = ?original_message_id, "Duplicate bounce event, skipping side effects");
-            return Ok(bounce_id);
+            return Ok(bounce_id.to_string());
         }
 
         // 5. C3: only act on bounces that reference a message this system sent.
@@ -347,12 +395,12 @@ impl BounceServer {
                 Some(v) => v,
                 None => {
                     warn!(msg_id = %mid, "Bounce references unknown message — skipping suppression and webhook");
-                    return Ok(bounce_id);
+                    return Ok(bounce_id.to_string());
                 }
             },
             None => {
                 warn!("Bounce carries no original message id — skipping suppression and webhook");
-                return Ok(bounce_id);
+                return Ok(bounce_id.to_string());
             }
         };
 
@@ -429,7 +477,7 @@ impl BounceServer {
             "Bounce processed"
         );
 
-        Ok(bounce_id)
+        Ok(bounce_id.to_string())
     }
 
     /// Resolve the tenant and recipient of a message this system sent.
@@ -604,8 +652,12 @@ pub(crate) fn connection_allowed(current: u32, max: u32) -> bool {
 }
 
 /// RFC 5321:bounce sessions require exactly the null sender `<>`.
+///
+/// `extract_addr` returns the address BETWEEN the angle brackets, so the null
+/// sender arrives here as the empty string — requiring the literal `<>` used
+/// to reject every legitimate bounce and killed the whole bounce pipeline.
 pub(crate) fn null_sender_ok(addr: &str) -> bool {
-    addr == "<>"
+    addr.is_empty()
 }
 
 /// Whether a `RCPT TO` address is an acceptable bounce recipient for this
@@ -790,10 +842,11 @@ fn extract_original_message_id(message: &str) -> Option<String> {
 }
 
 fn extract_addr(line: &str) -> String {
-    if let Some(start) = line.find('<') {
-        if let Some(end) = line.find('>') {
-            return line[start + 1..end].to_string();
-        }
+    // Shared panic-safe helper: search for '>' only AFTER the '<'. Searching
+    // the whole line could find a '>' before the '<' and slice out of bounds
+    // (remote panic on malformed commands like "RCPT TO:x> <a@b>").
+    if let Some(addr) = super::util::extract_addr_safe(line) {
+        return addr.to_string();
     }
     line.split_whitespace().last().unwrap_or("").to_string()
 }
@@ -916,10 +969,29 @@ mod tests {
 
     #[test]
     fn test_null_sender_ok() {
-        assert!(null_sender_ok("<>"));
-        assert!(!null_sender_ok(""));
-        assert!(!null_sender_ok("<attacker@evil.com>"));
-        assert!(!null_sender_ok("< >"));
+        // extract_addr("MAIL FROM:<>") yields the empty string — the null
+        // sender must be accepted in that form or every bounce is rejected.
+        assert!(null_sender_ok(""));
+        assert!(!null_sender_ok("attacker@evil.com"));
+        assert!(!null_sender_ok(" "));
+    }
+
+    #[test]
+    fn test_extract_addr_null_sender_yields_empty() {
+        assert_eq!(extract_addr("MAIL FROM:<>\r\n"), "");
+        assert_eq!(extract_addr("MAIL FROM:<user@bounces.apexmail.ee>\r\n"), "user@bounces.apexmail.ee");
+    }
+
+    #[test]
+    fn test_extract_addr_closing_bracket_before_opening_does_not_panic() {
+        // '>' before '<' used to slice out of bounds and panic the session.
+        assert_eq!(extract_addr("MAIL FROM:x> <user@example.com>\r\n"), "user@example.com");
+        // Unterminated path: falls back to the last whitespace token
+        // (trailing CRLF is split off as whitespace, the '<' stays attached).
+        assert_eq!(
+            extract_addr("MAIL FROM:unterminated <user@example.com\r\n"),
+            "<user@example.com"
+        );
     }
 
     #[test]

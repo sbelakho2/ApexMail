@@ -216,10 +216,13 @@ impl EdgeCasesConfig {
                 enabled: std::env::var("CLAMAV_ENABLED")
                     .map(|v| v != "false" && v != "0")
                     .unwrap_or(true),
-                // O-21.1: Configurable chunk size for ClamAV INSTREAM scanning
+                // O-21.1: Configurable chunk size for ClamAV INSTREAM scanning.
+                // A value of 0 would make the scanner loop forever sending
+                // empty chunks (or slice-panic), so fall back to the default.
                 chunk_size: std::env::var("CLAMAV_CHUNK_SIZE")
                     .ok()
                     .and_then(|v| v.parse().ok())
+                    .filter(|v| *v > 0)
                     .unwrap_or(8192),
             },
         })

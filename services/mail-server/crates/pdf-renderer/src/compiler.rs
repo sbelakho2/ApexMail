@@ -113,11 +113,52 @@ pub async fn render_pdf(template: &str, data: &serde_json::Value) -> Result<Vec<
 // PDF generator (valid PDF 1.4)
 // ---------------------------------------------------------------------------
 
+/// Escape a string for use inside a PDF literal string `(...)`.
+///
+/// PDF literal strings must balance parentheses and escape backslashes;
+/// unescaped `(`/`)` would let injected data terminate the string early and
+/// inject arbitrary content-stream operators. Newlines/CR/TAB are escaped
+/// as well to keep the stream well-formed.
+///
+/// Literal strings are byte strings (PDFDocEncoding/WinAnsi, i.e. latin-1):
+/// latin-1 characters outside printable ASCII are escaped as octal `\ooo`,
+/// and any character above U+00FF (which has no latin-1 representation) is
+/// dropped rather than emitting a multi-byte UTF-8 sequence that would
+/// corrupt the byte stream.
+fn escape_pdf_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '(' => out.push_str("\\("),
+            ')' => out.push_str("\\)"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) <= 0x7f => out.push(c),
+            c if (c as u32) <= 0xff => {
+                // Latin-1 supplement: emit as octal escape so the byte value
+                // survives regardless of the reader's text encoding.
+                out.push_str(&format!("\\{:03o}", c as u32));
+            }
+            // No latin-1 representation — drop the character.
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Generate a minimal but valid PDF 1.4 document with the template data.
 /// Uses raw PDF operators to produce a single-page document containing
 /// the title, template name, timestamp and a preview of the injected data.
-/// This avoids a Typst compile dependency while producing spec-compliant
-/// output that can be opened by any PDF reader.
+///
+/// NOTE: Full Typst compilation remains unwired in this pass (tracked
+/// separately); this generator produces spec-compliant output that can be
+/// opened by any PDF reader while the Typst pipeline is being wired up.
+///
+/// All offsets (xref table, `startxref`) are computed programmatically from
+/// the actual object bytes, and the content-stream `/Length` reflects the
+/// real byte count — no hardcoded/approximate offsets.
 fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderError> {
     let now = world.now.format("%Y%m%d%H%M%S").to_string();
     let title = match template {
@@ -129,64 +170,66 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
         _ => "Document",
     };
 
-    // Minimal PDF structure
-    let content = format!(
-        r#"%PDF-1.4
-1 0 obj
-<< /Type /Catalog /Pages 2 0 R >>
-endobj
+    // Escape every interpolated value: title/template come from a fixed set,
+    // but the data preview is attacker-controlled JSON.
+    let title_esc = escape_pdf_string(title);
+    let template_esc = escape_pdf_string(template);
+    let now_esc = escape_pdf_string(&now);
+    // Truncate on a char boundary before escaping so multi-byte UTF-8 is not split.
+    let data_preview: String = world.data_json.chars().take(80).collect();
+    let data_preview_esc = escape_pdf_string(&data_preview);
 
-2 0 obj
-<< /Type /Pages /Kids [3 0 R] /Count 1 >>
-endobj
+    // Content stream — build the actual bytes first so /Length is exact.
+    let stream_body = format!(
+        "BT\n/F1 24 Tf\n50 780 Td\n({title_esc}) Tj\n/F1 12 Tf\n0 -30 Td\n(Template: {template_esc}) Tj\n0 -20 Td\n(Generated: {now_esc}) Tj\n0 -20 Td\n(Data: {data_preview_esc}...) Tj\nET\n"
+    );
+    let stream_bytes = stream_body.into_bytes();
+    let stream_length = stream_bytes.len();
 
-3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]
-   /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
-endobj
+    // Object 4: content stream with exact /Length.
+    let mut obj4 = format!("<< /Length {stream_length} >>\nstream\n").into_bytes();
+    obj4.extend_from_slice(&stream_bytes);
+    obj4.extend_from_slice(b"\nendstream");
 
-4 0 obj
-<< /Length {stream_length} >>
-stream
-BT
-/F1 24 Tf
-50 780 Td
-({title}) Tj
-/F1 12 Tf
-0 -30 Td
-(Template: {template}) Tj
-0 -20 Td
-(Generated: {now}) Tj
-0 -20 Td
-(Data: {data_preview}...) Tj
-ET
-endstream
-endobj
+    // Fully serialised indirect objects (1..=5), in object-number order.
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]\n   /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_vec(),
+        obj4,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+    ];
 
-5 0 obj
-<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
-endobj
+    // Assemble the file, recording each object's byte offset as we go.
+    // Each indirect object is serialised as `N 0 obj\n<body>\nendobj\n` so the
+    // xref offsets point at the actual object headers.
+    let mut pdf: Vec<u8> = b"%PDF-1.4\n".to_vec();
+    let mut offsets: Vec<usize> = Vec::with_capacity(objects.len() + 1);
+    offsets.push(0); // object 0 — free entry, offset unused
+    for (idx, obj) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", idx + 1).as_bytes());
+        pdf.extend_from_slice(obj);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
 
-xref
-0 6
-0000000000 65535 f 
-0000000009 00000 n 
-0000000058 00000 n 
-0000000115 00000 n 
-0000000266 00000 n 
-trailer
-<< /Size 6 /Root 1 0 R /Info << /Title ({title}) /Producer (ApexMail pdf-renderer) >> >>
-startxref
-%%EOF
-"#,
-        title = title,
-        template = template,
-        now = now,
-        data_preview = &world.data_json[..world.data_json.len().min(80)],
-        stream_length = 200, // approximate
+    // Cross-reference table computed from the recorded offsets.
+    let xref_offset = pdf.len();
+    let size = offsets.len();
+    pdf.extend_from_slice(format!("xref\n0 {size}\n").as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for &off in &offsets[1..] {
+        pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+    }
+
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {size} /Root 1 0 R /Info << /Title ({title_esc}) /Producer (ApexMail pdf-renderer) >> >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        )
+        .as_bytes(),
     );
 
-    Ok(content.into_bytes())
+    Ok(pdf)
 }
 
 // ---------------------------------------------------------------------------
@@ -225,4 +268,95 @@ pub enum RenderError {
     Compilation(String),
     #[error("pdf export error: {0}")]
     PdfExport(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify the xref table is internally consistent: every `N 0 R` offset
+    /// in the xref section must point at the actual `N 0 obj` header, and
+    /// `startxref` must point at the `xref` keyword.
+    #[test]
+    fn xref_offsets_are_internally_consistent() {
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: r#"{"customer":"Injec)ted \\( Corp","items":[1,2,3]}"#.to_string(),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("invoice", &world).expect("pdf generation failed");
+        let text = String::from_utf8_lossy(&pdf);
+
+        // startxref points at the xref keyword.
+        let startxref_pos = text.rfind("startxref").expect("startxref missing");
+        let after = text[startxref_pos..].trim_start_matches("startxref").trim();
+        let xref_offset: usize = after
+            .lines()
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .expect("startxref value");
+        assert_eq!(&pdf[xref_offset..xref_offset + 4], b"xref");
+
+        // Parse the xref table entries and verify each in-use entry points at
+        // the matching `N 0 obj` header.
+        let xref_body = &text[xref_offset..];
+        let mut lines = xref_body.lines();
+        assert_eq!(lines.next().unwrap(), "xref");
+        let header = lines.next().unwrap();
+        let size: usize = header.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let first = lines.next().unwrap();
+        assert_eq!(first, "0000000000 65535 f ");
+        for obj_num in 1..size {
+            let entry = lines.next().expect("missing xref entry");
+            let offset: usize = entry[..10].parse().expect("bad xref offset");
+            let expected_prefix = format!("{obj_num} 0 obj");
+            assert!(
+                pdf[offset..].starts_with(expected_prefix.as_bytes()),
+                "xref offset for object {obj_num} does not point at its header: {entry}"
+            );
+        }
+
+        // Every object is terminated and the file ends with %%EOF.
+        assert!(pdf.ends_with(b"%%EOF\n"));
+    }
+
+    #[test]
+    fn escapes_parens_backslashes_and_non_latin1() {
+        assert_eq!(escape_pdf_string("a(b)c"), "a\\(b\\)c");
+        assert_eq!(escape_pdf_string("back\\slash"), "back\\\\slash");
+        assert_eq!(escape_pdf_string("new\nline\r\ttab"), "new\\nline\\r\\ttab");
+        // Latin-1 é (U+00E9) → octal escape of byte 0xE9.
+        assert_eq!(escape_pdf_string("café"), "caf\\351");
+        // Above latin-1 (U+0100 'Ā', U+4F60 '你') → dropped.
+        assert_eq!(escape_pdf_string("Ā你x"), "x");
+    }
+
+    #[test]
+    fn generated_pdf_has_valid_markers_and_exact_length() {
+        let world = TypstWorld {
+            template_source: String::new(),
+            data_json: r#"{"k":"v")"}"#.to_string(),
+            now: chrono::Utc::now(),
+        };
+        let pdf = generate_pdf("dpa", &world).expect("pdf generation failed");
+        assert!(pdf.starts_with(b"%PDF-1.4\n"));
+        assert!(pdf.windows(9).any(|w| w == b"startxref"));
+        assert!(pdf.ends_with(b"%%EOF\n"));
+
+        // The content stream /Length must equal the bytes between `stream\n`
+        // and `\nendstream`.
+        let text = String::from_utf8_lossy(&pdf);
+        let len_start = text.find("/Length ").unwrap() + "/Length ".len();
+        let declared: usize = text[len_start..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let stream_start = text.find("stream\n").unwrap() + "stream\n".len();
+        let stream_end = text.find("\nendstream").unwrap();
+        assert_eq!(declared, stream_end - stream_start);
+    }
 }
