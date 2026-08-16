@@ -597,7 +597,9 @@
         if (workerSrc) {
           worker = new Worker(workerSrc);
         } else {
-          var glue = kiwiFindGlueSource();
+          // Round 26: the compat loader's fetched glue covers the external
+          // /api.js case (no inline script element on the page).
+          var glue = kiwiFindGlueSource() || kiwiCompatGlue;
           var blobSrc = (glue ? "var window = self;" + glue + "\n" : "") + KIWI_WORKER_SRC;
           blobUrl = URL.createObjectURL(new Blob([blobSrc], { type: "application/javascript" }));
           worker = new Worker(blobUrl);
@@ -851,7 +853,16 @@
     }
     var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W);
     var telemetry = telemetrySession(container, W);
-    var scope = W.getAttribute("data-kiwi-scope") || container.getAttribute("data-kiwi-scope");
+    // Round 26 (P1): options.scope is AUTHORITATIVE — the incumbent
+    // compatibility loader passes the data-sitekey as the scope, and the
+    // server maps it through the sitekey allowlist to the intended policy
+    // scope. Letting DOM/path heuristics override it would silently
+    // downgrade admin_login/financial_action challenges to the login
+    // policy. Explicit options.scope beats the container attribute beats
+    // the path heuristics.
+    var scope = (options && typeof options.scope === "string" && options.scope)
+      || W.getAttribute("data-kiwi-scope")
+      || container.getAttribute("data-kiwi-scope");
     if (!scope) {
       scope = "login";
       var p = window.location.pathname.toLowerCase();
@@ -1315,6 +1326,14 @@
   // its provider script URL.
   var compat = null;
   var compatScriptUrl = null;
+  // Round 26 (P1): when the driver is loaded as the external
+  // /kiwi-captcha/api.js (glue + driver concatenated, split by the
+  // /*KIWI_COMPAT_SPLIT*/ marker), the worker cannot find the glue in an
+  // inline script element. Fetch the loader's own source once and keep the
+  // glue part for the Blob-worker prelude — Argon2id stays worker-only and
+  // WORKING through the external loader.
+  var kiwiCompatGlue = null;
+  var kiwiCompatGlueReady = null;
   try {
     var currentScript = document.currentScript;
     if (!currentScript) {
@@ -1324,6 +1343,16 @@
     compatScriptUrl = currentScript && currentScript.src ? currentScript.src : null;
     var compatMatch = compatScriptUrl ? compatScriptUrl.match(/[?&]compat=(recaptcha|hcaptcha|turnstile)/) : null;
     if (compatMatch) compat = compatMatch[1];
+    if (compat && compatScriptUrl) {
+      kiwiCompatGlueReady = fetch(compatScriptUrl.split("?")[0], { cache: "force-cache" })
+        .then(function (r) { return r.ok ? r.text() : null; })
+        .then(function (src) {
+          if (!src) return;
+          var idx = src.indexOf("/*KIWI_COMPAT_SPLIT*/");
+          if (idx !== -1) kiwiCompatGlue = src.slice(0, idx);
+        })
+        .catch(function () {});
+    }
   } catch (e) {}
   if (compat) {
     var COMPAT_FIELD = { recaptcha: "g-recaptcha-response", hcaptcha: "h-captcha-response", turnstile: "cf-turnstile-response" }[compat];
@@ -1381,6 +1410,12 @@
           if (el.hasAttribute(attr) && !inner.hasAttribute(attr)) inner.setAttribute(attr, el.getAttribute(attr));
         });
         if (!inner.hasAttribute("data-kiwi-endpoint")) inner.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
+        // The driver reads the endpoint from the rendered container AND
+        // from its own ancestor chain — mirror the default onto the
+        // incumbent container so a page with NO explicit endpoint uses
+        // the bundle's same-origin prefix (round 26: the one-line
+        // migration contract relies on this default).
+        if (!el.hasAttribute("data-kiwi-endpoint")) el.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
       }
       var sitekey = (params && (params.sitekey || params["sitekey"])) || el.getAttribute("data-sitekey") || "";
       var cbs = compatReadCallbacks(el, params);
@@ -1449,22 +1484,26 @@
       window.turnstile = window.turnstile || compatApi;
     }
     compatInjectCss();
-    // Implicit render: every incumbent container on the page.
-    var compatContainers = document.querySelectorAll(COMPAT_SELECTOR);
-    for (var ci = 0; ci < compatContainers.length; ci++) {
-      var el = compatContainers[ci];
-      var wid = compatRender(el);
-      // Invisible-style controls (buttons / inputs / data-size="invisible"):
-      // clicking the control triggers execute() — the incumbent pattern.
-      if (wid && (el.tagName === "BUTTON" || el.tagName === "INPUT" || el.getAttribute("data-size") === "invisible")) {
-        (function (id, node) {
-          node.addEventListener("click", function (ev) {
-            ev.preventDefault();
-            kiwiExecute(id);
-          });
-        })(wid, el);
+    // Implicit render: every incumbent container on the page. The initial
+    // render waits for the loader-glue fetch so Argon2id solves work on
+    // first paint through the external /api.js path (round 26).
+    (kiwiCompatGlueReady || Promise.resolve()).then(function () {
+      var compatContainers = document.querySelectorAll(COMPAT_SELECTOR);
+      for (var ci = 0; ci < compatContainers.length; ci++) {
+        var el = compatContainers[ci];
+        var wid = compatRender(el);
+        // Invisible-style controls (buttons / inputs / data-size="invisible"):
+        // clicking the control triggers execute() — the incumbent pattern.
+        if (wid && (el.tagName === "BUTTON" || el.tagName === "INPUT" || el.getAttribute("data-size") === "invisible")) {
+          (function (id, node) {
+            node.addEventListener("click", function (ev) {
+              ev.preventDefault();
+              kiwiExecute(id);
+            });
+          })(wid, el);
+        }
       }
-    }
+    });
     // Support grecaptcha.render(el, params) called LATER (dynamic widgets).
     if (compat === "recaptcha" && typeof MutationObserver !== "undefined") {
       new MutationObserver(function (mutations) {
