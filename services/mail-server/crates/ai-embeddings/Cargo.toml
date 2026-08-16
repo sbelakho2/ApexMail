@@ -58,7 +58,7 @@ sha2 = { workspace = true }
 # TLS for sidecar HTTPS (O-9.1)
 rustls = { workspace = true }
 rustls-pki-types = "1.10"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 
 # Hex encoding for HMAC signatures (O-9.2)
 hex = { workspace = true }

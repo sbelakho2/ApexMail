@@ -96,7 +96,7 @@ dotenvy.workspace = true
 rustls-pemfile = "2"
 x509-parser = { version = "0.16", features = ["verify"] }
 quick-xml = "0.36"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 
 # Public suffix list (registrable-domain computation for DMARC, RFC 7489)
 psl = "2.1"
