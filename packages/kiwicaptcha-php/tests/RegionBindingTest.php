@@ -15,7 +15,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Region binding (audit #22, Option A): the issued record carries an
+ * Region binding: the issued record carries an
  * optional region (NULL = unbound), the record JSON always includes the
  * `region` key (byte parity with the Rust serde schema — 21 keys), and a
  * verifier configured with an expected region rejects any record whose
@@ -144,7 +144,7 @@ final class RegionBindingTest extends TestCase
 
     public function testRegionIsPartOfTheSignedCanonicalPayload(): void
     {
-        // Round 9 (audit #42): region, policy_version, and request_binding
+        // region, policy_version, and request_binding
         // ARE part of the signed canonical payload — the v2 signature covers
         // the FULL canonical (`...|min_duration_ms|region|policy_version|
         // request_binding`), so a record's embedded signature must equal the

@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha;
 
 /**
- * A verification result committed to a consumed challenge record (audit #74).
+ * A verification result committed to a consumed challenge record.
  *
  * The storage layer stores this as the record's optional `consumed_result`
  * JSON field — `{"valid": bool, "binding": string|null}` — so a retry on an

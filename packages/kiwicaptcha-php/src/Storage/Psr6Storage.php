@@ -13,7 +13,7 @@ use Psr\Cache\CacheItemPoolInterface;
 /**
  * PSR-6 backed storage (Symfony Cache, etc.).
  *
- * consume() is the one-shot TRANSITION (audit #74): the record is marked
+ * consume() is the one-shot TRANSITION: the record is marked
  * consumed and KEPT until its own expiration — replay protection is the
  * consumed marker, not absence.
  *

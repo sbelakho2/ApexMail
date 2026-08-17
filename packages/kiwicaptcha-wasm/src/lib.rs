@@ -29,7 +29,7 @@ pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
-/// The solver PROTOCOL/ABI VERSION (audit round 24 — an integer is the
+/// The solver PROTOCOL/ABI VERSION (an integer is the
 /// clean primitive at the raw wasm-bindgen ABI boundary, where a String
 /// return surfaces as a [ptr, len] tuple). The runtime handshake uses it
 /// ONLY to prove that the driver, the worker and the WASM glue speak the
@@ -105,7 +105,7 @@ pub fn alloc(len: usize) -> *mut u8 {
     ptr
 }
 
-/// Free a buffer previously returned by [`alloc`].
+/// Free a buffer returned by [`alloc`].
 ///
 /// `len` must match the allocation size **exactly** (it is the length passed
 /// to [`alloc`]); the same `Layout::from_size_align(len, 8)` is rebuilt so

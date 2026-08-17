@@ -11,7 +11,7 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
 
 /**
- * Round 28 (P2): issuer / kid / secrets_by_kid / revoked_kids are now
+ * issuer / kid / secrets_by_kid / revoked_kids are now
  * first-class bundle configuration — the core's HMAC-key rotation and
  * emergency-revocation controls are reachable without replacing services.
  *

@@ -93,7 +93,7 @@ final class ProcessEmergencyCapTest extends TestCase
     }
 
     /**
-     * AUDIT #105 — warm-up ramp: a fresh process must NOT start with a
+     * Warm-up ramp: a fresh process must NOT start with a
      * full burst. At t≈0 the effective cap is the floor
      * max(1, cap/10); here cap 1000 -> floor 100: exactly 100 admissions
      * fit, the 101st is denied.
@@ -110,7 +110,7 @@ final class ProcessEmergencyCapTest extends TestCase
     }
 
     /**
-     * AUDIT #105 — after the ramp the cap reaches the full value: a short
+     * After the ramp the cap reaches the full value: a short
      * ramp + sleep (the implementation uses the fixed hrtime clock).
      */
     public function testWarmupReachesFullCapAfterTheRamp(): void
@@ -130,7 +130,7 @@ final class ProcessEmergencyCapTest extends TestCase
         self::assertFalse($limiter->allow(), 'the full cap+1th must be denied');
     }
 
-    /** AUDIT #105 — the floor is never below 1 admission. */
+    /** The floor is never below 1 admission. */
     public function testWarmupFloorNeverBelowOne(): void
     {
         $limiter = new ProcessEmergencyCap(processPerSecond: 5, warmupRampSecs: 0.3);
@@ -139,7 +139,7 @@ final class ProcessEmergencyCapTest extends TestCase
         self::assertFalse($limiter->allow(), 'the 2nd must be denied during the ramp');
     }
 
-    /** AUDIT #105 — the ramp must never raise the cap above the configured value. */
+    /** The ramp must never raise the cap above the configured value. */
     public function testWarmupNeverExceedsConfiguredCap(): void
     {
         $limiter = new ProcessEmergencyCap(processPerSecond: 10, warmupRampSecs: 0.3);

@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha;
 
 /**
- * HKDF purpose-key separation (audit #21).
+ * HKDF purpose-key separation.
  *
  * Every cryptographic purpose derives its own 32-byte key from the single
  * master secret, so a key compromise in one purpose (challenge signing, IP

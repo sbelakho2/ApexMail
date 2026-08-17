@@ -429,14 +429,14 @@ final class CalibrationTest extends TestCase
         self::assertGreaterThan(0, $yes, '50% ppm must eventually sample');
         self::assertGreaterThan(0, $no, '50% ppm must eventually skip');
 
-        // sample() is PURE (round 7): no singleton counters are touched —
+        // sample() is PURE: no singleton counters are touched —
         // the denominator is booked atomically with the receipt.
         $client = $this->requireClient();
         $r = new AggregateCalibrator($client, namespace: 'spure' . bin2hex(random_bytes(4)), samplingMode: 'random_sample', samplingProbabilityPpm: 1_000_000);
         $r->sample();
         $r->sample();
-        self::assertNull($client->get("{kiwi:{$r->namespace()}}:cal:sample:total"), 'the lifetime singleton counter key is GONE (round 7)');
-        self::assertNull($client->get("{kiwi:{$r->namespace()}}:cal:sample:resolved"), 'the lifetime singleton resolved key is GONE (round 7)');
+        self::assertNull($client->get("{kiwi:{$r->namespace()}}:cal:sample:total"), 'the lifetime singleton counter key is GONE');
+        self::assertNull($client->get("{kiwi:{$r->namespace()}}:cal:sample:resolved"), 'the lifetime singleton resolved key is GONE');
     }
 
     public function testSamplingMetricsPerScope(): void
@@ -702,7 +702,7 @@ final class CalibrationTest extends TestCase
         // random_sample mode with the default minimumResolutionRatio 0.80:
         // the gate compares the PER-SCOPE 24-bucket sample totals — two
         // scopes with different resolution ratios gate independently (the
-        // lifetime singleton counters are GONE in round 7).
+        // lifetime singleton counters are GONE).
         $c = new AggregateCalibrator(
             $this->requireClient(),
             namespace: 'gate' . bin2hex(random_bytes(4)),
@@ -844,12 +844,12 @@ final class CalibrationTest extends TestCase
             $c->biasForScope($i, $this->nowMs());
         }
 
-        // Full: a NEW scope evicts the oldest (scope 1) before inserting.
+        // Full: a NEW scope evicts the least-recently-used entry (scope 1) before inserting.
         $before = $client->commands;
         $c->biasForScope(2049, $this->nowMs());
-        self::assertSame($before + 1, $client->commands, 'new scope past the cap must run and evict the oldest');
+        self::assertSame($before + 1, $client->commands, 'new scope past the cap must run and evict the least-recently-used entry');
         $c->biasForScope(1, $this->nowMs());
-        self::assertSame($before + 2, $client->commands, 'the evicted oldest scope must miss the cache');
+        self::assertSame($before + 2, $client->commands, 'the evicted least-recently-used scope must miss the cache');
         $c->biasForScope(1024, $this->nowMs());
         self::assertSame($before + 2, $client->commands, 'recently cached scope must still hit');
     }

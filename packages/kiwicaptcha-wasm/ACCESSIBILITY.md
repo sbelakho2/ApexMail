@@ -1,12 +1,11 @@
 # KiwiCaptcha accessibility — WCAG 2.2 AA evidence, scope and limitations
 
-Round 29 establishes the accessibility acceptance set for the KiwiCaptcha
-widget; round 31/32 extends it with computed non-text-contrast evidence
-(WCAG 1.4.11) and the WCAG 2.2 new-criteria dispositions below. This
-document describes the component's **tested conformance scope** — what
-KiwiCaptcha itself provides and verifies, what the integrating page must
-provide, and the known limitations. It describes the software, not
-organizational structure.
+This document describes the component's **test scope** for the WCAG 2.2
+accessibility acceptance set: computed non-text-contrast evidence (WCAG
+1.4.11), the WCAG 2.2 new-criteria dispositions below, and the automated
+suite that enforces them — what KiwiCaptcha itself provides and verifies,
+what the integrating page must provide, and the known limitations. It
+describes the software, not organizational structure.
 
 ## Positioning
 
@@ -19,7 +18,10 @@ disabilities is needed because the challenge itself is not cognitive.
 
 The defensible product claim is:
 
-> KiwiCaptcha is engineered and automatically tested to support WCAG 2.2 Level AA within its component scope, and to support accessible identification and security workflows under Directive (EU) 2019/882 (European Accessibility Act).
+> KiwiCaptcha is engineered and automatically tested against the applicable
+> WCAG 2.2 A/AA success criteria within KiwiCaptcha's component test scope,
+> and to support accessible identification and security workflows under
+> Directive (EU) 2019/882 (European Accessibility Act).
 
 The stronger conformance statement — that KiwiCaptcha's user-facing
 widget conforms to WCAG 2.2 Level AA — is NOT published for any release
@@ -29,13 +31,13 @@ No completed artifact exists for v1.6.24 or v1.6.25, and automated
 evidence alone is not conformance evidence under WCAG (conformance
 depends on accessibility-supported technology).
 
-Component conformance is not whole-page conformance: KiwiCaptcha cannot
+A component test scope is not whole-page conformance: KiwiCaptcha cannot
 make an entire e-commerce site EAA-compliant by itself. The consuming
 service remains responsible for the page-level requirements (landmarks,
 headings, form labels, keyboard flow around the widget, language of the
 page, and the WCAG/EAA obligations of its own content).
 
-## Conformance scope
+## Component test scope
 
 The accessibility acceptance set below is enforced by the automated
 browser suite (`tests/browser/specs/a11y.spec.mjs`, run across
@@ -55,7 +57,7 @@ manual assistive-technology qualification checklist in the release gate.
 | No pointerdown-only activation | 2.5.2 | reacquisition uses the native button with click activation only |
 | Visible focus | 2.4.7 | `:focus-visible` ring on the Retry button (its 1.4.11 contrast is computed above) |
 | Pointer targets >= 24x24 CSS px (32px height) | 2.5.8 | `min-height: 32px; min-width: 24px` on the Retry button; bounding-box asserted |
-| No content/function loss at 200% text resize | 1.4.4 | 320 CSS px reflow + text-spacing overrides asserted; long German strings tested |
+| No content/function loss at 2x component font-scale enlargement (a component-level custom-property stress test, not browser/user text zoom; actual 200% browser zoom remains part of the manual accessibility qualification) | 1.4.4 | 320 CSS px reflow + text-spacing overrides asserted; long German strings tested |
 | Text spacing overrides (1.4.12) | 1.4.12 | letter/word spacing + line-height overrides injected and asserted |
 | Reduced motion eliminates decorative motion | 2.3.1 (A); 2.3.3 is Level AAA — the reduced-motion support satisfies 2.3.1 (A) plus above-AA 2.3.3 engineering | CSS animations + the SVG SMIL wink removed under `prefers-reduced-motion`; asserted |
 | Expiry never destroys host-form data or blocks reacquisition | 1.4.10 / 2.1.1 | expiry clears only the token field + fires the expired callback; the Retry button remains |

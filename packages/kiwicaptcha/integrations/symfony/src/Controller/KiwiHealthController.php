@@ -9,7 +9,7 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Rollback-resistant liveness/readiness split (audit #51/#58).
+ * Rollback-resistant liveness/readiness split.
  *
  *  - `/health/live`  — ALWAYS 200 while the process runs. Never tied to
  *    saturation, Redis, or any external state: a process that is up is
@@ -31,14 +31,14 @@ use Symfony\Component\HttpFoundation\Response;
  *         present, ready requires min_protocol_version <= 2 (this binary's
  *         max protocol version) AND min_policy_epoch <= the configured
  *         risk.policy_version — a NEWER central policy (mixed-version
- *         rolling deployments, rollbacks) takes the old binary OUT of the
+ *         rolling deployments, rollbacks) takes an outdated binary OUT of the
  *         pool BEFORE it serves traffic it cannot honor. When the key is
  *         ABSENT the binary's own configuration is authoritative.
- *      4. the MEMORY-BUDGET invariant holds (audit #68, only when
+ *      4. the MEMORY-BUDGET invariant holds (only when
  *         risk.container_memory_mib is configured):
  *         `argon2_max_concurrent_verifications × the FIXED Argon verification
  *         envelope (risk.argon_verification_memory_kib — the risk ladder's
- *         worst-case per-verification memory, audit #79; default 16384 KiB)
+ *         worst-case per-verification memory; default 16384 KiB)
  *         + 256 MiB headroom <= container_memory_mib`. A violated invariant
  *         refuses startup (503 memory_budget_invariant): the configured
  *         container cannot hold the worst-case memory-hard verification
@@ -65,7 +65,7 @@ final class KiwiHealthController
      */
     public const MAX_PROTOCOL_VERSION = 2;
 
-    /** Fixed headroom of the memory-budget invariant (audit #68), in MiB. */
+    /** Fixed headroom of the memory-budget invariant, in MiB. */
     public const MEMORY_HEADROOM_MIB = 256;
 
     /** In-process probe/state cache window in ms. */
@@ -107,7 +107,7 @@ final class KiwiHealthController
      *                                                   adaptive verification
      *                                                   memory envelope
      *                                                   (risk.argon_verification_
-     *                                                   memory_kib, audit #79)
+     *                                                   memory_kib)
      *                                                   — the worst-case
      *                                                   per-verification
      *                                                   memory of the risk
@@ -158,7 +158,7 @@ final class KiwiHealthController
     }
 
     /**
-     * The memory-budget readiness invariant (audit #68):
+     * The memory-budget readiness invariant:
      * `max(1, argon_concurrency) × MAX_PROFILE_MIB + MEMORY_HEADROOM_MIB
      * <= container_memory_mib`. True (ready) when the budget is null (the
      * check is skipped and documented) or the budget is large enough — a
@@ -183,10 +183,10 @@ final class KiwiHealthController
     }
 
     /**
-     * Max adaptive-profile memory in MiB (audit #68/#79): the risk ladder's
+     * Max adaptive-profile memory in MiB: the risk ladder's
      * largest per-verification memory is the FIXED verification envelope
-     * (risk.argon_verification_memory_kib) — audit #79 removed the
-     * escalating 16/32/64 MiB argon profiles, so the worst case is the
+     * (risk.argon_verification_memory_kib) — the
+     * escalating 16/32/64 MiB argon profiles are gone, so the worst case is the
      * single configured envelope, independent of the risk decision. Defaults
      * to the classic argon64 65536 KiB ceiling when the knob is absent.
      */

@@ -159,7 +159,7 @@ final class KernelIntegrationTest extends TestCase
         ]);
 
         $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
-        self::assertStringContainsString('data-kiwi-request-binding="txn-abc"', $html, 'the form-level transaction binding must render on the widget container (audit #41)');
+        self::assertStringContainsString('data-kiwi-request-binding="txn-abc"', $html, 'the form-level transaction binding must render on the widget container');
 
         // Without the option the attribute is absent (the static config
         // default is null in the test kernel).
@@ -211,7 +211,7 @@ final class KernelIntegrationTest extends TestCase
         $form->submit($this->solveToken($challenge));
         self::assertTrue($form->isValid(), $this->describe($form->getErrors(true)));
 
-        // Retry semantics (audit #74): an identical replay in the same
+        // Retry semantics: an identical replay in the same
         // context returns the SAME stored result WITHOUT a second
         // derivation — deterministic retry safety, not reuse of a second
         // operation. A replay under a DIFFERENT binding is rejected.
@@ -236,7 +236,7 @@ final class KernelIntegrationTest extends TestCase
         $violations = $validator->validate($dto);
         self::assertCount(0, $violations, $this->describeViolations($violations));
 
-        // Retry semantics (audit #74): the same token in the same context
+        // Retry semantics: the same token in the same context
         // returns the same stored result (idempotent), never a second
         // derivation.
         $violations = $validator->validate($dto);
@@ -244,7 +244,7 @@ final class KernelIntegrationTest extends TestCase
     }
 
     /**
-     * P2 scope/expected_scope consistency: the form's scope option drives the
+     * Scope/expected_scope consistency: the form's scope option drives the
      * constraint's expected scope, so a token minted for a 'signup' challenge
      * must be rejected by a form that declares scope 'login' (and vice versa).
      */
@@ -292,8 +292,8 @@ final class KernelIntegrationTest extends TestCase
     }
 
     /**
-     * Round 27 (P1): the REAL bundle routes must serve the compatibility
-     * loader — the browser fixture previously hid the missing Request
+     * The REAL bundle routes must serve the compatibility
+     * loader — the browser fixture hid the missing Request
      * import (the controller's type declarations resolved to a
      * nonexistent namespace-local class and the production routes could
      * not dispatch).

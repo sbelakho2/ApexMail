@@ -19,11 +19,11 @@ namespace KiwiCaptcha;
  *                {min_duration_ms}|{region}|{policy_version}|
  *                {request_binding}|{issuer}|{kid}" — region, request_binding
  *                and issuer render as the empty segment when unset,
- *                policy_version as the configured security-policy epoch
- *                (audits #42/#41/#67), kid as the configured signing key id
- *                (audit #91) — the FINAL canonical field
+ *                policy_version as the configured security-policy epoch,
+ *                kid as the configured signing key id
+ *                — the FINAL canonical field
  *   signature  = hex(hmac_sha256(K_challenge, canonical)) — HKDF-derived
- *                purpose key (audit #21, {@see DerivedKeys}); the master
+ *                purpose key ({@see DerivedKeys}); the master
  *                secret is never used directly as the signing key
  *   challenge  = base64(canonical) . "." . signature
  *   prefix     = "{challenge}|{salt}|"
@@ -61,7 +61,7 @@ final class Issuer
          * present (null when unbound) for parity with the Rust schema; a
          * verifier configured with an expected region rejects records whose
          * region does not match exactly. Must match the narrow identifier
-         * alphabet (audit #96) — at most 64 bytes of [A-Za-z0-9._:-].
+         * alphabet — at most 64 bytes of [A-Za-z0-9._:-].
          */
         private readonly ?string $region = null,
     ) {
@@ -80,7 +80,7 @@ final class Issuer
     /**
      * @throws \InvalidArgumentException when the scope is empty, longer than
      *                                   128 bytes, or outside the identifier
-     *                                   alphabet [A-Za-z0-9._:-] (audit #96);
+     *                                   alphabet [A-Za-z0-9._:-];
      *                                   when the request binding is longer
      *                                   than 128 bytes or outside the same
      *                                   alphabet
@@ -91,7 +91,7 @@ final class Issuer
         if ($scopeLen < 1 || $scopeLen > 128) {
             throw new \InvalidArgumentException('scope must be 1-128 bytes');
         }
-        // Audit #96: the narrow identifier alphabet subsumes the legacy '|'
+        // The narrow identifier alphabet subsumes the '|'
         // separator check — no scope can smuggle a canonical separator,
         // whitespace, invisible characters, or multi-byte text into the
         // signed payload.
@@ -217,7 +217,7 @@ final class Issuer
     ): Challenge {
         $profile->validate();
 
-        // Server-owned difficulty floors (audit #25): a client-reported
+        // Server-owned difficulty floors: a client-reported
         // capability can never lower the difficulty below the absolute
         // bounds the issuer signs. Argon2id memory must be 8..65536 KiB, the
         // time cost t >= 3 and parallelism exactly 1 — anything below would
@@ -267,8 +267,8 @@ final class Issuer
         );
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
-        // Round 26: the hostname (server-owned issuance metadata) must
-        // survive the profile path — previously dropped before storage.
+        // The hostname (server-owned issuance metadata) must
+        // survive the profile path.
         return (new self($config, $this->storage, $nowFn, $this->region))->issue($scope, $clientIp, $requestBinding, $hostname);
     }
 
@@ -276,7 +276,7 @@ final class Issuer
      * Protocol v2 nonce-bound IP binding tag.
      *
      * HMAC-SHA256 over the CANONICAL form of the client IP, keyed by the
-     * HKDF-derived IP-binding purpose key (K_ip_bind — audit #21,
+     * HKDF-derived IP-binding purpose key (K_ip_bind —
      * {@see DerivedKeys}; never the master secret itself) and bound to the
      * challenge nonce — so the stored binding is unique per challenge and
      * never a stable identifier that follows the client across requests.
@@ -334,7 +334,7 @@ final class Issuer
      * and base64-encoded into the challenge. Shared with the verifier so
      * issuance and verification can never drift apart.
      *
-     * Round-11 layout (audits #41/#42/#67/#91), byte-identical to the Rust
+     * Canonical v2 layout, byte-identical to the Rust
      * crate's `canonical_signing_input_v2`:
      *
      *     v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|
@@ -344,7 +344,7 @@ final class Issuer
      * with `region`, `request_binding` and `issuer` rendering as the EMPTY
      * segment when unset — so a null region + policy 1 + null binding +
      * null issuer + kid 1 ends the canonical with `|0||1|||1`. `kid` is
-     * the FINAL field (audit #91), appended AFTER `issuer`; it is ALWAYS
+     * the FINAL field, appended AFTER `issuer`; it is ALWAYS
      * present (the configured signing key id, default 1).
      */
     public static function canonicalPayload(
@@ -413,7 +413,7 @@ final class Issuer
     /**
      * Protocol v2 signature: hex HMAC-SHA256 of the canonical v2 payload
      * keyed by the HKDF-derived challenge-signing purpose key (K_challenge,
-     * audit #21 — {@see DerivedKeys}; the master secret is never used
+     * {@see DerivedKeys}; the master secret is never used
      * directly as the signing key). Byte-identical to the Rust crate's
      * `sign_canonical_v2`.
      */

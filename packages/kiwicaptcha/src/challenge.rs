@@ -39,9 +39,8 @@ type HmacSha256 = Hmac<Sha256>;
 /// The algorithm is decided at issuance time and carried explicitly on both
 /// the wire (`IssuedChallenge.algorithm`) and the stored record
 /// (`ChallengeRecord.algorithm`), so the solver and the verifier can never
-/// disagree about which computation to perform — a numeric `m_kib` flag was
-/// previously used as an implicit mode switch, which broke every challenge
-/// once the two sides interpreted it differently.
+/// disagree about which computation to perform — a numeric mode flag would
+/// leave room for the two sides to interpret it differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PoWAlgorithm {
@@ -112,8 +111,8 @@ pub enum BindingMode {
 /// binding_tag, issued_at, expires_at, algorithm 'sha256'|'argon2id', m_kib,
 /// t, p, target_bits, salt, prefix, challenge, min_duration_ms, issued_at_ns,
 /// attempts_used optional, protocol_version, region, policy_version,
-/// request_binding, issuer, kid — 23 keys). PoWAlgorithm already serializes
-/// lowercase — keep it. Both languages write and read this exact
+/// request_binding, issuer, kid, hostname — see `WIRE_KEYS` on the PHP side).
+/// Both languages write and read this exact
 /// shape, so a record persisted by PHP can be verified by Rust and vice
 /// versa.
 ///
@@ -172,9 +171,9 @@ pub struct ChallengeRecord {
     /// forgeable and is only used as telemetry. It is server-side state only
     /// (never signed into the canonical payload, never sent to the client);
     /// a ZERO value is REJECTED as malformed (`MissingIssuedAtNs`) — there is
-    /// no fallback to the attacker-controlled client duration (audit round
-    /// 17: the legacy fallback wording was removed; the verifier is strict).
-    /// The name keeps the historical `_ns` suffix for backward compatibility
+    /// no fallback to the attacker-controlled client duration; the verifier
+    /// is strict.
+    /// The name keeps the `_ns` suffix for backward compatibility
     /// with stored records; the UNIT is microseconds and is shared with PHP
     /// (`ChallengeRecord` JSON interchange).
     #[serde(default)]
@@ -196,8 +195,8 @@ pub struct ChallengeRecord {
     /// client-visible challenge (base64 of the canonical payload) — it is
     /// simply not separately exposed as a top-level response property. The
     /// JSON key is ALWAYS present for v2 records — `null` when the challenge
-    /// is region-unbound — for byte parity with the PHP `toArray()` key set
-    /// (23 keys). Absent in legacy stored records: `#[serde(default)]`.
+    /// is region-unbound — for byte parity with the PHP `toArray()` key set.
+    /// Absent in legacy stored records: `#[serde(default)]`.
     #[serde(default)]
     pub region: Option<String>,
     /// Security-policy epoch that authorized this challenge (signed). On
@@ -214,35 +213,35 @@ pub struct ChallengeRecord {
     #[serde(default)]
     pub request_binding: Option<String>,
     /// Deployment identity of the ISSUING application (e.g. "auth-gateway",
-    /// "signup-eu-1" — audit #67). Signed into the v2 canonical payload (the
+    /// "signup-eu-1"). Signed into the v2 canonical payload (the
     /// field before the FINAL `kid`) so a challenge minted for one audience
     /// cannot be redeemed in front of another verifier; a verifier configured
     /// with an expected issuer rejects records whose issuer differs — or that
     /// carry no issuer at all (fail closed). The JSON key is ALWAYS present
     /// for v2 records — `null` when unset — for byte parity with the PHP
-    /// `toArray()` key set (23 keys). Absent in legacy stored records:
+    /// `toArray()` key set. Absent in legacy stored records:
     /// `#[serde(default)]`.
     #[serde(default)]
     pub issuer: Option<String>,
-    /// Server-side issuance metadata (round 24): the Host the challenge was
+    /// Server-side issuance metadata: the Host the challenge was
     /// issued for, when the issuing application provides it. Used by the
     /// provider-compatible Siteverify response (`hostname` field); NEVER
     /// signed into the canonical payload and never sent to the client. The
     /// JSON key is ALWAYS present — `null` when unset — for byte parity
-    /// with the PHP `toArray()` key set (23 keys). Absent in legacy stored
+    /// with the PHP `toArray()` key set. Absent in legacy stored
     /// records: `#[serde(default)]`.
     #[serde(default)]
     pub hostname: Option<String>,
-    /// Key identifier of the signing secret this challenge was issued with
-    /// (audit #91). The FINAL v2 canonical field (`|<kid>` after the issuer);
+    /// Key identifier of the signing secret this challenge was issued with.
+    /// The FINAL v2 canonical field (`|<kid>` after the issuer);
     /// a verifier configured with a `secrets_by_kid` map selects the signing
     /// secret by this id and rejects unknown ids with
     /// [`crate::verify::VerifyError::UnknownKid`] — plus the forward guard: a
     /// record whose kid exceeds the verifier's newest configured kid is
     /// rejected even if the key were somehow known, so future-keyed
     /// challenges never verify on older nodes. The JSON key is ALWAYS
-    /// present (default 1 — the historical single-key deployments), so
-    /// pre-kid records keep verifying unchanged. Shared with the PHP core.
+    /// present (default 1), so records stored without a key id
+    /// keep verifying unchanged. Shared with the PHP core.
     #[serde(default = "default_kid")]
     pub kid: u32,
 }
@@ -319,17 +318,16 @@ pub struct ChallengeConfig {
     /// client-decodable from its canonical payload — but never separately
     /// exposed as a top-level response property.
     pub region: Option<String>,
-    /// Issuer identity stamped into every issued challenge (audit #67): a
+    /// Issuer identity stamped into every issued challenge: a
     /// stable deployment string (e.g. "auth-gateway") signed as the v2
     /// canonical field before the FINAL `kid`. A verifier configured with an
     /// expected issuer rejects records with a different — or missing —
     /// issuer ([`VerifyError::WrongIssuer`]).
     pub issuer: Option<String>,
-    /// Key identifier of the signing secret (audit #91). Stamped into every
+    /// Key identifier of the signing secret. Stamped into every
     /// issued record and signed as the FINAL v2 canonical field (`|<kid>`),
     /// so the verifier can rotate secrets: it picks the signing secret by
-    /// this id from its `secrets_by_kid` map. Default 1 — the historical
-    /// single-key deployments. Must be >= 1.
+    /// this id from its `secrets_by_kid` map. Default 1. Must be >= 1.
     pub kid: u32,
 }
 
@@ -414,7 +412,7 @@ pub fn hash_ip(ip: &str, salt: &str) -> String {
 /// `0x04` (IPv4) or `0x06` (IPv6), `canonical_ip_bytes` is the inet_pton
 /// byte sequence with IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) normalized
 /// to 4-byte IPv4, and `K_ip_bind` is the HKDF-derived IP-binding purpose key
-/// (audit #21 — see [`crate::keys::DerivedKeys`]; never the master secret
+/// (see [`crate::keys::DerivedKeys`]; never the master secret
 /// itself).
 ///
 /// The tag is **nonce-bound**: the same IP produces a different tag for every
@@ -445,7 +443,7 @@ pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignEr
 }
 
 /// The canonical current-time value for the `now_ns` parameter: epoch
-/// MICROSECONDS (despite the historical `_ns` name).
+/// MICROSECONDS (despite the `_ns` name).
 ///
 /// This is the unit Rust and PHP share in the `issued_at_ns` record field,
 /// so both sides must feed it the same way:
@@ -457,7 +455,7 @@ pub fn now_epoch_micros() -> u64 {
         .unwrap_or(0)
 }
 
-/// Whether `s` is a conforming identifier (audit #96): non-empty and every
+/// Whether `s` is a conforming identifier: non-empty and every
 /// byte in `[A-Za-z0-9._:-]`, at most `max_len` bytes.
 ///
 /// This is the narrow alphabet shared with the PHP core for `scope`,
@@ -491,8 +489,7 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// signature:
 /// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`.
 /// `region`, `request_binding` and `issuer` render as the EMPTY segment when
-/// unset; `kid` is the FINAL field (audit #91), appended after the issuer
-/// (audit #67).
+/// unset; `kid` is the FINAL field, appended after the issuer.
 pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
     format!(
         "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
@@ -517,9 +514,8 @@ pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
 }
 
 /// Sign a canonical input with the secret key, returning a hex HMAC tag
-/// (protocol v1 legacy path — the master key is used directly, exactly like
-/// the historical format; v2 records use the HKDF-derived challenge key via
-/// [`sign_canonical_v2`]).
+/// (protocol v1 legacy path — the master key is used directly; v2 records use
+/// the HKDF-derived challenge key via [`sign_canonical_v2`]).
 ///
 /// The secret key must be at least 16 bytes (the same minimum the PHP
 /// implementation enforces); 32 random bytes is the recommended size. Shorter
@@ -535,7 +531,7 @@ fn sign_canonical(canonical: &str, secret_key: &str) -> Result<String, SignError
 }
 
 /// Sign a canonical input with the HKDF-derived challenge-signing purpose key
-/// (`K_challenge`, audit #21 — protocol v2). The master secret is never used
+/// (`K_challenge` — protocol v2). The master secret is never used
 /// directly as the signing key.
 pub(crate) fn sign_canonical_v2(canonical: &str, secret_key: &str) -> Result<String, SignError> {
     if secret_key.len() < 16 {
@@ -577,8 +573,8 @@ pub fn verify_signature(
 /// Verify a signature over the protocol v2 canonical input of a record.
 ///
 /// Same constant-time guarantee as [`verify_signature`]. The signature is
-/// checked against the HKDF-derived challenge-signing key (`K_challenge`,
-/// audit #21), never the master secret directly.
+/// checked against the HKDF-derived challenge-signing key (`K_challenge`),
+/// never the master secret directly.
 pub fn verify_signature_v2(
     record: &ChallengeRecord,
     signature: &str,
@@ -591,7 +587,7 @@ fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Resul
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
-    // Audit #113: the HMAC-SHA256 tag is EXACTLY 64 hex characters — a
+    // The HMAC-SHA256 tag is EXACTLY 64 hex characters — a
     // longer signature is rejected before any hex::decode allocation
     // (attacker-written oversized signature bytes never drive a decode
     // buffer).
@@ -618,7 +614,7 @@ fn verify_canonical_v2(
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
-    // Audit #113: exact 64-hex-char signature pre-bound before any
+    // Exact 64-hex-char signature pre-bound before any
     // hex::decode allocation.
     if signature.len() != 64 {
         return Ok(false);
@@ -665,11 +661,11 @@ pub struct ChallengeCache {
 pub const SOLVER_MAX_TARGET_BITS: u32 = 20;
 
 /// Hard floor on the difficulty (`target_bits`) the VERIFIER accepts in a
-/// signed record (audit #87): 0 would accept a trivially-solvable challenge.
+/// signed record: 0 would accept a trivially-solvable challenge.
 /// Shared with the PHP core.
 pub const MIN_DIFFICULTY: u32 = 1;
 /// Hard ceiling on the difficulty (`target_bits`) the VERIFIER accepts in a
-/// signed record (audit #87): above the solver ceiling no legitimate widget
+/// signed record: above the solver ceiling no legitimate widget
 /// can finish. Applied to BOTH algorithms by `validate_record` — Argon2id
 /// issuance stays stricter ([`SOLVER_MAX_ARGON2_TARGET_BITS`]), exactly like
 /// the t=7..=16 verifier-vs-issuer split. Shared with the PHP core.
@@ -687,7 +683,7 @@ pub const SOLVER_MAX_HASHES: u64 = 5_000_000;
 pub const MAX_TTL_SECS: u64 = 300;
 
 /// Maximum tolerated clock skew (seconds) between the issuer and verifier
-/// clocks (audit #76). The TTL check rejects challenges whose `issued_at` is
+/// clocks. The TTL check rejects challenges whose `issued_at` is
 /// more than this far in the FUTURE relative to the verifier's current time
 /// — a future-issued challenge beyond the skew is a time-domain anomaly and
 /// invalid. Shared with the PHP core.
@@ -713,27 +709,27 @@ pub const SOLVER_MAX_ARGON2_TARGET_BITS: u32 = 10;
 pub const SOLVER_MAX_ARGON2_M_KIB: u32 = 65536;
 
 /// Hard floor on the Argon2id memory cost (KiB) the VERIFIER accepts in a
-/// signed record (audit #32). Below this the record is malformed —
+/// signed record. Below this the record is malformed —
 /// verification never runs a memory-hard computation with implausible
 /// parameters. Shared with the PHP core.
 pub const MIN_ARGON_MEMORY_KIB: u32 = 8;
 /// Hard ceiling on the Argon2id memory cost (KiB) the VERIFIER accepts in a
-/// signed record (audit #32). Matches [`SOLVER_MAX_ARGON2_M_KIB`]; above it
+/// signed record. Matches [`SOLVER_MAX_ARGON2_M_KIB`]; above it
 /// the record is malformed before any allocation. Shared with the PHP core.
 pub const MAX_ARGON_MEMORY_KIB: u32 = SOLVER_MAX_ARGON2_M_KIB;
 /// Hard floor on the Argon2id time cost the VERIFIER accepts in a signed
-/// record (audit #32): `t < 3` is not libsodium-representable. Shared with
+/// record: `t < 3` is not libsodium-representable. Shared with
 /// the PHP core.
 pub const MIN_ARGON_TIME: u32 = 3;
 /// Hard ceiling on the Argon2id time cost the VERIFIER accepts in a signed
-/// record (audit #32): above 16 the memory-hard computation is unbounded.
+/// record: above 16 the memory-hard computation is unbounded.
 /// Shared with the PHP core.
 pub const MAX_ARGON_TIME: u32 = 16;
 /// Hard floor on the Argon2id parallelism the VERIFIER accepts in a signed
-/// record (audit #32).
+/// record.
 pub const MIN_PARALLELISM: u32 = 1;
 /// Hard ceiling on the Argon2id parallelism the VERIFIER accepts in a signed
-/// record (audit #32).
+/// record.
 pub const MAX_PARALLELISM: u32 = 4;
 
 /// Expected hashes a browser solver can attempt per second (SHA-256, WASM).
@@ -830,20 +826,20 @@ impl Default for ChallengeCache {
 ///
 /// - `config` — difficulty + secret key.
 /// - `scope` — the auth flow ("login", "signup", "forgot-password", etc.);
-///   must be 1..=128 bytes of `[A-Za-z0-9._:-]` (audit #96) — anything else
+///   must be 1..=128 bytes of `[A-Za-z0-9._:-]` — anything else
 ///   is rejected with [`SignError::InvalidScope`].
 /// - `client_ip` — the client's IP address (hashed before storage).
 /// - `now_unix` — current Unix timestamp in seconds (injected for
 ///   testability); used for the signed payload, TTL, and the client-facing
 ///   challenge.
 /// - `now_ns` — high-resolution issuance timestamp in EPOCH MICROSECONDS
-///   (see [`now_epoch_micros`]; the field name keeps the historical `_ns`
+///   (see [`now_epoch_micros`]; the field name keeps the `_ns`
 ///   suffix but the unit is microseconds, shared with PHP), used exclusively
 ///   for server-side minimum-duration enforcement.
 /// - `active_solves` — current number of active solvers (for auto-tuning).
-/// - `request_binding` — the application-supplied transaction binding
-///   (audit #41); when set, must be 1..=128 bytes of `[A-Za-z0-9._:-]`
-///   (audit #96) — anything else is rejected with
+/// - `request_binding` — the application-supplied transaction binding;
+///   when set, must be 1..=128 bytes of `[A-Za-z0-9._:-]`
+///   — anything else is rejected with
 ///   [`SignError::InvalidIdentifier`]. `config.region` (<= 64 bytes) and
 ///   `config.issuer` (<= 128 bytes) are validated the same way.
 ///
@@ -868,7 +864,7 @@ pub fn issue_challenge(
     if !valid_identifier(scope, 128) {
         return Err(SignError::InvalidScope);
     }
-    // Audit #96: issuer/region/request_binding share the narrow identifier
+    // issuer/region/request_binding share the narrow identifier
     // alphabet; a non-conforming value must never be minted into a record
     // (the verifier would reject it as malformed — and Unicode/space
     // identifiers would break the canonical payload's byte-contract).
@@ -980,7 +976,7 @@ pub fn issue_challenge(
     // parameter (algorithm, difficulty, TTL, salt, …) can be tampered with
     // without breaking the signature. The challenge string is
     // `base64(canonical).hex_tag` — same structure as v1. The signature is
-    // computed with the HKDF-derived challenge key (audit #21), never the
+    // computed with the HKDF-derived challenge key, never the
     // master secret directly.
     let mut record = ChallengeRecord {
         nonce: nonce.clone(),
@@ -1103,12 +1099,13 @@ pub enum SignError {
     /// fail rather than fall back to a weak generator.
     #[error("OS cryptographic randomness unavailable")]
     Rng,
-    /// The auth scope must be 1..=128 bytes of `[A-Za-z0-9._:-]` (audit #96;
-    /// the historical `|` ban is subsumed — `|` is outside the alphabet).
+    /// The auth scope must be 1..=128 bytes of `[A-Za-z0-9._:-]` (
+    /// `|` is outside the alphabet, so a scope can never smuggle a canonical
+    /// separator into the signed payload).
     #[error("scope must be 1..=128 bytes of [A-Za-z0-9._:-]")]
     InvalidScope,
     /// Issuer, region or request_binding must be non-empty and match the
-    /// narrow identifier alphabet `[A-Za-z0-9._:-]` (audit #96) with the
+    /// narrow identifier alphabet `[A-Za-z0-9._:-]` with the
     /// length caps: issuer <= 128 bytes, request_binding <= 128 bytes,
     /// region <= 64 bytes.
     #[error("issuer/region/request_binding must be non-empty and match [A-Za-z0-9._:-] with the length caps (issuer 128, request_binding 128, region 64)")]
@@ -1291,7 +1288,7 @@ mod tests {
 
     #[test]
     fn oversized_signature_is_rejected_before_hex_decode() {
-        // Audit #113: the HMAC-SHA256 tag is exactly 64 hex characters — a
+        // The HMAC-SHA256 tag is exactly 64 hex characters — a
         // longer signature is rejected as a mismatch BEFORE any hex::decode
         // allocation (an attacker-written megabyte "signature" never drives
         // a decode buffer), on both the v1 and v2 canonical paths.
@@ -1563,7 +1560,7 @@ mod tests {
     fn auto_tune_disabled_ignores_tuning_bounds() {
         // With auto_tune off, the tuning bounds must have NO effect: only the
         // solver ceiling caps target_bits. A target_bits below the tuning min
-        // stays as-is (previously it was clamped UP to auto_tune_min_bits).
+        // stays as-is — it is never raised to the tuning bound.
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
@@ -2037,13 +2034,13 @@ mod tests {
 
     #[test]
     fn issuance_enforces_the_narrow_identifier_alphabet() {
-        // Audit #96: scope/issuer/region/request_binding must match
+        // scope/issuer/region/request_binding must match
         // [A-Za-z0-9._:-]+ with the length caps — issuance refuses to mint
         // a record the verifier would declare malformed.
         let base = profile_base_config();
 
         // Scope: Unicode and spaces are rejected (InvalidScope); the
-        // historical `|` ban is subsumed by the alphabet.
+        // `|` separator is outside the alphabet entirely.
         for bad_scope in ["логин", "log in", "login|admin", ""] {
             assert!(
                 matches!(
@@ -2232,8 +2229,8 @@ mod tests {
 
     #[test]
     fn issuance_stamps_and_signs_the_kid() {
-        // Audit #91: config.kid is stamped on the record and signed as the
-        // FINAL canonical field — the record JSON carries it (23 keys) and
+        // config.kid is stamped on the record and signed as the
+        // FINAL canonical field — the record JSON carries it and
         // the signed challenge string embeds it byte-exactly.
         let base = profile_base_config();
         let with_kid = ChallengeConfig {
@@ -2285,7 +2282,7 @@ mod tests {
 
     #[test]
     fn issue_with_profile_rejects_floor_violating_argon_profiles() {
-        // Audit #25: the issuer refuses profiles with m_kib below 8, t below
+        // The issuer refuses profiles with m_kib below 8, t below
         // 3, or p != 1 — a profile must never mint a challenge the verifier
         // would reject.
         let config = profile_base_config();

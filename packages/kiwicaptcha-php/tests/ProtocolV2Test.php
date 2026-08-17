@@ -110,7 +110,7 @@ final class ProtocolV2Test extends TestCase
             5,
         );
 
-        // Round-11 layout (audits #41/#42/#67/#91): the canonical carries
+        // Canonical v2 layout: the canonical carries
         // region (empty when unset), policy_version, request_binding (empty
         // when unset), issuer (empty when unset), and the FINAL kid segment
         // (default 1) — byte-identical to the Rust canonical_signing_input_v2.
@@ -119,7 +119,7 @@ final class ProtocolV2Test extends TestCase
 
     public function testCanonicalPayloadCarriesIssuerThenKidAsFinalSegments(): void
     {
-        // Audits #67/#91: the issuer is appended AFTER request_binding, and
+        // The issuer is appended AFTER request_binding, and
         // kid is the FINAL canonical field — issuer "prod" + kid 3 end the
         // canonical with |prod|3.
         $canonical = Issuer::canonicalPayload(
@@ -187,7 +187,7 @@ final class ProtocolV2Test extends TestCase
         // readers still ACCEPT ip_hash-only legacy records.
         self::assertArrayNotHasKey('ip_hash', $data);
         self::assertSame(2, $data['protocol_version']);
-        self::assertSame(1, $data['kid'], 'toArray must always emit the kid key (audit #91)');
+        self::assertSame(1, $data['kid'], 'toArray must always emit the kid key');
     }
 
     public function testFromArrayBindingTagDefaultsToProtocolV2(): void
@@ -216,7 +216,7 @@ final class ProtocolV2Test extends TestCase
     {
         // The Rust reader uses serde #[serde(alias = "ip_hash")] and rejects
         // a struct carrying BOTH the field and its alias as a duplicate
-        // field — the strict parser mirrors that (audit #56).
+        // field — the strict parser mirrors that.
         $data = $this->record()->toArray();
         $data['ip_hash'] = 'stale-mirror';
 

@@ -4,7 +4,7 @@ Privacy-preserving proof-of-work anti-abuse protection with first-party behavior
 
 **KiwiCaptcha is not a reliable human-vs-bot discriminator.** A human never solves the challenge — their CPU does, and a bot's CPU can do the same work. The core value is economic: every signup/login/reset/scraping attempt carries a real, tunable computational cost, making mass abuse uneconomical. Browser behavioral telemetry is a **supplement, not the security boundary** — it is client-controlled and forgeable.
 
-This package is **fully decoupled** from the ApexMail email API SDK: it implements the entire KiwiCaptcha protocol itself (challenge issuance, HMAC signing, IP binding, single-use storage, proof-of-work verification) and needs nothing but PHP + libsodium.
+This package is **fully self-contained**: it implements the entire KiwiCaptcha protocol itself (challenge issuance, HMAC signing, IP binding, single-use storage, proof-of-work verification) and needs nothing but PHP + libsodium.
 
 ## Protocol compatibility
 
@@ -14,15 +14,16 @@ Byte-for-byte compatible with the reference implementation in
 **Protocol v2** (current issuance, `protocol_version` 2):
 
 - canonical payload = `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`
-  (round 11: `region`/`request_binding`/`issuer` render as empty segments
-  when unset; `policy_version` is the security-policy epoch, default 1;
-  `issuer` is the deployment identity — a dev/staging/production
-  compartment that holds even with shared secret keys, audit #67; `kid` is
-  the signing key id, default 1, the FINAL canonical field — the verifier
-  selects the signature secret per kid via `secretsByKid`, audit #91, and
-  rejects any record whose kid is in its `revokedKids` set with UnknownKid
-  IMMEDIATELY — compromise revocation overrides the rotation grace, audit
-  #117)
+  (the canonical key set is `ChallengeRecord::WIRE_KEYS` — the single
+  source of truth for the record schema; `region`/`request_binding`/
+  `issuer` render as empty segments when unset; `policy_version` is the
+  security-policy epoch, default 1; `issuer` is the deployment identity —
+  a dev/staging/production compartment that holds even with shared secret
+  keys; `kid` is the signing key id, default 1, the FINAL canonical field
+  — the verifier selects the signature secret per kid via `secretsByKid`
+  and rejects any record whose kid is in its `revokedKids` set with
+  UnknownKid IMMEDIATELY — compromise revocation overrides the rotation
+  grace)
 - challenge = `base64(canonical_payload) + "." + hex(hmac_sha256(secret, canonical_payload))` —
   **full-parameter signing**: every record field that shapes verification is
   covered by the HMAC, so a tampered record can never pass
@@ -62,13 +63,13 @@ Byte-for-byte compatible with the reference implementation in
   minimum-duration floor; a receipt time preceding issuance beyond the
   tolerance is rejected. Hosts should be NTP-synced.
 
-**Protocol v1 migration window**: legacy challenges
+**Protocol v1**: legacy challenges
 (`challenge = base64(nonce|scope|ip_hash|issued_at) + "." + hex(hmac)`,
-`protocol_version` 1) are still accepted for at most one TTL after a
-deploy — v1 records expire naturally under the normal
-`expires_at`, and issuance never produces them again. The v1
-`hash(sha256, secret || ip)` IP hash is retained as
-`Issuer::hashIp()` for this path only.
+`protocol_version` 1). Protocol-v1 verification remains available only
+through explicit `acceptLegacyV1` opt-in for a controlled migration
+window. Default verification rejects v1. Issuance never produces v1
+challenges again; the v1 `hash(sha256, secret || ip)` IP hash is
+retained as `Issuer::hashIp()` for this path only.
 
 - minimum solve duration: enforced **server-side**, measured from challenge
   issuance to verification receipt — a timing-anomaly heuristic, not a
@@ -87,27 +88,23 @@ deploy — v1 records expire naturally under the normal
   the challenge record to consumed BEFORE the proof is checked, so a wrong
   candidate burns the challenge. There is no `maxAttempts` parameter: the
   one-shot record IS the attempt bound (each submitted token can cost at most
-  one memory-hard hash). The record is KEPT until its TTL (audit #74) and
+  one memory-hard hash). The record is KEPT until its TTL and
   carries the committed deterministic result: a retry on an already-consumed
   record returns the SAME outcome (Valid/InsufficientWork) without
   re-deriving; a consumed record without a committed result (crash between
   consume and commit) is reported as ConsumeIndeterminate. After the proof
   derives, a FINAL REVALIDATION re-checks expiry and the current
-  policy/region/issuer expectations with the verifier's clock (audit #59).
+  policy/region/issuer expectations with the verifier's clock.
   Strict single-use under concurrency requires an atomic consume
   (`RedisStorage`, fused Lua transition — atomic state flip, any Redis with
   Lua); PSR-6 pools are best-effort (see [Storage](#storage)).
 - **shared language-neutral record format**: challenge records are persisted
-  as JSON whose keys match the Rust crate's serde schema one-to-one — 22
-  canonical keys (`nonce`, `scope`, `binding_tag`, `issued_at`, `expires_at`,
-  `algorithm`, `m_kib`, `t`, `p`, `target_bits`, `salt`, `prefix`,
-  `challenge`, `min_duration_ms`, `issued_at_ns`, `protocol_version`,
-  `attempts_used`, `region`, `policy_version`, `request_binding`, `issuer`,
-  `kid`),
-  with `issued_at_ns` epoch microseconds in both implementations — a PHP
-  service and a Rust service can read each other's records from the same
-  Redis instance. The storage layer WRAPS the canonical JSON with two runtime
-  fields (`state` "pending"|"consumed" and `consumed_result`
+  as JSON whose keys match the Rust crate's serde schema one-to-one — the
+  canonical `ChallengeRecord::WIRE_KEYS` key set, with `issued_at_ns` epoch
+  microseconds in both implementations — a PHP service and a Rust service
+  can read each other's records from the same Redis instance. The storage
+  layer WRAPS the canonical JSON with two runtime fields
+  (`state` "pending"|"consumed" and `consumed_result`
   {valid, binding}) that are stripped before parsing — the canonical record
   itself never changes.
 
@@ -121,9 +118,12 @@ KiwiCaptcha's proof-of-work protocol itself **collects no behavioral or
 device telemetry and creates no stable client identifier**: the binding tag
 is a per-challenge HMAC bound to the nonce, and nothing in the record links
 a challenge to a previous one. The optional first-party behavioral
-telemetry (input-event timing, screen/device signals) is client-controlled,
-opt-in, and used only as a supplementary verification signal — it is never
-sent anywhere but your own server and can be disabled entirely.
+telemetry is client-controlled, opt-in, and used only as a supplementary
+verification signal — it is never sent anywhere but your own server and can
+be disabled entirely. The widget collects NO hardware-capability,
+device-memory, or screen signals; `minimal` mode reports only aggregate
+widget interaction counts, and `full` adds `navigator.webdriver` and at
+most 20 coarse 250 ms timing samples.
 
 ## Installation
 
@@ -216,7 +216,7 @@ This package itself is framework-neutral: it requires only PHP + libsodium.
 ## Storage
 
 One-shot semantics are enforced by `StorageInterface::consume()`: it
-transitions the record to consumed and KEEPS it until its TTL (audit #74),
+transitions the record to consumed and KEEPS it until its TTL,
 so replaying a token observes the consumed marker — plus the committed
 deterministic result when one was stored — instead of a missing record.
 `StorageInterface::commitResult()` stores that result atomically
@@ -237,12 +237,13 @@ pass.
 In production, use `RedisStorage` (or any `AtomicStorageInterface` backed by
 an atomic transition-style consume) so challenges are shared across workers
 and consumed exactly once. RedisStorage persists records as
-**language-neutral JSON** (the 22 canonical keys matching the Rust crate's
-serde schema — plus the storage runtime fields `state`/`consumed_result`
-wrapped around them — with `issued_at_ns` in epoch microseconds), so a Rust
-service can read the same records from the same Redis instance.
+**language-neutral JSON** (the canonical `ChallengeRecord::WIRE_KEYS` key
+set matching the Rust crate's serde schema — plus the storage runtime
+fields `state`/`consumed_result` wrapped around them — with `issued_at_ns`
+in epoch microseconds), so a Rust service can read the same records from
+the same Redis instance.
 
-### Redis script versioning (audit #116)
+### Redis script versioning
 
 `RedisStorage`'s atomic transitions (`consume`, `commitResult`) are plain
 **EVAL scripts embedded in the crate source** (`CONSUME_SCRIPT` /
@@ -278,23 +279,21 @@ nonce-bound binding tags over the canonical IP form incl. IPv4-mapped IPv6
 normalization, `binding_tag`/`protocol_version` record schema evolution,
 counter bounds), token codec edge cases, replay, tampering, expiry, IP
 binding, minimum duration, clock-skew tolerance, the one-shot
-consume-on-verify model, kid-keyed secrets with compromise revocation
-(audits #91/#117), allocation/length and recursion hardening (audits
-#113/#114/#115 — the 659-accepted differential fuzz corpus, 1 MB token and
-10 MB body caps, 100k-level nesting), and the storage adapters (Array,
-PSR-6, Redis — including the language-neutral JSON record format). The
-Symfony integration is tested in the `bel-consulting/kiwicaptcha-symfony`
-package.
+consume-on-verify model, kid-keyed secrets with compromise revocation,
+allocation/length and recursion hardening (the 659-accepted differential
+fuzz corpus, 1 MB token and 10 MB body caps, 100k-level nesting), and the
+storage adapters (Array, PSR-6, Redis — including the language-neutral JSON
+record format). The Symfony integration is tested in the
+`bel-consulting/kiwicaptcha-symfony` package.
 
 ## Limitations
 
 1. **Proof of computation, not proof of human.** KiwiCaptcha verifies that a
    client spent CPU time — not that a human did. Any automated client that
    pays the same cost passes.
-2. **Telemetry is client-controlled and forgeable.** Input events and
-   whatever the widget reports, a custom client can omit or fake; a
-   custom client can omit or fake them. Treat telemetry as a supplementary
-   signal, never the security boundary.
+2. **Telemetry is client-controlled and forgeable.** Whatever the widget
+   reports, a custom client can omit or fake. Treat telemetry as a
+   supplementary signal, never the security boundary.
 3. **IP binding is best-effort.** IPs legitimately change behind NAT/proxies,
    so a strict binding would reject real users. Protocol v2's binding is
    nonce-bound (a per-challenge HMAC, never a stable identifier) and
@@ -364,7 +363,7 @@ No `$remote_addr`, no `$request_body`.
 Use a private Redis (Unix socket or private network, ACLs, TLS when crossing
 hosts, no public listener). For ephemeral challenge state prefer a dedicated
 database with persistence disabled — records already carry a short TTL and
-are atomically transitioned to consumed (fused Lua, audit #74). Rate-limit
+are atomically transitioned to consumed (fused Lua). Rate-limit
 identifiers are peppered HMACs, never raw IPs; challenge records hold a
 nonce-bound binding tag, never a raw IP and never a stable IP-derived
 identifier.

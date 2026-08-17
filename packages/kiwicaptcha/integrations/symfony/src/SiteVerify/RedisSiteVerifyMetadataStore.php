@@ -7,7 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 use KiwiCaptcha\Storage\StorageInterface;
 
 /**
- * Redis-backed metadata sidecar (round 30 P1). Namespace:
+ * Redis-backed metadata sidecar. Namespace:
  * `{kiwi:<namespace>}:siteverify-meta:<nonce>` — the nonce is random and
  * bounded, so the key space is safe. TTL equals the challenge lifetime
  * plus a small replay/response margin (the caller passes it).

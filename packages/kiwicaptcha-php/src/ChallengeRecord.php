@@ -9,12 +9,8 @@ namespace KiwiCaptcha;
  *
  * Mirrors the Rust `ChallengeRecord` fields EXACTLY (serde key names and
  * types), so a PHP service and a Rust service can share the same Redis
- * records: the JSON keys match the Rust serde schema one-to-one
- * (`nonce`, `scope`, `binding_tag`, `issued_at`, `expires_at`, `algorithm`
- * `'sha256'|'argon2id'`, `m_kib`, `t`, `p`, `target_bits`, `salt`,
- * `prefix`, `challenge`, `min_duration_ms`, `issued_at_ns`,
- * `protocol_version`, `attempts_used`, `region`, `policy_version`,
- * `request_binding`, `issuer`, `kid` — 23 keys).
+ * records: the JSON keys match the Rust serde schema one-to-one — the
+ * canonical key list is {@see self::WIRE_KEYS}.
  *
  * Protocol v2 migration: v2 records carry `binding_tag` (a nonce-bound
  * HMAC, never a stable IP-derived identifier — see
@@ -34,25 +30,24 @@ namespace KiwiCaptcha;
  * `issuedAtNs` is a server-side-only high-resolution issuance timestamp in
  * WALL-CLOCK epoch microseconds (microseconds since Unix epoch, not
  * monotonic nanoseconds: hrtime() is per-host and cannot be persisted to
- * shared storage). The unit is IDENTICAL in the Rust crate (also being
- * moved to epoch microseconds in parallel), so records are interoperable.
- * The field name and JSON key stay `issuedAtNs` for serialization
- * stability; 0 remains the legacy "unknown" marker. It is never signed
- * into the challenge payload and never sent to the client — the verifier
- * uses it to measure elapsed solve time on the server instead of trusting
- * the client-reported duration.
+ * shared storage). The unit is IDENTICAL in the Rust crate, so records are
+ * interoperable. The field name and JSON key stay `issuedAtNs` for
+ * serialization stability; 0 marks an unknown issuance time. It is never
+ * signed into the challenge payload and never sent to the client — the
+ * verifier uses it to measure elapsed solve time on the server instead of
+ * trusting the client-reported duration.
  *
- * `region` is server-side deployment metadata (like `issuedAtNs` — never
- * signed into the challenge, though it IS part of the v2 canonical payload
- * since round 9; see {@see Issuer::canonicalPayload()}): the region the
- * challenge was issued for, or null when unbound. The JSON key is ALWAYS
- * present (null when unbound) for byte parity with the Rust serde schema
- * (23 keys including hostname), which the Rust reader requires via
- * `#[serde(default)]` for legacy records. A verifier configured with an expected region rejects
- * records whose region does not match exactly
+ * `region` is server-side deployment metadata included in the v2 canonical
+ * payload (therefore authenticated by the challenge HMAC — see
+ * {@see Issuer::canonicalPayload()}); it is not client-authorized. The
+ * JSON key is ALWAYS present (null when unbound) for byte parity with the
+ * Rust serde schema, which the Rust reader requires via
+ * `#[serde(default)]` for records written before the key existed. A
+ * verifier configured with an expected region rejects records whose
+ * region does not match exactly
  * ({@see \KiwiCaptcha\VerifyError::WrongRegion}).
  *
- * `issuer` (audit #67) is the deployment identity the challenge was issued
+ * `issuer` is the deployment identity the challenge was issued
  * under (e.g. "dev", "staging", "prod") — a dev/staging/production
  * compartment that works even when deployments share secret keys. Like
  * `region` it is ALWAYS present in `toArray()` (null when unset) and is
@@ -61,18 +56,18 @@ namespace KiwiCaptcha;
  * configured with an expected issuer rejects records whose issuer does not
  * match exactly ({@see \KiwiCaptcha\VerifyError::WrongIssuer}).
  *
- * `policyVersion` (audit #42) is the security-policy epoch that authorized
+ * `policyVersion` is the security-policy epoch that authorized
  * this challenge — the Rust field is `policy_version: u32` with default 1,
- * never null on the wire. `requestBinding` (audit #41) is the
+ * never null on the wire. `requestBinding` is the
  * application-supplied transaction binding nonce the host must present
  * again on the final protected POST (Rust: `request_binding:
  * Option<String>`, null when unset). Both keys are ALWAYS present in
  * `toArray()`; `policy_version` serializes as 1 when the ctor value is null
  * (a null would be unreadable by the Rust u32 reader).
  *
- * `kid` (audit #91) is the signing key id the challenge was issued under
- * (Rust: `kid: u32` with serde default 1 — missing defaults to 1, so
- * pre-kid records keep their 659-corpus acceptance). Like `policy_version`
+ * `kid` is the signing key id the challenge was issued under
+ * (Rust: `kid: u32` with serde default 1 — a missing key defaults to 1, so
+ * records written before key ids existed still load). Like `policy_version`
  * it is NEVER null on the wire: `toArray()` emits 1 when the ctor value is
  * null (a null would be unreadable by the Rust u32 reader). It is signed
  * as the FINAL v2 canonical field (appended AFTER `issuer` — see
@@ -82,25 +77,29 @@ namespace KiwiCaptcha;
  * ({@see \KiwiCaptcha\VerifyError::UnknownKid}, the rollback/forward
  * guard).
  *
- * `fromArray()` is the strict serde-mirror parser (audit #56): it accepts
+ * `hostname` is server-side issuance metadata (the Siteverify host the
+ * challenge was issued for), ALWAYS present in `toArray()` (null when
+ * unset); it is never signed into the challenge and never sent to the
+ * client.
+ *
+ * `fromArray()` is the strict serde-mirror parser: it accepts
  * EXACTLY what the Rust `serde_json::from_str::<ChallengeRecord>` accepts —
  * whitelisted keys only, exact lowercase algorithm values, strict integer
  * types and ranges, strings capped at 4096 bytes, nulls only where
  * `Option` allows them. Anything else throws
  * {@see \KiwiCaptcha\MalformedRecordException}. NOTE: base64 is NOT
  * validated here — serde treats `nonce`/`salt` as plain strings at parse
- * time, and the differential fuzz corpus (1000 deterministic mutations)
- * pins both parsers to the same 659-accepted split.
+ * time, and the differential fuzz corpus pins both parsers to the same
+ * acceptance split.
  */
 final class ChallengeRecord
 {
     /**
-     * The 23-key wire schema (round 28: hostname is the 23rd key, always
-     * present, null when unbound), mirroring the Rust serde struct fields
+     * The canonical wire schema, mirroring the Rust serde struct fields
      * (deny_unknown_fields). `ip_hash` is the legacy v1 alias for
      * `binding_tag` (serde `#[serde(alias = "ip_hash")]`). `issuer`
-     * (audit #67) is the deployment identity — always present, null when
-     * unset. `kid` (audit #91) is the signing key id — always present,
+     * is the deployment identity — always present, null when
+     * unset. `kid` is the signing key id — always present,
      * default 1.
      */
     public const WIRE_KEYS = [
@@ -120,7 +119,7 @@ final class ChallengeRecord
         'challenge', 'min_duration_ms',
     ];
 
-    /** Maximum byte length of any wire string (audit #56 ceiling). */
+    /** Maximum byte length of any wire string, mirroring the serde parse ceiling. */
     public const MAX_STRING_BYTES = 4096;
 
     public function __construct(
@@ -145,14 +144,14 @@ final class ChallengeRecord
         public readonly ?string $requestBinding = null,
         public readonly ?string $issuer = null,
         public readonly ?int $kid = 1,
-        // Server-side issuance metadata (round 24): the Host the challenge
+        // Server-side issuance metadata: the Host the challenge
         // was issued for (Siteverify `hostname`); never signed, never sent.
         public readonly ?string $hostname = null,
     ) {
     }
 
     /**
-     * Validates a wire hostname (round 26): a label string of at most
+     * Validates a wire hostname: a label string of at most
      * MAX_STRING_BYTES with no whitespace/control characters, or null.
      *
      * @throws MalformedRecordException on structural violations
@@ -176,11 +175,11 @@ final class ChallengeRecord
     }
 
     /**
-     * Compatibility accessor for callers of the pre-v2 `ipHash` property:
-     * the field now stores the nonce-bound binding tag
-     * ({@see Issuer::bindingTag()}). For v1 records this is exactly the
-     * legacy `hash(sha256, secret || ip)` value, so the accessor returns
-     * the same bytes callers of v1 records expect.
+     * Compatibility accessor exposing the binding tag under the legacy
+     * `ipHash` name: the field stores the nonce-bound binding tag
+     * ({@see Issuer::bindingTag()}). For v1 records the binding tag is
+     * exactly the legacy `hash(sha256, secret || ip)` value, so the
+     * accessor returns the same bytes callers of v1 records expect.
      */
     public function ipHash(): string
     {
@@ -222,21 +221,21 @@ final class ChallengeRecord
             // Deployment metadata — ALWAYS present (null when the challenge
             // is region-unbound) for byte parity with the Rust serde schema.
             'region' => $this->region,
-            // Security-policy epoch (audit #42). The Rust field is u32 and
+            // Security-policy epoch. The Rust field is u32 and
             // never serializes null — a null ctor value degrades to the
             // default epoch so PHP-written records stay readable by Rust.
             'policy_version' => $this->policyVersion ?? 1,
-            // Application transaction binding (audit #41) — null when unset.
+            // Application transaction binding — null when unset.
             'request_binding' => $this->requestBinding,
-            // Deployment identity (audit #67) — ALWAYS present (null when
+            // Deployment identity — ALWAYS present (null when
             // unset) for byte parity with the Rust serde schema.
             'issuer' => $this->issuer,
-            // Signing key id (audit #91) — ALWAYS present. The Rust field is
+            // Signing key id — ALWAYS present. The Rust field is
             // u32 and never serializes null — a null ctor value degrades to
             // the default key id 1 so PHP-written records stay readable by
             // Rust (mirror of policy_version).
             'kid' => $this->kid ?? 1,
-            // Server-side issuance metadata (round 24) — ALWAYS present
+            // Server-side issuance metadata — ALWAYS present
             // (null when unset) for byte parity with the Rust serde schema.
             'hostname' => $this->hostname,
         ];
@@ -244,14 +243,14 @@ final class ChallengeRecord
 
     /**
      * Rebuild a record from persisted (JSON-decoded) data — the strict
-     * serde-mirror parser (audit #56).
+     * serde-mirror parser.
      *
      * Accepts exactly what the Rust `ChallengeRecord` serde schema accepts:
      * - only the whitelisted keys in {@see self::WIRE_KEYS} (the canonical
-     *   schema — the list itself is the source of truth, not a prose count;
-     *   round 30) plus the legacy `ip_hash` alias, which
-     *   must not appear alongside `binding_tag`); unknown keys — including
-     *   trailing garbage — throw {@see MalformedRecordException};
+     *   schema — the list itself is the source of truth) plus the legacy
+     *   `ip_hash` alias, which must not appear alongside `binding_tag`);
+     *   unknown keys — including trailing garbage — throw
+     *   {@see MalformedRecordException};
      * - required fields must be present; optional fields default
      *   (`issued_at_ns` 0, `attempts_used` 0, `protocol_version` 1,
      *   `region` null, `policy_version` 1, `request_binding` null,
@@ -265,10 +264,10 @@ final class ChallengeRecord
      * - `algorithm` must be exactly `sha256` or `argon2id` (no aliases);
      * - null is only legal for `region`, `request_binding` and `issuer`
      *   (Option fields);
-     * - the deployment-bound identifiers `region`, `request_binding` and
-     *   `issuer` must match the narrow identifier alphabet
-     *   `[A-Za-z0-9._:-]+` (audit #96) with their length caps (64 / 128 /
-     *   128 bytes) — Unicode, whitespace, invisible characters, empty
+ * - the deployment-bound identifiers `region`, `request_binding` and
+ *   `issuer` must match the narrow identifier alphabet
+ *   `[A-Za-z0-9._:-]+` with their length caps (64 / 128 /
+ *   128 bytes) — Unicode, whitespace, invisible characters, empty
      *   strings and canonical separators are rejected. `scope` is
      *   deliberately NOT validated here: serde treats it as an opaque
      *   string, and the differential fuzz corpus pins both parsers to the
@@ -357,10 +356,10 @@ final class ChallengeRecord
 
         // Option fields: null or string (region, request_binding, issuer).
         // The deployment-bound identifiers must also match the narrow
-        // alphabet (audit #96) with their length caps: region <= 64,
+        // identifier alphabet with their length caps: region <= 64,
         // request_binding <= 128, issuer <= 128. NOTE: scope is exempt —
         // serde treats it as an opaque string and the fuzz corpus pins both
-        // parsers to the same 659-accepted split (the verifier's
+        // parsers to the same acceptance split (the verifier's
         // validateRecord enforces the scope alphabet instead).
         foreach (['region', 'request_binding', 'issuer'] as $field) {
             if (isset($data[$field]) && $data[$field] !== null) {
@@ -393,9 +392,9 @@ final class ChallengeRecord
             requestBinding: $data['request_binding'] ?? null,
             issuer: $data['issuer'] ?? null,
             kid: $data['kid'] ?? 1,
-            // Round 26: server-owned issuance metadata — parsed, validated
+            // Server-owned issuance metadata — parsed, validated
             // and passed through so a serialize -> Redis -> deserialize
-            // cycle preserves it (previously dropped in fromArray).
+            // cycle preserves it.
             hostname: isset($data['hostname']) ? self::validateHostname($data['hostname']) : null,
         );
     }

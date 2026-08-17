@@ -16,8 +16,8 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Security-policy epoch (audit #42) and application transaction binding
- * (audit #41): the issued record carries `policy_version` (Config, default
+ * Security-policy epoch and application transaction binding:
+ * the issued record carries `policy_version` (Config, default
  * 1) and `request_binding` (issue-time nonce); both are part of the signed
  * v2 canonical payload; a verifier configured with an expected policy epoch
  * rejects records issued under a different epoch (WrongPolicyVersion), and

@@ -141,7 +141,7 @@ final class RouterIntegrationTest extends TestCase
 
     public function testSameOriginPostIsAllowed(): void
     {
-        // Round 30 (item 17): with public_base_url configured, same-origin
+        // With public_base_url configured, same-origin
         // is defined by the SERVER-CONFIGURED origin — a request whose
         // Origin matches it is accepted regardless of the request's own
         // scheme/host.
@@ -179,7 +179,7 @@ final class RouterIntegrationTest extends TestCase
         self::assertSame('nosniff', $response->headers->get('X-Content-Type-Options'));
     }
 
-    // ── Round 9: health split (audit #51/#58) + cacheability (audit #40) ──
+    // ── Health split + cacheability ───────────────────────────────────────
 
     public function testHealthLiveRouteIsRegisteredAndAlways200(): void
     {
@@ -239,7 +239,7 @@ final class RouterIntegrationTest extends TestCase
         $client->request('GET', '/kiwi-captcha/health/live');
         $response = $client->getResponse();
         self::assertStringContainsString('no-store', $response->headers->get('Cache-Control'), 'health status is a dynamic document — never cached');
-        self::assertSame('no-cache', $response->headers->get('Pragma'), 'legacy intermediaries: Pragma no-cache (audit #40)');
+        self::assertSame('no-cache', $response->headers->get('Pragma'), 'legacy intermediaries: Pragma no-cache');
 
         $client->request('GET', '/kiwi-captcha/health/ready');
         $response = $client->getResponse();
@@ -249,7 +249,7 @@ final class RouterIntegrationTest extends TestCase
 
     public function testChallengeResponseCarriesNoStoreAndPragmaThroughTheRouter(): void
     {
-        // Audit #40: explicit KernelBrowser assertion of the no-store +
+        // Explicit KernelBrowser assertion of the no-store +
         // Pragma contract on the challenge endpoint (the ONLY dynamic
         // bundle endpoint besides health — verification is server-side via
         // the validator, there is no public verify route).

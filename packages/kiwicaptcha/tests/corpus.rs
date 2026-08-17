@@ -1,5 +1,5 @@
 //! Differential malicious-record parsing: the SAME corpus must be rejected
-//! (and accepted) identically by the Rust and PHP parsers (audit #56).
+//! (and accepted) identically by the Rust and PHP parsers.
 //!
 //! The corpus lives at protocol/risk-v1/fuzz-corpus.json (deterministic
 //! seed 0x5EED0001, 1000 mutations of a valid record). The accepted count
@@ -23,9 +23,9 @@ fn malicious_corpus_acceptance_is_pinned() {
             Ok(rec) => {
                 accepted += 1;
                 accepted_nonces.insert(rec.nonce);
-                // Audit #91: the corpus predates the kid key — every accepted
-                // record must default to kid = 1 (the historical single-key
-                // deployments), keeping the acceptance count pinned at 659.
+                // The corpus predates the kid key — every accepted
+                // record must default to kid = 1, keeping the acceptance
+                // count pinned.
                 assert_eq!(rec.kid, 1, "missing kid must default to 1");
             }
             Err(_) => rejected += 1,

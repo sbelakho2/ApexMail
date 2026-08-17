@@ -199,7 +199,7 @@ impl RedisRiskStateStore {
         store
     }
 
-    /// Override the connection/command timeouts (audit round 17): the
+    /// Override the connection/command timeouts: the
     /// production fail-fast consts (5 ms / 10 ms) stay the defaults; tests
     /// exercising LONG real-time sequences (storms, TTL expiry) use
     /// generous timeouts so CI scheduling jitter can never produce a
@@ -580,7 +580,7 @@ mod tests {
             DEFAULT_OUTCOME_TTL_SECS,
             DEFAULT_SATURATIONS,
         )
-        // Audit round 17: relaxed test timeouts — the production 10 ms
+        // Relaxed test timeouts — the production 10 ms
         // command timeout is a fail-fast tuning knob, not a test oracle;
         // under CI scheduling load it produced spurious Timeout flakes in
         // the sequential-storm tests.
@@ -981,7 +981,7 @@ mod tests {
             return;
         };
         // Saturations far above the burst so the SUM is visible: 20 * 1000
-        // raw -> normalize(20000, 10_000_000) = 2 (the old max3 over the two
+        // raw -> normalize(20000, 10_000_000) = 2 (a max3 over the two
         // halves would have read 1).
         let mut sats = DEFAULT_SATURATIONS;
         sats[0] = 10_000_000; // src_fast

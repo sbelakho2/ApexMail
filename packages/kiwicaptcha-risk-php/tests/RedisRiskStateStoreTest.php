@@ -459,7 +459,7 @@ final class RedisRiskStateStoreTest extends TestCase
     /**
      * The always-on outcome ledger (calibration-independent): register ->
      * confirm exactly once -> correct flips the ledger. This is the
-     * round-7 authority behind ConfirmedLegitimate/ConfirmedAbuse when
+     * authority behind ConfirmedLegitimate/ConfirmedAbuse when
      * calibration is disabled.
      */
     public function testOutcomeLedgerRegisterConfirmCorrect(): void
@@ -537,7 +537,7 @@ final class RedisRiskStateStoreTest extends TestCase
     }
 
     /**
-     * AUDIT #88 (b) — POISONED SOURCE ABSOLUTE CAP: hundreds of invalid
+     * POISONED SOURCE ABSOLUTE CAP: hundreds of invalid
      * proofs (plus request velocity and replay pressure) saturate the
      * channels; the score clamps at 1000 and the policy action reaches
      * Deny — but NEVER exceeds either, so there is no unbounded punishment
@@ -586,7 +586,7 @@ final class RedisRiskStateStoreTest extends TestCase
     }
 
     /**
-     * AUDIT #88 (c) — /64-STYLE NETWORK AGGREGATE WEAK PER-SIGNAL EFFECT:
+     * /64-STYLE NETWORK AGGREGATE WEAK PER-SIGNAL EFFECT:
      * many bad proofs across many IPs in ONE network saturate the shared
      * network channel, but the network signal stays bounded at 1000 and
      * the exact-IP signals of a single attacker dominate its score.

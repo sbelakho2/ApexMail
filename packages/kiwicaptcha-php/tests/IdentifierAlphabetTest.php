@@ -16,7 +16,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Narrow identifier alphabet (audit #96): scope, issuer, region and
+ * Narrow identifier alphabet: scope, issuer, region and
  * request_binding must match `[A-Za-z0-9._:-]+` with the length caps
  * (scope <= 128, request_binding <= 128, issuer <= 128, region <= 64).
  * The issuer rejects non-conforming values at issuance (SignError-like:
@@ -265,7 +265,7 @@ final class IdentifierAlphabetTest extends TestCase
     public function testVerifierRejectsNonConformingScopeRecords(): void
     {
         // The VERIFIER's validate_record enforces the scope alphabet
-        // (audit #96): a parsed-but-non-conforming scope fails closed as
+        // a parsed-but-non-conforming scope fails closed as
         // MalformedRecord before any crypto work. The record carries a
         // structurally valid 32-byte nonce and 16-byte salt so the scope
         // alphabet check is the ONLY validation failure.

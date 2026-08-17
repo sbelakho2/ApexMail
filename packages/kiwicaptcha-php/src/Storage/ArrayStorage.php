@@ -14,7 +14,7 @@ use KiwiCaptcha\StorageInterface;
  * In-memory storage (single-process, non-persistent). Intended for tests,
  * CLI tools, and single-worker apps where Redis/DB is not available.
  *
- * consume() is the one-shot TRANSITION (audit #74): the record is marked
+ * consume() is the one-shot TRANSITION: the record is marked
  * consumed and KEPT until deletion — replay protection is the consumed
  * marker, not absence. The transition is read-then-write; the state is a
  * plain in-process array that NO other process or thread can observe (PHP

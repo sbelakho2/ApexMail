@@ -74,7 +74,7 @@ final class SolutionToken
             throw DecodeError::malformed();
         }
 
-        // Strict canonical base64 (audit #29): base64_decode in strict mode
+        // Strict canonical base64: base64_decode in strict mode
         // rejects every character outside the standard alphabet (including
         // base64url '-'/'_' and whitespace) and the canonical re-encode
         // check rejects any non-canonical padding (unpadded, over-padded, or

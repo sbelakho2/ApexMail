@@ -14,7 +14,7 @@ use KiwiCaptcha\Risk\SignalVector;
 use PHPUnit\Framework\TestCase;
 
 /**
- * AUDIT #95 — SCOPE ACTION HYSTERESIS.
+ * SCOPE ACTION HYSTERESIS.
  *
  * The policy's fixed score bands must not oscillate at their boundaries:
  * a score hovering at a threshold (449/451/449…) would flip the challenge
@@ -213,10 +213,10 @@ final class ScopeActionHysteresisTest extends TestCase
         }
         self::assertSame(ScopeActionHysteresis::MAX_SCOPES, $h->count());
 
-        // A NEW scope at capacity evicts the OLDEST entry (scope 1).
+        // A NEW scope at capacity evicts the least-recently-used entry (scope 1).
         $h->remember(ScopeActionHysteresis::MAX_SCOPES + 1, RiskAction::Sha16, $now + 100_000);
         self::assertSame(ScopeActionHysteresis::MAX_SCOPES, $h->count(), 'the map must stay bounded');
-        self::assertNull($h->lastAction(1, $now + 100_000), 'the oldest entry must be evicted');
+        self::assertNull($h->lastAction(1, $now + 100_000), 'the least-recently-used entry must be evicted');
         self::assertNotNull($h->lastAction(ScopeActionHysteresis::MAX_SCOPES + 1, $now + 100_000));
 
         // Updates to EXISTING scopes never evict.
@@ -243,7 +243,7 @@ final class ScopeActionHysteresisTest extends TestCase
 
 
     /**
-     * Round 28 (P3): deterministic logical-clock boundary test for the
+     * Deterministic logical-clock boundary test for the
      * COOLDOWN hold gate (the real-Redis cooldown integration test can
      * legitimately zero-assert if the process is suspended across the
      * whole interval — this pure-function test pins the exact edges).

@@ -14,7 +14,7 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *
  *  - consume-transition script: marks the stored record consumed (keeps it)
  *    and returns {json, consumed_now, consumed_before, result_json} — the
- *    audit #74 one-shot transition, not a delete.
+ *    one-shot transition, not a delete.
  *  - commit-result script: stores {valid, binding} on a consumed record
  *    without a result yet; returns 1/0.
  *  - WAIT: returns {@see FakePredisClient::$waitAck} (default 0 — a real
@@ -113,7 +113,7 @@ final class FakePredisClient extends \Predis\Client
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $args = \array_slice($keysAndArgs, $numKeys);
 
-        // Consume transition (audit #74): mark consumed, keep the record.
+        // Consume transition: mark consumed, keep the record.
         if (str_contains($script, 'consume transition')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
@@ -138,7 +138,7 @@ final class FakePredisClient extends \Predis\Client
             return [$raw, 1, 0, ''];
         }
 
-        // Commit result (audit #74): only on a consumed record without a
+        // Commit result: only on a consumed record without a
         // result yet. ARGV = [valid, binding, has_binding].
         if (str_contains($script, 'commit result')) {
             $key = (string) $keys[0];

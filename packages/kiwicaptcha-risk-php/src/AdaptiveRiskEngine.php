@@ -18,7 +18,7 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
  * Pipeline: emergency limiter (single per-process window, before any state
  * backend) -> observation -> circuit breaker -> state store (EVALSHA) ->
  * scorer -> policy (with the per-process scope-action hysteresis map:
- * enter/exit smoothing of the score band selection, audit #95) -> decision.
+ * enter/exit smoothing of the score band selection) -> decision.
  * Backend failure degrades instead of failing the request.
  *
  * assessPreIssue() is the PRE-ISSUE path (emergency limiter + request

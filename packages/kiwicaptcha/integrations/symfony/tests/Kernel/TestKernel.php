@@ -66,7 +66,7 @@ class TestKernel extends Kernel
             $container->loadFromExtension('kiwi_captcha', [
                 'secret_key' => self::SECRET,
                 'difficulty_bits' => 8,
-                // Round 30 (item 17): prod kernels must carry the canonical
+                // Prod kernels must carry the canonical
                 // origin (the prod-invariant guard requires it).
                 'public_base_url' => 'https://captcha.example.com',
             ]);

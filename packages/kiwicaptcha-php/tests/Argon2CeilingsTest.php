@@ -16,7 +16,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Hard Argon2id verifier ceilings (audit #32): the verifier validates the
+ * Hard Argon2id verifier ceilings: the verifier validates the
  * SIGNED parameters against the absolute process limits AFTER signature
  * authentication and BEFORE any allocation/computation — out-of-range
  * records are rejected with UnsupportedArgon2Params and the memory-hard
@@ -184,7 +184,7 @@ final class Argon2CeilingsTest extends TestCase
 
         self::assertSame(VerifyError::UnsupportedArgon2Params, $outcome->error);
         self::assertSame(1, $gate->acquires, 'the cheap ceiling check passes for p=4; only the compute step refuses');
-        self::assertNotNull($storage->find($record->nonce), 'the consumed record is KEPT until its TTL (audit #74 — replay protection is the consumed marker, not absence)');
+        self::assertNotNull($storage->find($record->nonce), 'the consumed record is KEPT until its TTL — replay protection is the consumed marker, not absence');
     }
 
     public function testMinimalInCeilingRecordVerifiesEndToEnd(): void

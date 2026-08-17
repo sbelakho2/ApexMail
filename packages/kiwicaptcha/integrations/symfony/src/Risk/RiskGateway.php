@@ -151,7 +151,7 @@ final class RiskGateway
     }
 
     /**
-     * Audit #70: whether the process-local emergency window is CURRENTLY
+     * Whether the process-local emergency window is CURRENTLY
      * saturated — the cheap local admission step the challenge controller
      * runs BEFORE any Redis issuance limiter. NON-CONSUMING
      * ({@see ProcessEmergencyCap::isOpen()}): the controller never marks an
@@ -386,7 +386,7 @@ final class RiskGateway
     }
 
     /**
-     * CORRECTION of a previously confirmed outcome (e.g. a chargeback
+     * CORRECTION of a confirmed outcome (e.g. a chargeback
      * verdict or moderation appeal flipped the label): the engine's
      * compensating-state API — records the corrected class at most once
      * per decision, guarded by the outcome ledger (status flipped to 2;
@@ -877,7 +877,7 @@ final class RiskGateway
     }
 
     /**
-     * Decision logging for operators (audit #35). The decision id is
+     * Decision logging for operators. The decision id is
      * deliberately NOT included (it is an internal handle that pairs
      * calibration receipts — logging it would let log analysis correlate
      * decisions across requests); decision ids are only ever carried in

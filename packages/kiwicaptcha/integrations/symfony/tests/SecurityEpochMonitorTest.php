@@ -20,7 +20,7 @@ use Symfony\Component\Validator\ConstraintValidatorFactory;
 use Symfony\Component\Validator\Validation;
 
 /**
- * Bounded-revocation-latency security epoch (audit #81): the monitor reads
+ * Bounded-revocation-latency security epoch: the monitor reads
  * the central {kiwi:<ns>}:security-policy hash's min_policy_epoch with a
  * SHORT cache, keeps a MONOTONIC in-process max (a regressed central value
  * is ignored), serves the last-observed max on Redis failure, and feeds the
@@ -66,7 +66,7 @@ final class SecurityEpochMonitorTest extends TestCase
     {
         $challenge = $issuer->issue('login', '198.51.100.7');
         // The server-measured minimum-duration floor applies at verification
-        // (audit #47's server timing) — sleep past it like every other
+        // (the server timing) — sleep past it like every other
         // round-trip test.
         usleep(((int) $challenge->minDurationMs + 10) * 1000);
         $saltBytes = base64_decode($challenge->salt, true);
@@ -218,7 +218,7 @@ final class SecurityEpochMonitorTest extends TestCase
     }
 
     /**
-     * The VALIDATOR path (audit #81: "the validator + any verification path
+     * The VALIDATOR path ("the validator + any verification path
      * use the monitor's current epoch"): a monitor observing the bump makes
      * an old-version solve fail with the collapsed invalid_or_expired
      * violation, and the monitor's refresh happens per verification.
@@ -251,10 +251,10 @@ final class SecurityEpochMonitorTest extends TestCase
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'the monitored epoch must be enforced per verification (collapsed public code)');
     }
 
-    // ── Round 12: max-stale fail-closed (audit #108) ──────────────────────
+    // ── Max-stale fail-closed ─────────────────────────────────────────────
 
     /**
-     * Audit #108: within the max-stale window (now <= last_success +
+     * Within the max-stale window (now <= last_success +
      * risk.security_epoch_max_stale_secs) a Redis outage is NOT stale — the
      * cached max keeps serving and the revocation stays in force.
      */
@@ -274,7 +274,7 @@ final class SecurityEpochMonitorTest extends TestCase
         $redis->failCommand = '*';
         $this->clockMs = 30_000;
         self::assertSame(2, $monitor->currentEpoch(), 'the cached max keeps serving during the outage');
-        self::assertFalse($monitor->isStale(), 'within the max-stale window the outage is NOT stale (audit #108)');
+        self::assertFalse($monitor->isStale(), 'within the max-stale window the outage is NOT stale');
         self::assertSame(
             VerifyError::WrongPolicyVersion,
             $verifier->verify($revokedToken, self::SECRET, 'login', '198.51.100.7')->error,
@@ -283,7 +283,7 @@ final class SecurityEpochMonitorTest extends TestCase
     }
 
     /**
-     * Audit #108: once now > last_success + max_stale the monitor IS stale —
+     * Once now > last_success + max_stale the monitor IS stale —
      * the cached epoch may be outdated (an emergency revocation could have
      * landed while the node could not read) — and every caller fails closed.
      */
@@ -299,7 +299,7 @@ final class SecurityEpochMonitorTest extends TestCase
         $redis->failCommand = '*';
         $this->clockMs = 90_000; // last_success 0 + 60 s < 90 s
         self::assertSame(2, $monitor->currentEpoch(), 'the cached max is still the enforced epoch');
-        self::assertTrue($monitor->isStale(), 'past last_success + max_stale the monitor is stale (audit #108)');
+        self::assertTrue($monitor->isStale(), 'past last_success + max_stale the monitor is stale');
 
         // A SUCCESSFUL read refreshes the deadline: the outage ends at
         // T0+90 s, the next refresh confirms the central state and the
@@ -343,7 +343,7 @@ final class SecurityEpochMonitorTest extends TestCase
     }
 
     /**
-     * Audit #108: the VALIDATOR fails verification CLOSED with the distinct
+     * The VALIDATOR fails verification CLOSED with the distinct
      * temporary_unavailable violation when the monitor is stale — the token
      * is NOT burned (retryable), the server refuses to trust its own cache.
      */
@@ -387,12 +387,12 @@ final class SecurityEpochMonitorTest extends TestCase
         self::assertSame(
             KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR,
             $violations[0]->getCode(),
-            'a stale security state fails verification closed with temporary_unavailable (audit #108)'
+            'a stale security state fails verification closed with temporary_unavailable'
         );
     }
 
     /**
-     * Audit #108: the CHALLENGE CONTROLLER refuses issuance with 503
+     * The CHALLENGE CONTROLLER refuses issuance with 503
      * SERVICE_UNAVAILABLE when the monitor is stale — within the window the
      * cached max still serves (issuance keeps working).
      */

@@ -9,7 +9,7 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
  * Kernel with risk.health.enabled = false: the /health/live + /health/ready
- * routes must NOT be registered (audit #51/#58 — operators opt out of the
+ * routes must NOT be registered (operators opt out of the
  * bundle's health endpoints, e.g. when the platform provides its own).
  */
 final class HealthDisabledTestKernel extends TestKernel

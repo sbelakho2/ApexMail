@@ -11,7 +11,7 @@
  *          targetBits, mKib, t, p, startCounter, maxHashes }
  *        prefix/salt are base64 strings (the driver passes the decoded byte
  *        lengths alongside); the worker decodes them itself.
- *   out: { type: "ready", buildId } on startup (build-id handshake, audit #53)
+ *   out: { type: "ready", buildId } on startup (solver protocol id)
  *        { type: "progress", counter } every 1000 hashes
  *        { type: "done", counter, buildId }  |  { type: "failed", reason }
  *
@@ -22,8 +22,7 @@
 (function () {
   "use strict";
 
-  // Solver PROTOCOL id (audit round 23 — renamed from the misleading
-  // "build id" semantics): a compatibility/ABI generation LABEL reported
+  // Solver PROTOCOL id: a compatibility/ABI generation LABEL reported
   // in the handshake for debugging. MUST equal the widget driver's
   // KIWI_SOLVER_PROTOCOL_ID constant. The ENFORCED check is the numeric
   // protocol version against the wasm glue's exported
@@ -298,9 +297,8 @@
 
   // Read the wasm glue's exported solver protocol VERSION. The glue's
   // load() resolves to the RAW wasm exports, where an integer export is a
-  // plain number (audit round 24: the earlier String export surfaced as a
-  // [ptr, len] tuple and had to be decoded — an integer needs no decode).
-  // Any failure returns null (fail closed).
+  // plain number (an integer needs no decode). Any failure returns null
+  // (fail closed).
   function wasmProtocolVersion(w) {
     if (!w || typeof w.solver_protocol_version !== "function") return null;
     try {
@@ -311,7 +309,7 @@
     }
   }
 
-  // Startup handshake (audit #53 / round 23-24): BEFORE any solve work,
+  // Startup handshake: BEFORE any solve work,
   // verify the loaded wasm's exported solver_protocol_version() against
   // this constant (driver + worker + wasm must speak the same protocol
   // generation) and only then announce ready — a mismatched pair fails

@@ -20,7 +20,7 @@ use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use PHPUnit\Framework\TestCase;
 
 /**
- * AUDIT #34 — TRUST-BOUNDARY PROPERTY.
+ * TRUST-BOUNDARY PROPERTY.
  *
  * The SignalVector carries NO client-visible fields: every one of its 13
  * fields is server-derived (the risk-v1.lua state channels and the

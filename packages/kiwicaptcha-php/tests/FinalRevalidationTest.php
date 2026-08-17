@@ -16,7 +16,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * POST-DERIVE FINAL REVALIDATION (audit #59): after the proof derives
+ * POST-DERIVE FINAL REVALIDATION: after the proof derives
  * successfully and BEFORE returning Valid, the verifier re-checks against
  * the CURRENT server clock (its now closure) and the CURRENT expectations.
  *
@@ -115,7 +115,7 @@ final class FinalRevalidationTest extends TestCase
         // Race (b): the deployment rotates its expected policy epoch DURING
         // the verification (the rotation lands on the second clock read —
         // the final re-check's expiry check — so the cheap check already
-        // passed with the OLD expectation). The final re-check reads the
+        // passed with the cheap-phase expectation). The final re-check reads the
         // CURRENT expected value and rejects WrongPolicyVersion.
         [$record, $token] = $this->issueAndSolve($this->shaConfig(policyVersion: 2));
         $storage = new ArrayStorage();

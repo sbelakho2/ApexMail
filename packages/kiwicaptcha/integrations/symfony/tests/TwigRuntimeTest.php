@@ -37,7 +37,7 @@ final class TwigRuntimeTest extends TestCase
         // Driver inlined
         self::assertStringContainsString('window.KiwiCaptcha = {', $html);
         self::assertStringContainsString('render: kiwiRender', $html);
-        // Audit #41: the driver sends the container's request binding with
+        // The driver sends the container's request binding with
         // the challenge POST and writes the hidden kiwi_request_binding form
         // field next to the token.
         self::assertStringContainsString('request_binding', $html, 'the driver must include the request_binding challenge field');
@@ -59,7 +59,7 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('data-kiwi-scope="login"', $html);
     }
 
-    // ── Round 10: widget-page frame-ancestors CSP helper (audit #71) ──────
+    // ── Widget-page frame-ancestors CSP helper ────────────────────────────
 
     public function testCspFrameAncestorsIsNullForAnEmptyAllowlist(): void
     {
@@ -130,7 +130,7 @@ final class TwigRuntimeTest extends TestCase
         $env = new Environment($loader);
         $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', requestBinding: 'static-txn');
         $html = $runtime->renderWidget($env, []);
-        self::assertStringContainsString('data-kiwi-request-binding="static-txn"', $html, 'the static binding must render as data-kiwi-request-binding (audit #41)');
+        self::assertStringContainsString('data-kiwi-request-binding="static-txn"', $html, 'the static binding must render as data-kiwi-request-binding');
 
         // A dynamic per-render binding overrides the runtime default.
         $html = $runtime->renderWidget($env, ['request_binding' => 'per-transaction']);
@@ -145,10 +145,10 @@ final class TwigRuntimeTest extends TestCase
         new KiwiCaptchaRuntime('/kiwi-captcha', '/nonexistent/assets/dir');
     }
 
-    // ── Round 12: backend-originated binding (audit #107) ─────────────────
+    // ── Backend-originated binding ────────────────────────────────────────
 
     /**
-     * Audit #107: the widget's rendered container carries ONLY the
+     * The widget's rendered container carries ONLY the
      * SERVER-provided binding — the value comes from the form option /
      * runtime configuration (a flow_id stored server-side), never from the
      * client. With a binding configured, the container carries exactly one
@@ -179,7 +179,7 @@ final class TwigRuntimeTest extends TestCase
     }
 
     /**
-     * Audit #107: the widget DRIVER never generates a transaction binding
+     * The widget DRIVER never generates a transaction binding
      * itself — no crypto.randomUUID / getRandomValues / Math.random binding
      * synthesis. The ONLY source of the binding is the container attribute
      * the server rendered (backend-originated mode), so a client can never
@@ -193,11 +193,11 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('var requestBinding = W.getAttribute("data-kiwi-request-binding")', $driver, 'the binding variable is assigned ONLY from the container attribute');
         self::assertStringNotContainsString('randomUUID', $driver, 'the driver must never generate bindings with crypto.randomUUID');
         self::assertStringNotContainsString('getRandomValues', $driver, 'the driver must never generate bindings with crypto.getRandomValues');
-        // Round-14: Math.random exists exactly once — the per-widget
-        // data-kiwi-instance debugging marker. It must NEVER appear in the
-        // binding path: the binding is assigned from the container
-        // attribute only (asserted above), and no other Math.random usage
-        // may appear in the driver.
-        self::assertSame(1, substr_count($driver, 'Math.random'), 'Math.random must be limited to the instance-id marker — bindings are never synthesized client-side');
+        // Math.random exists exactly twice — the per-widget
+        // data-kiwi-instance debugging marker and the per-widget hCaptcha
+        // response-key marker. It must NEVER appear in the binding path:
+        // the binding is assigned from the container attribute only
+        // (asserted above).
+        self::assertSame(2, substr_count($driver, 'Math.random'), 'Math.random must be limited to the instance-id and response-key markers — bindings are never synthesized client-side');
     }
 }

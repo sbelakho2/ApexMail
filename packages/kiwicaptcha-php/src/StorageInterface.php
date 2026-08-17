@@ -7,7 +7,7 @@ namespace KiwiCaptcha;
 /**
  * Persistence for issued challenges.
  *
- * `consume()` is a one-shot TRANSITION (audit #74): it marks the record
+ * `consume()` is a one-shot TRANSITION: it marks the record
  * consumed and KEEPS it until its TTL — replay protection is the consumed
  * marker, not absence. The returned {@see ConsumedRecord} distinguishes the
  * winner of the transition (`consumedNow`) from a retry on an

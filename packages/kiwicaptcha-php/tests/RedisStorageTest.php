@@ -100,7 +100,7 @@ final class RedisStorageTest extends TestCase
         self::assertGreaterThanOrEqual(1, $client->expirations['kiwicaptcha:redis-nonce-1']);
         $setCalls = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'SET'));
         self::assertSame('EX', $setCalls[0][1][2] ?? null, 'store must set the key expiration');
-        // Audit #48: the TTL must be fused into the SET command (SET key val
+        // The TTL must be fused into the SET command (SET key val
         // EX ttl) — a separate EXPIRE round trip is not atomic and must
         // never be issued.
         $expireCalls = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'EXPIRE'));
@@ -109,7 +109,7 @@ final class RedisStorageTest extends TestCase
 
     public function testStoreTtlIncludesTheMargin(): void
     {
-        // Audit #22/#23: ttlMarginSecs extends the record's retention beyond
+        // ttlMarginSecs extends the record's retention beyond
         // token validity — TTL = expires_at - now + margin. The margin must
         // exceed max clock skew + failover margin so a replayed token can
         // never land on an already-expired state that re-accepted it.
@@ -141,7 +141,7 @@ final class RedisStorageTest extends TestCase
 
     public function testStoreIssuesWaitAndVerifiesThresholdWhenConfigured(): void
     {
-        // Audit round 14: with waitReplicas > 0 the durability barrier is
+        // With waitReplicas > 0 the durability barrier is
         // unconditional — store() issues WAIT after SET and FAILS CLOSED
         // when the acknowledged replica count is below the threshold.
         $client = $this->requirePredis();
@@ -190,16 +190,15 @@ final class RedisStorageTest extends TestCase
         // canonical ChallengeRecord keys (identical to the Rust serde keys,
         // including attempts_used (Rust: #[serde(default)]) so a PHP-written
         // record is complete for a Rust reader) WRAPPED with the two storage
-        // runtime fields (audit #74): `state` ("pending") and
+        // runtime fields: `state` ("pending") and
         // `consumed_result` (null). Protocol v2 emits binding_tag ONLY —
         // never the legacy ip_hash key alongside it: the Rust reader uses
         // #[serde(alias = "ip_hash")] and serde rejects a struct carrying
         // both the field and its alias as a duplicate field, making a
         // dual-key record unreadable by Rust (caught by the live
-        // cross-language round trip). Round 9 added policy_version and
-        // request_binding (audits #42/#41); round 10 adds issuer (audit
-        // #67); round 11 adds kid (audit #91) — 22 base keys + 2 runtime
-        // fields = 24 stored keys.
+        // cross-language round trip). The canonical key set is
+        // `ChallengeRecord::WIRE_KEYS` — that list is the source of truth
+        // for the stored wire schema.
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
@@ -216,16 +215,16 @@ final class RedisStorageTest extends TestCase
         self::assertSame(2, $data['protocol_version']);
         self::assertArrayHasKey('region', $data, 'region is part of the 22-key cross-language schema');
         self::assertNull($data['region'], 'an unbound record carries region: null (byte parity with Rust serde)');
-        self::assertArrayHasKey('policy_version', $data, 'policy_version is part of the 22-key cross-language schema (audit #42)');
+        self::assertArrayHasKey('policy_version', $data, 'policy_version is part of the cross-language wire schema');
         self::assertSame(1, $data['policy_version'], 'the default security-policy epoch is 1');
-        self::assertArrayHasKey('request_binding', $data, 'request_binding is part of the 22-key cross-language schema (audit #41)');
+        self::assertArrayHasKey('request_binding', $data, 'request_binding is part of the cross-language wire schema');
         self::assertNull($data['request_binding'], 'an unbound record carries request_binding: null (byte parity with Rust serde)');
-        self::assertArrayHasKey('issuer', $data, 'issuer is part of the 22-key cross-language schema (audit #67)');
+        self::assertArrayHasKey('issuer', $data, 'issuer is part of the cross-language wire schema');
         self::assertNull($data['issuer'], 'an unbound record carries issuer: null (byte parity with Rust serde)');
-        self::assertArrayHasKey('kid', $data, 'kid is part of the 22-key cross-language schema (audit #91)');
+        self::assertArrayHasKey('kid', $data, 'kid is part of the cross-language wire schema');
         self::assertSame(1, $data['kid'], 'the default signing key id is 1');
-        self::assertSame('pending', $data['state'], 'stored records start in the pending state (audit #74)');
-        self::assertNull($data['consumed_result'], 'a pending record has no consumed_result (audit #74)');
+        self::assertSame('pending', $data['state'], 'stored records start in the pending state');
+        self::assertNull($data['consumed_result'], 'a pending record has no consumed_result');
     }
 
     public function testReadsRecordsWrittenWithoutAttemptsUsed(): void
@@ -252,7 +251,7 @@ final class RedisStorageTest extends TestCase
 
     public function testConsumeIsAtomicSingleUseTransition(): void
     {
-        // Audit #74: consume() is a TRANSITION, not a delete — the winner
+        // consume() is a TRANSITION, not a delete — the winner
         // gets consumedNow, the record is KEPT (marked consumed), and a
         // second consume returns the same record with consumedBefore.
         $client = $this->requirePredis();
@@ -302,7 +301,7 @@ final class RedisStorageTest extends TestCase
 
     public function testCommitResultStoresTheDeterministicOutcome(): void
     {
-        // Audit #74: commitResult only lands on a CONSUMED record without a
+        // commitResult only lands on a CONSUMED record without a
         // result yet; the stored JSON then carries consumed_result.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
@@ -333,7 +332,7 @@ final class RedisStorageTest extends TestCase
 
     public function testConsumeIssuesWaitAndFailsClosedBelowThreshold(): void
     {
-        // Audit round 14: the pending→consumed transition carries the same
+        // The pending→consumed transition carries the same
         // durability barrier as issuance — a promotion must never resurrect
         // a consumed record from a stale replica. With the threshold unmet,
         // consume() throws (the transition DID happen on the primary; the
@@ -361,7 +360,7 @@ final class RedisStorageTest extends TestCase
 
     public function testCommitResultIssuesWaitAndFailsClosedBelowThreshold(): void
     {
-        // Audit round 14: the deterministic-result commit is also barriered
+        // The deterministic-result commit is also barriered
         // (best-effort callers: a barrier failure cannot change the
         // outcome, but it surfaces the safe degraded state on retry).
         $client = $this->requirePredis();
@@ -470,7 +469,7 @@ final class RedisStorageTest extends TestCase
 
     public function testRealRedisStoreFindConsumeWithWaitBarrierFailsClosed(): void
     {
-        // Audit round 14 against a REAL Redis: a replica-less server
+        // Against a REAL Redis: a replica-less server
         // reports 0 acknowledged replicas, so a configured waitReplicas=1
         // barrier must FAIL CLOSED — store() throws and the challenge is
         // never handed to the client (the write is not durably replicated).
@@ -520,7 +519,7 @@ final class RedisStorageTest extends TestCase
 
     public function testWrongCounterConsumesAndRetryReplaysTheInvalidOutcome(): void
     {
-        // Audit #74: the record is consumed BEFORE the proof is checked. A
+        // The record is consumed BEFORE the proof is checked. A
         // wrong counter burns the challenge (InsufficientWork) and commits
         // the deterministic invalid outcome — the subsequent correct token
         // sees the SAME InsufficientWork without re-deriving.
@@ -599,7 +598,7 @@ final class RedisStorageTest extends TestCase
         self::assertTrue($first->isOk(), 'the first verification must succeed (got '.$first->code().')');
 
         // The consumed record persists with its exact integers intact (the
-        // Lua must NEVER re-encode the record — audit #74 regression: cjson
+        // Lua must NEVER re-encode the record: cjson
         // rewrote issued_at_ns in scientific notation).
         $stored = $storage->find($challenge->nonce);
         self::assertNotNull($stored, 'the consumed record must persist until its TTL');
@@ -615,7 +614,7 @@ final class RedisStorageTest extends TestCase
 
     public function testTenMegabyteStoredBodyIsRejectedAtParse(): void
     {
-        // Audit #113: a 10 MB stored JSON body must be rejected by the
+        // A 10 MB stored JSON body must be rejected by the
         // record parse (the 4096-byte string ceiling / required-field set)
         // and surface as null — no exception, and no allocation beyond the
         // body itself. A decode-before-cap regression would materialize the
@@ -629,7 +628,7 @@ final class RedisStorageTest extends TestCase
 
     public function testHundredThousandLevelNestingFailsCleanly(): void
     {
-        // Audit #114/#115: json_decode runs at the default depth (512) — a
+        // json_decode runs at the default depth (512) — a
         // 100k-level nested body must fail cleanly (null), never exhaust
         // the stack and never surface an untyped exception.
         $client = $this->requirePredis();
@@ -641,7 +640,7 @@ final class RedisStorageTest extends TestCase
 
     public function testBindingArgumentIsCappedBeforeEvalArgv(): void
     {
-        // Audit #113: the binding embedded into the commit-result EVAL ARGV
+        // The binding embedded into the commit-result EVAL ARGV
         // is the record's request_binding, which the strict record parse
         // caps at 128 bytes of the identifier alphabet BEFORE it can reach
         // evalScript — a 10 KB "binding" can never enter the ARGV.

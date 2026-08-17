@@ -17,7 +17,7 @@ namespace KiwiCaptcha\Risk;
  *   clamped to [0, 1000].
  *
  * The SCORE is pure integer math (intdiv) — there is NO float boundary in
- * the scorer (audit #109: no NaN/Inf can enter; the score is always a
+ * the scorer (no NaN/Inf can enter; the score is always a
  * bounded int in 0..1000). The only floats in the risk path live in the
  * calibration boundary, which is guarded separately (AggregateCalibrator
  * + calibration.lua).

@@ -28,7 +28,7 @@ namespace KiwiCaptcha\Risk\Storage;
  * is saturated the engine denies immediately (HardRateLimit) instead of
  * spending time/state on the request.
  *
- * WARM-UP RAMP (audit #105): after every restart/autoscale the process
+ * WARM-UP RAMP: after every restart/autoscale the process
  * must not start with a full burst — the effective cap ramps linearly
  * from a floor of `max(1, processPerSecond / 10)` to the full cap over
  * the first `warmupRampSecs` seconds of the process's life:
@@ -49,7 +49,7 @@ final class ProcessEmergencyCap
 {
     public const DEFAULT_PROCESS_PER_SECOND = 10000;
 
-    /** Default warm-up ramp length in seconds (audit #105). */
+    /** Default warm-up ramp length in seconds. */
     public const DEFAULT_WARMUP_RAMP_SECS = 10;
 
     /** Window length in nanoseconds (1 s on the monotonic hrtime clock). */
@@ -140,7 +140,7 @@ final class ProcessEmergencyCap
 }
 
 // BC alias: the per-process emergency cap was renamed from
-// LocalEmergencyLimiter; the old class name must keep resolving for the
+// LocalEmergencyLimiter; the former class name must keep resolving for the
 // Symfony bundle's existing wiring until it is updated to the new name.
 if (!class_exists(LocalEmergencyLimiter::class, false)) {
     class_alias(ProcessEmergencyCap::class, LocalEmergencyLimiter::class);

@@ -1,4 +1,4 @@
-//! Provider-compatible Siteverify helper (round 24).
+//! Provider-compatible Siteverify helper.
 //!
 //! Incumbent CAPTCHA backends call a provider "siteverify" endpoint with
 //! `response` + `secret` (+ optional `remoteip`) and expect provider-shaped

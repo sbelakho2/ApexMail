@@ -6,14 +6,14 @@ namespace KiwiCaptcha;
 
 /**
  * A stored challenge record failed the strict serde-mirror parser
- * ({@see ChallengeRecord::fromArray()}, audit #56).
+ * ({@see ChallengeRecord::fromArray()}).
  *
  * Thrown on any structural violation the Rust `ChallengeRecord` serde schema
  * rejects — unknown keys (deny_unknown_fields), wrong types, out-of-range or
  * negative integers, oversized strings, algorithm aliases, unexpected nulls,
  * duplicate `binding_tag`/`ip_hash` aliases, missing required fields, JSON
  * arrays in place of objects, and identifier-alphabet violations for the
- * deployment-bound identifiers (audit #96). Storage backends catch it and
+ * deployment-bound identifiers. Storage backends catch it and
  * treat the record as absent; callers of `fromArray()` can catch it
  * explicitly.
  */
@@ -78,7 +78,7 @@ final class MalformedRecordException extends \RuntimeException
     }
 
     /**
-     * Audit #96: a deployment-bound identifier (region, request_binding,
+     * A deployment-bound identifier (region, request_binding,
      * issuer) violated the narrow identifier alphabet `[A-Za-z0-9._:-]+`
      * or its length cap — e.g. Unicode, whitespace, invisible characters,
      * empty strings, or the canonical `|` separator.

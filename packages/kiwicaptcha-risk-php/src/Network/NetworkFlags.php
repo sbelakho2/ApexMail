@@ -31,7 +31,7 @@ final class NetworkFlags
     }
 
     /**
-     * Fixed-point network risk contribution (P1 rescale — only deliberately
+     * Fixed-point network risk contribution (only deliberately
      * blocked/impossible networks hard-deny; the policy's >= 900 Deny rule
      * is reached by blocked (1000) and reserved/impossible (950) alone):
      * blocked -> 1000, reserved -> 950, known_proxy -> 750, tor -> 650,

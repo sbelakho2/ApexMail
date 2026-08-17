@@ -2,13 +2,13 @@
 //!
 //! [`RedisChallengeStore`] persists [`ChallengeRecord`]s as the language-
 //! neutral JSON schema shared with the PHP core (`packages/kiwicaptcha-php`)
-//! — the same 23 keys `ChallengeRecord::toArray()` emits — under the key
-//! `{prefix}{nonce}` with an EX TTL of `expires_at - now + ttl_margin_secs`
-//! (min 1 s, exactly like the PHP `RedisStorage` plus the audit #22/#23 TTL
-//! margin). A PHP service and a Rust service can read each other's records
-//! from the same Redis instance.
+//! — the same canonical key set `ChallengeRecord::toArray()` emits — under
+//! the key `{prefix}{nonce}` with an EX TTL of `expires_at - now +
+//! ttl_margin_secs` (min 1 s, exactly like the PHP `RedisStorage` plus the
+//! TTL margin). A PHP service and a Rust service can read each other's
+//! records from the same Redis instance.
 //!
-//! # Consumed-state transition (audit #74)
+//! # Consumed-state transition
 //!
 //! `consume()` is a Lua TRANSITION, not a GETDEL delete: the pending record is
 //! KEPT in the store with a storage-level runtime field `state =
@@ -218,7 +218,7 @@ impl r2d2::ManageConnection for StoreConnectionManager {
     }
 }
 
-/// One Lua script for the consumed-state TRANSITION (audit #74): atomically
+/// One Lua script for the consumed-state TRANSITION: atomically
 /// marks a pending record consumed (KEEPING it — the storage-level `state`
 /// field is added), or observes the already-consumed record.
 ///
@@ -251,7 +251,7 @@ redis.call('SET', KEYS[1], string.sub(v, 1, -2) .. ',"state":"consumed"}', 'EX',
 return {v, 1}
 "#;
 
-/// One Lua script for the best-effort outcome commit (audit #74): stores
+/// One Lua script for the best-effort outcome commit: stores
 /// `consumed_result = {valid, binding}` exactly once, only when the record
 /// is already `consumed` and carries no result yet. Returns 1 when stored,
 /// 0 otherwise. Like [`CONSUME_TRANSITION_LUA`], the record's JSON bytes
@@ -277,7 +277,7 @@ redis.call('SET', KEYS[1], string.sub(v, 1, -2) .. ',"consumed_result":' .. resu
 return 1
 "#;
 
-/// The result of the consumed-state transition (audit #74).
+/// The result of the consumed-state transition.
 #[derive(Debug, Clone)]
 pub struct ConsumeResult {
     /// The consumed record (the value as stored — the runtime `state` /
@@ -292,8 +292,8 @@ pub struct ConsumeResult {
     pub stored_result: Option<StoredConsumedResult>,
 }
 
-/// A committed verification outcome, persisted at the STORAGE layer (audit
-/// #74) so a concurrent or retried consumer returns the SAME outcome
+/// A committed verification outcome, persisted at the STORAGE layer so a
+/// concurrent or retried consumer returns the SAME outcome
 /// without re-deriving. This is storage-level runtime state — it is never
 /// part of the [`ChallengeRecord`] wire schema.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -305,7 +305,7 @@ pub struct StoredConsumedResult {
 }
 
 /// A stored value decoded at the storage layer: the [`ChallengeRecord`]
-/// plus the optional committed outcome (audit #74). The `state` field is
+/// plus the optional committed outcome. The `state` field is
 /// stripped from the JSON by [`decode_stored`] (it must never leak into the
 /// strict record parse); the transition flag comes from the Lua reply.
 struct StoredChallenge {
@@ -313,7 +313,7 @@ struct StoredChallenge {
     consumed_result: Option<StoredConsumedResult>,
 }
 
-/// Maximum byte length of a stored record value (audit #113). The canonical
+/// Maximum byte length of a stored record value. The canonical
 /// [`ChallengeRecord`] JSON is a few hundred bytes — every field is
 /// length-bounded (nonce 44 chars, salt 24 chars, identifiers ≤ 128 bytes,
 /// challenge/signature bounded by the signed canonical input) — so 128 KiB is
@@ -329,7 +329,7 @@ pub const MAX_STORED_RECORD_JSON_BYTES: usize = 128 * 1024;
 /// Returns `None` on any parse failure — a corrupt key must never blow up
 /// the verify path (mirrors the PHP `RedisStorage::decode()`).
 fn decode_stored(raw: &str) -> Option<StoredChallenge> {
-    // Bound BEFORE the parse (audit #113): the canonical record JSON is a
+    // Bound BEFORE the parse: the canonical record JSON is a
     // few hundred bytes — a value at 128 KiB+ is a corrupt/attacker-written
     // key and is rejected without allocating for a parse it could never
     // survive.
@@ -382,7 +382,7 @@ fn parse_consume(value: redis::Value) -> Option<ConsumeResult> {
 /// `RedisStorage` (same key layout, same JSON schema, same TTL rule), so
 /// records written by one side verify on the other.
 ///
-/// `consume()` is a Lua TRANSITION (audit #74): the pending record is kept
+/// `consume()` is a Lua TRANSITION: the pending record is kept
 /// with a storage-level `state = "consumed"` field so a concurrent loser
 /// returns the winner's committed outcome instead of re-deriving.
 /// `find()` peeks with a plain GET — the non-consuming read the verify flow
@@ -400,12 +400,12 @@ pub struct RedisChallengeStore {
     pool: r2d2::Pool<StoreConnectionManager>,
     prefix: String,
     /// Number of replicas the SET must be acknowledged by (Redis WAIT)
-    /// before `store()` returns (audit #22/#23). 0 = fire-and-forget.
+    /// before `store()` returns. 0 = fire-and-forget.
     wait_replicas: u32,
     /// Timeout (ms) for the Redis WAIT after the SET.
     wait_timeout_ms: u64,
     /// Extra seconds added to the EX TTL (`expires_at - now + margin`,
-    /// min 1 s) so a challenge survives replica lag / clock skew (audit #23).
+    /// min 1 s) so a challenge survives replica lag / clock skew.
     ttl_margin_secs: i64,
 }
 
@@ -452,7 +452,7 @@ impl RedisChallengeStore {
     /// `wait_replicas` replicas before the call returns: after the issuance
     /// SET, after the pending→consumed transition, and after the
     /// deterministic-result commit, a Redis `WAIT replicas timeout_ms` is
-    /// issued and its acknowledgement count is VERIFIED (audit round 14).
+    /// issued and its acknowledgement count is VERIFIED.
     /// Fewer than `wait_replicas` acknowledged replicas fail the call
     /// closed with an error — the durability promise is unconditional, it
     /// is never silently downgraded to "whatever the replica set managed".
@@ -466,7 +466,7 @@ impl RedisChallengeStore {
     }
 
     /// Add `ttl_margin_secs` seconds to the stored record's EX TTL:
-    /// `ttl = max(1, expires_at - now + margin)` (audit #23). A positive
+    /// `ttl = max(1, expires_at - now + margin)`. A positive
     /// margin keeps the record readable past `expires_at` by replica lag or
     /// clock skew; the verifier's own TTL check still rejects it at
     /// `expires_at`, so the margin never extends the challenge's real
@@ -529,8 +529,8 @@ impl RedisChallengeStore {
         }
     }
 
-    /// Invoke one of the store's Lua scripts with bounded NOSCRIPT recovery
-    /// (audit #102). The redis crate's [`redis::Script`] already re-loads the
+    /// Invoke one of the store's Lua scripts with bounded NOSCRIPT recovery.
+    /// The redis crate's [`redis::Script`] already re-loads the
     /// script on NOSCRIPT, but it retries exactly ONCE — a concurrent
     /// `SCRIPT FLUSH` landing between the re-load and the retry would fail
     /// the invocation. The bounded loop (3 attempts, re-loading on every
@@ -565,13 +565,13 @@ impl RedisChallengeStore {
 
     /// Persist a record with `EX ttl = max(1, expires_at - now +
     /// ttl_margin_secs)` — the PHP `RedisStorage::store()` rule plus the
-    /// audit #23 TTL margin. An already-expired record is stored with a
+    /// TTL margin. An already-expired record is stored with a
     /// 1-second lifetime (it will fail the verifier's TTL check if fetched
     /// in time, and vanish otherwise).
     ///
     /// When [`RedisChallengeStore::with_wait`] configured a replica wait,
     /// a Redis `WAIT replicas timeout_ms` is issued AFTER the SET and the
-    /// acknowledgement count is VERIFIED (audit round 14): fewer than
+    /// acknowledgement count is VERIFIED: fewer than
     /// `wait_replicas` acked replicas is an `Err` — the challenge is only
     /// handed to the client once the requested replica count has it, so a
     /// promotion cannot lose a freshly issued challenge. WAIT blocks up to
@@ -586,7 +586,7 @@ impl RedisChallengeStore {
         let key = format!("{}{}", self.prefix, record.nonce);
         // Infallible for this struct in practice — every field is a String
         // or an integer (no non-finite floats) — but the no-panic invariant
-        // (audit #115) maps even the impossible serialization failure to a
+        // maps even the impossible serialization failure to a
         // typed storage error instead of panicking.
         let value = serde_json::to_string(record).map_err(|e| {
             redis::RedisError::from((
@@ -636,7 +636,7 @@ impl RedisChallengeStore {
     }
 
     /// Atomically transition the record for `nonce` from `pending` to
-    /// `consumed` — the one-shot bound of the verify flow (audit #74).
+    /// `consumed` — the one-shot bound of the verify flow.
     ///
     /// ONE Lua script on the server:
     /// - `pending` → the record is KEPT with `state = "consumed"` and
@@ -669,10 +669,9 @@ impl RedisChallengeStore {
                 &key,
                 &[],
             )?;
-            // Durability barrier (audit round 14): when the transition DID
+            // Durability barrier: when the transition DID
             // execute, the consumed state must reach the configured replica
-            // count before the caller may act on it. QUALIFICATION (audit
-            // round 22 — same wording as SECURITY.md): WAIT N proves that
+            // count before the caller may act on it. WAIT N proves that
             // at least N replicas acknowledged the write; it does NOT
             // constrain which replicas a future failover manager promotes —
             // replay-safe promotion additionally requires the threshold to
@@ -689,7 +688,7 @@ impl RedisChallengeStore {
     }
 
     /// Best-effort persistence of the proof outcome for an already-consumed
-    /// record (audit #74): ONE Lua script stores `{valid, binding}` exactly
+    /// record: ONE Lua script stores `{valid, binding}` exactly
     /// once, and only while the record is in the `consumed` state with no
     /// result yet.
     ///
@@ -725,7 +724,7 @@ impl RedisChallengeStore {
 
     /// Issue `WAIT wait_replicas wait_timeout_ms` and FAIL CLOSED when the
     /// acknowledged-replica count is below the configured threshold
-    /// (audit round 14). WAIT blocks up to its timeout before replying, so
+    /// . WAIT blocks up to its timeout before replying, so
     /// the connection's read timeout is temporarily raised to
     /// `timeout_ms + 500 ms` headroom and restored to [`READ_TIMEOUT`]
     /// afterwards (even when the WAIT itself failed).
@@ -832,13 +831,13 @@ pub enum AdmissionError {
 pub struct ProductionVerifier {
     store: RedisChallengeStore,
     secret_key: String,
-    /// Optional per-key-id secrets (audit #91): `kid → master secret`. When
+    /// Optional per-key-id secrets: `kid → master secret`. When
     /// set, the record's `kid` selects the signing secret for the signature
     /// (and IP-binding) checks — see [`crate::verify::VerifyContext::secrets_by_kid`]
     /// for the UnknownKid / forward-guard semantics. `None` = the historical
     /// single-key path (`secret_key` used unconditionally).
     secrets_by_kid: Option<std::collections::HashMap<u32, String>>,
-    /// Compromise-revoked key ids (audit #117): a record whose `kid` is in
+    /// Compromise-revoked key ids: a record whose `kid` is in
     /// this set is rejected with [`VerifyError::UnknownKid`] in the cheap
     /// phase — BEFORE the signature check — even when the secret is present:
     /// compromise revocation overrides the rotation grace.
@@ -877,7 +876,7 @@ impl ProductionVerifier {
         }
     }
 
-    /// Configure key rotation (audit #91): the `kid → master secret` map
+    /// Configure key rotation: the `kid → master secret` map
     /// used to verify challenges signed under a rotated key. The record's
     /// `kid` selects the secret; an unknown kid — or a kid newer than the
     /// map's newest id (the forward/rollback guard) — is rejected with
@@ -888,7 +887,7 @@ impl ProductionVerifier {
         self
     }
 
-    /// Configure compromise-revoked key ids (audit #117): a record whose
+    /// Configure compromise-revoked key ids: a record whose
     /// `kid` is in this set is rejected with [`VerifyError::UnknownKid`] in
     /// the cheap phase — BEFORE the signature check — even when the kid's
     /// secret is still present in `secrets_by_kid` (or the single-key path):
@@ -901,7 +900,7 @@ impl ProductionVerifier {
 
     /// Override the verifier's clock: `f` returns the current Unix time in
     /// seconds used by the TTL checks and the post-derive final
-    /// re-validation (audit #59). Mirrors the PHP Verifier's `$now` clock
+    /// re-validation. Mirrors the PHP Verifier.s `` clock
     /// override; the default is the real clock.
     #[doc(hidden)]
     pub fn with_now_fn(mut self, f: fn() -> u64) -> Self {
@@ -932,7 +931,7 @@ impl ProductionVerifier {
     }
 
     /// Require every verified challenge to have been issued for this region
-    /// (audit #22): a record with a different region — or with no region at
+    /// : a record with a different region — or with no region at
     /// all — is rejected with [`VerifyError::WrongRegion`]. Use
     /// [`ProductionVerifier::without_expected_region`] to clear.
     pub fn with_expected_region(mut self, region: impl Into<String>) -> Self {
@@ -952,7 +951,7 @@ impl ProductionVerifier {
     }
 
     /// Require every verified challenge to have been issued under the
-    /// CURRENT security-policy epoch (audit #42): a record with a different
+    /// CURRENT security-policy epoch: a record with a different
     /// `policy_version` is rejected with [`VerifyError::WrongPolicyVersion`]
     /// — outstanding challenges die immediately on policy revocation
     /// (origin/action-policy changes, emergency revocation, compromised
@@ -975,7 +974,7 @@ impl ProductionVerifier {
     }
 
     /// Require every verified challenge to have been issued by this issuer
-    /// (audit #67): a record with a different issuer — or with no issuer at
+    /// : a record with a different issuer — or with no issuer at
     /// all — is rejected with [`VerifyError::WrongIssuer`] (fail closed,
     /// like the region expectation). Use
     /// [`ProductionVerifier::without_expected_issuer`] to clear.
@@ -1088,7 +1087,7 @@ impl ProductionVerifier {
             None
         };
 
-        // 5. Atomic CONSUME (the pending → consumed TRANSITION, audit #74).
+        // 5. Atomic CONSUME (the pending → consumed TRANSITION).
         //    The one-shot bound: exactly one caller wins the transition and
         //    derives; a concurrent loser observes `first == false` and
         //    returns the WINNER'S COMMITTED OUTCOME (Valid/InsufficientWork)
@@ -1136,7 +1135,7 @@ impl ProductionVerifier {
             Err(e) => return VerifyOutcome::Invalid(e),
         };
 
-        // 7b. POST-DERIVE FINAL re-validation (audit #59): re-read the
+        // 7b. POST-DERIVE FINAL re-validation: re-read the
         //     CURRENT server time and the current expectations — the
         //     challenge may have expired DURING the expensive derivation,
         //     or the policy epoch / region / issuer expectations may have
@@ -1154,7 +1153,7 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(e);
         }
 
-        // 8. Leading-zero check + best-effort outcome commit (audit #74):
+        // 8. Leading-zero check + best-effort outcome commit:
         //    the winner stores the proof verdict so concurrent/retried
         //    consumers return the SAME outcome without re-deriving. The
         //    commit is best-effort — a storage failure must never change
@@ -1197,7 +1196,7 @@ impl ProductionVerifier {
             return Err(VerifyError::MalformedRecord);
         }
 
-        // 3b2. Compromise revocation (audit #117): a REVOKED kid is rejected
+        // 3b2. Compromise revocation: a REVOKED kid is rejected
         //      IMMEDIATELY — before the signature check — even when its
         //      secret is still present: revocation overrides the rotation
         //      grace. Never consumes the record (the deployment's revocation
@@ -1208,7 +1207,7 @@ impl ProductionVerifier {
             }
         }
 
-        // 3b3. Key-rotation resolution (audit #91): when a `secrets_by_kid`
+        // 3b3. Key-rotation resolution: when a `secrets_by_kid`
         //      map is configured, the record's kid selects the signing
         //      secret. An unknown kid — or a kid NEWER than the map's newest
         //      id (the forward/rollback guard: future-keyed challenges must
@@ -1242,7 +1241,7 @@ impl ProductionVerifier {
             _ => return Err(VerifyError::BadSignature),
         }
 
-        // 3c2. Hard Argon2id parameter ceilings (audit #32) — AFTER the
+        // 3c2. Hard Argon2id parameter ceilings — AFTER the
         //      signature is authenticated, BEFORE any Params::new/allocation.
         if record.algorithm == PoWAlgorithm::Argon2id {
             crate::verify::check_argon2_ceilings(record)?;
@@ -1250,7 +1249,7 @@ impl ProductionVerifier {
 
         // 3d. TTL (server clock, like the PHP `time()`). The challenge is
         //     invalid outside its validity window [issued_at, expires_at):
-        //     expired once now reaches expires_at, and (audit #76) a
+        //     expired once now reaches expires_at, and a
         //     future-issued challenge is a time-domain anomaly when its
         //     issued_at is more than MAX_CLOCK_SKEW_SECS ahead of the
         //     verifier clock.
@@ -1267,7 +1266,7 @@ impl ProductionVerifier {
             return Err(VerifyError::WrongScope);
         }
 
-        // 3e2. Region (audit #22): a region-expecting deployment fails
+        // 3e2. Region: a region-expecting deployment fails
         //      closed on challenges issued for another region — or for no
         //      region at all.
         if let Some(expected) = self.expected_region.as_deref() {
@@ -1276,7 +1275,7 @@ impl ProductionVerifier {
             }
         }
 
-        // 3e3. Security-policy epoch (audit #42): the policy that authorized
+        // 3e3. Security-policy epoch: the policy that authorized
         //      this challenge must still be in force.
         if let Some(expected) = self.expected_policy_version {
             if record.policy_version != expected {
@@ -1284,7 +1283,7 @@ impl ProductionVerifier {
             }
         }
 
-        // 3e4. Issuer identity (audit #67): an issuer-expecting deployment
+        // 3e4. Issuer identity: an issuer-expecting deployment
         //      rejects challenges issued by another issuer — or by no
         //      issuer at all (fail closed).
         if let Some(expected) = self.expected_issuer.as_deref() {
@@ -1420,7 +1419,7 @@ mod tests {
 
     #[test]
     fn expired_during_derivation_is_rejected_by_the_final_revalidation() {
-        // Audit #59 at the production boundary: the challenge expires WHILE
+        // At the production boundary: the challenge expires WHILE
         // the proof derives. The cheap phase (peek + post-consume re-check)
         // passes at time BASE; the FINAL re-validation RE-READS the clock
         // (the race) and sees BASE + 1 ≥ expires_at → Expired, even though
@@ -1462,11 +1461,11 @@ mod tests {
         );
     }
 
-    // ── Round-12 audit: allocation-after-length (#113), recursion (#114) ──
+    // ── allocation-after-length, recursion ─────────────────────────────
 
     #[test]
     fn oversized_stored_value_is_rejected_before_any_parse() {
-        // Audit #113 at the STORAGE layer: a stored value beyond
+        // At the STORAGE layer: a stored value beyond
         // MAX_STORED_RECORD_JSON_BYTES never reaches serde_json — a 10 MB
         // attacker-written value maps to None (corrupt key → RecordNotFound
         // upstream) without a large decode/parse.
@@ -1483,7 +1482,7 @@ mod tests {
 
     #[test]
     fn deeply_nested_stored_value_hits_the_recursion_limit() {
-        // Audit #114: serde_json's default recursion limit (128) is intact —
+        // serde_json's default recursion limit (128) is intact —
         // a 100k-level nested value yields a CLEAN RecursionLimitExceeded
         // parse error, never a stack overflow. (The crate never calls
         // disable_recursion_limit / unbounded_depth.)

@@ -330,7 +330,7 @@ impl RiskPolicy {
     /// capacity check is LAST, so floors/minimum can never reintroduce
     /// Argon after a demotion.
     ///
-    /// Hysteresis (audit #95): with `hysteresis` the band selection uses
+    /// Hysteresis: with `hysteresis` the band selection uses
     /// the scope's previous action — escalate to the next band only at its
     /// ENTER threshold (upper + 10), de-escalate only below its EXIT
     /// threshold (lower − 10); fresh scopes and StepUp/Deny use the plain
@@ -1069,7 +1069,7 @@ mod tests {
         assert_eq!(p.degraded_decision(1, 3).global_level, 3);
         assert_eq!(p.degraded_decision(1, 0).global_level, 0);
         assert_eq!(p.degraded_decision(1, 3).policy_version, 3);
-        // AUDIT #110: the degraded decision carries the model revision too.
+        // The degraded decision carries the model revision too.
         assert_eq!(
             p.degraded_decision(1, 3).model_revision,
             crate::RISK_MODEL_REVISION
@@ -1084,7 +1084,7 @@ mod tests {
         assert_eq!(json["score"], 500);
         assert_eq!(json["action"], "sha20");
         assert_eq!(json["policy_version"], 3);
-        // AUDIT #110: the revision is exposed in the public JSON (bounded).
+        // The revision is exposed in the public JSON (bounded).
         assert_eq!(json["model_revision"], 17);
         assert_eq!(json["global_level"], 2);
         assert_eq!(json["retry_after_ms"], Value::Null);
@@ -1092,13 +1092,13 @@ mod tests {
         assert!(json["reasons"].is_array());
     }
 
-    /// AUDIT #110: the revision constant is a shared cross-language value.
+    /// The revision constant is a shared cross-language value.
     #[test]
     fn model_revision_constant_is_seventeen() {
         assert_eq!(crate::RISK_MODEL_REVISION, 17);
     }
 
-    /// AUDIT #95 — the policy-level wiring: an oscillating boundary score
+    /// Policy-level wiring: an oscillating boundary score
     /// (449/451/449…) with the engine's hysteresis map yields a STABLE
     /// action (no flip-flop), while the plain `decide` (no map) keeps the
     /// pre-audit mapping.
@@ -1141,7 +1141,7 @@ mod tests {
         );
     }
 
-    /// AUDIT #95 — hysteresis never violates the scope minimum or the
+    /// Hysteresis never violates the scope minimum or the
     /// global floor (the clamps apply AFTER the band selection).
     #[test]
     fn hysteresis_never_violates_minimum_or_floor() {

@@ -7,7 +7,7 @@ This package ships four browser assets (`assets/`):
 | `kiwicaptcha-wasm.js` | wasm-bindgen glue with the Argon2id/SHA-256 solver wasm inlined as base64 |
 | `kiwi-worker.js` | standalone same-origin worker solver (`data-kiwi-worker-src`) |
 | `widget-driver.js` | the widget driver; embeds the worker source and the solver protocol id |
-| `widget.css` | the widget stylesheet (first-class release asset since round 18; SRI-capable via `<link>`) |
+| `widget.css` | the widget stylesheet (first-class release asset; SRI-capable via `<link>`) |
 
 Everything below is guidance for integrators who serve these assets (self-hosted
 or via a CDN). The exact release URLs are the integrator's choice — this file
@@ -41,7 +41,7 @@ Use the SRI script-tag pattern for every asset you serve:
         crossorigin="anonymous"></script>
 ```
 
-(Round 28: the example path uses the RELEASE version — the solver protocol
+(The example path uses the RELEASE version — the solver protocol
 id is a protocol/ABI label, not an artifact identity; see §2 below.)
 
 Notes:
@@ -50,7 +50,7 @@ Notes:
   cross-origin script without `crossorigin` will be blocked.
 - Re-run the tool after every rebuild and update the tags; a hash mismatch
   means the bytes on the wire are not the bytes you pinned.
-- **Workers cannot use `integrity=` (audit round 15):** `new Worker(url)`
+- **Workers cannot use `integrity=`:** `new Worker(url)`
   has no SRI parameter, so the standalone `kiwi-worker.js` served via
   `data-kiwi-worker-src` must be protected differently:
   - serve it from an **immutable, versioned, same-origin URL**
@@ -74,7 +74,7 @@ Notes:
 
 - Every asset must be served from an immutable, versioned URL path. The
   version is the RELEASE tag (or a content address — the strongest form,
-  below), e.g. `/kiwicaptcha/v1.6.20/widget-driver.js`. Round 28: the
+  below), e.g. `/kiwicaptcha/v1.6.20/widget-driver.js`. The
   solver protocol id (§5) is an ABI/protocol label — multiple
   byte-different compatible releases legitimately share it, so it must
   NEVER be used as the URL version (a "v2026-08-r1" path would silently

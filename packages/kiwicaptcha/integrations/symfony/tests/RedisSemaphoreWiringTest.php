@@ -64,7 +64,7 @@ final class RedisSemaphoreWiringTest extends TestCase
         self::assertSame(64, $semaphore->getArgument(4), 'argon2_max_waiters (default 64) must reach the semaphore\'s bounded waiters guard');
 
         // The verifier consumes the gate through the request-scope-aware
-        // wrapper (audit #47: the validator passes the scope into acquire).
+        // wrapper (the validator passes the scope into acquire).
         $verifier = $container->getDefinition('kiwi_captcha.verifier');
         self::assertSame(Verifier::class, $verifier->getClass());
         self::assertSame('kiwi_captcha.argon2_scope_gate', (string) $verifier->getArgument(1), 'the verifier must be wired with the scope-aware gate');
@@ -98,7 +98,7 @@ final class RedisSemaphoreWiringTest extends TestCase
         });
 
         $semaphore = $container->getDefinition('kiwi_captcha.argon2_redis_semaphore');
-        self::assertSame(15, $semaphore->getArgument(5), 'the configured argon2_max_per_tenant must reach the semaphore (audit #47)');
+        self::assertSame(15, $semaphore->getArgument(5), 'the configured argon2_max_per_tenant must reach the semaphore');
 
         $container = $this->load(self::ARGON2 + [
             'argon2_max_concurrent_verifications' => 2,

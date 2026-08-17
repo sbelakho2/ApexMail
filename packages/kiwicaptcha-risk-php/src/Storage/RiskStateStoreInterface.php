@@ -57,7 +57,7 @@ interface RiskStateStoreInterface
     public function confirmOutcome(string $decisionId, bool $legitimate): int;
 
     /**
-     * Corrects a previously confirmed outcome (canonical outcome_correct.lua):
+     * Corrects a confirmed outcome (canonical outcome_correct.lua):
      * flips the ledger L <-> A. The corrected outcome is authoritative for
      * future events; ephemeral reputation pressure is left to decay.
      *

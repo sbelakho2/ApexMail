@@ -157,7 +157,7 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsMegabyteTokenByLengthCapBeforeAnyDecode(): void
     {
-        // Audit #113: the 32,768-byte length cap is checked BEFORE
+        // The 32,768-byte length cap is checked BEFORE
         // base64_decode — a 1 MB token must be rejected by the cap with no
         // huge decoded allocation behind it. A decode-before-cap regression
         // would materialize ~750 KB of plaintext here.
@@ -172,7 +172,7 @@ final class SolutionTokenTest extends TestCase
 
     public function testDeeplyNestedTelemetryJsonFailsCleanly(): void
     {
-        // Audit #115: json_decode runs at the default depth (512). A
+        // json_decode runs at the default depth (512). A
         // telemetry segment nested far beyond it must fail cleanly with a
         // typed DecodeError — never a stack exhaustion or an untyped
         // JsonException escaping the parse path.
@@ -183,7 +183,7 @@ final class SolutionTokenTest extends TestCase
 
     public function testDecodeOnlyThrowsDecodeError(): void
     {
-        // Audit #115: the public parse path must never throw anything
+        // The public parse path must never throw anything
         // except DecodeError — adversarial inputs (huge, deeply nested,
         // non-numeric, malformed) all fail typed.
         $inputs = [
@@ -231,7 +231,7 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsBase64UrlVariant(): void
     {
-        // Audit #29: the same semantic token encoded with the base64url
+        // The same semantic token encoded with the base64url
         // alphabet (- _) must be rejected — exactly one canonical byte
         // representation is accepted. The telemetry '?' bytes (0x3F) are
         // positioned (duration=1000) so the token's base64 contains '/'
@@ -251,7 +251,7 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsUnpaddedBase64(): void
     {
-        // Audit #29: stripping the canonical padding decodes to the same
+        // Stripping the canonical padding decodes to the same
         // bytes in PHP but is NOT the canonical byte representation — the
         // canonical re-encode check rejects it.
         $nonce = base64_encode(str_repeat("\xff", 32));
@@ -266,7 +266,7 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsWhitespacePaddedBase64(): void
     {
-        // Audit #29: the historical trim() leniency is gone — embedded or
+        // There is no trim() leniency — embedded or
         // surrounding whitespace is outside the canonical representation.
         $raw = SolutionToken::create(self::NONCE, 1, 100, [])->encode();
         foreach ([$raw."\n", ' '.$raw, str_replace('=', "=\n", $raw)] as $variant) {
@@ -282,7 +282,7 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsNonCanonicalPaddingTrailingBits(): void
     {
-        // Audit #29: a valid-length base64 whose final group carries
+        // A valid-length base64 whose final group carries
         // non-zero trailing bits ('A' instead of '=' for a 1-byte remainder)
         // is not canonical even though strict decode may accept it.
         $plain = self::NONCE.'.1.100.{}';

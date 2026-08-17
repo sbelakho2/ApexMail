@@ -17,7 +17,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Protocol difficulty bounds (audit #87): the explicit constants
+ * Protocol difficulty bounds: the explicit constants
  * MIN_DIFFICULTY = 1 and MAX_DIFFICULTY = 20 (the solver ceiling) guard
  * the verifier's validate_record for BOTH algorithms — a stored record
  * whose target_bits is outside 1..20 is malformed, and the check runs

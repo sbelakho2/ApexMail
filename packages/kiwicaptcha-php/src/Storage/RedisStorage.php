@@ -12,7 +12,7 @@ use KiwiCaptcha\ConsumedResult;
 /**
  * Redis-backed storage with TRUE atomic one-shot semantics.
  *
- * `consume()` is a TRANSITION (audit #74), not a delete: an atomic Lua
+ * `consume()` is a TRANSITION, not a delete: an atomic Lua
  * script marks the record consumed and KEEPS it until its TTL. Replay
  * protection is the consumed marker, not absence — and the record can carry
  * a deterministic verification result (`consumed_result`) so a retry on an
@@ -49,7 +49,7 @@ final class RedisStorage implements AtomicStorageInterface
      * when absent).
      */
     private const CONSUME_SCRIPT = <<<'LUA'
--- kiwicaptcha consume transition (audit #74)
+-- kiwicaptcha consume transition
 --
 -- CRITICAL: the record is NEVER re-encoded through cjson — re-encoding
 -- rewrites large integers (issued_at_ns ~ 1.7e15) in scientific notation
@@ -96,7 +96,7 @@ LUA;
      * "1"|"0"}.
      */
     private const COMMIT_SCRIPT = <<<'LUA'
--- kiwicaptcha commit result (audit #74)
+-- kiwicaptcha commit result
 --
 -- Same raw-splice rule as CONSUME_SCRIPT: the stored JSON is never
 -- re-encoded through cjson (large integers would switch to scientific
@@ -193,10 +193,9 @@ LUA;
             return null;
         }
 
-        // Durability barrier (audit round 14): the pending→consumed
+        // Durability barrier: the pending→consumed
         // transition must reach the configured replica count before the
-        // caller is allowed to treat the record as consumed. QUALIFICATION
-        // (audit round 22 — same wording as SECURITY.md): WAIT N proves
+        // caller is allowed to treat the record as consumed. WAIT N proves
         // that at least N replicas acknowledged the write; it does NOT
         // constrain which replicas a future failover manager promotes —
         // replay-safe promotion additionally requires the threshold to
@@ -235,7 +234,7 @@ LUA;
         $raw = $this->evalScript(self::COMMIT_SCRIPT, [$key, $valid ? '1' : '0', $binding ?? '', $binding === null ? '0' : '1'], 1);
         $committed = $raw === 1 || $raw === '1' || $raw === true;
 
-        // Durability barrier (audit round 14): a committed deterministic
+        // Durability barrier: a committed deterministic
         // result that only lives on the primary would be lost on promotion,
         // degrading a retry to ConsumeIndeterminate. The barrier keeps the
         // commit's durability contract honest. Callers treat commit as
@@ -268,7 +267,7 @@ LUA;
 
     /**
      * Block until at least waitReplicas replicas acknowledged the previous
-     * write, and FAIL CLOSED when they did not (audit round 14).
+     * write, and FAIL CLOSED when they did not.
      *
      * Redis WAIT returns the number of replicas that processed the write
      * (0 on a replica-less server). The barrier asserts that number against

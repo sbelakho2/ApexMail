@@ -60,7 +60,7 @@ pub struct IssuedChallenge {
 pub const MAX_DURATION_MS: u64 = 3_600_000;
 
 /// Hard ceiling on the RAW token length (bytes) accepted by
-/// [`SolutionToken::decode`] (audit #113). The canonical wire form of a
+/// [`SolutionToken::decode`]. The canonical wire form of a
 /// legitimate token is a few hundred bytes (32-byte nonce + counter +
 /// duration + a small telemetry object); 32 KiB is far beyond any of them.
 /// The bound is enforced BEFORE the base64 decode, so an oversized token is
@@ -101,13 +101,12 @@ impl SolutionToken {
         if raw.len() > MAX_TOKEN_RAW_BYTES {
             return Err(DecodeError::TooLarge);
         }
-        // Strict canonical decode (audit #29): the input must be EXACTLY the
+        // Strict canonical decode: the input must be EXACTLY the
         // canonical padded standard-base64 encoding of the decoded bytes.
         // Any deviation — url-safe alphabet, missing/loose padding, trailing
         // bits, surrounding whitespace — re-encodes to a different string, so
         // the byte-exact re-encode comparison enforces the single accepted
-        // encoding (the legacy `.trim()` was removed: whitespace is not part
-        // of the wire language).
+        // encoding; whitespace is not part of the wire language.
         let plain = B64.decode(raw).map_err(|_| DecodeError::InvalidBase64)?;
         if B64.encode(&plain) != raw {
             return Err(DecodeError::InvalidBase64);
@@ -252,7 +251,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_megabyte_token_by_length_cap() {
-        // Audit #113: a 1 MB token is rejected by the length cap BEFORE any
+        // A 1 MB token is rejected by the length cap BEFORE any
         // base64 decode — no large allocation, no decode work, and no panic.
         let mega = "A".repeat(1_000_000);
         assert!(
@@ -263,7 +262,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_recursively_nested_telemetry() {
-        // Audit #114: the telemetry JSON parse respects serde_json's DEFAULT
+        // The telemetry JSON parse respects serde_json's DEFAULT
         // recursion limit (the crate never disables it) — a telemetry object
         // nested deeper than the limit is rejected with Malformed (a clean
         // error), never a stack overflow. 200 levels exceed the 128-level
@@ -434,7 +433,7 @@ mod tests {
         );
     }
 
-    // ── Round-8 audit #29: exactly one canonical encoding ──────────────
+    // ── exactly one canonical encoding ─────────────────────────────────
 
     fn valid_token() -> SolutionToken {
         // Nonce whose base64 contains both '+' and '/' (0xFF×3 → "////",

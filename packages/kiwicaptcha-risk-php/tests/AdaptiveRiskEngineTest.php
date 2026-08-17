@@ -418,7 +418,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     }
 
     /**
-     * AUDIT #95 — engine-level wiring: the engine passes its per-process
+     * Engine-level wiring: the engine passes its per-process
      * scope-action hysteresis map into the policy, so an oscillating
      * boundary score (449/451/449…) yields a STABLE action instead of a
      * flip-flopping challenge profile.
@@ -779,7 +779,7 @@ final class AdaptiveRiskEngineTest extends TestCase
     }
 
     /**
-     * ROUND-7 HEADLINE: the OUTCOME LEDGER is ALWAYS ON and independent of
+     * THE OUTCOME LEDGER IS ALWAYS ON and independent of
      * calibration — ConfirmedLegitimate/ConfirmedAbuse work IDENTICALLY with
      * calibration disabled. Every decision registers a PENDING ledger entry
      * at assessment time (store->registerOutcome without calibration); the

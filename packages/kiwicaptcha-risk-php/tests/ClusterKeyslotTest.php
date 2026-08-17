@@ -9,7 +9,7 @@ use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
 /**
- * AUDIT #24 — REDIS CLUSTER KEYSLOT TESTS.
+ * REDIS CLUSTER KEYSLOT TESTS.
  *
  * Every multi-key Lua invocation must use keys in the same hash slot (the
  * {kiwi:<ns>} tag). For each canonical script's key set we build the keys

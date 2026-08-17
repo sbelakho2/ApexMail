@@ -6,8 +6,7 @@ namespace KiwiCaptcha\Risk;
 
 /**
  * Per-process, bounded, TTL'd map of the LAST score-selected action per
- * scope, giving the SCOPE action selection enter/exit hysteresis (audit #95):
- * a score hovering at a band boundary (449/451/449…) can no longer flip the
+ * scope, giving the SCOPE action selection enter/exit hysteresis: a score hovering at a band boundary (449/451/449…) can no longer flip the
  * challenge profile on every request.
  *
  * Rules (byte-identical on the Rust side):
@@ -21,7 +20,7 @@ namespace KiwiCaptcha\Risk;
  *   - the hard actions (StepUp/Deny) are NOT hysteresis-affected: when the
  *     previous or the plain action is StepUp/Deny the plain mapping wins;
  *   - entries expire after TTL_MS (300 s); the map is bounded at
- *     MAX_SCOPES (1024), the oldest entry evicted when a NEW scope arrives
+ *     MAX_SCOPES (1024), the least-recently-used entry evicted when a NEW scope arrives
  *     at capacity (expired entries are purged first).
  *
  * The map is intentionally PER-PROCESS (the engine service is a per-worker
@@ -34,7 +33,7 @@ final class ScopeActionHysteresis
     /** Entry lifetime: 300 s. */
     public const TTL_MS = 300_000;
 
-    /** Bounded map: at most 1024 scopes; the oldest entry is evicted. */
+    /** Bounded map: at most 1024 scopes; the least-recently-used entry is evicted. */
     public const MAX_SCOPES = 1024;
 
     /**

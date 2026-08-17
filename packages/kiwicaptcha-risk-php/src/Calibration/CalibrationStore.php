@@ -69,7 +69,7 @@ use KiwiCaptcha\Risk\RiskAction;
  * biasForScope() never returns a nonzero bias below the store's
  * minSamples threshold and clamps the raw bias to its maxAdjustment; the
  * final bias is rate-limited and cached in-process per scope for 30 s.
- * NON-FINITE GUARD (audit #109): the returned bias is ALWAYS a bounded
+ * NON-FINITE GUARD: the returned bias is ALWAYS a bounded
  * integer within ±maxAdjustment — a non-finite script reply (NaN/±Inf
  * from corrupted bucket values) maps to +maxAdjustment (fail HIGH, never
  * 0, never lower-risk-than-max).
@@ -115,12 +115,12 @@ interface CalibrationStore
     public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int;
 
     /**
-     * Corrects a previously confirmed outcome via the canonical
+     * Corrects a confirmed outcome via the canonical
      * correction.lua: flips the ledger L <-> A, REVERSES the original
      * bucket contribution (exact recorded weight, clamped at zero) and
      * adds the corrected contribution. The corrected outcome is
      * authoritative for future events; if the decision-time bucket already
-     * expired, the ledger still flips and the old ephemeral reputation
+     * expired, the ledger still flips and the prior ephemeral reputation
      * pressure decays naturally.
      *
      * @return bool true when the correction was applied, false when the

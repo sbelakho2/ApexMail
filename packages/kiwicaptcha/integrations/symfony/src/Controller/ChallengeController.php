@@ -40,120 +40,142 @@ use Symfony\Component\HttpFoundation\Response;
  * X-Content-Type-Options nosniff — challenge bytes and client identity must
  * never be cached, mirrored, or sniffed (see {@see self::privateJson()}).
  *
- * Hardening order: PATH CANONICALITY first (audit #99 — the RAW request
- * target must be the canonical path: no `//`, no `/./`, no `/../`, no
- * percent-encoded bytes, no trailing slash — the raw REQUEST_URI is
- * compared, never a normalized route; a noncanonical target gets 404
- * CANONICAL_PATH_REQUIRED before any handling), then NARROW HTTP (audit
- * #77/#65: non-POST stays 405 — an OPTIONS preflight alone never authorizes
- * anything; HTTP FRAMING is rejected before any body is read — audit #83: a
- * request carrying BOTH Content-Length and Transfer-Encoding, or a duplicate
- * Content-Length, is request-smuggling ambiguity and gets 400
- * FRAMING_REJECTED; the SECURITY-SINGULAR HEADER duplicates are rejected
- * next — audit #100: Origin, Forwarded, X-Forwarded-For or X-Real-IP
- * appearing more than once is a parser-ambiguity attack and gets 400
- * DUPLICATE_HEADER before any header-derived identity is trusted; the
- * client-IP resolver treats such a duplicate as ambiguous and the controller
- * has already refused it; Content-Encoding other than identity and
- * Content-Type other than application/json are rejected with 415 before any
- * body is read — no decompression bombs, no form-encoded smuggling), then
- * the query-parameter audit (audit #72: the POST accepts ONLY scope /
- * algorithm? / request_binding — any query string is a debug/override probe
- * and gets 422), then the SECURITY-STATE staleness check (audit #108: a
- * monitor whose central policy read is past the max-stale window refuses
- * issuance with 503 SERVICE_UNAVAILABLE — deliberate constrained
- * degradation, documented in the README's availability trade-off), then
- * same-origin (CORS IS NOT AUTHORIZATION — audit #63: origin enforcement
- * runs on EVERY security response; the bundle never emits CORS headers at
- * all, so there is no preflight path that could authorize), then the
- * optional origin allowlist (origin_rejected 403) and Fetch Metadata check
- * (CROSS_SITE_REJECTED 403) — the origin-laundering defenses, also before
- * any state is written — then the DUPLICATE-JSON-KEY scan (audit #111: the
- * raw body is scanned for repeated object keys — {"scope":"a","scope":"b"}
- * is a parser-ambiguity probe and gets 422 DUPLICATE_FIELD, nested objects
- * included), then the strict JSON-field audit (audit #72: only the
- * documented fields, scalars only), then scope read, then the PROCESS-LOCAL
- * emergency admission step (audit #70: the engine's per-process cap is
- * checked BEFORE any Redis issuance limiter — a saturated process refuses
- * with the 429 risk-denied response without a single Redis round trip),
- * then issuance rate limiting (per-client and deployment-global; a
- * per-client 429 records SourceRateLimitHit, a global 429 records
- * GlobalCapacityHit — the deployment-wide refusal is identity-neutral and
- * never contaminates the visitor's source reputation), then — when the
- * adaptive risk engine is enabled — the PRE-ISSUE risk assessment (a Deny
- * decision returns 429 RISK_DENIED before any challenge is minted; the
- * denial already scored the evidence, so NO further rate-limit event is
- * recorded — double-counting removed; an escalated action raises the
- * difficulty of the issued challenge, an unknown scope in 'reject' mode
- * returns 429 RISK_DENIED without issuing), then the PER-SCOPE issuance cap
- * (audit #89/#112/#16: when risk.max_challenges_per_scope_per_minute is
- * set, the atomic {kiwi:<ns>}:issuance:<scopeIdentity>:<minute> fixed-window
- * counter refuses 429 SCOPE_LIMITED beyond the cap — the quota keys on the
- * SERVER-OWNED scope identity (the configured risk.scopes id, the shared
- * synthetic unknown-scope id, or the single reserved UNKNOWN_QUOTA_ID for
- * every unresolvable scope in ANY risk mode), so the raw scope string is
- * NEVER a Redis key component AND attacker-chosen scope names can never
- * mint fresh quota windows — a public site key + claimed origin can no
- * longer create unlimited billed work per scope),
- * then the ANTI-STOCKPILING admission (audit #26/#104: the bounded
- * outstanding counters are admitted BEFORE the challenge state is created
- * when the configured challenge TTL is wired — the challenge-issuance
- * sequence is local cap -> issuer limiter -> scope cap -> outstanding
- * counters -> mint+store, so every quota check runs before the storage
- * write; without a wired TTL the historical mint-then-admit race fallback
- * applies, discarding the minted record on refusal), then issuance (every
- * minted challenge increments the atomic issuance-rate counter used by the
- * resource-pressure provider).
+ * Security design of the request pipeline, in order:
+ *  1. PATH CANONICALITY: the RAW request target must be the canonical path
+ *     (no `//`, no `/./`, no `/../`, no percent-encoded bytes, no trailing
+ *     slash — the raw REQUEST_URI is compared, never a normalized route); a
+ *     noncanonical target gets 404 CANONICAL_PATH_REQUIRED before any
+ *     handling.
+ *  2. NARROW HTTP: non-POST stays 405 — an OPTIONS preflight alone never
+ *     authorizes anything. HTTP FRAMING is rejected before any body is
+ *     read: a request carrying BOTH Content-Length and Transfer-Encoding,
+ *     or a duplicate Content-Length, is request-smuggling ambiguity and
+ *     gets 400 FRAMING_REJECTED.
+ *  3. SECURITY-SINGULAR HEADERS: Origin, Forwarded, X-Forwarded-For or
+ *     X-Real-IP appearing more than once is a parser-ambiguity attack and
+ *     gets 400 DUPLICATE_HEADER before any header-derived identity is
+ *     trusted.
+ *  4. Content-Encoding other than identity and Content-Type other than
+ *     application/json are rejected (415) before any body is read — no
+ *     decompression bombs, no form-encoded smuggling.
+ *  5. BODY CEILING: the body is consumed as a stream with a hard 8 KiB cap
+ *     and a declared-Content-Length check — oversized input gets 413
+ *     BODY_TOO_LARGE before the duplicate scan, the JSON decode or any
+ *     admission control. Allocation-level ceilings are a deployment
+ *     concern: mirror the bound in the proxy (client_max_body_size etc.)
+ *     and in PHP (post_max_size) so oversized bytes never reach PHP at
+ *     all.
+ *  6. QUERY-PARAM HARDENING: the POST accepts ONLY scope / algorithm? /
+ *     request_binding — any query string is a debug/override probe and
+ *     gets 422.
+ *  7. SECURITY-STATE STALENESS: a monitor whose central policy read is
+ *     past the max-stale window refuses issuance with 503
+ *     SERVICE_UNAVAILABLE — deliberate constrained degradation (README:
+ *     availability trade-off).
+ *  8. SAME-ORIGIN (CORS IS NOT AUTHORIZATION): origin enforcement runs on
+ *     EVERY security response; the bundle never emits CORS headers at
+ *     all, so there is no preflight path that could authorize. The
+ *     optional origin allowlist (403 origin_rejected) and the Fetch
+ *     Metadata check (403 CROSS_SITE_REJECTED) are the origin-laundering
+ *     defenses, also before any state is written.
+ *  9. DUPLICATE-JSON-KEY scan: the raw body is scanned for repeated object
+ *     keys ({"scope":"a","scope":"b"} is a parser-ambiguity probe, 422
+ *     DUPLICATE_FIELD, nested objects included), then the strict
+ *     JSON-field check (only the documented fields, scalars only), then
+ *     scope read.
+ * 10. PROCESS-LOCAL EMERGENCY ADMISSION before any Redis issuance
+ *     limiter: a saturated process refuses with the 429 risk-denied
+ *     response without a single Redis round trip. Issuance rate limiting
+ *     follows (per-client and deployment-global; a per-client 429 records
+ *     SourceRateLimitHit, a global 429 records GlobalCapacityHit — the
+ *     deployment-wide refusal is identity-neutral and never contaminates
+ *     the visitor's source reputation).
+ * 11. When the adaptive risk engine is enabled, the PRE-ISSUE risk
+ *     assessment runs (a Deny decision returns 429 RISK_DENIED before any
+ *     challenge is minted; the denial already scored the evidence, so no
+ *     further rate-limit event is recorded; an escalated action raises
+ *     the difficulty of the issued challenge, an unknown scope in
+ *     'reject' mode returns 429 RISK_DENIED without issuing).
+ * 12. PER-SCOPE ISSUANCE CAP: when risk.max_challenges_per_scope_per_minute
+ *     is set, the atomic fixed-window counter refuses 429 SCOPE_LIMITED
+ *     beyond the cap. The quota keys on the SERVER-OWNED scope identity
+ *     (the configured risk.scopes id, the shared synthetic unknown-scope
+ *     id, or the single reserved UNKNOWN_QUOTA_ID bucket for every
+ *     unresolvable scope in ANY risk mode), so the raw scope string is
+ *     NEVER a Redis key component and attacker-chosen scope names can
+ *     never mint fresh quota windows.
+ * 13. ANTI-STOCKPILING admission: the bounded outstanding counters are
+ *     admitted BEFORE the challenge state is created when the configured
+ *     challenge TTL is wired — the challenge-issuance sequence is local
+ *     cap -> issuer limiter -> scope cap -> outstanding counters ->
+ *     mint+store, so every quota check runs before the storage write;
+ *     without a wired TTL the mint-then-admit path applies, discarding
+ *     the minted record on refusal. Every minted challenge increments the
+ *     atomic issuance-rate counter used by the resource-pressure
+ *     provider.
+ *
+ * Issuance policy:
+ *  - SERVER-OWNED SITEKEY POLICY: when the request carries a sitekey with
+ *    a configured policy, the security scope is resolved from the
+ *    (sitekey, action) pair — the browser never gets to choose protected
+ *    scope names; unknown actions are rejected. The global binding_mode
+ *    is the only binding control (there is no per-sitekey binding
+ *    dimension).
+ *  - PROVIDER METADATA BINDING: action/cData are validated, bound to the
+ *    nonce at issuance and persisted server-side; a token whose metadata
+ *    sidecar cannot be written is never handed out (fail closed).
+ *  - SINGLE-USE SEMANTICS: the minted challenge is atomically consumed on
+ *    verification with deterministic consumed-result retention — replays
+ *    resolve to the stored outcome, never a second success.
  *
  * A syntactically INVALID scope or request binding is rejected at 422 with
- * ZERO Redis operations (audit #103: the identifier-charset check runs
- * BEFORE the rate limiter, the risk engine, the scope cap and the
- * outstanding counters — a malformed identifier never touches shared
- * infrastructure).
+ * ZERO Redis operations: the identifier-charset check runs BEFORE the rate
+ * limiter, the risk engine, the scope cap and the outstanding counters —
+ * a malformed identifier never touches shared infrastructure.
  *
- * The canonical client IP comes from {@see ClientIpResolver} (audit #64 —
- * risk.client_ip_mode / risk.trusted_proxies / risk.reject_ambiguous_
- * forwarding): the same IP that feeds the challenge binding tag, the
- * rate-limit identity and the risk source pseudonym, never a Host-header or
- * forwarding-header free-for-all.
+ * The canonical client IP comes from {@see ClientIpResolver}
+ * (risk.client_ip_mode / risk.trusted_proxies /
+ * risk.reject_ambiguous_forwarding): the same IP that feeds the challenge
+ * binding tag, the rate-limit identity and the risk source pseudonym,
+ * never a Host-header or forwarding-header free-for-all.
  *
- * The expected same-origin comes from the configured public_base_url
- * (audit #78 — SERVER CONFIG, never the Host header): a forged Host can
- * never make a cross-origin request look same-origin.
+ * The expected same-origin comes from the configured public_base_url —
+ * SERVER CONFIG, never the Host header: a forged Host can never make a
+ * cross-origin request look same-origin.
  */
 final class ChallengeController
 {
     /**
-     * The bundle's identifier charset (audit #96): scope/tenant identifiers
-     * and request bindings may only carry these characters (1..128 — the
+     * The bundle's identifier charset: scope/tenant identifiers and
+     * request bindings may only carry these characters (1..128 — the
      * ceiling is embedded in the pattern). Stricter than the core's "no '|'"
      * shape rule — an identifier outside the charset is refused before it
      * can be signed into a challenge.
      */
     private const IDENTIFIER_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
 
-    /** The ONLY JSON fields the challenge POST accepts (audit #72). */
+    /** The ONLY JSON fields the challenge POST accepts. */
     private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey'];
 
-    /** Round 30 (P1): Turnstile-compatible shapes, per Cloudflare's docs. */
+    /** Turnstile-compatible shapes, per Cloudflare's docs. */
     private const ACTION_PATTERN = '/^[a-z0-9_-]{1,32}$/i';
     private const CDATA_PATTERN = '/^[a-z0-9_-]{1,255}$/i';
 
     /**
-     * SECURITY-SINGULAR headers (audit #100): each of these carries client
-     * identity or forwarding trust and MUST appear at most once — a
-     * duplicate is parser-ambiguity (different intermediaries will pick
-     * different values) and gets 400 DUPLICATE_HEADER before any
-     * header-derived identity is trusted.
+     * SECURITY-SINGULAR headers: each of these carries client identity or
+     * forwarding trust and MUST appear at most once — a duplicate is
+     * parser-ambiguity (different intermediaries will pick different
+     * values) and gets 400 DUPLICATE_HEADER before any header-derived
+     * identity is trusted.
      */
     private const SECURITY_SINGULAR_HEADERS = ['origin', 'forwarded', 'x-forwarded-for', 'x-real-ip'];
 
     /**
-     * Hard ceiling for the challenge request body (audit round 14): the
-     * challenge language is tiny (scope/algorithm/request_binding), so 8
-     * KiB is extremely generous — everything beyond it is refused before
-     * the duplicate scan / JSON decode / risk admission consume anything.
-     * Edge deployments should mirror this in the proxy (client_max_body_size
+     * Hard ceiling for the challenge request body: the challenge language
+     * is tiny (scope/algorithm/request_binding), so 8 KiB is extremely
+     * generous — everything beyond it is refused before the duplicate
+     * scan / JSON decode / risk admission consume anything. Edge
+     * deployments should mirror this in the proxy (client_max_body_size
      * etc.) so oversized bytes never reach PHP at all.
      */
     private const MAX_CHALLENGE_BODY_BYTES = 8192;
@@ -179,21 +201,21 @@ final class ChallengeController
         private readonly ?ScopeIssuanceCap $scopeIssuanceCap = null,
         private readonly ?SecurityEpochMonitor $epochMonitor = null,
         private readonly ?int $challengeTtlSecs = null,
-        /** Audit round 15: server-owned scope allowlist ([] = accept any). */
+        /** Server-owned scope allowlist ([] = accept any). */
         private readonly array $allowedScopes = [],
-        /** Round 24: public sitekey -> scope alias map (migration compat). */
+        /** Public sitekey -> scope alias map (server-owned migration compat). */
         private readonly array $sitekeyAllowlist = [],
-        /** Round 30 (P1): server-side provider-metadata sidecar (nullable). */
+        /** Server-side provider-metadata sidecar (nullable). */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
-        /** Round 30 (item 14): server-owned sitekey policy map. */
+        /** Server-owned sitekey policy map. */
         private readonly array $sitekeyPolicy = [],
     ) {
     }
 
     public function challenge(Request $request): JsonResponse
     {
-        // PATH CANONICALITY (audit #99): the RAW REQUEST_URI must be the
-        // canonical request target — no `//` (empty segment), no `/.` /
+        // PATH CANONICALITY: the RAW REQUEST_URI must be the canonical
+        // request target — no `//` (empty segment), no `/.` /
         // `/..` (dot segments), no percent-encoded bytes (the canonical
         // target is a fixed ASCII path — ANY `%` in the path is an
         // encoding probe: `/%76hallenge`, `%2F`, `%5C`...), no trailing
@@ -210,11 +232,11 @@ final class ChallengeController
             );
         }
 
-        // NARROW HTTP (audit #77): the endpoint is POST-only — at the
-        // CONTROLLER level too (the route already restricts the method, but
-        // a direct invocation must behave identically). An OPTIONS preflight
-        // is a non-POST method: 405 — a preflight ALONE never authorizes
-        // anything (audit #63).
+        // NARROW HTTP: the endpoint is POST-only — at the CONTROLLER level
+        // too (the route already restricts the method, but a direct
+        // invocation must behave identically). An OPTIONS preflight is a
+        // non-POST method: 405 — a preflight ALONE never authorizes
+        // anything.
         if ($request->getMethod() !== 'POST') {
             $response = $this->privateJson(
                 ['error' => ['code' => 'METHOD_NOT_ALLOWED', 'message' => 'The challenge endpoint accepts POST requests only.']],
@@ -225,7 +247,7 @@ final class ChallengeController
             return $response;
         }
 
-        // HTTP FRAMING (audit #83): a request carrying BOTH Content-Length
+        // HTTP FRAMING: a request carrying BOTH Content-Length
         // and Transfer-Encoding — or a DUPLICATE Content-Length — is
         // request-smuggling ambiguity: different intermediaries will frame
         // the body differently, so the endpoint refuses before any body is
@@ -242,7 +264,7 @@ final class ChallengeController
             );
         }
 
-        // BODY CEILING (audit round 14): the challenge language is tiny —
+        // BODY CEILING: the challenge language is tiny —
         // real requests are tens to a few hundred bytes — so a giant body
         // is pure memory/CPU spend BEFORE the shared risk/Redis admission
         // controls. An oversized DECLARED Content-Length is rejected before
@@ -260,7 +282,7 @@ final class ChallengeController
                 );
             }
         }
-        // DUPLICATE SECURITY-SINGULAR HEADERS (audit #100): Origin,
+        // DUPLICATE SECURITY-SINGULAR HEADERS: Origin,
         // Forwarded, X-Forwarded-For and X-Real-IP are identity/trust
         // inputs — a duplicate occurrence is parser ambiguity (one
         // intermediary trusts the first value, another the last, and the
@@ -278,7 +300,7 @@ final class ChallengeController
             }
         }
 
-        // NO DECOMPRESSION BOMBS (audit #65): a request body that was
+        // NO DECOMPRESSION BOMBS: a request body that was
         // compressed on the wire must not be transparently decompressed by a
         // downstream layer into unbounded memory — any Content-Encoding other
         // than identity is refused BEFORE the body is read. identity (or an
@@ -292,7 +314,7 @@ final class ChallengeController
             }
         }
 
-        // NARROW HTTP (audit #77): the challenge POST is a JSON document —
+        // NARROW HTTP: the challenge POST is a JSON document —
         // form-encoded and multipart bodies are refused before anything is
         // read (no CSRF-form smuggling, no HTML-form replay through the
         // endpoint). A PRESENT Content-Type must be application/json (an
@@ -308,7 +330,7 @@ final class ChallengeController
             );
         }
 
-        // BODY READ (audit round 15): the input is consumed as a STREAM
+        // BODY READ: the input is consumed as a STREAM
         // with a hard cap — at most MAX+1 bytes are ever materialized, so
         // a gigantic chunked request cannot force PHP/Symfony to buffer
         // the full body before the 413. Every header-level check (framing,
@@ -323,7 +345,7 @@ final class ChallengeController
             );
         }
 
-        // QUERY-PARAM HARDENING (audit #72): the endpoint accepts NO query
+        // QUERY-PARAM HARDENING: the endpoint accepts NO query
         // parameters — ?debug=1, ?algorithm=sha256 overrides, ?skip_pow=1
         // and friends are probes and get 422 before any state is touched.
         if ($request->query->count() > 0) {
@@ -333,7 +355,7 @@ final class ChallengeController
             );
         }
 
-        // SECURITY-STATE STALENESS (audit #108): the security-epoch monitor
+        // SECURITY-STATE STALENESS: the security-epoch monitor
         // tracks the last successful central policy read; once
         // now > last_success + risk.security_epoch_max_stale_secs the
         // central policy may have moved (an emergency revocation could have
@@ -358,14 +380,14 @@ final class ChallengeController
             );
         }
 
-        // Origin laundering defense (audit #27): when an origin allowlist is
+        // Origin laundering defense: when an origin allowlist is
         // configured, the challenge POST MUST be attributable to one of the
         // allowlisted origins (Origin header, or the Referer origin as
-        // fallback). Audit #43: the comparison is STRUCTURED NORMALIZATION —
+        // fallback). The comparison is STRUCTURED NORMALIZATION —
         // scheme/host/effective-port, host lowercased, default ports
         // normalized, trailing dots stripped, IDN converted to punycode when
-        // ext-intl is available, IPv6 literals kept bracketed. Audit #43
-        // enforce_origin: when true, a request WITHOUT a usable Origin
+        // ext-intl is available, IPv6 literals kept bracketed. With
+        // enforce_origin, a request WITHOUT a usable Origin
         // header — or carrying the literal "null" origin (opaque/sandboxed)
         // — is rejected outright, before the allowlist is even consulted.
         // A launderer framing a victim's browser into fetching this endpoint
@@ -401,7 +423,7 @@ final class ChallengeController
             }
         }
 
-        // Trusted client-IP policy (audit #64): the canonical IP comes from
+        // Trusted client-IP policy: the canonical IP comes from
         // the configured mode (risk.client_ip_mode). In 'direct' mode
         // forwarding headers are ALWAYS ignored (socket peer only); in
         // 'symfony_trusted_proxies' mode Symfony's trusted-proxy machinery
@@ -420,7 +442,7 @@ final class ChallengeController
             );
         }
 
-        // DUPLICATE JSON KEYS (audit #111): json_decode silently keeps the
+        // DUPLICATE JSON KEYS: json_decode silently keeps the
         // LAST occurrence of a repeated object key — two different
         // intermediaries parsing the same document could disagree on the
         // effective value ({"scope":"login","scope":"signup"} is a
@@ -438,7 +460,7 @@ final class ChallengeController
         }
 
         // The challenge POST is a JSON OBJECT with exactly the documented
-        // fields (audit #72): scope, algorithm (accepted for
+        // fields: scope, algorithm (accepted for
         // forward-compatibility, the issued algorithm always comes from the
         // server), request_binding. Unknown fields are debug/override probes
         // and get 422 — the endpoint never silently ignores extra control
@@ -475,9 +497,9 @@ final class ChallengeController
         }
         $scope = isset($payload['scope']) ? (string) $payload['scope'] : 'default';
 
-        // Round 30 (P1): provider-compatible challenge metadata is
-        // validated HERE, at issuance — provider shapes, bounded, so a
-        // malformed action/cData can never be persisted or returned.
+        // Provider-compatible challenge metadata is validated
+        // HERE, at issuance — provider shapes, bounded, so a malformed
+        // action/cData can never be persisted or returned.
         $action = isset($payload['action']) && $payload['action'] !== '' ? (string) $payload['action'] : null;
         $cdata = isset($payload['cdata']) && $payload['cdata'] !== '' ? (string) $payload['cdata'] : null;
         if ($action !== null && !preg_match(self::ACTION_PATTERN, $action)) {
@@ -493,7 +515,7 @@ final class ChallengeController
             );
         }
 
-        // IDENTIFIER VALIDATION (audit #96): scope/tenant identifiers and
+        // IDENTIFIER VALIDATION: scope/tenant identifiers and
         // request bindings must match `[A-Za-z0-9._:-]+` with the 128-char
         // ceiling BEFORE they reach the issuer — a malformed identifier can
         // never be signed into a challenge, and separator/control bytes can
@@ -508,16 +530,15 @@ final class ChallengeController
             );
         }
 
-        // Round 30 (item 14): SERVER-OWNED v3-style (sitekey, action)
+        // SERVER-OWNED v3-style (sitekey, action)
         // resolution. When the request carries a sitekey that has a
         // configured policy, the security scope is resolved from the
         // (sitekey, action) pair: the browser NEVER gets to choose
         // protected scope names. Unknown actions are REJECTED (never
-        // silently mapped to a default); the per-sitekey binding profile
-        // also resolves here (required by default — the client can never
-        // request the weaker unbound mode).
+        // silently mapped to a default). Binding is governed by the global
+        // binding_mode only — the client can never request the weaker
+        // unbound mode.
         $sitekey = isset($payload['sitekey']) && $payload['sitekey'] !== '' ? (string) $payload['sitekey'] : null;
-        $bindingProfile = null;
         if ($sitekey !== null && isset($this->sitekeyPolicy[$sitekey])) {
             $policy = $this->sitekeyPolicy[$sitekey];
             $actionKey = $action ?? '';
@@ -531,10 +552,9 @@ final class ChallengeController
                     Response::HTTP_UNPROCESSABLE_ENTITY,
                 );
             }
-            $bindingProfile = $policy['binding'] ?? 'required';
         }
 
-        // MIGRATION SITEKEY ALIAS (round 24): a public sitekey is optional
+        // MIGRATION SITEKEY ALIAS: a public sitekey is optional
         // legacy metadata, never a secret. When the client sends a
         // configured sitekey (a server-maintained alias map), the scope is
         // resolved from the SERVER-OWNED mapping — an attacker-supplied
@@ -545,7 +565,7 @@ final class ChallengeController
             $scope = $this->sitekeyAllowlist[$scope];
         }
 
-        // SERVER-OWNED SCOPE ALLOWLIST (audit round 15): when
+        // SERVER-OWNED SCOPE ALLOWLIST: when
         // risk.allowed_scopes is configured, issuance is refused for any
         // scope outside the server-defined set BEFORE the risk assessment
         // and the quota checks. This is the trust boundary that makes the
@@ -559,10 +579,10 @@ final class ChallengeController
             );
         }
 
-        // Transaction binding (audit #41): the widget sends the
+        // Transaction binding: the widget sends the
         // request_binding field it carries (data-kiwi-request-binding); when
         // absent, the configured static risk.request_binding applies. The
-        // value is validated here (1..128 bytes, the audit #96 identifier
+        // value is validated here (1..128 bytes, the identifier
         // charset — the same shape rule as the scope) BEFORE it reaches the
         // issuer, so a malformed binding can never be signed into a
         // challenge; the verification side enforces equality between the
@@ -588,7 +608,7 @@ final class ChallengeController
         $riskSession = $this->continuityCookie?->read($request);
         $mintedCookie = false;
 
-        // LOCAL ADMISSION BEFORE REDIS (audit #70): the process-local
+        // LOCAL ADMISSION BEFORE REDIS: the process-local
         // emergency window (risk.hard_limits.process_per_second) is checked
         // BEFORE any Redis issuance limiter — a saturated window refuses
         // immediately with the 429 risk-denied response (same shape as the
@@ -709,8 +729,8 @@ final class ChallengeController
 
                 if ($decision->action === RiskAction::Deny) {
                     // The denial already scored the evidence (the pre-issue
-                    // assessment + decision) — NO extra rate-limit event is
-                    // recorded, double-counting is removed.
+                    // assessment + decision) — no additional rate-limit
+                    // event is recorded.
                     $body = ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']];
                     if ($decision->retryAfterMs !== null) {
                         $body['error']['retry_after_ms'] = $decision->retryAfterMs;
@@ -722,7 +742,7 @@ final class ChallengeController
             }
         }
 
-        // PER-SCOPE ISSUANCE CAP (audit #89/#112/#round-15): when
+        // PER-SCOPE ISSUANCE CAP: when
         // risk.max_challenges_per_scope_per_minute is configured, the
         // atomic {kiwi:<ns>}:issuance:<scopeIdentity>:<minute> fixed-window
         // counter (INCR + EXPIRE 60 in one Lua script) refuses 429
@@ -733,13 +753,13 @@ final class ChallengeController
         // identity: the risk policy's canonical scope id (the configured
         // risk.scopes.<name>.id, or the shared synthetic unknown-scope id
         // in 'minimum' mode) — the raw scope string is NEVER a Redis key
-        // component (audit #112) and, when risk.allowed_scopes is
+        // component and, when risk.allowed_scopes is
         // configured, the quota namespace is bounded by the server-owned
-        // set (audit round 15: HMAC-only keying hides attacker-controlled
+        // set (HMAC-only keying hides attacker-controlled
         // BYTES, it does not bound cardinality). A Redis failure propagates
         // (fail closed: no challenge without a checked scope bound).
-        // The quota keys on the SERVER-OWNED scope identity ALWAYS (audit
-        // round 16): configured scopes use their stable id; every scope
+        // The quota keys on the SERVER-OWNED scope identity ALWAYS:
+        // configured scopes use their stable id; every scope
         // the risk policy cannot resolve — unknown scopes in ANY mode,
         // including risk-disabled deployments — collapses into the single
         // reserved UNKNOWN_QUOTA_ID bucket. An attacker can never mint a
@@ -759,7 +779,7 @@ final class ChallengeController
             try {
                 $allowed = $this->scopeIssuanceCap->allow($scope, $canonicalScopeId);
             } catch (\Exception $e) {
-                // Audit round 19: the cap FAILS CLOSED when the Redis
+                // The cap FAILS CLOSED when the Redis
                 // server clock is unavailable — no quota proof means no
                 // challenge issuance (503, private envelope; the detail
                 // goes to the server log only). Never silently fall back
@@ -785,7 +805,7 @@ final class ChallengeController
             }
         }
 
-        // ANTI-STOCKPILING PRE-MINT ADMISSION (audit #26/#104): when the
+        // ANTI-STOCKPILING PRE-MINT ADMISSION: when the
         // configured challenge TTL is wired, the bounded outstanding
         // counters are admitted BEFORE the challenge state is created —
         // the challenge-issuance sequence is local cap -> issuer limiter ->
@@ -812,21 +832,17 @@ final class ChallengeController
         }
 
         try {
-            // Round 24/26: the record carries server-owned issuance metadata
+            // The record carries server-owned issuance metadata
             // (Siteverify `hostname`); never signed, never sent. The value
             // comes from the SERVER-CONFIGURED public_base_url — a forged
             // Host header can never influence the reported hostname (the
-            // same trust rule as the Origin check, audit #78). Without
+            // same trust rule as the Origin check). Without
             // public_base_url the hostname stays null rather than trusting
             // the request Host.
             $hostname = $this->publicBaseUrl !== null
                 ? parse_url($this->publicBaseUrl, PHP_URL_HOST) ?: null
                 : null;
-            // Round 30 (item 15): the per-sitekey binding profile is
-            // SERVER-OWNED — an explicitly configured "none" profile is
-            // only valid when the deployment's GLOBAL binding mode is
-            // unbound (validated at container compile time; the client can
-            // never request the weaker mode). Issuance always uses the
+            // Issuance always uses the
             // canonical client IP.
             $challenge = $profile !== null
                 ? $this->issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
@@ -840,7 +856,7 @@ final class ChallengeController
                 $mintedCookie,
             );
         } catch (ReplicaWaitException $e) {
-            // Durability barrier failure (audit round 14/15): the
+            // Durability barrier failure: the
             // configured wait_replicas threshold could not be met, so the
             // challenge was NOT handed out — fail closed. This is an
             // OPERATIONAL condition (replica lag / topology), not a client
@@ -858,16 +874,16 @@ final class ChallengeController
             );
         }
 
-        // Anti-stockpiling POST-MINT FALLBACK (audit #26): a direct
-        // controller construction WITHOUT a wired challenge TTL keeps the
-        // historical mint-then-admit race handling — the minted record is
-        // admitted with its ACTUAL lifetime; a refusal here is a RACE the
-        // pre-issuance checks did not see (concurrent issuances): the minted
-        // record is discarded best-effort and the request gets the same 429
-        // risk-denied response — a challenge is NEVER handed out when its
-        // stockpile admission failed. Production wiring always provides the
-        // TTL (the extension passes challenge_ttl_secs), so the pre-mint
-        // path above is the deployment behavior.
+        // Anti-stockpiling POST-MINT FALLBACK: a direct
+        // controller construction WITHOUT a wired challenge TTL admits the
+        // minted record with its ACTUAL lifetime AFTER issuance; a refusal
+        // here is a RACE the pre-issuance checks did not see (concurrent
+        // issuances): the minted record is discarded best-effort and the
+        // request gets the same 429 risk-denied response — a challenge is
+        // NEVER handed out when its stockpile admission failed. Production
+        // wiring always provides the TTL (the extension passes
+        // challenge_ttl_secs), so the pre-mint path above is the deployment
+        // behavior.
         if ($this->outstanding !== null && $this->challengeTtlSecs === null) {
             $admitted = $this->outstanding->issue($clientIp, max(1, $challenge->ttlSecs));
             if ($admitted !== 1) {
@@ -887,7 +903,7 @@ final class ChallengeController
             }
         }
 
-        // Round 30 (P1): provider-compatible challenge metadata (action /
+        // Provider-compatible challenge metadata (action /
         // cData) is bound to the nonce AT ISSUANCE, server-side. If the
         // metadata was explicitly supplied and the sidecar CANNOT persist
         // it, the minted challenge is discarded and the request fails 503
@@ -935,7 +951,7 @@ final class ChallengeController
      * non-browser clients) are allowed — a browser cross-site POST always
      * carries one. When present, the Origin must match the EXPECTED origin.
      *
-     * Audit #78: the expected origin comes from SERVER CONFIG
+     * The expected origin comes from SERVER CONFIG
      * (public_base_url) when configured — a forged Host header can never
      * shift the expected origin ("Host: evil.example" + "Origin:
      * https://evil.example" must stay cross-origin). Comparison is the same
@@ -970,7 +986,7 @@ final class ChallengeController
      * (or a Referer whose URL yields an origin) whose NORMALIZED
      * scheme+host+port matches one allowlisted origin. Comparison is
      * component-wise over the STRUCTURED normalization of both sides
-     * (audit #43 — {@see self::normalizeOrigin()}: scheme lowercase, host
+     * ({@see self::normalizeOrigin()}: scheme lowercase, host
      * lowercased with the trailing dot stripped and IDN converted to
      * punycode when ext-intl is available, the effective port defaulted per
      * scheme, IPv6 literals kept bracketed), so "https://app.example.com"
@@ -984,7 +1000,7 @@ final class ChallengeController
         $origin = $request->headers->get('Origin');
         if ($origin === null || $origin === '' || $origin === 'null') {
             if ($this->enforceOrigin) {
-                // Audit #43: with enforce_origin, a request without a usable
+                // With enforce_origin, a request without a usable
                 // Origin is rejected BEFORE the Referer fallback — the
                 // strict mode never trusts a Referer the browser would not
                 // attach to a cross-site fetch.
@@ -1023,7 +1039,7 @@ final class ChallengeController
 
     /**
      * Parse and NORMALIZE an origin string into its exact comparison
-     * components (audit #43): a canonical "{scheme}://{host}:{port}" string
+     * components: a canonical "{scheme}://{host}:{port}" string
      * with
      *  - scheme lowercased,
      *  - host lowercased, trailing dot stripped, IDN converted to punycode
@@ -1087,7 +1103,7 @@ final class ChallengeController
     }
 
     /**
-     * PATH CANONICALITY (audit #99): whether the RAW request target is the
+     * PATH CANONICALITY: whether the RAW request target is the
      * canonical path. The check runs over the raw REQUEST_URI — never a
      * normalized route — and rejects
      *
@@ -1127,7 +1143,7 @@ final class ChallengeController
     }
 
     /**
-     * DUPLICATE JSON KEY SCANNER (audit #111): a small recursive walk over
+     * DUPLICATE JSON KEY SCANNER: a small recursive walk over
      * the RAW JSON document that reports the FIRST object key seen more
      * than once at the same level — json_decode itself silently keeps the
      * LAST occurrence, which is exactly the parser-ambiguity the endpoint
@@ -1143,14 +1159,14 @@ final class ChallengeController
      * without a duplicate is never refused by it).
      */
     /**
-     * Read the challenge request body with a hard byte cap (audit round
-     * 15): the input stream is consumed for at most MAX+1 bytes, so an
-     * oversized chunked body is refused by the caller's length check
-     * WITHOUT ever being materialized in full — the bounded read is the
-     * authoritative protection (a declared Content-Length was already
-     * checked before the stream was touched, but chunked uploads can skip
-     * a truthful one). When Symfony hands back a buffered stream (tests,
-     * already-consumed input) the read is still bounded.
+     * Read the challenge request body with a hard byte cap: the input
+     * stream is consumed for at most MAX+1 bytes, so an oversized chunked
+     * body is refused by the caller's length check WITHOUT ever being
+     * materialized in full — the bounded read is the authoritative
+     * protection (a declared Content-Length was already checked before the
+     * stream was touched, but chunked uploads can skip a truthful one).
+     * When Symfony hands back a buffered stream (tests, already-consumed
+     * input) the read is still bounded.
      */
     private function readBoundedBody(Request $request): string
     {
@@ -1189,7 +1205,7 @@ final class ChallengeController
     private function scanJsonValue(string $json, int &$offset, int $depth): void
     {
         if ($depth > self::MAX_JSON_SCAN_DEPTH) {
-            // Depth bomb (audit round 14): a pathological nesting cannot
+            // Depth bomb: a pathological nesting cannot
             // consume unbounded stack — beyond the cap the document is
             // "not walkable" and the strict json_decode below (which has
             // its own depth guard) rejects it.
@@ -1287,7 +1303,7 @@ final class ChallengeController
      * Consume one JSON string starting at $offset (which must point at the
      * opening quote) and return its DECODED content — escape sequences
      * resolved to the actual characters. Duplicate detection compares
-     * SEMANTIC keys (audit round 14): {"a":1,"\u0061":2} is ONE key
+     * SEMANTIC keys: {"a":1,"\u0061":2} is ONE key
      * spelled twice, exactly the parser-ambiguity the scan refuses
      * (json_decode canonicalizes both spellings into the same key). The
      * JSON string grammar is decoded with json_decode itself (the
@@ -1355,13 +1371,13 @@ final class ChallengeController
      *   X-Content-Type-Options: nosniff               (JSON must never be
      *                                                 re-sniffed as HTML)
      *
-     * FRAME-ANCESTORS CSP (audit #71): when risk.challenge_origin_allowlist
+     * FRAME-ANCESTORS CSP: when risk.challenge_origin_allowlist
      * is non-empty, EVERY challenge response carries an EXPLICIT
      * `Content-Security-Policy: frame-ancestors <allowlisted origins,
      * space-separated>` — never inherited from default-src, so the allowlist
      * is exactly the framing contract of the challenge endpoint. An empty
      * allowlist emits NO CSP header (nothing to promise). The bundle emits
-     * NO CORS headers at all (audit #63 — CORS is not authorization; the
+     * NO CORS headers at all (CORS is not authorization; the
      * origin checks above are, and they run on every response regardless).
      *
      * When a NEW risk continuity session was minted for this request, the
@@ -1391,8 +1407,8 @@ final class ChallengeController
 }
 
 /**
- * @internal control-flow sentinel of the duplicate-JSON-key scan (audit
- *           #111): thrown when the walker finds an object key it already
+ * @internal control-flow sentinel of the duplicate-JSON-key scan:
+ *           thrown when the walker finds an object key it already
  *           saw at the same level. Carries the raw key for the error
  *           message. Never escapes the controller.
  */
@@ -1405,8 +1421,8 @@ final class DuplicateJsonKeyException extends \RuntimeException
 }
 
 /**
- * @internal control-flow sentinel of the duplicate-JSON-key scan (audit
- *           #111): thrown when the walker cannot advance through the
+ * @internal control-flow sentinel of the duplicate-JSON-key scan:
+ *           thrown when the walker cannot advance through the
  *           document. The strict json_decode check handles the malformed
  *           body afterwards (422 INVALID_JSON). Never escapes the
  *           controller.

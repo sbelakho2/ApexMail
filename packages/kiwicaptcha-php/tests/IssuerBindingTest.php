@@ -16,7 +16,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Deployment issuer binding (audit #67): the issued record carries an
+ * Deployment issuer binding: the issued record carries an
  * optional deployment identity (NULL = unbound), the record JSON always
  * includes the `issuer` key (byte parity with the Rust serde schema — 21
  * keys), the issuer is the FINAL field of the signed v2 canonical payload
@@ -71,7 +71,7 @@ final class IssuerBindingTest extends TestCase
         [, $record] = $this->issue(null);
 
         self::assertNull($record->issuer);
-        self::assertArrayHasKey('issuer', $record->toArray(), 'the issuer key is ALWAYS present (audit #67)');
+        self::assertArrayHasKey('issuer', $record->toArray(), 'the issuer key is ALWAYS present');
         self::assertNull($record->toArray()['issuer']);
         self::assertNull(ChallengeRecord::fromArray($record->toArray())->issuer);
     }
@@ -93,13 +93,13 @@ final class IssuerBindingTest extends TestCase
 
         self::assertCount(23, $keys);
         self::assertSame('issuer', $keys[20], 'issuer is the penultimate wire key, appended after request_binding');
-        self::assertSame('kid', $keys[21], 'kid is the final wire key (audit #91)');
+        self::assertSame('kid', $keys[21], 'kid is the final wire key');
         self::assertSame($keys, \array_keys($this->issue('prod')[1]->toArray()));
     }
 
     public function testIssuerIsThePenultimateFieldOfTheSignedCanonicalPayload(): void
     {
-        // Round-11 canonical: `...|min_duration_ms|region|policy_version|
+        // Canonical v2 payload: `...|min_duration_ms|region|policy_version|
         // request_binding|issuer|kid` — kid (default 1) is the FINAL
         // segment, appended AFTER the issuer.
         [, $record] = $this->issue('staging');
@@ -197,7 +197,7 @@ final class IssuerBindingTest extends TestCase
 
     public function testSharedSecretDoesNotDefeatTheCompartment(): void
     {
-        // The whole point of audit #67: two deployments SHARING the secret
+        // Two deployments SHARING the secret
         // key must still reject each other's challenges via the issuer.
         [$storageA, , $tokenA] = $this->issue('dev');
 

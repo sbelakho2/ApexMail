@@ -1,4 +1,4 @@
-//! Round-12 audit #115: the NO-PANIC invariant under attacker-controlled
+//! The NO-PANIC invariant under attacker-controlled
 //! input.
 //!
 //! ~5000 deterministic random byte mutations of a valid solution token and a

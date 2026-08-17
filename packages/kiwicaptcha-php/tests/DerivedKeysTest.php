@@ -9,7 +9,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * HKDF purpose-key separation (audit #21).
+ * HKDF purpose-key separation.
  *
  * Byte-exact lock-in against the Rust crate's reference vectors
  * (packages/kiwicaptcha/src/keys.rs): the SAME master derives the SAME

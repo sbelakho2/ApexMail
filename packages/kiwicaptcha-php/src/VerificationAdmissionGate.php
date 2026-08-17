@@ -28,7 +28,7 @@ interface VerificationAdmissionGate
     public function acquire(): ?string;
 
     /**
-     * Release a previously acquired lease. MUST NOT throw into
+     * Release an acquired lease. MUST NOT throw into
      * verification: a failed release is best-effort (a leaked slot is
      * recovered by the lease TTL) and must never override a completed
      * verification result.

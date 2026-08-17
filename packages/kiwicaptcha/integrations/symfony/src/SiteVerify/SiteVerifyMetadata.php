@@ -5,12 +5,12 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
 /**
- * Round 30 (P1): provider-compatible challenge metadata (Turnstile action /
- * cData / sitekey), bound to the challenge at ISSUANCE and returned from
- * verified server state. A backend Siteverify request can NEVER supply
- * these — the trust direction is server-owned: the widget declares them at
- * challenge time, the server validates and persists them against the
- * nonce, and the verification response reads them back.
+ * Provider-compatible challenge metadata (Turnstile action / cData /
+ * sitekey), bound to the challenge at ISSUANCE and returned from verified
+ * server state. A backend Siteverify request can NEVER supply these — the
+ * trust direction is server-owned: the widget declares them at challenge
+ * time, the server validates and persists them against the nonce, and the
+ * verification response reads them back.
  */
 final readonly class SiteVerifyMetadata
 {

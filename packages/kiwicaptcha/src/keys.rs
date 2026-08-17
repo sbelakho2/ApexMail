@@ -1,4 +1,4 @@
-//! HKDF purpose-key separation (audit #21).
+//! HKDF purpose-key separation.
 //!
 //! Every cryptographic purpose derives its own 32-byte key from the single
 //! master secret, so a key compromise in one purpose (challenge signing, IP
@@ -49,7 +49,7 @@ pub const INFO_RESULT_TOKEN: &[u8] = b"kiwi/v2/result-token";
 /// Prefix of the tenant-root info label: `"kiwi/v2/tenant/" + tenant_id`.
 pub const INFO_TENANT_ROOT_PREFIX: &[u8] = b"kiwi/v2/tenant/";
 
-/// Purpose-separated 32-byte keys derived from the master secret (audit #21).
+/// Purpose-separated 32-byte keys derived from the master secret.
 ///
 /// All cryptographic primitives in the crate derive their key internally from
 /// the master via [`DerivedKeys::from_master`], so callers keep passing the

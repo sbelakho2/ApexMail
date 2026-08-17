@@ -21,7 +21,7 @@ use KiwiCaptcha\Risk\Tests\RiskStateStoreStub;
 use PHPUnit\Framework\TestCase;
 
 /**
- * AUDIT #35 — METRICS CARDINALITY.
+ * METRICS CARDINALITY.
  *
  * RiskMetrics counter keys must be BOUNDED: recording decisions with
  * distinct decisionIds/challengeIds must never grow the counters map (no

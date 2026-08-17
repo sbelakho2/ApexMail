@@ -11,7 +11,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Strict serde-mirror record parser (audit #56): ChallengeRecord::fromArray
+ * Strict serde-mirror record parser: ChallengeRecord::fromArray
  * must reject exactly what the Rust `ChallengeRecord` serde schema rejects —
  * unknown keys (deny_unknown_fields), out-of-range/negative integers, wrong
  * types, oversized strings, algorithm aliases, unexpected nulls, duplicate
@@ -80,7 +80,7 @@ final class StrictParserTest extends TestCase
         self::assertSame(1, $record->kid, 'kid defaults to 1 on the wire');
         self::assertSame(23, \count(ChallengeRecord::WIRE_KEYS));
         self::assertSame(ChallengeRecord::WIRE_KEYS, \array_keys($record->toArray()));
-        self::assertSame(1, $record->toArray()['kid'], 'the kid key is ALWAYS present (audit #91)');
+        self::assertSame(1, $record->toArray()['kid'], 'the kid key is ALWAYS present');
     }
 
     /**
@@ -185,7 +185,7 @@ final class StrictParserTest extends TestCase
 
         yield 'algorithm alias argon2' => [self::mutate('algorithm', 'argon2'), 'must be exactly'];
 
-        // Audit #73: unknown algorithm strings must be rejected IDENTICALLY
+        // Unknown algorithm strings must be rejected IDENTICALLY
         // to the Rust parser (PoWAlgorithm enum — exact lowercase names
         // only, no aliases, no spelling variants).
         yield 'algorithm unknown argon2d' => [self::mutate('algorithm', 'argon2d'), 'must be exactly'];
@@ -339,7 +339,7 @@ final class StrictParserTest extends TestCase
 
     public function testRuntimeStorageFieldsAreNotWireKeys(): void
     {
-        // Audit #74: `state` and `consumed_result` are storage-layer runtime
+        // `state` and `consumed_result` are storage-layer runtime
         // fields wrapped around the canonical JSON — they are NOT part of
         // the canonical record schema and must be rejected by the strict
         // serde-mirror parser exactly like any other unknown key.

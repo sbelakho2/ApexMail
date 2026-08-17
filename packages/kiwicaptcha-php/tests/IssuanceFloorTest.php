@@ -12,7 +12,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Issuance difficulty floors (audit #25): issueWithProfile must refuse
+ * Issuance difficulty floors: issueWithProfile must refuse
  * out-of-range profiles at issuance — the server-owned floors guarantee the
  * issuer never signs below-floor work (the widget sends no difficulty
  * parameters, so a client-reported capability can never lower difficulty

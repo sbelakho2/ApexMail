@@ -17,14 +17,14 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * Round 28 (P1): strict single-use under concurrency. Siteverify's
- * one-success contract is only as strong as the storage's consume()
- * transition. On a NON-ATOMIC backend (e.g. a PSR-6 pool) two racing
- * requests can both observe pending, both win `consumedNow`, and both
- * return success:true — the container refuses that combination at compile
- * time. On RedisStorage the Lua transition guarantees exactly one
- * `consumedNow` winner; this test proves it end-to-end with 100 REAL
- * concurrent processes hammering the SAME valid token.
+ * Strict single-use under concurrency. Siteverify's one-success contract
+ * is only as strong as the storage's consume() transition. On a
+ * NON-ATOMIC backend (e.g. a PSR-6 pool) two racing requests can both
+ * observe pending, both win `consumedNow`, and both return success:true —
+ * the container refuses that combination at compile time. On RedisStorage
+ * the Lua transition guarantees exactly one `consumedNow` winner; this
+ * test proves it end-to-end with 100 REAL concurrent processes hammering
+ * the SAME valid token.
  */
 final class SiteVerifyConcurrencyTest extends TestCase
 {
@@ -146,7 +146,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
     }
 
     /**
-     * Round 30 (P1): provider retry contract — 100 CONCURRENT requests with
+     * Provider retry contract — 100 CONCURRENT requests with
      * the SAME valid token and the SAME idempotency UUID must ALL receive
      * the IDENTICAL canonical success response, with only ONE logical
      * redemption. This is a SEPARATE contract from the native single-use
@@ -262,11 +262,11 @@ final class SiteVerifyConcurrencyTest extends TestCase
 
 
     /**
-     * Round 31 (item 12, P2): provider retry contract under a DELIBERATELY
+     * Provider retry contract under a DELIBERATELY
      * SLOW Argon solve — 20 concurrent requests with the same token and
      * the same UUID must ALL receive the identical canonical response
      * (the PENDING_SAME wait follows the owner to completion instead of
-     * re-deriving) with exactly one redemption. The round-31 (P2) lease
+     * re-deriving) with exactly one redemption. The lease
      * loop makes the wait structural: the test's elapsed time stays under
      * the bound because the waiters POLL the store instead of each
      * re-deriving the Argon proof (20 re-derivations at ~5-15s each would
@@ -383,7 +383,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $successes = \count(array_filter($responses, static fn (string $r): bool => str_contains($r, '"success":true')));
         self::assertSame($workers, $successes, 'same-key retries must all succeed: '.implode(' || ', array_slice($responses, 0, 3)));
         self::assertSame(1, \count(array_unique($responses)), 'all responses must be byte-identical');
-        // Round 31 (P2): the waiters must NOT re-derive the Argon proof —
+        // The waiters must NOT re-derive the Argon proof —
         // 20 re-derivations at ~5-15s each would take ~100-300s. Bounded
         // elapsed time is the proof they polled the store instead.
         self::assertLessThan(

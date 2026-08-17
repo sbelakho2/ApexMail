@@ -26,7 +26,7 @@ use kiwicaptcha::token::SolutionToken;
 use kiwicaptcha::verify::{solve_for_test, VerifyError, VerifyOutcome};
 
 /// Gate that flatly grants (`true`) or refuses (`false`) capacity — the
-/// trait-based replacement for the old closure gates.
+/// trait-based admission-gate contract.
 #[derive(Clone, Copy)]
 struct BoolGate(bool);
 
@@ -117,7 +117,7 @@ fn now_micros() -> u64 {
 }
 
 /// Deterministic verifier clock for the future-issued-skew test: the fixed
-/// issue-time second (audit #76) — the 61 s future-issued challenge is then
+/// issue-time second — the 61 s future-issued challenge is then
 /// ALWAYS beyond the 60 s skew bound, with no wall-clock race.
 static FAKE_FUTURE_NOW: AtomicU64 = AtomicU64::new(0);
 
@@ -290,7 +290,7 @@ fn valid_solution_verifies_and_wire_format_is_language_neutral() {
 
 #[test]
 fn two_concurrent_verifies_exactly_one_derives() {
-    // Audit #74: the consumed-state transition keeps the record, so the
+    // The consumed-state transition keeps the record, so the
     // concurrent loser now returns the WINNER'S STORED OUTCOME — the SAME
     // Valid — or ConsumeIndeterminate when it races between the transition
     // and the outcome commit. NOT RecordNotFound. Exactly one derive
@@ -411,7 +411,7 @@ fn replay_after_valid_verify_returns_the_stored_outcome() {
         verify_at(&verifier, &token, issued_at_ns),
         VerifyOutcome::Valid { .. }
     ));
-    // Audit #74: the consumed record is KEPT with the committed outcome —
+    // The consumed record is KEPT with the committed outcome —
     // a replay returns the SAME Valid (from the stored result), never
     // RecordNotFound and never a re-derivation.
     assert!(
@@ -455,7 +455,7 @@ fn wrong_counter_is_insufficient_work_and_burns_the_record() {
         ),
         VerifyOutcome::Invalid(VerifyError::InsufficientWork)
     );
-    // Audit #74: the retry with the correct counter sees the stored
+    // The retry with the correct counter sees the stored
     // valid=false outcome — the SAME InsufficientWork, not RecordNotFound.
     assert_eq!(
         verify_at(
@@ -609,7 +609,7 @@ fn cheap_validation_failure_consumes_the_record() {
         VerifyOutcome::Invalid(VerifyError::BadSignature)
     );
 
-    // Round-7 cross-language table: terminal cheap failures CONSUME the
+    // Cross-language table: terminal cheap failures CONSUME the
     // record (best-effort DEL), matching the PHP core — a retry with the
     // correct token now sees RecordNotFound.
     let good_token = encode_token(&issued.record.nonce, counter);
@@ -1092,8 +1092,8 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
 fn record_json_keys_match_php_cross_language_format() {
     // The 22 keys PHP ChallengeRecord::toArray() emits for v2 records — the
     // exact key set a PHP RedisStorage writes and fromArray() reads. The
-    // `region` and `issuer` keys (audits #22/#67) are ALWAYS present: null
-    // when unbound, exactly like PHP; `kid` (audit #91) is ALWAYS present
+    // `region` and `issuer` keys are ALWAYS present: null
+    // when unbound, exactly like PHP; `kid` is ALWAYS present
     // (default 1). No Redis needed: pure language-neutral schema parity.
     const PHP_KEYS: [&str; 23] = [
         "nonce",
@@ -1152,11 +1152,11 @@ fn record_json_keys_match_php_cross_language_format() {
     assert_eq!(
         value["issuer"],
         serde_json::Value::Null,
-        "the issuer key must be present (null when unbound) in the Rust wire format (audit #67)"
+        "the issuer key must be present (null when unbound) in the Rust wire format"
     );
     assert_eq!(
         value["kid"], 1,
-        "the kid key must be present with the default 1 in the Rust wire format (audit #91)"
+        "the kid key must be present with the default 1 in the Rust wire format"
     );
 
     // Reverse direction: a PHP toArray()-shaped object (same keys, including
@@ -1198,13 +1198,13 @@ fn record_json_keys_match_php_cross_language_format() {
     let mut no_kid_written = php_written.clone();
     no_kid_written.as_object_mut().unwrap().remove("kid");
     let decoded: ChallengeRecord = serde_json::from_value(no_kid_written).unwrap();
-    assert_eq!(decoded.kid, 1, "missing kid must default to 1 (audit #91)");
+    assert_eq!(decoded.kid, 1, "missing kid must default to 1");
     // A region-bound PHP record round-trips the region.
     let mut region_written = php_written.clone();
     region_written["region"] = serde_json::json!("eu");
     let decoded: ChallengeRecord = serde_json::from_value(region_written).unwrap();
     assert_eq!(decoded.region.as_deref(), Some("eu"));
-    // An issuer-bound PHP record round-trips the issuer (audit #67).
+    // An issuer-bound PHP record round-trips the issuer.
     let mut issuer_written = php_written.clone();
     issuer_written["issuer"] = serde_json::json!("auth-gw");
     let decoded: ChallengeRecord = serde_json::from_value(issuer_written).unwrap();
@@ -1219,11 +1219,11 @@ fn record_json_keys_match_php_cross_language_format() {
     assert_eq!(decoded.issuer, None);
 }
 
-// ── Round-8 audit: replica wait, TTL margin, region, jti, strict tokens ──
+// ── replica wait, TTL margin, region, jti, strict tokens ──
 
 #[test]
 fn replica_wait_barrier_fails_closed_without_replicas() {
-    // Audit round 14: with_wait(1, ...) makes the durability promise
+    // with_wait(1, ...) makes the durability promise
     // UNCONDITIONAL — after the SET a WAIT is issued and its
     // acknowledgement count is verified. A replica-less server returns 0
     // (after the timeout), so the store MUST fail closed: a challenge that
@@ -1286,7 +1286,7 @@ fn replica_wait_barrier_fails_closed_without_replicas() {
 
 #[test]
 fn consume_and_commit_barriers_fail_closed_without_replicas() {
-    // Audit round 14: the pending→consumed transition and the deterministic
+    // The pending→consumed transition and the deterministic
     // result commit carry the SAME verified replica barrier as issuance —
     // a promotion must never resurrect a consumed record from a stale
     // replica, and a committed result must survive promotion. Against a
@@ -1363,7 +1363,7 @@ fn consume_and_commit_barriers_fail_closed_without_replicas() {
 
 #[test]
 fn ttl_margin_extends_the_redis_ttl_only() {
-    // Audit #23: store() uses EX = max(1, expires_at - now + margin). The
+    // store() uses EX = max(1, expires_at - now + margin). The
     // verifier's own TTL check still rejects at expires_at, so the margin
     // never extends the challenge's real lifetime — it only keeps the record
     // readable across replica lag / clock skew.
@@ -1419,7 +1419,7 @@ fn ttl_margin_extends_the_redis_ttl_only() {
 
 #[test]
 fn verifier_expected_region_rejects_mismatched_and_unbound_records() {
-    // Audit #22: ProductionVerifier::with_expected_region enforces the
+    // ProductionVerifier::with_expected_region enforces the
     // region in the cheap phase. A record issued for a different region —
     // or for no region — is rejected with WrongRegion BEFORE any consume.
     let Some(url) = redis_url() else { return };
@@ -1485,7 +1485,7 @@ fn verifier_expected_region_rejects_mismatched_and_unbound_records() {
 
 #[test]
 fn verifier_secrets_by_kid_selects_the_secret_and_rejects_unknown_kids() {
-    // Audit #91 at the production boundary: with_secrets_by_kid makes the
+    // At the production boundary: with_secrets_by_kid makes the
     // record's kid select the signing secret in the cheap phase. The
     // matching key verifies; the wrong key for the same kid is
     // BadSignature; an unknown (or future) kid is UnknownKid — all before
@@ -1547,7 +1547,7 @@ fn verifier_secrets_by_kid_selects_the_secret_and_rejects_unknown_kids() {
 
 #[test]
 fn valid_outcome_exposes_the_consumed_nonce() {
-    // Audit #37: the ProductionVerifier outcome carries the canonical nonce
+    // The ProductionVerifier outcome carries the canonical nonce
     // (jti) of the consumed record.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("jti");
@@ -1576,7 +1576,7 @@ fn valid_outcome_exposes_the_consumed_nonce() {
 
 #[test]
 fn noncanonical_tokens_reach_the_verifier_as_malformed_token() {
-    // Audit #29 at the production boundary: url-safe variants and loose
+    // At the production boundary: url-safe variants and loose
     // padding are rejected as MalformedToken by ProductionVerifier::verify
     // (all decode errors map to MalformedToken).
     let Some(url) = redis_url() else { return };
@@ -1632,12 +1632,12 @@ fn noncanonical_tokens_reach_the_verifier_as_malformed_token() {
     ));
 }
 
-// ── Round-10 audit: issuer (67), final re-validation (59), future-time
-//    bound (76), consumed-state transition (74), algorithm hard-fail (73) ──
+// ── issuer, final re-validation, future-time bound, consumed-state
+//    transition, algorithm hard-fail ──
 
 #[test]
 fn consumed_state_transition_and_outcome_commit_lifecycle() {
-    // Audit #74 at the STORE level: consume() is a Lua transition that KEEPS
+    // At the STORE level: consume() is a Lua transition that KEEPS
     // the record (state=pending → consumed), commit_result() stores the
     // outcome exactly once, and a later consume returns first=false with the
     // stored result.
@@ -1754,7 +1754,7 @@ fn consumed_state_transition_and_outcome_commit_lifecycle() {
 
 #[test]
 fn verifier_expected_issuer_rejects_mismatched_and_unbound_records() {
-    // Audit #67 at the production boundary: with_expected_issuer enforces
+    // At the production boundary: with_expected_issuer enforces
     // the issuer in the cheap phase. A record issued by a different issuer
     // — or by no issuer — is rejected with WrongIssuer BEFORE any consume.
     let Some(url) = redis_url() else { return };
@@ -1821,7 +1821,7 @@ fn verifier_expected_issuer_rejects_mismatched_and_unbound_records() {
 
 #[test]
 fn future_issued_challenge_beyond_skew_is_rejected() {
-    // Audit #76 at the production boundary: a challenge whose issued_at is
+    // At the production boundary: a challenge whose issued_at is
     // more than MAX_CLOCK_SKEW_SECS (60) ahead of the verifier clock is a
     // time-domain anomaly — the cheap TTL phase rejects it with Expired.
     // The verifier's clock is INJECTED (the PHP `$now` override equivalent)
@@ -1858,7 +1858,7 @@ fn future_issued_challenge_beyond_skew_is_rejected() {
 
 #[test]
 fn unknown_algorithm_variants_in_stored_records_are_record_not_found() {
-    // Audit #73 at the production boundary: a stored record with an unknown
+    // At the production boundary: a stored record with an unknown
     // algorithm variant cannot parse (serde rejects it; PHP fromArray
     // throws MalformedRecordException) — the storage layer maps the corrupt
     // key to RecordNotFound, identical to PHP.
@@ -1901,12 +1901,11 @@ fn unknown_algorithm_variants_in_stored_records_are_record_not_found() {
     }
 }
 
-// ── Round-12 audit: revocation (#117), allocation-after-length (#113),
-//    NOSCRIPT recovery (#102) ──────────────────────────────────────────────
+// ── revocation, allocation-after-length, NOSCRIPT recovery ──
 
 #[test]
 fn revoked_kid_is_rejected_before_signature_checks() {
-    // Audit #117 at the production boundary: with_revoked_kids rejects the
+    // At the production boundary: with_revoked_kids rejects the
     // record in the cheap phase with UnknownKid — BEFORE the signature
     // check — even when the kid's secret is present in secrets_by_kid:
     // compromise revocation overrides the rotation grace. An UNREVOKED kid
@@ -1961,7 +1960,7 @@ fn revoked_kid_is_rejected_before_signature_checks() {
 
 #[test]
 fn oversized_stored_record_is_rejected_before_parse() {
-    // Audit #113 at the production boundary: a 10 MB attacker-written value
+    // At the production boundary: a 10 MB attacker-written value
     // under the nonce key is rejected by the stored-record length cap BEFORE
     // any JSON parse and maps to RecordNotFound — exactly like any other
     // corrupt key (PHP parity), never a large parse and never a panic.
@@ -2003,7 +2002,7 @@ fn oversized_stored_record_is_rejected_before_parse() {
 
 #[test]
 fn script_flush_is_recovered_deterministically() {
-    // Audit #102: the redis crate's Script invoke() handles NOSCRIPT by
+    // The redis crate's Script invoke() handles NOSCRIPT by
     // re-loading the script text (EVALSHA → NOSCRIPT → SCRIPT LOAD →
     // EVALSHA), so a SCRIPT FLUSH cannot break verification: the record is
     // NOT burned and the verification proceeds normally — deterministically,

@@ -15,7 +15,7 @@ use Predis\Response\ServerException;
  * The script is the cross-language shared asset BUNDLED with this package
  * at resources/risk-v1.lua (self-contained — no monorepo paths), resolved
  * via dirname(__DIR__, 2) . '/resources/risk-v1.lua' and loaded with
- * EVALSHA (NOSCRIPT fallback to EVAL + SCRIPT LOAD, sha cached). The old
+ * EVALSHA (NOSCRIPT fallback to EVAL + SCRIPT LOAD, sha cached). The
  * monorepo copy (protocol/risk-v1/risk.lua) is obsolete.
  *
  * All keys carry the hash tag {kiwi:<namespace>} so the script is Cluster
@@ -89,7 +89,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
             throw new \RuntimeException(
                 'Cannot locate the bundled risk-v1 script at resources/risk-v1.lua ' .
                 '(resolved from ' . __DIR__ . '). The script ships with this package — ' .
-                'the old monorepo copy (protocol/risk-v1/risk.lua) is obsolete.'
+                'the monorepo copy (protocol/risk-v1/risk.lua) is obsolete.'
             );
         }
         $script = @file_get_contents($path);

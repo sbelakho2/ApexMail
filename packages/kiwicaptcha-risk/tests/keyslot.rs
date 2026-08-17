@@ -147,7 +147,7 @@ fn slot_of(con: &mut redis::Connection, key: &str) -> i64 {
     }
 }
 
-/// AUDIT #24 — every canonical script's key set must hash to ONE cluster
+/// Every canonical script's key set must hash to ONE cluster
 /// slot (the {kiwi:<ns>} tag). Real Redis (skipped unless RISK_REDIS_URL):
 /// per script, the keys are built EXACTLY as the production code builds
 /// them and all slots must be equal.

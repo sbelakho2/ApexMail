@@ -74,14 +74,14 @@ pub enum RiskError {
     ConfirmationApiRequired,
 }
 
-/// The risk model generation implemented by this package (audit #110).
+/// The risk model generation implemented by this package.
 ///
 /// Monotonically increasing (never reset). 17 is the current model
 /// generation: 16 prior generations covered the fixed-point score
 /// contract, class-normalized calibration, the random-sample resolution
 /// gate, the outcome ledger and the rate-of-change clamp; this revision
-/// adds the non-finite guards (audit #109) and the local-limiter warm-up
-/// ramp (audit #105) to the model's behavior surface.
+/// adds the non-finite guards and the local-limiter warm-up
+/// ramp to the model's behavior surface.
 ///
 /// Every [`RiskDecision`] carries the revision it was computed under
 /// (`model_revision`, exposed in the decision's public JSON — bounded,
@@ -226,7 +226,7 @@ impl Saturations {
 /// engine denies immediately (HardRateLimit) instead of spending time/state
 /// on the request.
 ///
-/// WARM-UP RAMP (audit #105): after every restart/autoscale the process
+/// WARM-UP RAMP: after every restart/autoscale the process
 /// must not start with a full burst — the effective cap ramps linearly
 /// from a floor of `max(1, process_per_second / 10)` to the full cap over
 /// the first `warmup_ramp_secs` seconds of the process's life:
@@ -257,7 +257,7 @@ impl Default for ProcessEmergencyCap {
 
 impl ProcessEmergencyCap {
     pub const DEFAULT_PROCESS_PER_SECOND: u64 = 10_000;
-    /// Default warm-up ramp length in seconds (audit #105).
+    /// Default warm-up ramp length in seconds.
     pub const DEFAULT_WARMUP_RAMP_SECS: f64 = 10.0;
 
     /// Builds a cap with the default rate (10000 admissions per second,
@@ -620,7 +620,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     ///
     /// CONFIRMATION EVENTS (ConfirmedLegitimate/ConfirmedAbuse) ARE
     /// REJECTED with [`RiskError::ConfirmationApiRequired`]: they carry an
-    /// outcome for a previously assessed decision and must go through
+    /// outcome for an assessed decision and must go through
     /// [`RiskEngine::confirmed_legitimate`] / [`RiskEngine::confirmed_abuse`]
     /// (the wrappers require the decision_id the ALWAYS-ON outcome ledger
     /// needs and confirm it BEFORE booking the reputation event).
@@ -707,7 +707,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         })
     }
 
-    /// Confirms the outcome of a previously assessed decision: ONE atomic
+    /// Confirms the outcome of an assessed decision: ONE atomic
     /// ledger operation that flips the decision's PENDING entry exactly
     /// once. With calibration attached the calibrator's confirm script also
     /// consumes the receipt and records the exact score into the DECISION-
@@ -752,7 +752,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
 
     /// Compensating-state correction: flips a decision's ALWAYS-ON outcome
     /// ledger entry L <-> A — the corrected outcome is authoritative for
-    /// future events while the old ephemeral reputation pressure decays
+    /// future events while the prior ephemeral reputation pressure decays
     /// naturally (no synthetic identities are involved; the ledger itself
     /// is the once-only authority). With calibration attached the
     /// calibrator's correction script also REVERSES the original bucket
@@ -1313,7 +1313,7 @@ mod tests {
     }
 
     /// Store alternating boundary scores (449/451) on every observe — the
-    /// engine-level AUDIT #95 wiring check.
+    /// engine-level hysteresis wiring check.
     #[derive(Default)]
     struct OscillatingStore {
         calls: AtomicUsize,
@@ -1383,7 +1383,7 @@ mod tests {
         assert_eq!(decision.score, 195); // 100 + weighted(500, 190)
         assert_eq!(decision.action, RiskAction::Sha18); // band Sha16 raised by global floor 2
         assert_eq!(decision.policy_version, 3);
-        assert_eq!(decision.model_revision, RISK_MODEL_REVISION); // audit #110
+        assert_eq!(decision.model_revision, RISK_MODEL_REVISION);
         assert_eq!(decision.global_level, 2);
         assert_eq!(decision.band, 1);
         assert_eq!(decision.decision_id.len(), 32);
@@ -1393,7 +1393,7 @@ mod tests {
         assert!(snapshot.iter().any(|(k, _)| k == "store:observe:count"));
     }
 
-    /// AUDIT #95 — engine-level wiring: the engine passes its per-process
+    /// Engine-level wiring: the engine passes its per-process
     /// scope-action hysteresis map into the policy, so an oscillating
     /// boundary score (449/451/449…) yields a STABLE action instead of a
     /// flip-flopping challenge profile.
@@ -1538,7 +1538,7 @@ mod tests {
         assert_eq!(decision.action, RiskAction::Deny);
         assert!(decision.has_reason(RiskReason::HardRateLimit));
         assert_eq!(decision.retry_after_ms, Some(1000));
-        assert_eq!(decision.model_revision, RISK_MODEL_REVISION); // audit #110
+        assert_eq!(decision.model_revision, RISK_MODEL_REVISION);
         assert_eq!(decision.decision_id.len(), 32);
         assert_eq!(
             engine.store.calls.load(Ordering::Relaxed),
@@ -1563,7 +1563,7 @@ mod tests {
         assert!(small.is_open());
     }
 
-    /// AUDIT #105 — warm-up ramp: a fresh process must NOT start with a
+    /// Warm-up ramp: a fresh process must NOT start with a
     /// full burst. At t≈0 the effective cap is the floor
     /// max(1, cap/10); cap 1000 -> floor 100: exactly 100 admissions fit,
     /// the 101st is denied.
@@ -1581,7 +1581,7 @@ mod tests {
         );
     }
 
-    /// AUDIT #105 — after the ramp the cap reaches the full value: a short
+    /// After the ramp the cap reaches the full value: a short
     /// ramp + sleep (the implementation uses the fixed Instant clock).
     #[test]
     fn warmup_reaches_full_cap_after_the_ramp() {
@@ -1603,7 +1603,7 @@ mod tests {
         assert!(!limiter.allow(), "the full cap+1th must be denied");
     }
 
-    /// AUDIT #105 — the floor is never below 1 admission.
+    /// The floor is never below 1 admission.
     #[test]
     fn warmup_floor_never_below_one() {
         let limiter = ProcessEmergencyCap::with_capacity_and_ramp(5, 0.3);
@@ -1612,7 +1612,7 @@ mod tests {
         assert!(!limiter.allow(), "the 2nd must be denied during the ramp");
     }
 
-    /// AUDIT #105 — the ramp must never raise the cap above the configured
+    /// The ramp must never raise the cap above the configured
     /// value.
     #[test]
     fn warmup_never_exceeds_configured_cap() {

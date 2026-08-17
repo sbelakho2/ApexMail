@@ -9,7 +9,7 @@ use KiwiCaptcha\MalformedRecordException;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Differential malicious-record parsing (audit #56): the SAME deterministic
+ * Differential malicious-record parsing: the SAME deterministic
  * fuzz corpus (protocol/risk-v1/fuzz-corpus.json — 1000 mutations of a
  * valid record, seed 0x5EED0001) must be accepted (and rejected)
  * IDENTICALLY by the PHP and Rust parsers. The Rust side pins 659 accepted
@@ -43,7 +43,7 @@ final class FuzzCorpusParityTest extends TestCase
             } catch (MalformedRecordException) {
                 $rejected++;
             } catch (\Throwable $e) {
-                // Audit #115: fromArray is a documented-exception-only parse
+                // fromArray is a documented-exception-only parse
                 // path — every corpus entry must end in either a record or
                 // MalformedRecordException. A TypeError/Error/ValueError
                 // leaking out is a parser bug (e.g. an unchecked type cast

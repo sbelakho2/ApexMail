@@ -42,7 +42,7 @@ pub(crate) fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8;
         PoWAlgorithm::Argon2id => {
             // Reject implausible parameters up front: the verifier must never
             // run a memory-hard computation with impossible parameters — the
-            // hard ceilings (audit #32) plus the Argon2 minimum
+            // hard ceilings plus the Argon2 minimum
             // `m_kib >= 8 * p`. The minimum (m_kib >= 8 * p) is enforced at
             // issuance too.
             if record.m_kib < 8 * record.p || check_argon2_ceilings(record).is_err() {
@@ -96,16 +96,16 @@ pub struct VerifyContext<'a> {
     pub record: &'a mut ChallengeRecord,
     /// The HMAC secret key (to re-verify the challenge signature).
     pub secret_key: &'a str,
-    /// Optional per-key-id secrets (audit #91): `kid → master secret`. When
+    /// Optional per-key-id secrets: `kid → master secret`. When
     /// present, the record's `kid` selects the secret for the signature (and
     /// IP-binding) checks — the secret rotation map. An unknown kid — or a
     /// kid beyond the map's NEWEST configured id (the forward/rollback guard:
     /// future-keyed challenges must never verify on older nodes, even if the
     /// key were somehow known) — rejects with
     /// [`VerifyError::UnknownKid`]. When `None`, `secret_key` is used
-    /// unconditionally (the historical single-key path).
+    /// unconditionally (the single-key path).
     pub secrets_by_kid: Option<&'a HashMap<u32, String>>,
-    /// Compromise-revoked key ids (audit #117): `kid → revoked` — e.g. a key
+    /// Compromise-revoked key ids: `kid → revoked` — e.g. a key
     /// that leaked. A record whose `kid` is in this set is rejected with
     /// [`VerifyError::UnknownKid`] IMMEDIATELY — before the signature check —
     /// even when the secret is present: compromise revocation OVERRIDES the
@@ -123,7 +123,7 @@ pub struct VerifyContext<'a> {
     /// The current Unix timestamp in seconds (for the TTL check).
     pub now_unix: u64,
     /// The server's receipt time in EPOCH MICROSECONDS — the same unit as the
-    /// record's `issued_at_ns` (the field names keep the historical `_ns`
+    /// record's `issued_at_ns` (the field names keep the `_ns`
     /// suffix; the unit is microseconds, shared with PHP). Together they
     /// provide a server-measured elapsed time, used to enforce the minimum
     /// solve duration. A forged client `duration_ms` can never satisfy this
@@ -147,7 +147,7 @@ pub struct VerifyContext<'a> {
     /// deployment fails closed on region-unbound challenges). When `None`,
     /// the record's region is not checked.
     pub expected_region: Option<&'a str>,
-    /// Expected issuer identity (audit #67). If [`Some`], the solution is
+    /// Expected issuer identity. If [`Some`], the solution is
     /// rejected with [`VerifyError::WrongIssuer`] when the stored record was
     /// issued by a different issuer — or by no issuer at all (fail closed,
     /// like the region expectation). When `None`, the record's issuer is not
@@ -161,9 +161,9 @@ pub struct VerifyContext<'a> {
     /// The current client's IP address. In v2 the binding is the
     /// NONCE-BOUND HMAC tag: verification recomputes the tag from the
     /// challenge nonce + canonical client IP under the derived purpose key
-    /// and rejects a mismatch with [`VerifyError::IpMismatch`] (audit round
-    /// 18: the field comment previously described the legacy v1 `ip_hash`
-    /// — the nonce-bound tag is the current model). When `None` and the
+    /// and rejects a mismatch with [`VerifyError::IpMismatch`]. The nonce-
+    /// bound tag is the current binding model (v1 records use the legacy
+    /// `hash_ip`). When `None` and the
     /// record's binding tag is NON-EMPTY, the solution is rejected with
     /// [`VerifyError::MissingClientIp`] — a bound challenge requires its IP.
     /// Only records with an empty binding tag (`BindingMode::None`) verify
@@ -203,8 +203,8 @@ pub enum VerifyOutcome {
     Valid {
         /// The consumed challenge's canonical base64 nonce (the jti).
         nonce: String,
-        /// The application-supplied transaction binding (round 9, audit
-        /// #41): the host application generated this nonce and must present
+        /// The application-supplied transaction binding: the host application
+        /// generated this nonce and must present
         /// it again on the final protected POST — correlating the CAPTCHA
         /// result with the exact application transaction.
         request_binding: Option<String>,
@@ -255,7 +255,7 @@ pub enum VerifyError {
     #[error("challenge was issued for a different region")]
     WrongRegion,
     /// The stored record was issued under a DIFFERENT issuer identity than
-    /// the verifier's configured expected issuer (audit #67) — or under no
+    /// the verifier's configured expected issuer — or under no
     /// issuer at all (an issuer-expecting deployment fails closed on
     /// issuer-unbound challenges).
     #[error("challenge was issued by a different issuer")]
@@ -266,7 +266,7 @@ pub enum VerifyError {
     /// revocation) is no longer in force, so the challenge is invalid.
     #[error("challenge was issued under a different security-policy epoch")]
     WrongPolicyVersion,
-    /// The record's key id (`kid`, audit #91) is unknown to this verifier —
+    /// The record's key id (`kid`) is unknown to this verifier —
     /// either absent from its `secrets_by_kid` map, or NEWER than the
     /// newest configured key (the forward/rollback guard: a challenge keyed
     /// with a future kid must never verify on an older node, even if the
@@ -313,21 +313,21 @@ pub enum VerifyError {
 /// Runs as the FIRST check of [`verify_solution`] (after attempt accounting),
 /// before any hash is derived, so a malformed or attacker-crafted record can
 /// never drive an expensive verification:
-/// - `scope` 1..=128 bytes of `[A-Za-z0-9._:-]` (audit #96);
+/// - `scope` 1..=128 bytes of `[A-Za-z0-9._:-]`;
 /// - `issuer` / `region` / `request_binding`, when set, match the same
 ///   narrow alphabet with the length caps (issuer 128, request_binding 128,
-///   region 64 — audit #96);
+///   region 64);
 /// - `nonce` decodes as base64 to exactly 32 bytes (44-char pre-bound before
-///   decode — audit #113);
+///   decode);
 /// - `salt` decodes as base64 to exactly 16 bytes (24-char pre-bound before
-///   decode — audit #113);
+///   decode);
 /// - `expires_at > issued_at` and `expires_at - issued_at <= MAX_TTL_SECS`;
 /// - `prefix` is exactly `challenge|salt|`;
-/// - `target_bits` 1..=MAX_DIFFICULTY for BOTH algorithms (audit #87 — the
+/// - `target_bits` 1..=MAX_DIFFICULTY for BOTH algorithms (the
 ///   Argon2id issuance ceiling stays stricter at
 ///   [`SOLVER_MAX_ARGON2_TARGET_BITS`], exactly like the t=7..=16
 ///   verifier-vs-issuer split);
-/// - Argon2id: the hard parameter ceilings (audit #32): `m_kib` 8..=65536,
+/// - Argon2id: the hard parameter ceilings: `m_kib` 8..=65536,
 ///   `t` 3..=16, `p` 1..=4.
 ///
 /// Returns [`VerifyError::MalformedRecord`] on any violation.
@@ -341,7 +341,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     if !crate::challenge::valid_identifier(&record.scope, 128) {
         return Err(VerifyError::MalformedRecord);
     }
-    // Audit #96: the same narrow identifier alphabet applies to the optional
+    // The same narrow identifier alphabet applies to the optional
     // identifiers — a non-conforming value (Unicode, spaces, empty string)
     // is a malformed record.
     if let Some(issuer) = record.issuer.as_deref() {
@@ -359,11 +359,10 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
             return Err(VerifyError::MalformedRecord);
         }
     }
-    // Round 27 (P3, hostname parity with PHP fromArray): the server-side
-    // hostname metadata is validated on read — a label of at most 4096
-    // bytes with no whitespace/control characters, or None. It is NOT part
-    // of the signed security payload, so this is interoperability rigor,
-    // not a verification boundary.
+    // The server-side hostname metadata is validated on read — a label of at
+    // most 4096 bytes with no whitespace/control characters, or None. It is
+    // NOT part of the signed security payload, so this is interoperability
+    // rigor, not a verification boundary.
     if let Some(hostname) = record.hostname.as_deref() {
         if hostname.is_empty()
             || hostname.len() > 4096
@@ -372,7 +371,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
             return Err(VerifyError::MalformedRecord);
         }
     }
-    // Audit #113: exact-length pre-bounds BEFORE any base64 decode — the
+    // Exact-length pre-bounds BEFORE any base64 decode — the
     // nonce is the 44-char base64 of 32 bytes and the salt the 24-char
     // base64 of 16 bytes. An oversized (attacker-written) value is rejected
     // as malformed without allocating a decode buffer for it.
@@ -396,7 +395,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     if record.prefix != format!("{}|{}|", record.challenge, record.salt) {
         return Err(VerifyError::MalformedRecord);
     }
-    // Audit #87: the difficulty bounds are explicit constants, applied to
+    // The difficulty bounds are explicit constants, applied to
     // BOTH algorithms — 0 would accept a trivially-solvable challenge and
     // anything above the solver ceiling can never be produced by a widget.
     use crate::challenge::{MAX_DIFFICULTY, MIN_DIFFICULTY};
@@ -412,7 +411,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     Ok(())
 }
 
-/// Validate the hard Argon2id parameter ceilings (audit #32).
+/// Validate the hard Argon2id parameter ceilings.
 ///
 /// Checks `m_kib`/`t`/`p` against [`crate::challenge::MIN_ARGON_MEMORY_KIB`],
 /// [`crate::challenge::MAX_ARGON_MEMORY_KIB`], [`crate::challenge::MIN_ARGON_TIME`],
@@ -455,14 +454,14 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 ///    records can never drive expensive verification work.
 /// 3. Re-verify the HMAC signature over the protocol-appropriate canonical
 ///    input (v1 for `protocol_version == 1` records, v2 otherwise; v2
-///    signatures use the HKDF-derived challenge key, audit #21). When
-///    `secrets_by_kid` is configured, the record's `kid` selects the secret
-///    (audit #91): an unknown — or future — kid rejects with
+///    signatures use the HKDF-derived challenge key). When
+///    `secrets_by_kid` is configured, the record's `kid` selects the secret:
+///    an unknown — or future — kid rejects with
 ///    [`VerifyError::UnknownKid`] before any signature work. A REVOKED kid
-///    (audit #117 — `revoked_kids`) rejects with [`VerifyError::UnknownKid`]
+///    (`revoked_kids`) rejects with [`VerifyError::UnknownKid`]
 ///    even earlier, before the signature check, even when its secret is
 ///    present: compromise revocation overrides the rotation grace.
-/// 4. Hard Argon2id parameter ceilings (audit #32) — after signature
+/// 4. Hard Argon2id parameter ceilings — after signature
 ///    authentication, before any `Params::new`/allocation.
 /// 5. Check the TTL (defends against stale challenges).
 /// 6. Check the scope (prevents cross-scope replay) →
@@ -478,12 +477,12 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 /// 9. Check the minimum duration with the SERVER clock (see
 ///    [`SKEW_TOLERANCE_US`] for the clock-skew policy). The client-reported
 ///    duration is forgeable and is never trusted for this check. Records
-///    without `issued_at_ns` are malformed (the legacy client-duration
-///    fallback was removed).
+///    without `issued_at_ns` are malformed (there is no client-duration
+///    fallback).
 /// 10. Optional telemetry scoring (when `enforce_telemetry` is set).
 /// 11. Re-derive the SHA-256/Argon2id hash and check leading zero bits (the
 ///     actual PoW). The valid outcome's `nonce` field carries the consumed
-///     canonical nonce (jti — audit #37).
+///     canonical nonce (jti).
 pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 0. Attempt accounting — counted on EVERY verification call, correct or
     //    not, so a wrong-candidate loop cannot burn unbounded server-side
@@ -515,13 +514,13 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
     }
 
-    // 1a. Key-rotation resolution (audit #91): when a `secrets_by_kid` map
+    // 1a. Key-rotation resolution: when a `secrets_by_kid` map
     //     is configured, the record's kid selects the signing secret. An
     //     unknown kid — or a kid NEWER than the map's newest id (the
     //     forward/rollback guard: future-keyed challenges must never verify
     //     on older nodes, even if the key were somehow known) — is rejected
     //     with UnknownKid BEFORE any signature work.
-    //     Compromise revocation FIRST (audit #117): a REVOKED kid is
+    //     Compromise revocation is checked FIRST: a REVOKED kid is
     //     rejected immediately — before the signature check — even when its
     //     secret is still present in `secrets_by_kid` (or the single-key
     //     path): revocation overrides the rotation grace.
@@ -559,7 +558,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         Err(_) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
     }
 
-    // 1c. Hard Argon2id parameter ceilings (audit #32) — validated AFTER the
+    // 1c. Hard Argon2id parameter ceilings — validated AFTER the
     //     signature has been authenticated and BEFORE any Params::new or
     //     memory allocation: even a properly signed record must never drive
     //     an out-of-bounds memory-hard computation.
@@ -571,7 +570,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 
     // 2. TTL. The challenge is invalid outside its validity window
     //    [issued_at, expires_at): expired once now reaches expires_at, and
-    //    (audit #76) a future-issued challenge is a time-domain anomaly
+    //    a future-issued challenge is a time-domain anomaly
     //    when its issued_at is more than MAX_CLOCK_SKEW_SECS ahead of the
     //    verifier clock — the issuer and verifier clocks are broken.
     if ctx.now_unix >= ctx.record.expires_at {
@@ -593,7 +592,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         }
     }
 
-    // 2c. Region validation (audit #22): a deployment that expects a region
+    // 2c. Region validation: a deployment that expects a region
     //     rejects challenges issued for a different region — or for no region
     //     at all (fail closed).
     if let Some(expected) = ctx.expected_region {
@@ -610,7 +609,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         }
     }
 
-    // 7c. Issuer identity (audit #67): a verifier that expects a specific
+    // 7c. Issuer identity: a verifier that expects a specific
     //     issuer rejects challenges issued by another issuer — or by no
     //     issuer at all (fail closed, like the region expectation).
     if let Some(expected) = ctx.expected_issuer {
@@ -622,14 +621,11 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 2c. IP binding: the challenge was issued to a client IP; a different
     //     submission IP means the token was relayed. Enforced here (not just
     //     at the route layer) so the secure behavior cannot be forgotten.
-    //     An empty binding_tag means binding is disabled (BindingMode::None)
-    //     the check is skipped; a `None` client_ip with a NON-EMPTY tag
-    //     fails closed with MissingClientIp (only BindingMode::None records
-    //     verify without an IP).
-    // The stored record is AUTHORITATIVE: an empty binding tag means binding
-    // is disabled (BindingMode::None); a NON-EMPTY tag means the challenge IS
-    // bound, so a missing client IP fails closed (MissingClientIp) instead of
-    // silently skipping the check.
+    //     The stored record is AUTHORITATIVE: an empty binding tag means
+    //     binding is disabled (BindingMode::None) and the check is skipped; a
+    //     NON-EMPTY tag means the challenge IS bound, so a missing client IP
+    //     fails closed (MissingClientIp) instead of silently skipping the
+    //     check.
     if !ctx.record.binding_tag.is_empty() {
         let Some(client_ip) = ctx.client_ip else {
             return VerifyOutcome::Invalid(VerifyError::MissingClientIp);
@@ -651,12 +647,9 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //    floor is a timing-anomaly heuristic: a fast bot can wait before
     //    submitting, so it only rejects solves that ARRIVE faster than the
     //    theoretical minimum. Records without a high-resolution issuance
-    //    timestamp are malformed — there is no legacy client-duration
-    //    fallback (XV).
-    // Records without a high-resolution issuance timestamp are malformed —
-    // there is no legacy client-duration fallback (XV). This is enforced
-    // UNCONDITIONALLY (even when the timing floor is disabled) to match the
-    // PHP verifier exactly.
+    //    timestamp are malformed — there is no client-duration fallback. This
+    //    is enforced UNCONDITIONALLY (even when the timing floor is disabled)
+    //    to match the PHP verifier exactly.
     if ctx.record.issued_at_ns == 0 {
         return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
     }
@@ -665,8 +658,8 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         if ctx.now_ns >= ctx.record.issued_at_ns {
             // High-resolution path: elapsed time between issuance and receipt,
             // both observed by the server clock. Both `now_ns` and
-            // `issued_at_ns` are EPOCH MICROSECONDS (the names keep the
-            // historical `_ns` suffix), so the ms floor is compared in the
+            // `issued_at_ns` are EPOCH MICROSECONDS (the names keep the `_ns`
+            // suffix), so the ms floor is compared in the
             // same unit: ms -> µs (× 1_000).
             let elapsed_us = ctx.now_ns - ctx.record.issued_at_ns;
             if elapsed_us < floor.saturating_mul(1_000) {
@@ -711,7 +704,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         Err(e) => return VerifyOutcome::Invalid(e),
     };
 
-    // 5b. FINAL re-validation (audit #59): the expensive derivation may have
+    // 5b. FINAL re-validation: the expensive derivation may have
     //     taken long enough that the challenge expired DURING it — or the
     //     verifier's current expectations (policy epoch, region, issuer) may
     //     have changed while the hash was computing. Re-check the CURRENT
@@ -740,7 +733,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     }
 }
 
-/// POST-DERIVE final re-validation (audit #59): re-check the challenge's
+/// POST-DERIVE final re-validation: re-check the challenge's
 /// validity with the CURRENT server time and the CURRENT verifier
 /// expectations, AFTER the (potentially long) proof derivation succeeded but
 /// BEFORE the outcome is declared valid.
@@ -855,7 +848,7 @@ fn telemetry_is_empty(telemetry: &serde_json::Value) -> bool {
 /// Hard rejection signals:
 /// - `webdriver` flag is set (Chrome DevTools Protocol / Selenium).
 /// - Solve completes in >30s with zero mouse/key events (headless solver).
-/// - Solve takes >120s total (well beyond the ~30s expected for targetBits=14).
+/// - Solve takes >300s total (well beyond the ~30s expected for targetBits=14).
 ///
 /// Soft signals (logged but NOT rejected):
 /// - `hardwareConcurrency=0` AND `deviceMemory=0` (likely headless browser).
@@ -887,7 +880,8 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
         return true;
     }
 
-    // 2. Solve takes >300s total (well beyond expected). Increased from 120s to allow for very slow devices.
+    // 2. Solve takes >300s total (well beyond expected — a generous bound
+    //    that allows for very slow devices).
     if duration_ms > 300_000 {
         tracing::warn!(duration_ms, "KiwiCaptcha: bot suspected — solve took >300s");
         return true;
@@ -975,7 +969,7 @@ mod tests {
 
     const NOW_UNIX: u64 = 1_000_000;
     // EPOCH MICROSECONDS (1_700_000_000_000_000 µs ≈ 2023-11-14 UTC) — the
-    // unit shared with PHP; field names keep the historical `_ns` suffix.
+    // unit shared with PHP; field names keep the `_ns` suffix.
     const NOW_NS: u64 = 1_700_000_000_000_000;
 
     fn make_record(target_bits: u32) -> ChallengeRecord {
@@ -1055,7 +1049,7 @@ mod tests {
     }
 
     /// Re-sign a mutated Argon2id record so its parameters are covered by a
-    /// VALID v2 signature — the ceiling checks (audit #32) must fire on
+    /// VALID v2 signature — the ceiling checks must fire on
     /// properly signed records, not on signature failures.
     fn resign_v2(record: &mut ChallengeRecord, secret: &str) {
         let canonical = super::super::challenge::canonical_signing_input_v2(record);
@@ -1877,8 +1871,7 @@ mod tests {
     fn telemetry_enforcement_rejects_empty_object() {
         // The PHP widget emits `{}` when no telemetry was collected — in
         // strict mode an empty payload is the same as no payload: a bot
-        // signal. (Previously `{}` slipped through because score_telemetry
-        // scored it as benign.)
+        // signal. (An empty object must not score as benign.)
         use serde_json::json;
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
@@ -2035,8 +2028,8 @@ mod tests {
     #[test]
     fn records_without_issued_at_ns_are_malformed() {
         // Records without a high-resolution issuance timestamp (issued_at_ns
-        // == 0) are rejected as MalformedRecord — the legacy client-duration
-        // fallback was removed (XV): the floor can only be enforced with a
+        // == 0) are rejected as MalformedRecord — there is no client-duration
+        // fallback: the floor can only be enforced with a
         // server-measured elapsed time.
         let mut record = make_record(8);
         record.issued_at_ns = 0;
@@ -2592,7 +2585,7 @@ mod tests {
         );
     }
 
-    // ── Round-5 audit: validate_record, binding_tag, protocol v1/v2 ─────
+    // ── validate_record, binding_tag, protocol v1/v2 ────────────────────
 
     #[test]
     fn validate_record_rejects_malformed_records() {
@@ -2837,7 +2830,7 @@ mod tests {
         );
     }
 
-    // ── Round-8 audit: region binding, argon ceilings, jti exposure ─────
+    // ── region binding, argon ceilings, jti exposure ────────────────────
 
     #[test]
     fn region_mismatch_is_rejected_with_wrong_region() {
@@ -2850,7 +2843,7 @@ mod tests {
         // issued for another region.
         let mut record = make_record(8);
         record.region = Some("eu".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed (round 9)
+        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed into the canonical payload
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
@@ -2915,7 +2908,7 @@ mod tests {
     fn matching_region_verifies_and_unmatched_expectation_never_fires() {
         let mut record = make_record(8);
         record.region = Some("us".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed (round 9)
+        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed into the canonical payload
         let counter = solve_for_test(&record).unwrap();
 
         let mut ctx_match = VerifyContext {
@@ -2970,7 +2963,7 @@ mod tests {
         ));
     }
 
-    // ── Round-10 audit: issuer identity (audit #67) ────────────────────
+    // ── issuer identity ─────────────────────────────────────────────────
 
     #[test]
     fn issuer_mismatch_is_rejected_with_wrong_issuer() {
@@ -2979,7 +2972,7 @@ mod tests {
         // challenges issued by another issuer.
         let mut record = make_record(8);
         record.issuer = Some("auth-gw-eu".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed (audit #67)
+        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed into the v2 canonical payload
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
@@ -3045,7 +3038,7 @@ mod tests {
     fn matching_issuer_verifies_and_no_expectation_never_fires() {
         let mut record = make_record(8);
         record.issuer = Some("auth-gw".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed (audit #67)
+        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed into the v2 canonical payload
         let counter = solve_for_test(&record).unwrap();
 
         let mut ctx_match = VerifyContext {
@@ -3102,7 +3095,7 @@ mod tests {
 
     #[test]
     fn v2_fixture_with_issuer_set_verifies() {
-        // The issuer is the field before the FINAL kid (audits #67/#91): a
+        // The issuer is the field before the FINAL kid: a
         // fixture record with an issuer set re-signs and verifies — the
         // byte-exact anchor the PHP side pins too.
         let mut record = fixture_record(2);
@@ -3114,7 +3107,7 @@ mod tests {
         ));
     }
 
-    // ── Round-11 audit: key rotation (audit #91) ──────────────────────
+    // ── key rotation ───────────────────────────────────────────────────
 
     /// Issue a SHA-256 record under `kid` with the given master secret.
     fn make_record_with_kid(target_bits: u32, kid: u32, secret: &str) -> ChallengeRecord {
@@ -3144,7 +3137,7 @@ mod tests {
 
     #[test]
     fn kid_selects_the_secret_for_signature_and_binding() {
-        // Audit #91: with `secrets_by_kid` configured, the record's kid
+        // With `secrets_by_kid` configured, the record's kid
         // selects the signing secret — a challenge issued under kid 2 with
         // secret B verifies ONLY against B, never against the other keys.
         let key_b = "0123456789abcdef0123456789abcdef";
@@ -3241,7 +3234,7 @@ mod tests {
 
     #[test]
     fn unknown_kid_is_rejected_with_unknown_kid() {
-        // Audit #91: a record whose kid is absent from the verifier's key
+        // A record whose kid is absent from the verifier's key
         // map is rejected with UnknownKid — before any signature work (the
         // correct signature for a DIFFERENT kid can never rescue it).
         let key_a = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -3305,10 +3298,10 @@ mod tests {
 
     #[test]
     fn future_kid_is_rejected_by_the_forward_guard() {
-        // Audit #91 forward/rollback guard: a record keyed with a kid NEWER
+        // The forward/rollback guard: a record keyed with a kid NEWER
         // than the verifier's newest configured kid must never verify on an
         // older node — UnknownKid fires even though the record is otherwise
-        // perfectly signed and the node holds the older keys.
+        // perfectly signed and the node has simply not rolled forward yet.
         let key = "0123456789abcdef0123456789abcdef";
         let mut record = make_record_with_kid(8, 3, key);
         let counter = solve_for_test(&record).unwrap();
@@ -3404,11 +3397,11 @@ mod tests {
         ));
     }
 
-    // ── Round-12 audit: compromise revocation overrides rotation grace (#117)
+    // ── compromise revocation overrides rotation grace ─────────────────
 
     #[test]
     fn revoked_kid_is_rejected_even_when_the_secret_is_present() {
-        // Audit #117: a REVOKED kid is rejected with UnknownKid IMMEDIATELY —
+        // A REVOKED kid is rejected with UnknownKid IMMEDIATELY —
         // before the signature check — even though the record is perfectly
         // signed and the verifier still holds its secret: compromise
         // revocation overrides the rotation grace (a leaked key stays in
@@ -3479,7 +3472,7 @@ mod tests {
 
     #[test]
     fn unrevoked_kid_verifies_normally() {
-        // Audit #117: revocation is an exact-kid set — a record whose kid is
+        // Revocation is an exact-kid set — a record whose kid is
         // NOT in the revoked set verifies normally even when other kids are
         // revoked.
         let key = "0123456789abcdef0123456789abcdef";
@@ -3538,10 +3531,10 @@ mod tests {
         );
     }
 
-    // ── Round-11 audit: explicit difficulty bounds (audit #87) ────────
+    // ── explicit difficulty bounds ─────────────────────────────────────
     #[test]
     fn validate_record_enforces_the_explicit_difficulty_bounds() {
-        // Audit #87: MIN_DIFFICULTY = 1 and MAX_DIFFICULTY = 20 apply to BOTH
+        // MIN_DIFFICULTY = 1 and MAX_DIFFICULTY = 20 apply to BOTH
         // algorithms — 0, 21, 256 and 65535 are rejected, 1 and 20 accepted.
         use crate::challenge::{MAX_DIFFICULTY, MIN_DIFFICULTY};
         assert_eq!(MIN_DIFFICULTY, 1);
@@ -3607,11 +3600,11 @@ mod tests {
         }
     }
 
-    // ── Round-12 audit: allocation-after-length pre-bounds (#113) ─────
+    // ── allocation-after-length pre-bounds ─────────────────────────────
 
     #[test]
     fn validate_record_rejects_oversized_nonce_and_salt_before_decode() {
-        // Audit #113: the exact-length pre-bounds (nonce 44 chars, salt
+        // The exact-length pre-bounds (nonce 44 chars, salt
         // 24 chars) fire BEFORE any base64 decode — a megabyte salt/nonce
         // string is rejected as MalformedRecord without allocating a decode
         // buffer. Also verified end-to-end: validate_record is the first
@@ -3643,10 +3636,10 @@ mod tests {
         }
     }
 
-    // ── Round-11 audit: narrow identifier alphabet (audit #96) ────────
+    // ── narrow identifier alphabet ─────────────────────────────────────
     #[test]
     fn validate_record_rejects_non_conforming_identifiers() {
-        // Audit #96: scope, issuer, region and request_binding must match
+        // scope, issuer, region and request_binding must match
         // [A-Za-z0-9._:-]+ — Unicode, spaces and the empty string are
         // malformed records.
         let mut unicode_scope = make_record(8);
@@ -3716,7 +3709,7 @@ mod tests {
         assert_eq!(validate_record(&ok), Ok(()));
     }
 
-    // ── Round-10 audit: future-time bound (audit #76) ─────────────────
+    // ── future-time bound ─────────────────────────────────────────────
 
     #[test]
     fn future_issued_challenge_beyond_skew_is_rejected() {
@@ -3787,7 +3780,7 @@ mod tests {
         ));
     }
 
-    // ── Round-10 audit: POST-DERIVE final re-validation (audit #59) ───
+    // ── POST-DERIVE final re-validation ───────────────────────────────
 
     #[test]
     fn final_revalidation_race_expired_during_derive() {
@@ -3901,7 +3894,7 @@ mod tests {
 
     #[test]
     fn unknown_algorithm_variants_are_rejected_at_parse_time() {
-        // Audit #73: serde rejects unknown PoWAlgorithm variants exactly like
+        // serde rejects unknown PoWAlgorithm variants exactly like
         // PHP's fromArray throws MalformedRecordException — "argon2d",
         // "sha1", "sha256-v2" and "ARGON2ID" are all parse errors, and the
         // storage layer maps a corrupt key to RecordNotFound (PHP parity).
@@ -3918,7 +3911,7 @@ mod tests {
 
     #[test]
     fn valid_outcome_exposes_the_consumed_nonce_jti() {
-        // Audit #37: the VerifyOutcome must carry the canonical nonce so
+        // The VerifyOutcome must carry the canonical nonce so
         // callers can correlate the result without re-decoding the token.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
@@ -3938,7 +3931,7 @@ mod tests {
 
     #[test]
     fn signed_argon2_records_outside_hard_ceilings_are_rejected() {
-        // Audit #32: signed records (valid v2 signatures over the mutated
+        // Signed records (valid v2 signatures over the mutated
         // parameters) with out-of-range m_kib/t must be rejected with
         // MalformedRecord before any Params::new/allocation.
         use crate::challenge::{MAX_ARGON_MEMORY_KIB, MAX_ARGON_TIME};
@@ -3965,7 +3958,7 @@ mod tests {
 
     #[test]
     fn signed_argon2_record_at_max_parallelism_verifies() {
-        // Audit #32 ceiling outcome for p: MAX_PARALLELISM = 4 is WITHIN the
+        // Ceiling outcome for p: MAX_PARALLELISM = 4 is WITHIN the
         // hard range, so a properly signed record with p=4 (and m_kib >= 8*p,
         // t >= 3) must verify.
         let mut record = make_argon2_record(4, 64);
@@ -4013,8 +4006,8 @@ mod tests {
     // min_duration_ms = 0; Sha256: target_bits = 8, m_kib = 0, t = 1, p = 1;
     // ip = "192.168.1.5"; protocol_version = 2 (v1 vector below);
     // region/request_binding/issuer all unset, kid = 1 → the canonical ends
-    // `|0||1|||1` (audit #67: issuer is the penultimate field, empty when
-    // unset; audit #91: kid is the FINAL field, 1 when unset).
+    // `|0||1|||1` (issuer is the penultimate field, empty when
+    // unset; kid is the FINAL field, 1 when unset).
     const FIXTURE_SECRET: &str = "0123456789abcdef0123456789abcdef";
     const FIXTURE_NONCE: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=";
     const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
@@ -4100,7 +4093,7 @@ mod tests {
             binding_tag(FIXTURE_NONCE, "192.168.1.5", FIXTURE_SECRET).unwrap(),
             FIXTURE_BINDING_TAG
         );
-        // Legacy binding (v1) is the historical hash_ip(secret||ip).
+        // Legacy binding (v1) is the hash_ip(secret||ip) value.
         assert_eq!(
             hash_ip("192.168.1.5", FIXTURE_SECRET),
             FIXTURE_LEGACY_IP_HASH

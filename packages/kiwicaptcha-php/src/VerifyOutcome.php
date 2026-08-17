@@ -14,7 +14,7 @@ namespace KiwiCaptcha;
  * be decoded).
  *
  * A VALID outcome also exposes the consumed record's application-supplied
- * transaction binding (audit #41) via {@see self::requestBinding()} — the
+ * transaction binding via {@see self::requestBinding()} — the
  * host application generated this nonce at issuance and must present it
  * again on the final protected POST, correlating the CAPTCHA result with
  * the exact application transaction.
@@ -69,7 +69,7 @@ final class VerifyOutcome
 
     /**
      * The consumed record's application-supplied transaction binding when
-     * the outcome is valid (audit #41), else null.
+     * the outcome is valid, else null.
      */
     public function requestBinding(): ?string
     {
@@ -77,8 +77,8 @@ final class VerifyOutcome
     }
 
     /**
-     * The failure reason when the outcome is invalid, else null (round 24 —
-     * used by the provider-compatible Siteverify error mapping).
+     * The failure reason when the outcome is invalid, else null —
+     * used by the provider-compatible Siteverify error mapping.
      */
     public function error(): ?VerifyError
     {

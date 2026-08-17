@@ -15,12 +15,12 @@ Browser behavioral telemetry is a **supplement, not the security boundary** — 
 - **Difficulty derived per algorithm** — SHA-256 scales to 20 bits (~1M hashes); Argon2id is capped at 10 bits because every memory-hard hash is ~1000x more expensive.
 - **Server-side minimum solve duration** — a **timing-anomaly heuristic**, not a proof of human behavior: PoW is probabilistic (a valid solution can occur at counter 0) and a fast bot can wait before submitting, so the floor only rejects solves that **arrive** faster than the theoretical minimum, measured **server-side** from challenge issuance to verification receipt (high-resolution issuance timestamp vs server receipt time). The client-reported duration is forgeable (a custom client can submit `duration_ms=5000`) and is used **only as telemetry**. Clock policy: when the verifier clock is behind the issuer clock, a skew within 5 s (`SKEW_TOLERANCE_US`) skips the floor heuristic (the apparent negative elapsed time carries no signal) and a larger skew is rejected as `TooFast`; records without a high-resolution issuance timestamp (`issued_at_ns == 0`) are **malformed** — the legacy client-duration fallback was removed.
 - **Comprehensive record validation before any hash** — `verify_solution` runs `validate_record` first (right after attempt accounting): scope bounds, nonce = 32 bytes, salt = 16 bytes, `expires_at - issued_at <= 300 s`, `prefix == challenge|salt|`, SHA-256 difficulty 1..=20, Argon2id difficulty 1..=10 with `p == 1`, `t` 3..=6, `m_kib` 8..=65536. A malformed or attacker-crafted record is rejected as `MalformedRecord` before any signature or hash work.
-- **HMAC-signed challenges, protocol v2** — the signed canonical input covers the full parameter set (`v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`, with `region`/`request_binding`/`issuer` rendering as the EMPTY segment when unset — kid is the FINAL field, audits #67/#91), so no issuance parameter can be tampered with without breaking the signature. The challenge string is `base64(canonical).hex_tag` for both protocol versions; v1 records (legacy canonical `nonce|scope|ip_hash|issued_at`) keep verifying during the migration window (max TTL). The TTL check also rejects challenges issued more than `MAX_CLOCK_SKEW_SECS` (60) in the future (audit #76). Key rotation (audit #91): the record's `kid` selects the signing secret from the verifier's `secrets_by_kid` map — an unknown kid, or a kid newer than the map's newest id (the forward/rollback guard), rejects with `UnknownKid`. Compromise revocation (audit #117): `with_revoked_kids` / `VerifyContext::revoked_kids` rejects any challenge keyed with a revoked kid IMMEDIATELY — before the signature check — even while its secret is still present: revocation **overrides** the rotation grace (a leaked key can stay in `secrets_by_kid` while the deployment retires it, but its challenges never verify).
+- **HMAC-signed challenges, protocol v2** — the signed canonical input covers the full parameter set (`v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`, with `region`/`request_binding`/`issuer` rendering as the EMPTY segment when unset — kid is the FINAL field), so no issuance parameter can be tampered with without breaking the signature. The challenge string is `base64(canonical).hex_tag` for both protocol versions; v1 records (legacy canonical `nonce|scope|ip_hash|issued_at`) keep verifying during the migration window (max TTL). The TTL check also rejects challenges issued more than `MAX_CLOCK_SKEW_SECS` (60) in the future. Key rotation: the record's `kid` selects the signing secret from the verifier's `secrets_by_kid` map — an unknown kid, or a kid newer than the map's newest id (the forward/rollback guard), rejects with `UnknownKid`. Compromise revocation: `with_revoked_kids` / `VerifyContext::revoked_kids` rejects any challenge keyed with a revoked kid IMMEDIATELY — before the signature check — even while its secret is still present: revocation **overrides** the rotation grace (a leaked key can stay in `secrets_by_kid` while the deployment retires it, but its challenges never verify).
 - **Nonce-bound IP binding** — the record stores `binding_tag`, an HMAC over the nonce + canonical IP bytes (IPv4-mapped IPv6 normalized to 4-byte IPv4). The tag changes with every nonce, so the record **creates no stable IP-derived identifier**. Verification recomputes the tag from the submitting IP and compares in constant time; an empty `binding_tag` (i.e. the challenge was issued with `BindingMode::None`) disables the check; a `None` client IP with a NON-EMPTY tag fails closed with `MissingClientIp`. This is a **relay mitigation, not a guarantee**: IPs legitimately change behind NAT/proxies, and operators can disable the check.
-- **POST-DERIVE final re-validation (audit #59)** — after the proof derives successfully and BEFORE the outcome is declared valid, the verifier re-checks the CURRENT server time and the CURRENT expectations (policy epoch, region, issuer): a challenge that expired DURING the expensive derivation is `Expired` even though the record was already consumed. The production verifier re-reads the clock at this final step.
-- **Single-use with bounded verification cost** — verification consumes the challenge, and the verification path includes per-nonce attempt accounting (`max_attempts`) that bounds the server-side cost of wrong candidates (critical for memory-hard Argon2id verification). Per-nonce attempt caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) ships both: `rate_limit` (per-IP issuance window, optionally Redis/PSR-6 backed) and `argon2_max_concurrent_verifications` (per-process semaphore). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. the consumed-state Lua transition in `RedisChallengeStore` — the record is KEPT with a storage-level `state` and the winner's committed outcome, so a concurrent loser returns the SAME outcome instead of re-deriving, audit #74).
+- **POST-DERIVE final re-validation** — after the proof derives successfully and BEFORE the outcome is declared valid, the verifier re-checks the CURRENT server time and the CURRENT expectations (policy epoch, region, issuer): a challenge that expired DURING the expensive derivation is `Expired` even though the record was already consumed. The production verifier re-reads the clock at this final step.
+- **Single-use with bounded verification cost** — verification consumes the challenge, and the verification path includes per-nonce attempt accounting (`max_attempts`) that bounds the server-side cost of wrong candidates (critical for memory-hard Argon2id verification). Per-nonce attempt caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) ships both: `rate_limit` (per-IP issuance window, optionally Redis/PSR-6 backed) and `argon2_max_concurrent_verifications` (per-process semaphore). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. the consumed-state Lua transition in `RedisChallengeStore` — the record is KEPT with a storage-level `state` and the winner's committed outcome, so a concurrent loser returns the SAME outcome instead of re-deriving).
 Note on distributed deployments: the in-record `attempts_used` counter is a LOCAL bound — concurrent workers loading the same record each see `attempts_used = 0` and could each run one expensive verification before any update is persisted. To make attempt accounting a STRICT concurrency bound, reserve attempts atomically (e.g. a Redis Lua INCR, as the Symfony bundle's one-shot Redis model does) or rely on one-shot atomic challenge consumption.
-- **Premium UI** — modern, responsive widget with native dark mode and zero external dependencies (no external JS, no iframes, no third-party hosts). The emitted markup takes an optional CSP nonce: with a nonce, `<style nonce>` / `<script nonce>` are emitted; without one, the widget still works under CSP policies that allow `'unsafe-inline'` or where the application post-processes the HTML (as ApexMail does).
+- **Premium UI** — modern, responsive widget with native dark mode and zero external dependencies (no external JS, no iframes, no third-party hosts). The emitted markup takes an optional CSP nonce: with a nonce, `<style nonce>` / `<script nonce>` are emitted; without one, the widget still works under CSP policies that allow `'unsafe-inline'` or where the application post-processes the HTML (or where the application post-processes the HTML).
 - **First-party behavioral telemetry, opt-in** — **no third-party tracking. No third-party requests. First-party behavioral signals never leave your application.** Telemetry is collected only in the mode the page opts into via `data-kiwi-telemetry` on the widget or container: `"off"` (default), `"minimal"` (`me`/`ke` interaction counts), or `"full"` (adds `wd` = webdriver flag and quantized event timings). Listeners are widget-local (never document-wide) and are removed when the solve finishes. **Privacy Strict** — the default mode — collects no behavioral or device telemetry and creates no stable client identifier. Telemetry is a **supplementary** signal: it is client-controlled and forgeable, so it is never treated as the security boundary.
 - **Same-origin enforcement** — the widget resolves the challenge endpoint against the page origin and refuses cross-origin endpoints outright; the fetch uses `credentials: "same-origin"`, `cache: "no-store"`, and `referrerPolicy: "no-referrer"`.
 - **Bounded solving** — the solver (WASM and pure-JS fallback) caps its search at 5,000,000 hashes (`SOLVER_MAX_HASHES`), and solution tokens whose counter exceeds that bound are rejected at decode time.
@@ -89,8 +89,8 @@ let config = ChallengeConfig {
     binding_mode: BindingMode::Bound, // nonce-bound IP binding (relay mitigation)
     policy_version: 1,       // the security-policy epoch
     region: None,            // Some("eu") for region-bound deployments
-    issuer: None,            // Some("auth-gateway") to pin the issuer (audit #67)
-    kid: 1,                  // key id (audit #91); the FINAL signed canonical field
+    issuer: None,            // Some("auth-gateway") to pin the issuer
+    kid: 1,                  // key id; the FINAL signed canonical field
 };
 
 // (b) Argon2id — memory-hard, increases the cost of massively parallel and
@@ -119,7 +119,7 @@ let argon2_mobile = ChallengeConfig {
     policy_version: 1,
     region: None,
     issuer: None,
-    kid: 1,                  // key id (audit #91)
+    kid: 1,                  // key id
 };
 
 // Desktop — 64 MiB memory (the WASM heap ceiling), 8 bits (~256 hashes):
@@ -140,11 +140,11 @@ let argon2_desktop = ChallengeConfig {
     policy_version: 1,
     region: None,
     issuer: None,
-    kid: 1,                  // key id (audit #91)
+    kid: 1,                  // key id
 };
 
 // issue_challenge(&config, scope, client_ip, now_unix, now_ns, active_solves, request_binding)
-//   scope            — 1..=128 bytes of [A-Za-z0-9._:-] (audit #96; e.g. "login", "signup")
+//   scope            — 1..=128 bytes of [A-Za-z0-9._:-] (e.g. "login", "signup")
 //   client_ip        — hashed before storage (never stored raw)
 //   now_unix         — current Unix time in SECONDS (signed payload + TTL)
 //   now_ns           — high-resolution issuance timestamp in EPOCH MICROSECONDS
@@ -172,7 +172,7 @@ use kiwicaptcha::{kiwi_widget_html, kiwi_widget_html_default};
 let html = kiwi_widget_html("/api/kcaptcha/challenge", "login", Some("your-base64-nonce"));
 
 // Without a nonce (works under CSP that allows 'unsafe-inline', or where the
-// application post-processes the HTML — as ApexMail does).
+// application post-processes the HTML — where the application post-processes the HTML).
 let html_default = kiwi_widget_html_default();
 ```
 
@@ -235,7 +235,7 @@ let mut ctx = VerifyContext {
     // Some(empty_map) would REJECT the normal challenge — the verifier
     // treats a present map as authoritative and kid 1 would be UnknownKid.
     // Rotation deployments pass a populated map {1 => master_secret}
-    // (audit #91); revoked_kids hard-revokes compromised keys (audit #117,
+    // revoked_kids hard-revokes compromised keys (
     // rejected before the signature check).
     secrets_by_kid: None,
     revoked_kids: None,
@@ -248,7 +248,7 @@ let mut ctx = VerifyContext {
                                        // 0 = use only the record's floor
     expected_scope: Some("login"),     // reject cross-scope replay
     expected_region: None,             // reject records from other regions
-    expected_issuer: None,             // reject records from other issuers (audit #67)
+    expected_issuer: None,             // reject records from other issuers
     expected_policy_version: None,     // reject records from revoked policy epochs
     client_ip: Some(&client_ip),       // IP binding: None + a bound record => MissingClientIp;
     //                                        only BindingMode::None records verify without an IP
@@ -278,7 +278,7 @@ match verify_solution(&mut ctx) {
 `kiwi_widget_html(endpoint, scope, csp_nonce)` emits `<style nonce="...">` and
 `<script nonce="...">` when a nonce is supplied; without a nonce the widget
 still works under CSP that allows `'unsafe-inline'`, or where the application
-post-processes the HTML (as ApexMail does). The Symfony bundle
+post-processes the HTML (or where the application post-processes the HTML). The Symfony bundle
 (`bel-consulting/kiwicaptcha-symfony`, the single Symfony integration)
 accepts a `nonce` option in the Twig widget.
 
@@ -327,7 +327,7 @@ Requires `cargo`, the `wasm32-unknown-unknown` target, and `wasm-bindgen-cli`
 pure Rust — no Node.js, no wasm-pack: `build.sh` runs `cargo build`, the
 `wasm-bindgen` CLI, and the embed tool in `packages/kiwicaptcha-wasm/tools/embed/`.
 
-## Lua script versioning (audit #116)
+## Lua script versioning
 
 The single-use consumed-state transition and the outcome commit are
 implemented as two Lua scripts — `CONSUME_TRANSITION_LUA` and
@@ -349,7 +349,7 @@ the PHP core's `RedisStorage`. Their deployment model:
   release rollback rolls the script text (and its hash) back with it.
 - **NOSCRIPT is self-healing.** The client re-loads the script text on
   demand whenever a `SCRIPT FLUSH` (or a server restart) empties the cache —
-  with a bounded retry loop (`invoke_script`, audit #102), so verification
+  with a bounded retry loop (`invoke_script`), so verification
   recovers deterministically even if the cache is flushed mid-flight: the
   record is never burned and the verification proceeds normally.
 
@@ -363,7 +363,7 @@ the PHP core's `RedisStorage`. Their deployment model:
 | `Issued` / `IssuedChallenge` | The client-facing challenge (send as JSON) |
 | `ChallengeRecord` | Server-side state (store in Redis); `protocol_version` 1 (legacy) or 2 (full-parameter signing); `binding_tag` (nonce-bound) with `ip_hash` read-alias; `region` (always-present JSON key, `null` when unbound) |
 | `SolutionToken` | Client-submitted solution (from `kiwi__token`); counters above `SOLVER_MAX_HASHES` (5M) are rejected at decode; decode accepts exactly one canonical base64 encoding (strict, padded, standard alphabet) |
-| `VerifyContext` | Parameters for server-side verification (client IP, expected region, revoked kids — audit #117, server-side timing, telemetry, attempt cap) |
+| `VerifyContext` | Parameters for server-side verification (client IP, expected region, revoked kids, server-side timing, telemetry, attempt cap) |
 | `verify_solution()` | Validate the record (cheap phase, before any hash), re-verify the signature (v1/v2 canonical per `protocol_version`; v2 uses the HKDF-derived challenge key), enforce TTL, scope (`WrongScope`), region (`WrongRegion`), nonce-bound IP binding, hard Argon2id parameter ceilings (after signature auth, before allocation), server-side minimum duration (with clock-skew policy), attempt cap, then re-derive the hash and check leading zero bits; the `Valid` outcome carries the consumed nonce (jti) |
 | `score_telemetry()` | Supplementary headless/automated-client scoring (client-controlled input) |
 | `kiwi_widget_html()` | Inline HTML + JS widget with optional CSP nonce |

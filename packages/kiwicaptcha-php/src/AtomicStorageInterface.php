@@ -6,7 +6,7 @@ namespace KiwiCaptcha;
 
 /**
  * Marker interface for storage backends that guarantee STRICT single-use
- * under concurrency (round 29 wording — this describes the ACTUAL
+ * under concurrency — this describes the ACTUAL
  * retained consumed-state protocol, not a load-and-delete model):
  *
  * `consume()` performs an ATOMIC pending->consumed TRANSITION. The record

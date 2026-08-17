@@ -369,7 +369,7 @@ final class RiskPolicyTest extends TestCase
         self::assertSame(500, $json['score']);
         self::assertSame('sha20', $json['action']);
         self::assertSame(3, $json['policy_version']);
-        self::assertSame(17, $json['model_revision'], 'AUDIT #110: the decision carries the model revision in the public JSON');
+        self::assertSame(17, $json['model_revision'], 'the decision carries the model revision in the public JSON');
         self::assertSame(2, $json['global_level']);
         self::assertNull($json['retry_after_ms']);
         self::assertSame(5, $json['band']);
@@ -377,7 +377,7 @@ final class RiskPolicyTest extends TestCase
     }
 
     /**
-     * AUDIT #88 (b) — ABSOLUTE USER-VISIBLE CAP: the adaptive escalation is
+     * ABSOLUTE USER-VISIBLE CAP: the adaptive escalation is
      * bounded. The policy's maximum action across every scope, every
      * global floor and every possible score is the configured ladder top
      * (Deny) — and never above it, so there is no unbounded punishment

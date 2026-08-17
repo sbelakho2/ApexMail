@@ -13,7 +13,7 @@ final class KiwiCaptchaExtension extends AbstractExtension
     {
         return [
             new TwigFunction('kiwi_captcha_widget', [KiwiCaptchaRuntime::class, 'renderWidget'], ['is_safe' => ['html'], 'needs_environment' => true]),
-            // Audit #71: the explicit frame-ancestors CSP directive for the
+            // The explicit frame-ancestors CSP directive for the
             // WIDGET PAGE (null when risk.challenge_origin_allowlist is
             // empty). The application appends it to its own
             // Content-Security-Policy header — frame-ancestors is ignored

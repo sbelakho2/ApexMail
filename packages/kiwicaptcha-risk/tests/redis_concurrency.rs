@@ -33,7 +33,7 @@ fn client() -> redis::Client {
 /// Store with contract defaults on a fresh namespace.
 fn store() -> RedisRiskStateStore {
     RedisRiskStateStore::new(client(), &common::unique_namespace("conc"))
-        // Audit round 17: relaxed test timeouts (the 10 ms production
+        // Relaxed test timeouts (the 10 ms production
         // command timeout flaked the storm tests under CI load).
         .with_io_timeouts(2_000, 2_000)
 }
@@ -55,7 +55,7 @@ fn store_with(
         kiwicaptcha_risk::redis::DEFAULT_OUTCOME_TTL_SECS,
         saturations,
     )
-    .with_io_timeouts(2_000, 2_000) // audit round 17: CI-jitter-proof test timeouts
+    .with_io_timeouts(2_000, 2_000) // CI-jitter-proof test timeouts
 }
 
 /// The Redis server clock in milliseconds (the store's rate-limit clock).
@@ -65,7 +65,7 @@ fn redis_now_ms() -> u64 {
     (t[0] * 1000 + t[1] / 1000) as u64
 }
 
-/// Audit round 17: wait until the REDIS CLOCK reaches `target_ms`,
+/// Wait until the REDIS CLOCK reaches `target_ms`,
 /// polling it instead of wall-clock sleeping. A CI scheduling pause can
 /// only make us wait LONGER — an observation is never pushed across a
 /// timing boundary by assuming wall-clock sleep == Redis execution time.
@@ -330,14 +330,14 @@ fn no_expired_state_resurrection_after_ttl() {
     // The source counters are saturated at 1000 while the key lives.
     assert_eq!(store.last_global_level(), 4);
 
-    // Audit round 17: wait for the REDIS clock (which stamps the key's
+    // Wait for the REDIS clock (which stamps the key's
     // TTL) to pass 3 s — comfortably beyond the 2 s state TTL — instead
     // of wall-clock sleeping. Polling makes the expiry deterministic
     // under any scheduling jitter.
     let ttl_start = redis_now_ms();
     wait_until_redis_ms(ttl_start + 3_000);
 
-    // A new event at T0+4 s: if the old key had resurrected, rf would be
+    // A new event at T0+4 s: if the expired key had resurrected, rf would be
     // ~99_000 (normalized 990). A fresh key yields exactly 125.
     let fresh = store
         .observe(&common::observation(
@@ -466,9 +466,9 @@ fn global_level_enters_hysteresis_hold_after_storm() {
 
     // Inside the window: poll the Redis clock to ~1 s past the ratchet
     // (the deadline is ratchet + 2000 ms), then probe REPEATEDLY while the
-    // server clock stays inside the window (audit round 18: every
+    // server clock stays inside the window (every
     // iteration asserts the hold and each probe carries a unique event id
-    // so the dedupe never swallows one). Residual edge (audit round 23,
+    // so the dedupe never swallows one). Residual edge (
     // honestly documented): if the test process is suspended for the
     // ENTIRE remaining window between the initial wait and the first
     // probe, the loop can enter after `cool` and execute zero in-window
@@ -523,7 +523,7 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
     // 100 REAL threads race the SAME event_id from a common barrier: the
     // Lua's GET-then-SET dedupe is atomic, so exactly ONE call may
     // increment; the rest are duplicate no-ops that return the CURRENT
-    // signals with is_duplicate=true. (Audit round 19: the previous
+    // signals with is_duplicate=true. (The previous
     // version ran the loop sequentially and proved only sequential
     // dedupe; the named concurrency property is now actually exercised.)
     let barrier = Arc::new(Barrier::new(HUNDRED));
@@ -618,7 +618,7 @@ fn duplicate_event_id_increments_exactly_once_across_threads() {
     );
 }
 
-/// Contract-default policy snapshot for the AUDIT #88 decision assertions.
+/// Contract-default policy snapshot for the cap decision assertions.
 fn audit_policy() -> RiskPolicy {
     RiskPolicy::from_config(
         3,
@@ -640,7 +640,7 @@ fn audit_policy() -> RiskPolicy {
     .expect("audit policy parses")
 }
 
-/// AUDIT #88 (b) — POISONED SOURCE ABSOLUTE CAP: hundreds of invalid
+/// POISONED SOURCE ABSOLUTE CAP: hundreds of invalid
 /// proofs (plus request velocity and replay pressure) saturate the
 /// channels; the score clamps at 1000 and the policy action reaches Deny —
 /// but NEVER exceeds either, so there is no unbounded punishment mode.
@@ -733,7 +733,7 @@ fn poisoned_source_reaches_the_cap_but_never_exceeds_it() {
     assert_eq!(decision.action.rank(), RiskAction::Deny.rank());
 }
 
-/// AUDIT #88 (c) — /64-STYLE NETWORK AGGREGATE WEAK PER-SIGNAL EFFECT:
+/// /64-STYLE NETWORK AGGREGATE WEAK PER-SIGNAL EFFECT:
 /// many bad proofs across many IPs in ONE network saturate the shared
 /// network channel, but the network signal stays bounded at 1000 and the
 /// exact-IP signals of a single attacker dominate its score.

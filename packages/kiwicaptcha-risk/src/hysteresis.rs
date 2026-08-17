@@ -1,6 +1,6 @@
 //! Per-process, bounded, TTL'd map of the LAST score-selected action per
-//! scope, giving the SCOPE action selection enter/exit hysteresis
-//! (audit #95): a score hovering at a band boundary (449/451/449…) can no
+//! scope, giving the SCOPE action selection enter/exit hysteresis: a score
+//! hovering at a band boundary (449/451/449…) can no
 //! longer flip the challenge profile on every request.
 //!
 //! Rules (byte-identical with the PHP `ScopeActionHysteresis`):
@@ -15,7 +15,7 @@
 //!     the previous or the plain action is StepUp/Deny the plain mapping
 //!     wins;
 //!   - entries expire after [`TTL_MS`] (300 s); the map is bounded at
-//!     [`MAX_SCOPES`] (1024), the oldest entry evicted when a NEW scope
+//!     [`MAX_SCOPES`] (1024), the least-recently-used entry evicted when a NEW scope
 //!     arrives at capacity (expired entries are purged first).
 //!
 //! The map is intentionally PER-PROCESS (one engine per process in server
@@ -44,7 +44,7 @@ impl ScopeActionHysteresis {
     /// Entry lifetime: 300 s.
     pub const TTL_MS: u64 = 300_000;
 
-    /// Bounded map: at most 1024 scopes; the oldest entry is evicted.
+    /// Bounded map: at most 1024 scopes; the least-recently-used entry is evicted.
     pub const MAX_SCOPES: usize = 1024;
 
     /// The hysteresis ladder (ranks 0..6): StepUp and Deny are hard actions
@@ -356,7 +356,7 @@ mod tests {
         }
         assert_eq!(h.len(), ScopeActionHysteresis::MAX_SCOPES);
 
-        // A NEW scope at capacity evicts the OLDEST entry (scope 1).
+        // A NEW scope at capacity evicts the least-recently-used entry (scope 1).
         let new_scope = ScopeActionHysteresis::MAX_SCOPES as u32 + 1;
         h.select(new_scope, 100, RiskAction::Allow, T0 + 100_000);
         assert_eq!(
@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(
             h.select(1, 449, RiskAction::Sha18, T0 + 100_001),
             RiskAction::Sha18,
-            "the oldest entry must be evicted"
+            "the least-recently-used entry must be evicted"
         );
         assert_eq!(h.len(), ScopeActionHysteresis::MAX_SCOPES);
     }

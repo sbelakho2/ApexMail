@@ -16,7 +16,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Signing key ids (audit #91): the issued record carries a `kid` (wire key
+ * Signing key ids: the issued record carries a `kid` (wire key
  * ALWAYS present, default 1; the 22-key schema), the v2 canonical payload
  * ends with `|<kid>` (the FINAL field, after issuer), and a verifier
  * configured with a kid-keyed SECRET SET selects the signature secret per
@@ -25,7 +25,7 @@ use PHPUnit\Framework\TestCase;
  * set keeps the legacy single-secret path (the verify() $secretKey
  * parameter).
  *
- * Compromise revocation (audit #117): a verifier configured with a
+ * Compromise revocation: a verifier configured with a
  * revokedKids set rejects any record whose kid is in it with
  * UnknownKid IMMEDIATELY — before the signature check — so revocation
  * overrides the normal rotation grace even when the kid's secret is still
@@ -437,7 +437,7 @@ final class KidSigningTest extends TestCase
     {
         // The new parameter defaults to []: the legacy single-secret path
         // (empty secretsByKid, no revocations) verifies any kid exactly as
-        // before the audit #117 change.
+        // on the single-secret path.
         [$record, $token] = $this->issue(kid: 3, secret: self::SECRET_1);
 
         $storage = new ArrayStorage();

@@ -19,7 +19,7 @@ use Predis\Client;
  * pruning loops.
  *
  * Bias is derived from the last 24 hourly buckets (calibration.lua,
- * CLASS-NORMALIZED exact-score semantics, round 6):
+ * CLASS-NORMALIZED exact-score semantics):
  *   fp_mean = legit_score_sum / legit_count        (0 when none)
  *   fn_mean = (abuse_count*1000 - abuse_score_sum) / abuse_count
  *   error   = fn_mean * falseNegativeCost - fp_mean * falsePositiveCost
@@ -31,7 +31,7 @@ use Predis\Client;
  * (single round trip); the clamp is atomic (read prev -> clamp -> write)
  * so concurrent processes never race.
  *
- * RANDOM-SAMPLE RESOLUTION GATE (round 7): the counters live in the SAME
+ * RANDOM-SAMPLE RESOLUTION GATE: the counters live in the SAME
  * scope/hour buckets as the observations (sample_total / sample_resolved
  * hash fields), so scope, window, label population and resolution
  * population are exactly ONE cohort. In random_sample mode the bias target
@@ -273,7 +273,7 @@ final class AggregateCalibrator implements CalibrationStore
      * outcome_*.lua scripts write the same key.
      */
     /**
-     * Canonical HMAC-scoped calibration key component (audit #112): the raw
+     * Canonical HMAC-scoped calibration key component: the raw
      * scope must NEVER appear in Redis keys — an attacker can manufacture
      * unbounded distinct scopes. K_scope = hash_hkdf('sha256', master, 32,
      * 'kiwi/v2/scope-rate'), identical to the bundle's ScopeIssuanceCap.
@@ -282,7 +282,7 @@ final class AggregateCalibrator implements CalibrationStore
     {
         if ($this->scopeHmacKey === '') {
             // @deprecated BC bridge: production wiring MUST pass the derived
-            // key (audit #112) — the raw scope in Redis keys is an
+            // key — the raw scope in Redis keys is an
             // attacker-controlled cardinality vector.
             return (string) $scope;
         }
@@ -440,14 +440,14 @@ final class AggregateCalibrator implements CalibrationStore
     }
 
     /**
-     * Corrects a previously confirmed outcome via the canonical
+     * Corrects a confirmed outcome via the canonical
      * correction.lua: flips the ledger L <-> A, REVERSES the original
      * bucket contribution (exact recorded weight, clamped at zero) and adds
      * the corrected contribution — the decision-time bucket key is derived
      * from the ledger's own scope/hour (the pre-read only derives the key;
      * the script re-validates ledger.scope/hour atomically). The corrected
      * outcome is authoritative for future events; if the decision-time
-     * bucket already expired, the ledger still flips and the old ephemeral
+     * bucket already expired, the ledger still flips and the prior ephemeral
      * reputation pressure decays naturally.
      *
      * @return bool true when the correction was applied, false when the
@@ -508,7 +508,7 @@ final class AggregateCalibrator implements CalibrationStore
         $resolved = (int) ($result[1] ?? 0);
         // (float) cast: PHP 8.5 division returns exact INT results. The
         // inputs are integers, so the ratio is ALWAYS finite; the
-        // is_finite() guard is defensive (audit #109) and maps a
+        // is_finite() guard is defensive and maps a
         // never-occurring non-finite ratio to 0.0 — the resolution gate
         // stays suspended (fail-closed for bias movement).
         $ratio = $total > 0 ? (float) ($resolved / $total) : 0.0;
@@ -563,7 +563,7 @@ final class AggregateCalibrator implements CalibrationStore
         );
 
         if (count($this->biasCache) >= self::CACHE_CAP && !isset($this->biasCache[$scope])) {
-            // Evict the oldest entry (array_shift would renumber the int
+            // Evict the least-recently-used entry (array_shift would renumber the int
             // keys and corrupt the scope -> entry map, so unset instead).
             unset($this->biasCache[array_key_first($this->biasCache)]);
         }
@@ -572,8 +572,8 @@ final class AggregateCalibrator implements CalibrationStore
     }
 
     /**
-     * Maps the raw calibration.lua reply to a BOUNDED integer bias
-     * (audit #109). The canonical script guards its own output (a
+     * Maps the raw calibration.lua reply to a BOUNDED integer bias.
+     * The canonical script guards its own output (a
      * non-finite final_mp maps to +max_adjustment*1000 inside the Lua),
      * so a well-behaved Redis never sends a non-finite value here — this
      * is the defense-in-depth conversion boundary on the PHP side:

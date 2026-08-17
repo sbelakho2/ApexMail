@@ -12,11 +12,11 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
 
 /**
- * Storage safety contract (rounds 26-28):
+ * Storage safety contract:
  *  - the default ArrayStorage is in-memory only: a challenge issued in
  *    request A can never be verified in request B under PHP-FPM — refused
  *    in any non-test/non-dev environment;
- *  - round 28 (P1): production verification REQUIRES an atomic backend
+ *  - production verification REQUIRES an atomic backend
  *    (KiwiCaptcha\AtomicStorageInterface); non-atomic storage is only
  *    possible through the explicitly-named allow_best_effort_storage: true
  *    escape hatch;

@@ -10,7 +10,7 @@ use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 
 /**
  * Shared store stub for the engine tests: the outcome-ledger methods are
- * RECORDING stubs (default first-confirmation status 1) so the round-7
+ * RECORDING stubs (default first-confirmation status 1) so the
  * headline contract — ConfirmedLegitimate/ConfirmedAbuse work identically
  * with or without calibration — is exercised against the ledger, never
  * against silent no-ops. Anonymous test classes extend it and override

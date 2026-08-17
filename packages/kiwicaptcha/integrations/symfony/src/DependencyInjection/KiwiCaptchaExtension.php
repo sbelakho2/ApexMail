@@ -155,8 +155,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 'a floor at or above the TTL leaves no acceptable submission time'
             );
         }
-        // Audit #41: a STATIC transaction binding must satisfy the same
-        // shape rule the controller enforces per request (audit #96: 1..128
+        // A STATIC transaction binding must satisfy the same
+        // shape rule the controller enforces per request (1..128
         // bytes of [A-Za-z0-9._:-]) — refuse a broken static value at
         // compile time instead of 422-ing every challenge request.
         $staticBinding = $config['risk']['request_binding'];
@@ -166,7 +166,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             );
         }
 
-        // Audit #80: the optional Ed25519 receipt-signing seed must be a
+        // The optional Ed25519 receipt-signing seed must be a
         // base64 32-byte Ed25519 seed — refuse a broken value at compile
         // time instead of failing on the first valid verification.
         $receiptSeed = $config['risk']['result_receipt_signing_key'];
@@ -192,7 +192,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $container->setParameter('kiwi_captcha.enforce_telemetry', $config['enforce_telemetry']);
         $container->setParameter('kiwi_captcha.min_duration_ms', $config['min_duration_ms']);
 
-        // Round 30 (item 17): production NEVER derives the expected origin
+        // Production NEVER derives the expected origin
         // from an arbitrary Host header. When same_origin_only (the
         // default) is active in a production environment, public_base_url
         // is REQUIRED and validated at container compile time — the
@@ -215,7 +215,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         );
         $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
 
-        // Audit #22/#23: the risk.redis knobs (wait_replicas /
+        // The risk.redis knobs (wait_replicas /
         // wait_timeout_ms / ttl_margin_secs) harden the CHALLENGE storage
         // when it is a KiwiCaptcha\Storage\RedisStorage definition: WAIT for
         // replica acknowledgment after storing a challenge (async-replication
@@ -245,13 +245,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$bindingMode', $config['binding_mode'] === 'none'
                 ? BindingMode::None
                 : BindingMode::Bound)
-            // Audit #42: the security-policy epoch (risk.policy_version) is
+            // The security-policy epoch (risk.policy_version) is
             // stamped into every issued challenge record.
             ->setArgument('$policyVersion', $config['risk']['policy_version'])
-            // Round 28 (P2): deployment issuer + signing key id are now
-            // first-class bundle options (HMAC-key rotation control) — the
-            // core's strongest identity/key controls are no longer only
-            // reachable by replacing services.
+            // Deployment issuer + signing key id are first-class
+            // bundle options (HMAC-key rotation control) — the core's
+            // strongest identity/key controls are reachable without
+            // replacing services.
             ->setArgument('$issuer', $config['issuer'])
             ->setArgument('$kid', $config['kid'])
             ->setPublic(true);
@@ -262,11 +262,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $storageRef,
         ]))->setPublic(true));
 
-        // Audit #22 (failover-replay Option A): risk.region is baked into
+        // risk.region is baked into
         // every issued challenge record and enforced at verification — a
         // result token issued in one region is never redeemable elsewhere.
         // Set ONLY when configured (the core's $region param is optional),
-        // so deployments on older cores are untouched.
+        // so deployments without the parameter are untouched.
         if ($config['risk']['region'] !== null) {
             $container->getDefinition('kiwi_captcha.issuer')
                 ->setArgument('$region', $config['risk']['region']);
@@ -298,14 +298,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $config['argon2_semaphore_namespace'],
                         $config['argon2_lease_ms'],
                         $config['argon2_max_waiters'],
-                        // Audit #47: per-scope budget (argon2_max_per_tenant)
+                        // Per-scope budget (argon2_max_per_tenant)
                         // — the semaphore checks the scope's own lease set in
                         // addition to the global cap.
                         $config['argon2_max_per_tenant'],
                     ]))->setPublic(true),
                 );
                 // The VERIFIER consumes the gate through the
-                // request-scope-aware wrapper (audit #47): the validator
+                // request-scope-aware wrapper: the validator
                 // stamps the constraint scope into the request and the
                 // wrapper forwards it into acquire(), so the per-scope
                 // budget engages on top of the global cap. The raw
@@ -327,14 +327,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $storageRef,
             $gateRef,
         ]))
-            // Audit #42: the verifier's expected security-policy epoch — a
+            // The verifier's expected security-policy epoch — a
             // record issued under any other epoch is rejected
             // (WrongPolicyVersion) so bumping risk.policy_version invalidates
             // outstanding challenges immediately.
             ->setArgument('$expectedPolicyVersion', $config['risk']['policy_version'])
-            // Round 28 (P2): HMAC-key rotation (secretsByKid) + emergency
+            // HMAC-key rotation (secretsByKid) + emergency
             // revocation (revokedKids) + expected issuer are first-class
-            // bundle options now.
+            // bundle options.
             ->setArgument('$expectedIssuer', $config['issuer'])
             ->setArgument('$secretsByKid', $config['secrets_by_kid'])
             ->setArgument('$revokedKids', $config['revoked_kids'])
@@ -379,7 +379,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // from the validator.
         // A logger (when the app has one) receives the risk gateway's
         // internal diagnostics and the validator's collapsed-verification
-        // detail (audit #57) — resolved once, used by both.
+        // detail — resolved once, used by both.
         $loggerRef = $container->hasDefinition('logger') || $container->hasAlias('logger')
             ? new Reference('logger')
             : null;
@@ -442,7 +442,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // process_per_second (assessPreIssue() checks the single cap
             // once before any state backend; per-source throttling belongs
             // to the distributed keyed layer). The CONTROLLER also consults
-            // it via the gateway (audit #70) BEFORE the Redis issuance
+            // it via the gateway BEFORE the Redis issuance
             // limiter — non-consuming, so the engine stays the single
             // budget consumer.
             $container->setDefinition('kiwi_captcha.risk.emergency_limiter', new Definition(ProcessEmergencyCap::class, [
@@ -519,7 +519,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $container->setDefinition('kiwi_captcha.risk.resolver', new Definition(RiskProfileResolver::class, [
                 PoWAlgorithm::from($config['algorithm']),
                 $config['difficulty_bits'],
-                // Audit #79: the FIXED Argon2id verification-memory envelope
+                // The FIXED Argon2id verification-memory envelope
                 // (risk.argon_verification_memory_kib) and the target-bits
                 // escalation ladder — risk escalates the expected nonce
                 // search space, never the server verification cost.
@@ -538,7 +538,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ]));
             $issuanceCounterRef = new Reference('kiwi_captcha.risk.issuance_counter');
 
-            // Anti-stockpiling (audit #26): bounded outstanding UNSOLVED
+            // Anti-stockpiling: bounded outstanding UNSOLVED
             // challenges per source + deployment-wide. One atomic Lua checks
             // BOTH caps before incrementing ({kiwi:<ns>}:outstanding:<hex>
             // — the source identity is HMAC(canonical ip, RiskKeys::event),
@@ -594,7 +594,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$decisionTtlSecs', $riskConfig['nonce_to_decision_ttl_secs'])
                 ->setArgument('$calibration', $calibrationRef)
                 ->setArgument('$policy', new Reference('kiwi_captcha.risk.policy'))
-                // Audit #70: the controller's cheap local admission step
+                // The controller's cheap local admission step
                 // (RiskGateway::emergencyCapSaturated) — the process-local
                 // window checked BEFORE any Redis issuance limiter.
                 ->setArgument('$emergencyCap', new Reference('kiwi_captcha.risk.emergency_limiter'))
@@ -619,7 +619,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $riskGatewayRef = new Reference(RiskGateway::class);
             $riskCookieRef = new Reference(ContinuityCookie::class);
         }
-        // ── Trusted client-IP policy (audit #64) ──────────────────────────
+        // ── Trusted client-IP policy ──────────────────────────────────────
         // Wired UNCONDITIONALLY (not gated on risk.enabled): the canonical
         // client IP feeds the challenge binding tag, the rate-limit identity
         // and the risk source pseudonym — the controller and the validator
@@ -632,7 +632,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$logger', $loggerRef)
             ->setPublic(true));
 
-        // ── Security-epoch monitor (audit #81) ────────────────────────────
+        // ── Security-epoch monitor ────────────────────────────────────────
         // Wired UNCONDITIONALLY (not gated on risk.enabled — the central
         // security-policy state exists independently of the adaptive
         // engine): reads `{kiwi:<ns>}:security-policy`'s min_policy_epoch
@@ -656,14 +656,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         ]))
             ->setArgument('$region', $config['risk']['region'])
             ->setArgument('$issuer', null)
-            // Audit #108: the max-stale fail-closed window — past
+            // The max-stale fail-closed window — past
             // last_success + max_stale the validator fails verification
             // closed (temporary_unavailable) and the controller refuses
             // issuance with 503 SERVICE_UNAVAILABLE.
             ->setArgument('$maxStaleSecs', $riskConfig['security_epoch_max_stale_secs'])
             ->setPublic(true));
 
-        // ── Optional Ed25519 result-receipt signer (audit #80) ────────────
+        // ── Optional Ed25519 result-receipt signer ────────────────────────
         // The result verification stays CENTRAL-ONLY (the HMAC secret never
         // leaves the server); this signer only enables EXPORTED
         // verification receipts verified with the public key. Null seed =
@@ -672,12 +672,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $receiptSeed,
         ]));
 
-        // ── Per-scope issuance cap (audit #89/#112) ───────────────────────
+        // ── Per-scope issuance cap ────────────────────────────────────────
         // risk.max_challenges_per_scope_per_minute > 0 requires a Redis
         // client for the atomic fixed-window counter — refuse the config at
         // compile time instead of silently minting unbilled challenges. The
         // window key carries hex(hmac_sha256(scope, K_scope)) — the RAW
-        // scope string is never a Redis key component (audit #112); K_scope
+        // scope string is never a Redis key component; K_scope
         // is derived from the risk master with
         // hash_hkdf info 'kiwi/v2/scope-rate' (the same derivation the risk
         // package uses for its calibration scope keys).
@@ -701,7 +701,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $scopeCapRef = new Reference('kiwi_captcha.risk.scope_issuance_cap');
         }
 
-        // Round 30 (P1): server-side provider-compatibility stores — the
+        // Server-side provider-compatibility stores — the
         // metadata sidecar (action/cData bound at challenge issuance) and
         // the atomic idempotency store (provider-style idempotency_key).
         // Redis-backed whenever the challenge storage is RedisStorage (the
@@ -723,10 +723,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $idempotencyStoreRef = new Reference(ArraySiteVerifyIdempotencyStore::class);
         }
 
-        // Round 31 (item 15): the per-sitekey binding option was REMOVED —
-        // the core binds issuance by the GLOBAL binding_mode only, so a
-        // per-sitekey "required"/"none" claim could not be enforced. The
-        // global server-owned mode is the only binding control.
+        // The core binds issuance by the GLOBAL binding_mode only: the
+        // per-sitekey map carries no binding dimension. The global
+        // server-owned mode is the only binding control.
         $sitekeyPolicy = $riskConfig['sitekeys'] ?? [];
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
@@ -739,41 +738,41 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['risk']['challenge_origin_allowlist'],
             $config['risk']['enforce_fetch_metadata'],
             $storageRef,
-            // Audit #41: static transaction-binding fallback — the widget
+            // Static transaction-binding fallback — the widget
             // sends its own request_binding field when it carries one; this
             // default applies when the request does not.
             $config['risk']['request_binding'],
-            // Audit #43: when enforced, a challenge POST without a usable
+            // When enforced, a challenge POST without a usable
             // Origin header is rejected with 403 origin_rejected.
             $config['risk']['enforce_origin'],
         ]))
-            // Audit #64: the trusted client-IP policy drives the controller's
+            // The trusted client-IP policy drives the controller's
             // canonical IP (binding tag / rate-limit identity / risk source).
             ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
-            // Audit #78: the same-origin expected origin comes from SERVER
+            // The same-origin expected origin comes from SERVER
             // CONFIG, never the Host header.
             ->setArgument('$publicBaseUrl', $config['public_base_url'])
-            // Audit #89: the per-scope issuance cap (fixed-window Redis
+            // The per-scope issuance cap (fixed-window Redis
             // counter; null when disabled).
             ->setArgument('$scopeIssuanceCap', $scopeCapRef)
-            // Audit round 15: the SERVER-OWNED scope allowlist — when
+            // The SERVER-OWNED scope allowlist — when
             // non-empty, issuance outside it is refused (422
             // SCOPE_NOT_ALLOWED) before risk/quota, making the per-scope
             // quota namespace server-bounded.
             ->setArgument('$allowedScopes', $riskConfig['allowed_scopes'])
-            // Round 24: migration sitekey -> scope alias map (server-owned).
+            // Migration sitekey -> scope alias map (server-owned).
             ->setArgument('$sitekeyAllowlist', $riskConfig['sitekey_allowlist'])
-            // Round 30 (P1): the provider-metadata sidecar (action/cData
+            // The provider-metadata sidecar (action/cData
             // bound to the nonce at issuance).
             ->setArgument('$metadataStore', $metadataStoreRef)
-            // Round 30 (item 14): server-owned (sitekey, action) -> scope
-            // policy + per-sitekey binding profiles.
+            // Server-owned (sitekey, action) -> scope
+            // policy map.
             ->setArgument('$sitekeyPolicy', $sitekeyPolicy)
-            // Audit #108: the security-epoch monitor drives the issuance-side
+            // The security-epoch monitor drives the issuance-side
             // max-stale fail-closed check — a stale central policy read
             // refuses issuance with 503 SERVICE_UNAVAILABLE.
             ->setArgument('$epochMonitor', new Reference(SecurityEpochMonitor::class))
-            // Audit #104: the configured challenge TTL lets the anti-
+            // The configured challenge TTL lets the anti-
             // stockpiling admission run BEFORE the challenge state is
             // created (the quota checks all precede the storage write).
             ->setArgument('$challengeTtlSecs', $config['challenge_ttl_secs'])
@@ -782,12 +781,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──
         $container->setDefinition(KiwiCaptchaRouteLoader::class, (new Definition(KiwiCaptchaRouteLoader::class, [
             '%kiwi_captcha.route_prefix%',
-            // Audit #51/#58: the /health/live + /health/ready routes follow
+            // The /health/live + /health/ready routes follow
             // risk.health.enabled (default true).
             $config['risk']['health']['enabled'],
         ]))->addTag('routing.loader'));
 
-        // ── Provider-compatible Siteverify (round 24) ──
+        // ── Provider-compatible Siteverify ──
         // Disabled unless siteverify_secret is configured; calls the SAME
         // atomic verifier service (kiwi_captcha.verifier). The storage is
         // injected so the deterministic consumed-result's record metadata
@@ -795,22 +794,22 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $container->setDefinition(SiteVerifyController::class, (new Definition(SiteVerifyController::class, [
             new Reference('kiwi_captcha.verifier'),
             $config['secret_key'],
-            // Round 26: map of siteverify secret -> expected scope; empty
+            // Map of siteverify secret -> expected scope; empty
             // disables the endpoint.
             $riskConfig['siteverify_secrets'],
-            // Round 28 (P1): the one-success provider contract REQUIRES an
+            // The one-success provider contract REQUIRES an
             // atomic backend — requireAtomicStorageWhenNeeded() refuses any
             // non-atomic combination (Psr6Storage included) at compile time.
             $riskConfig['siteverify_secrets'] !== [] ? new Reference(StorageInterface::class) : null,
             null, // logger (autowired position — kept explicit for stability)
             $riskConfig['siteverify_secrets'] !== [] ? $metadataStoreRef : null,
             $riskConfig['siteverify_secrets'] !== [] ? $idempotencyStoreRef : null,
-            // Round 30 (item 16): the shared Redis log gate for
+            // The shared Redis log gate for
             // invalid-secret flood suppression (null = suppressed detail).
             $riskConfig['siteverify_secrets'] !== [] ? $redisRef : null,
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
-        // ── Migration compatibility loader (round 24) ──
+        // ── Migration compatibility loader ──
         // GET {prefix}/api.js[?compat=...]: the canonical glue + driver as
         // one same-origin immutable external script.
         $assetsDir = \dirname(__DIR__, 2).'/Resources/public';
@@ -818,7 +817,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $assetsDir,
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
-        // ── Health endpoints (audit #51/#58) ──
+        // ── Health endpoints ──
         // /health/live: always 200 while the process runs. /health/ready:
         // 200 only when the signing keys are configured, the security Redis
         // answers a (cached) PING and the CENTRAL security-policy state is
@@ -833,9 +832,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $healthNamespace,
             $config['risk']['policy_version'],
         ]))
-            // Audit #68: the memory-budget readiness invariant
+            // The memory-budget readiness invariant
             // (concurrency x max adaptive profile + headroom <=
-            // container_memory_mib). Audit #79: the max adaptive profile
+            // container_memory_mib). The max adaptive profile
             // memory is the FIXED verification envelope
             // (risk.argon_verification_memory_kib) — risk never escalates
             // the server verification cost, so the worst case is the
@@ -850,7 +849,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // follows the ACTUAL registered route (the standalone Twig widget
         // derives its endpoint from the same prefix); the telemetry mode
         // follows the (strict-enforced) config; the request_binding option
-        // follows the static risk.request_binding default (audit #41).
+        // follows the static risk.request_binding default.
         $container->setDefinition(KiwiCaptchaType::class, (new Definition(KiwiCaptchaType::class, [
             new Reference(KiwiCaptchaRuntime::class),
             '%kiwi_captcha.route_prefix%',
@@ -859,8 +858,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         ]))->addTag('form.type'));
 
         // ── Validator (local verification, no external calls) ──
-        // The logger receives the INTERNAL verification detail on failures
-        // (audit #57): the public violation code is collapsed
+        // The logger receives the INTERNAL verification detail on failures —
+        // the public violation code is collapsed
         // (invalid_or_expired / rate_limited / temporary_unavailable), the
         // precise core reason stays in the logs.
         $container->setDefinition(KiwiCaptchaValidator::class, (new Definition(KiwiCaptchaValidator::class, [
@@ -873,17 +872,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $outstandingRef,
         ]))
             ->setArgument('$logger', $loggerRef)
-            // Audit #74: the challenge storage resolves ambiguous-consume
+            // The challenge storage resolves ambiguous-consume
             // outcomes from the consumed record (state + consumed_result).
             ->setArgument('$storage', $storageRef)
-            // Audit #64: the SAME canonical client IP the controller bound
+            // The SAME canonical client IP the controller bound
             // the challenge to (trusted client-IP policy).
             ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
-            // Audit #81: the security-epoch monitor feeds the verifier's
+            // The security-epoch monitor feeds the verifier's
             // expected policy epoch per verification (bounded revocation
             // latency + monotonic max).
             ->setArgument('$epochMonitor', new Reference(SecurityEpochMonitor::class))
-            // Audit #80: the optional Ed25519 result-receipt signer for
+            // The optional Ed25519 result-receipt signer for
             // exported verification results (null = disabled).
             ->setArgument('$receiptSigner', new Reference(ResultReceiptSigner::class))
             ->addTag('validator.constraint_validator'));
@@ -894,10 +893,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             null,
             KiwiCaptchaRuntime::DEFAULT_TEMPLATE,
             $config['telemetry'],
-            // Audit #41: the static transaction binding is the standalone
+            // The static transaction binding is the standalone
             // widget's data-kiwi-request-binding default.
             $config['risk']['request_binding'],
-            // Audit #71: the widget page's frame-ancestors CSP helper —
+            // The widget page's frame-ancestors CSP helper —
             // the space-separated allowlisted origins.
             $config['risk']['challenge_origin_allowlist'],
         ]))->addTag('twig.runtime'));
@@ -933,7 +932,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * Round 30 (item 17): the production origin invariant. The challenge
+     * The production origin invariant. The challenge
      * controller's same-origin check must compare against SERVER CONFIG
      * (public_base_url), never the request's own scheme+host — otherwise a
      * forged Host header defines the security boundary. Fail closed at
@@ -968,7 +967,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * Round 28 (P1): strict single-use requires an ATOMIC storage backend.
+     * Strict single-use requires an ATOMIC storage backend.
      * In production (not test/dev):
      *  - unless allow_best_effort_storage is explicitly true, the resolved
      *    storage must implement KiwiCaptcha\AtomicStorageInterface — a
@@ -1141,7 +1140,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // The risk-v1 policy contract version is internal to the risk
         // package (RiskPolicy::CONTRACT_VERSION): the policy handed to the
         // engine always carries it. The operator's risk.policy_version knob
-        // is now the CHALLENGE security-policy epoch (audit #42) — stamped
+        // is the CHALLENGE security-policy epoch — stamped
         // into issued records and enforced at verification — completely
         // independent of the risk-v1 contract.
         $policyConfig = [

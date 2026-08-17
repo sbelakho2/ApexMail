@@ -43,14 +43,14 @@ final class Config
 
     /**
      * Absolute protocol difficulty floor for a STORED record's target bits
-     * (audit #87): validation rejects 0 — "no work at all" cannot be
+     * : validation rejects 0 — "no work at all" cannot be
      * distinguished from an uninitialized misconfiguration.
      */
     public const MIN_DIFFICULTY = 1;
 
     /**
      * Absolute protocol difficulty ceiling for a STORED record's target
-     * bits (audit #87) — the SOLVER ceiling shared by both algorithms:
+     * bits — the SOLVER ceiling shared by both algorithms:
      * the verifier's validate_record guard accepts 1..MAX_DIFFICULTY for
      * SHA-256 AND Argon2id records, so the leading-zero comparison is only
      * ever run against a bounded, validated difficulty. (Issuance keeps
@@ -86,13 +86,13 @@ final class Config
      * @param int|null $minDurationMs       Minimum solve duration (null = derive from difficulty).
      * @param int      $solverMaxHashes     Solver cap used by the widget (informational).
      * @param int      $policyVersion       Security-policy epoch stamped into every issued
-     *                                      record (audit #42; mirrors Rust
+     *                                      record (mirrors Rust
      *                                      ChallengeConfig.policy_version). The verifier
      *                                      rejects records issued under a different epoch
      *                                      (WrongPolicyVersion). Cosmetic configuration
      *                                      changes must NOT bump it.
      * @param string|null $issuer           Deployment identity stamped into every issued
-     *                                      record (audit #67; mirrors Rust
+     *                                      record (mirrors Rust
      *                                      ChallengeConfig.issuer) — e.g. "dev", "staging",
      *                                      "prod". A verifier configured with an expected
      *                                      issuer rejects records issued by a different
@@ -100,7 +100,7 @@ final class Config
      *                                      holds even when deployments share secret keys.
      *                                      Null (default) stamps an unbound record.
      * @param int      $kid                 Signing key id stamped into every issued record
-     *                                      (audit #91; mirrors Rust ChallengeConfig.kid,
+     *                                      (mirrors Rust ChallengeConfig.kid,
      *                                      default 1) and signed as the FINAL v2 canonical
      *                                      field (`|<kid>`). The verifier selects the
      *                                      signature secret per kid via `secretsByKid`
@@ -204,7 +204,7 @@ final class Config
     }
 
     /**
-     * The narrow security-identifier alphabet (audit #96): the deployment-
+     * The narrow security-identifier alphabet: the deployment-
      * bound identifiers (issuer, region, request_binding, scope) must match
      * `[A-Za-z0-9._:-]+` so no identifier can smuggle canonical separators
      * ('|'), whitespace, invisible characters, or multi-byte text into a

@@ -405,7 +405,7 @@ final class VerifierHardeningTest extends TestCase
     }
 
     /**
-     * Consume-on-verify (audit #74): a wrong candidate burns the challenge —
+     * Consume-on-verify: a wrong candidate burns the challenge —
      * the record transitions to consumed and the deterministic invalid
      * outcome is committed, so the second (correct) verify sees the SAME
      * InsufficientWork instead of re-deriving the proof.
@@ -434,7 +434,7 @@ final class VerifierHardeningTest extends TestCase
     }
 
     /**
-     * Consume-on-verify (audit #74): a FIRST verify that succeeds consumes
+     * Consume-on-verify: a FIRST verify that succeeds consumes
      * the record and commits the deterministic valid outcome, so a replay
      * returns the SAME Valid without re-deriving — the attempt bound IS the
      * single-use record (there is no maxAttempts parameter).

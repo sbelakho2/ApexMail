@@ -5,8 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
 /**
- * Round 30 (P1): the outcome of claiming an idempotency key for a
- * verification attempt.
+ * The outcome of claiming an idempotency key for a verification attempt.
  *
  * - CLAIMED: no prior key exists — this request OWNS verification.
  * - PENDING_SAME: the same key + same response hash is being processed by
@@ -18,8 +17,8 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * - CONFLICT: the same key is being reused for a DIFFERENT response —
  *   reject.
  *
- * Round 31 (P2): a PENDING_SAME waiter whose owner's lease has expired
- * attempts an atomic takeover:
+ * A PENDING_SAME waiter whose owner's lease has expired attempts an atomic
+ * takeover:
  * - TOOK_OVER: this request atomically replaced the owner and now owns
  *   verification (it must finalize with the returned owner token).
  * - STILL_PENDING: the takeover attempt lost (entry complete, different

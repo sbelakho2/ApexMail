@@ -19,7 +19,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * CONSUMED-STATE RETRY (audit #74): consume() is a one-shot TRANSITION that
+ * CONSUMED-STATE RETRY: consume() is a one-shot TRANSITION that
  * keeps the record until its TTL — replay protection is the consumed
  * marker, not absence. The deterministic verification result
  * (consumed_result) is committed best-effort, so a retry on an

@@ -114,7 +114,7 @@ final class ParityTest extends TestCase
 
     public function testReplayReturnsTheCommittedStoredOutcome(): void
     {
-        // Audit #74: the record is consumed but KEPT until its TTL, and the
+        // The record is consumed but KEPT until its TTL, and the
         // deterministic result is committed — a replay of the same token
         // returns the SAME Valid outcome without re-deriving (the bundle
         // dedupes same-binding retries at the validator).
@@ -293,7 +293,7 @@ final class ParityTest extends TestCase
     public function testArgon2WithBelowCeilingParamsRejectsAsUnsupported(): void
     {
         // t=1 sits below the absolute process ceiling (MIN_ARGON_TIME=3,
-        // audit #32). The record is SIGNED with the shared secret, so the
+        // The record is SIGNED with the shared secret, so the
         // verifier authenticates the parameters first and reports
         // UnsupportedArgon2Params (not MalformedRecord) — no Argon2
         // computation is attempted.

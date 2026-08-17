@@ -12,7 +12,7 @@ use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
 /**
- * AUDIT #109 — NON-FINITE RISK GUARDS: every float boundary in the
+ * NON-FINITE RISK GUARDS: every float boundary in the
  * scoring/calibration path must produce a BOUNDED integer output — never
  * NaN, never lower-risk-than-max.
  *

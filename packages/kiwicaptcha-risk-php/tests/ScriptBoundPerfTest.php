@@ -9,7 +9,7 @@ use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
 /**
- * AUDIT #101 — SLOW-SCRIPT GUARD (a guard, NOT a benchmark): the
+ * SLOW-SCRIPT GUARD (a guard, NOT a benchmark): the
  * verification-path scripts (risk-v1.lua + the calibration read) must run
  * well under a generous bound when the state is at its MAXIMUM allowed
  * size (every key carrying its full bounded field set — 12 flat fields

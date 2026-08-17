@@ -46,9 +46,9 @@ final class Psr6StorageTest extends TestCase
 
     public function testStoreThenConsumeReturnsRecord(): void
     {
-        // REGRESSION: consume() must return the stored record. The old
-        // delete-then-find implementation always returned null because
-        // PSR-6's delete postcondition makes the subsequent find miss.
+        // REGRESSION: consume() must return the stored record. PSR-6's delete
+        // postcondition makes a subsequent find miss, so a transition that
+        // deletes instead of keeping the record would break the contract.
         $storage = new Psr6Storage($this->makePool());
         $storage->store($this->makeRecord());
 
@@ -61,7 +61,7 @@ final class Psr6StorageTest extends TestCase
 
     public function testConsumeMarksConsumedAndKeepsTheRecord(): void
     {
-        // Audit #74: consume() is a transition — the record is kept (marked
+        // consume() is a transition — the record is kept (marked
         // consumed) until its own expiration; a retry observes the consumed
         // marker instead of a missing record.
         $storage = new Psr6Storage($this->makePool());

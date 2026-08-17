@@ -1,4 +1,4 @@
-//! End-to-end quick-start mirroring the root README (audit rounds 15–16):
+//! End-to-end quick-start mirroring the root README:
 //! issue a low-difficulty challenge → construct a solution → verify it →
 //! assert `VerifyOutcome::Valid`. CI RUNS this example (`cargo test
 //! --example quickstart`), so the documented flow is proven to work, not
@@ -13,7 +13,7 @@ use kiwicaptcha::{
     ChallengeConfig, PoWAlgorithm, SolutionToken, VerifyContext, VerifyOutcome,
 };
 
-/// The complete current `ChallengeConfig` (audit round 16): there is NO
+/// The complete current `ChallengeConfig`: there is NO
 /// `Default` — every field is explicit so a copied quick-start cannot
 /// silently drop a security-relevant knob.
 fn config() -> ChallengeConfig {
@@ -114,6 +114,6 @@ fn main() {
 
 #[test]
 fn quickstart_reaches_verify_outcome_valid() {
-    // CI asserts BEHAVIOR, not merely syntax (audit round 16).
+    // CI asserts BEHAVIOR, not merely syntax.
     quickstart().expect("the documented quick-start must end in VerifyOutcome::Valid");
 }

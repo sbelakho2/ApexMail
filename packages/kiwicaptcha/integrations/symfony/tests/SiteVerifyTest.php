@@ -19,10 +19,9 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * Round 24: provider-compatible Siteverify golden tests. The endpoint calls
- * the EXACT SAME atomic verifier as the native path and returns the
- * provider-shaped JSON (`success`, `challenge_ts`, `hostname`,
- * `error-codes`).
+ * Provider-compatible Siteverify golden tests. The endpoint calls the EXACT
+ * SAME atomic verifier as the native path and returns the provider-shaped
+ * JSON (`success`, `challenge_ts`, `hostname`, `error-codes`).
  */
 final class SiteVerifyTest extends TestCase
 {
@@ -34,11 +33,12 @@ final class SiteVerifyTest extends TestCase
         ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
         ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $idempotencyStore = null,
         ?ArrayStorage $storage = null,
+        float $waitSecs = 90.0,
     ): SiteVerifyController {
         $storage ??= new ArrayStorage();
         $verifier = new Verifier($storage);
 
-        return new SiteVerifyController($verifier, self::SECRET, $secrets, $storage, null, $metadataStore, $idempotencyStore);
+        return new SiteVerifyController($verifier, self::SECRET, $secrets, $storage, null, $metadataStore, $idempotencyStore, null, $waitSecs);
     }
 
     private function issuedToken(ArrayStorage $storage, string $scope = 'login', ?string $remoteIp = '127.0.0.1'): array
@@ -138,7 +138,7 @@ final class SiteVerifyTest extends TestCase
         self::assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/', $json['challenge_ts']);
 
         // JSON-encoded body works identically — with a FRESH token (the
-        // round-26 replay boundary rejects the already-consumed one).
+        // replay boundary rejects the already-consumed one).
         $challenge2 = $issuer->issue('login', '203.0.113.7', null, 'login.example');
         $solution2 = $this->solveSolution($storage->find($challenge2->nonce));
         usleep(((int) $challenge2->minDurationMs + 10) * 1000);
@@ -167,7 +167,7 @@ final class SiteVerifyTest extends TestCase
         $first = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $solution, 'secret' => self::SITEVERIFY_SECRET, 'remoteip' => '203.0.113.7']));
         self::assertTrue(json_decode((string) $first->getContent(), true)['success']);
 
-        // Round 26 (P1): the COMPATIBILITY boundary distinguishes the first
+        // The COMPATIBILITY boundary distinguishes the first
         // redemption from replays. A repeated Siteverify redemption of the
         // same nonce MUST NOT report success again — it returns the
         // provider vocabulary for a consumed token. (The native verifier's
@@ -180,7 +180,7 @@ final class SiteVerifyTest extends TestCase
 
     public function testCrossSecretScopeEscalationIsRejected(): void
     {
-        // Round 26 (P1): the secret resolves the EXPECTED SCOPE — a login
+        // The secret resolves the EXPECTED SCOPE — a login
         // token presented to the financial secret is rejected, so a weaker
         // challenge can never satisfy a stronger backend's Siteverify.
         $storage = new ArrayStorage();
@@ -206,7 +206,7 @@ final class SiteVerifyTest extends TestCase
 
     public function testHostnameSurvivesARedisSerializeDeserializeRoundTrip(): void
     {
-        // Round 26 (P1): hostname must survive a real serialize -> Redis ->
+        // Hostname must survive a real serialize -> Redis ->
         // deserialize cycle (ArrayStorage would mask a fromArray() drop).
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');
@@ -257,7 +257,7 @@ final class SiteVerifyTest extends TestCase
     }
 
 
-    // ── Round 30 (P1): provider metadata + idempotency semantics ──────
+    // ── Provider metadata + idempotency semantics ─────────────────────
 
     public function testMissingSecretMapsToMissingInputSecret(): void
     {
@@ -416,7 +416,7 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(true, $second['success'] ?? null, 'different backends must not collide on the same UUID');
     }
 
-    // ── Round 31 (P2): the owner lease + atomic takeover ───────────────
+    // ── The owner lease + atomic takeover ───────────────────────────────
 
     public function testTakeoverReturnsTookOverToExactlyOneWaiterAfterLeaseExpiry(): void
     {
@@ -451,7 +451,7 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(IdempotencyClaim::StillPending, $secondTakeover, 'the loser sees StillPending — the winner refreshed the lease');
     }
 
-    public function testFinalizeByTheOldOwnerIsRefusedAfterTakeover(): void
+    public function testFinalizeByTheDisplacedOwnerIsRefusedAfterTakeover(): void
     {
         $now = 1_700_000_000;
         $clock = static function () use (&$now): int {
@@ -469,9 +469,9 @@ final class SiteVerifyTest extends TestCase
         [$takeover, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300);
         self::assertSame(IdempotencyClaim::TookOver, $takeover);
 
-        // The crashed owner's finalize must be a no-op after the takeover.
+        // The displaced owner's finalize must be a no-op after the takeover.
         $store->finalize($backendId, $uuid, $hash, $oldOwner, ['success' => true]);
-        self::assertNull($store->stored($backendId, $uuid), 'the old owner cannot finalize after the takeover');
+        self::assertNull($store->stored($backendId, $uuid), 'a displaced owner cannot finalize after the takeover');
 
         // The takeover winner finalizes with ITS token.
         $store->finalize($backendId, $uuid, $hash, $newOwner, ['success' => true]);
@@ -506,6 +506,123 @@ final class SiteVerifyTest extends TestCase
         self::assertIsArray($stored);
         self::assertFalse($stored['success'] ?? true);
         self::assertSame(['invalid-input-response'], $stored['error-codes'] ?? null);
+    }
+
+    public function testOwnerStallDoesNotVerifyWithoutOwnership(): void
+    {
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $counting = new class($storage) implements \KiwiCaptcha\AtomicStorageInterface {
+            public int $consumes = 0;
+
+            public function __construct(private readonly \KiwiCaptcha\StorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                $this->consumes++;
+
+                return $this->inner->consume($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $verifier = new Verifier($counting);
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $uuid = 'a3e4567e-e89b-42d3-a456-426614174000';
+        $hash = hash('sha256', $token);
+
+        // The stalled owner claims the entry and never finalizes.
+        [$claim] = $store->claim($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::Claimed, $claim);
+
+        // A waiter that never wins the takeover (the owner's lease is
+        // held) hits the hard bound: it receives the retryable provider
+        // error and the verifier is NEVER invoked for it.
+        $boundWaiter = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $counting, null, null, $store, null, 0.05);
+        $response = $boundWaiter->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(503, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame(['temporarily-unavailable'], $body['error-codes'] ?? null);
+        self::assertSame(0, $counting->consumes, 'a waiter that hits the bound must never enter the verifier');
+        self::assertNull($store->stored($backendId, $uuid), 'the claim entry stays pending for a later retry');
+
+        // Once the owner's lease expires, a waiter wins the atomic
+        // takeover, verifies and finalizes with the takeover owner token.
+        $now += 31;
+        $winner = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $counting, null, null, $store);
+        $won = $winner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $wonBody = json_decode((string) $won->getContent(), true);
+        self::assertSame(true, $wonBody['success'] ?? null);
+        self::assertSame(1, $counting->consumes, 'the token was consumed exactly once, by the takeover winner');
+        self::assertSame($wonBody, $store->stored($backendId, $uuid), 'the takeover winner finalizes its canonical response');
+    }
+
+    public function testLeaseRenewalPreventsOvertake(): void
+    {
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $uuid = 'b3e4567e-e89b-42d3-a456-426614174000';
+        $hash = 'response-hash';
+
+        [$claim, $owner] = $store->claim($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::Claimed, $claim);
+
+        // The owner's verification outlasts most of the lease window; the
+        // owner renews the lease before it expires.
+        $now += 29;
+        self::assertTrue($store->renew($backendId, $uuid, $owner), 'the current owner renews a still-pending lease');
+
+        // The waiter's takeover attempt is refused: the renewed lease is
+        // still held.
+        [$takeover] = $store->takeover($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::StillPending, $takeover, 'the renewed lease blocks the takeover of a live owner');
+
+        // A foreign owner token cannot renew (ownership is bound to the
+        // current owner token).
+        self::assertFalse($store->renew($backendId, $uuid, 'foreign-owner-token'));
+
+        // Once the RENEWED lease expires, the takeover succeeds.
+        $now += 31;
+        [$later, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::TookOver, $later, 'a takeover succeeds only after the renewed lease expires');
+        self::assertNotNull($newOwner);
+
+        // A complete entry can no longer be renewed.
+        $store->finalize($backendId, $uuid, $hash, $newOwner, ['success' => true]);
+        self::assertFalse($store->renew($backendId, $uuid, $newOwner), 'a completed entry cannot be renewed');
     }
 }
 

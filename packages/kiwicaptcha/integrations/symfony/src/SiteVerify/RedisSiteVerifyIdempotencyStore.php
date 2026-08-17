@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
 /**
- * Redis-backed atomic idempotency store (round 30 P1, round 31 P2).
+ * Redis-backed atomic idempotency store.
  *
  * Key: `{kiwi:<namespace>}:siteverify-idem:<backend_id>:<uuid>`
  * Value: JSON {response_hash, state: pending|complete, owner, result,
@@ -18,7 +18,8 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * owner's lease (`lease_expires_at`, set from the server clock via
  * redis TIME at claim creation) bounds how long a crashed owner blocks
  * the key: after expiry an atomic TAKEOVER transfers ownership to a
- * waiter.
+ * waiter, and a live owner extends the lease with RENEW before a
+ * long-running verification finalizes.
  */
 final class RedisSiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStore
 {
@@ -74,6 +75,25 @@ rec.owner = owner
 rec.lease_expires_at = now + lease_seconds
 redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
 return 'took_over'
+LUA;
+
+    private const RENEW_LUA = <<<'LUA'
+local key = KEYS[1]
+local owner = ARGV[1]
+local lease_seconds = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local now = tonumber(redis.call('TIME')[1])
+local existing = redis.call('GET', key)
+if not existing then
+  return 0
+end
+local rec = cjson.decode(existing)
+if rec.state ~= 'pending' or rec.owner ~= owner then
+  return 0
+end
+rec.lease_expires_at = now + lease_seconds
+redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
+return 1
 LUA;
 
     private const FINALIZE_LUA = <<<'LUA'
@@ -132,10 +152,17 @@ LUA;
     public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
     {
         $payload = (string) json_encode($canonicalResponse, JSON_THROW_ON_ERROR);
-        $result = RedisEval::eval($this->redis, self::FINALIZE_LUA, $this->key($backendId, $idempotencyKey), [$owner, $payload, max(1, $this->finalizeTtl($idempotencyKey))]);
+        $result = RedisEval::eval($this->redis, self::FINALIZE_LUA, $this->key($backendId, $idempotencyKey), [$owner, $payload, max(1, $this->retentionTtl($idempotencyKey))]);
         // The owning request's finalize is authoritative; a failed Lua
         // (lost key / foreign owner) is a no-op — the entry expires on TTL.
         unset($result);
+    }
+
+    public function renew(string $backendId, string $idempotencyKey, string $owner): bool
+    {
+        $result = RedisEval::eval($this->redis, self::RENEW_LUA, $this->key($backendId, $idempotencyKey), [$owner, self::LEASE_SECONDS, max(1, $this->retentionTtl($idempotencyKey))]);
+
+        return (string) $result === '1';
     }
 
     public function stored(string $backendId, string $idempotencyKey): ?array
@@ -156,10 +183,11 @@ LUA;
         return $rec['result'];
     }
 
-    private function finalizeTtl(string $idempotencyKey): int
+    private function retentionTtl(string $idempotencyKey): int
     {
-        // finalize does not know the original TTL; keep a conservative
-        // bounded window so completed entries are readable for retries.
+        // finalize and renew do not know the original TTL; keep a
+        // conservative bounded window so completed entries are readable for
+        // retries.
         return 300;
     }
 

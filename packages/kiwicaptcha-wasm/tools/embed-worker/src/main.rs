@@ -1,6 +1,6 @@
 //! Regenerates the `KIWI_WORKER_SRC` template literal inside
-//! `assets/widget-driver.js` FROM the standalone `assets/kiwi-worker.js`
-//! (audit rounds 15–17): kiwi-worker.js is the source of truth; the
+//! `assets/widget-driver.js` FROM the standalone `assets/kiwi-worker.js`:
+//! kiwi-worker.js is the source of truth; the
 //! driver's embedded copy is machine-generated so the two can never drift
 //! by hand. The tool is part of the PURE-RUST build pipeline — build.sh
 //! invokes it (--locked) before the solver build.
@@ -41,7 +41,7 @@ fn main() {
     let worker_src = fs::read_to_string(&worker_path).expect("read assets/kiwi-worker.js");
     let driver = fs::read_to_string(&driver_path).expect("read assets/widget-driver.js");
 
-    // ASCII case-insensitive scan (audit round 17): `</ScRiPt>` must be
+    // ASCII case-insensitive scan: `</ScRiPt>` must be
     // rejected too — HTML script end tags are case-insensitive.
     if worker_src.to_ascii_lowercase().contains("</script") {
         die("kiwi-worker.js must not contain a closing-script-tag sequence (the driver is inlined into pages)");

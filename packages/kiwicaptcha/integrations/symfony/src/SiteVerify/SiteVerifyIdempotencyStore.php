@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
 /**
- * Round 30 (P1): atomic provider-style verification idempotency.
+ * Atomic provider-style verification idempotency.
  *
  * Turnstile semantics: an optional UUID idempotency_key makes validation
  * retries SAFE while tokens remain single-use:
@@ -22,11 +22,13 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * does NOT make ordinary token replays successful (the key+hash pair must
  * match a pending claim for THIS pair).
  *
- * Round 31 (P2): every claim carries a LEASE (`lease_expires_at`, Unix
- * seconds, set at claim creation and refreshed on takeover). A PENDING_SAME
- * waiter whose lease has expired may atomically TAKEOVER the entry and
- * become the owner — a crashed owner therefore blocks the key for at most
- * one lease window instead of the full TTL.
+ * Lease semantics: every claim and every successful takeover starts a
+ * lease window of {@see self::LEASE_SECONDS}. A PENDING_SAME waiter whose
+ * owner's lease has expired may atomically TAKEOVER the entry and become
+ * the owner — a crashed owner therefore blocks the key for at most one
+ * lease window instead of the full TTL. A live owner whose verification
+ * outlasts the window renews the lease ({@see self::renew()}) so a
+ * slow-but-alive owner is not overtaken mid-verification.
  */
 interface SiteVerifyIdempotencyStore
 {
@@ -67,4 +69,20 @@ interface SiteVerifyIdempotencyStore
      *         belongs to a different response hash)
      */
     public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds): array;
+
+    /**
+     * Refresh the owner's lease on a still-pending claim. Succeeds ONLY
+     * when the caller still holds the CURRENT owner token AND the entry
+     * is still pending; the expiry is extended by a full lease window.
+     * The owner calls this just before finalizing when its verification
+     * outlasted the lease window, so a concurrent takeover cannot reject
+     * the finalize.
+     *
+     * @return bool true when the lease was extended (the caller is still
+     *              the current owner); false when the caller lost
+     *              ownership (an atomic takeover won) or the entry is no
+     *              longer pending — a failed renewal means the caller must
+     *              not attempt to finalize (it would be a no-op anyway)
+     */
+    public function renew(string $backendId, string $idempotencyKey, string $owner): bool;
 }

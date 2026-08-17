@@ -173,7 +173,7 @@ final class RiskPolicy
      * floor/minimum re-clamp can never reintroduce Argon. A final Argon
      * action with argonCapacity < 300 escalates to StepUp.
      *
-     * Hysteresis (audit #95): with $hysteresis the band selection uses the
+     * Hysteresis: with $hysteresis the band selection uses the
      * scope's previous action — escalate to the next band only at its
      * ENTER threshold (upper + 10), de-escalate only below its EXIT
      * threshold (lower − 10); fresh scopes and StepUp/Deny use the plain

@@ -36,14 +36,14 @@
                 <span class="kiwi-timer" data-kiwi-timer></span>
             </div>
         </div>
-        {# The dedicated live region (audit round 14): the ONLY aria-live
+        {# The dedicated live region: the ONLY aria-live
            element on the widget. State changes land here via
            data-kiwi-status (the driver's announcer); the countdown,
            label, badge and hint stay OUTSIDE the live region so a
            ticking timer can never spam the screen reader. Visually
-           hidden, screen-reader only. Round 30 (P1): INSIDE
+           hidden, screen-reader only. INSIDE
            .kiwi-widget — matching the Rust renderer and the driver's
-           widget-local lookup (the previous sibling position was a
+           widget-local lookup (the sibling position would be a
            structural divergence). #}
         <span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span>
     </div>

@@ -2,7 +2,7 @@
 # Regenerates the browser assets: assets/kiwicaptcha-wasm.js (the widget's
 # embedded WASM + glue) and the KIWI_WORKER_SRC literal inside
 # assets/widget-driver.js (generated from assets/kiwi-worker.js by the
-# kiwicaptcha-embed-worker tool, audit round 16).
+# kiwicaptcha-embed-worker tool).
 # Requires: cargo, the wasm32-unknown-unknown target, and wasm-bindgen-cli
 # (a Rust binary; installed via `cargo install` if missing).
 # Pure Rust pipeline — no Node.js, no wasm-pack.
@@ -17,7 +17,7 @@ if ! command -v "$WASM_BINDGEN_BIN" >/dev/null 2>&1; then
   cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
 fi
 
-# Version-lock (audit round 14): a DIFFERENT wasm-bindgen binary already on
+# Version-lock: a DIFFERENT wasm-bindgen binary already on
 # the machine must never be silently accepted — the emitted glue is
 # bindgen-version-specific, so a mismatched binary would produce release
 # bytes that differ from the pinned build. The installed version is read
@@ -34,7 +34,7 @@ if [ "$BINDGEN_VERSION_READ" != "$WASM_BINDGEN_VERSION" ]; then
 fi
 echo "wasm-bindgen ${WASM_BINDGEN_VERSION} verified"
 
-# Audit round 16: the embedded worker literal is regenerated from
+# The embedded worker literal is regenerated from
 # assets/kiwi-worker.js on every build (the standalone file is the source
 # of truth; CI's --check step fails on any manual drift).
 cargo run --release --locked --manifest-path tools/embed-worker/Cargo.toml --
@@ -45,7 +45,7 @@ cargo build --release --locked --target wasm32-unknown-unknown
 # NOT Node.js; -O typically shrinks the wasm ~20% and speeds up the hot
 # solver loops. Download a pinned, checksum-verified wasm-opt on first use
 # (no package managers, no runtime deps); the tarball is verified with
-# SHA-256 before extraction. Audit round 22 wording: in NON-STRICT mode
+# SHA-256 before extraction. In NON-STRICT mode
 # optimization may be SKIPPED when wasm-opt is unavailable/unverifiable (a
 # larger, slower artifact — its byte identity differs (the released
 # SHA256SUMS/SRI hashes change; the solver PROTOCOL id is unchanged by
@@ -90,7 +90,7 @@ if [[ -z "$WASM_OPT_BIN" ]]; then
   WASM_OPT_BIN="$CACHE_DIR/wasm-opt"
 fi
 
-# Per-run verification (audit round 15): a PRE-EXISTING or CACHED wasm-opt
+# Per-run verification: a PRE-EXISTING or CACHED wasm-opt
 # is authenticated on EVERY build — the version string must be exactly the
 # pinned binaryen (version_119), and a binary we downloaded ourselves must
 # still match the SHA-256 recorded at download time (a replaced or
@@ -116,7 +116,7 @@ verify_wasm_opt() {
       return 1
     fi
   elif [[ "${WASM_OPT_STRICT:-0}" == "1" ]]; then
-    # Audit rounds 16-17: in STRICT mode there is NO version-text-only
+    # In STRICT mode there is NO version-text-only
     # exception — the trusted executable hash is mandatory for EVERY
     # binary, whether env-supplied or cached.
     if [[ "$WASM_OPT_ENV_SUPPLIED" == "1" ]]; then
@@ -197,7 +197,7 @@ if [[ -n "$WASM_OPT_BIN" ]] && ! verify_wasm_opt "$WASM_OPT_BIN"; then
   echo "wasm-opt failed per-run verification — skipping optimization" >&2
   WASM_OPT_BIN=""
 fi
-# Release-build determinism (audit round 14): with WASM_OPT_STRICT=1 the
+# Release-build determinism: with WASM_OPT_STRICT=1 the
 # pipeline FAILS instead of silently skipping optimization when wasm-opt is
 # unavailable/unverifiable — a release build must either use the pinned
 # binaryen at the known SHA-256 or not exist. GitHub CI (ubuntu-latest,
@@ -218,7 +218,7 @@ fi
 cargo run --release --locked --manifest-path tools/embed/Cargo.toml -- pkg assets/kiwicaptcha-wasm.js
 echo "assets/kiwicaptcha-wasm.js regenerated"
 
-# Audit round 18: the core crate embeds the assets from ITS OWN
+# The core crate embeds the assets from ITS OWN
 # resources/ directory (cargo package verification builds the tarball in
 # isolation and cannot reach outside the crate) — keep the copies
 # byte-identical; CI enforces it (widget-assets parity job).

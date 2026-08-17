@@ -110,7 +110,7 @@ final class ChallengeFlowTest extends TestCase
         $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
 
-        // Retry semantics (audit #74): an identical replay in the same
+        // Retry semantics: an identical replay in the same
         // context returns the SAME stored result without re-deriving.
         $replay = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
         self::assertTrue($replay->isOk(), 'same-context replay must return the stored result');
@@ -390,7 +390,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #43: the FULL origin-normalization audit list. Structured
+     * The FULL origin-normalization list. Structured
      * normalization compares (scheme, host, effective port) with the host
      * lowercased, trailing dots stripped and IDN converted to punycode
      * (when ext-intl is available).
@@ -489,7 +489,7 @@ final class ChallengeFlowTest extends TestCase
         $data = json_decode((string) $response->getContent(), true);
         $record = $storage->find($data['nonce']);
         self::assertNotNull($record);
-        self::assertSame('txn-abc-123', $record->requestBinding, 'the request binding must be signed into the stored record (audit #41)');
+        self::assertSame('txn-abc-123', $record->requestBinding, 'the request binding must be signed into the stored record');
     }
 
     public function testChallengeRejectsMalformedRequestBinding(): void
@@ -511,10 +511,10 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame(200, $response->getStatusCode());
     }
 
-    // ── Round 11: identifier validation (audit #96) ───────────────────────
+    // ── Identifier validation ──────────────────────────────────────────
 
     /**
-     * Audit #96: scope/tenant identifiers and request bindings are
+     * Scope/tenant identifiers and request bindings are
      * validated against `[A-Za-z0-9._:-]+` with the 128-char ceiling BEFORE
      * they reach the issuer — separator, control and out-of-charset bytes
      * can never be signed into a challenge record.
@@ -611,7 +611,7 @@ final class ChallengeFlowTest extends TestCase
         return new FakePredisClient();
     }
 
-    // ── Round 10: narrow HTTP (audit #77) ─────────────────────────────────
+    // ── Narrow HTTP ─────────────────────────────────────────────────────
 
     public function testNonPostMethodsStay405(): void
     {
@@ -629,7 +629,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #63: an OPTIONS preflight ALONE never authorizes — it is a
+     * An OPTIONS preflight ALONE never authorizes — it is a
      * non-POST method and gets 405 with no challenge stored, no CORS
      * headers, no state written.
      */
@@ -705,7 +705,7 @@ final class ChallengeFlowTest extends TestCase
         }
     }
 
-    // ── Round 10: query-param hardening / unknown fields (audit #72) ──────
+    // ── Query-param hardening / unknown fields ──────────────────────────
 
     public function testUnknownJsonFieldsAre422(): void
     {
@@ -743,7 +743,7 @@ final class ChallengeFlowTest extends TestCase
         }
     }
 
-    // ── Round 10: CORS is not authorization (audit #63) ───────────────────
+    // ── CORS is not authorization ───────────────────────────────────────
 
     public function testNoCorsHeadersAreEmittedOnAnyResponse(): void
     {
@@ -773,7 +773,7 @@ final class ChallengeFlowTest extends TestCase
         self::assertNull($denied->headers->get('Access-Control-Allow-Origin'));
     }
 
-    // ── Round 10: frame-ancestors CSP (audit #71) ─────────────────────────
+    // ── Frame-ancestors CSP ─────────────────────────────────────────────
 
     public function testFrameAncestorsCspEmittedWhenAllowlistNonEmpty(): void
     {
@@ -797,7 +797,7 @@ final class ChallengeFlowTest extends TestCase
         self::assertNull($response->headers->get('Content-Security-Policy'), 'an empty allowlist must emit NO CSP header');
     }
 
-    // ── Round 10: host-context hardening (audit #78) ──────────────────────
+    // ── Host-context hardening ──────────────────────────────────────────
 
     /**
      * public_base_url comes from SERVER CONFIG: a forged Host header can
@@ -848,7 +848,7 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame(Issuer::bindingTag($nonce, '198.51.100.7', self::SECRET), $record->bindingTag);
     }
 
-    // ── Round 10: local admission before Redis (audit #70) ────────────────
+    // ── Local admission before Redis ────────────────────────────────────
 
     private function riskGatewayWithEmergencyCap(ProcessEmergencyCap $cap): RiskGateway
     {
@@ -865,7 +865,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #70: a saturated PROCESS-LOCAL emergency cap denies BEFORE any
+     * A saturated PROCESS-LOCAL emergency cap denies BEFORE any
      * Redis issuance limiter — the fake Redis client sees ZERO calls.
      */
     public function testSaturatedProcessCapDeniesBeforeAnyRedisWrite(): void
@@ -904,7 +904,7 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame('RATE_LIMITED', json_decode((string) $response->getContent(), true)['error']['code']);
     }
 
-    // ── Round 11: HTTP framing (audit #83) ────────────────────────────────
+    // ── HTTP framing ────────────────────────────────────────────────────
 
     private function framingRequest(array $headers): Request
     {
@@ -917,7 +917,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #83: a request carrying BOTH Content-Length and
+     * A request carrying BOTH Content-Length and
      * Transfer-Encoding is request-smuggling ambiguity (intermediaries will
      * frame the body differently) — refused with 400 FRAMING_REJECTED
      * BEFORE any body is read.
@@ -935,7 +935,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #83: a DUPLICATE Content-Length (two values) is equally
+     * A DUPLICATE Content-Length (two values) is equally
      * ambiguous — refused with 400 FRAMING_REJECTED.
      */
     public function testDuplicateContentLengthIs400FramingRejected(): void
@@ -951,7 +951,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #83: a SINGLE Content-Length is the normal framing — the
+     * A SINGLE Content-Length is the normal framing — the
      * endpoint must keep issuing.
      */
     public function testSingleContentLengthStillIssues(): void
@@ -965,7 +965,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #83: the framing check runs FIRST — before the content-type /
+     * The framing check runs FIRST — before the content-type /
      * content-encoding checks (a framing-ambiguous request with a wrong
      * content type still gets FRAMING_REJECTED, never 415).
      */
@@ -981,7 +981,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #83: a duplicate Content-Length reaches the controller as TWO
+     * A duplicate Content-Length reaches the controller as TWO
      * raw header values (Symfony's HeaderBag keeps every value) — the
      * detection is count-based, not value-based (two IDENTICAL values are
      * still a duplicate framing).
@@ -996,10 +996,10 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame('FRAMING_REJECTED', json_decode((string) $response->getContent(), true)['error']['code']);
     }
 
-    // ── Round 11: sitekey publicity (audit #82) ───────────────────────────
+    // ── Sitekey publicity ───────────────────────────────────────────────
 
     /**
-     * Audit #82: NO client-visible identifier confers any privileged
+     * NO client-visible identifier confers any privileged
      * capability. The challenge endpoint accepts no client-supplied
      * identifier AT ALL — a payload carrying a "site_key", "secret" or
      * "api_key" field is an unknown-field probe (422 UNKNOWN_FIELDS), and
@@ -1022,7 +1022,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #82: no ADMIN endpoint keys off a client-supplied identifier.
+     * No ADMIN endpoint keys off a client-supplied identifier.
      * The bundle's route surface is exactly challenge + health (both
      * fully public by design) — there is no control-plane route that could
      * be reached with a client-provided credential.
@@ -1051,13 +1051,13 @@ final class ChallengeFlowTest extends TestCase
         return array_values($prop->getValue($storage));
     }
 
-    // ── Round 12: canonical request targets (audit #99) ───────────────────
+    // ── Canonical request targets ───────────────────────────────────────
 
     /**
-     * Audit #99: the RAW REQUEST_URI must equal the canonical path — no
+     * The RAW REQUEST_URI must equal the canonical path — no
      * empty segments (`//`, trailing `/`), no dot segments (`/./`,
      * `/../`), no percent-encoded bytes (`/%76hallenge`, `%2F`, `%5C`).
-     * The full audit list gets 404 CANONICAL_PATH_REQUIRED before ANY
+     * The full list gets 404 CANONICAL_PATH_REQUIRED before ANY
      * handling (no challenge is ever minted for a noncanonical target).
      */
     public function testNonCanonicalRequestTargetsAre404BeforeAnyHandling(): void
@@ -1094,7 +1094,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #99: the canonicality check runs BEFORE the method check — a
+     * The canonicality check runs BEFORE the method check — a
      * noncanonical GET is still 404 CANONICAL_PATH_REQUIRED, never 405 —
      * and BEFORE the query check (a canonical path with a query string
      * still gets the query rejection 422, not the canonical 404).
@@ -1114,10 +1114,10 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame('QUERY_PARAMETERS_NOT_ALLOWED', json_decode((string) $response->getContent(), true)['error']['code']);
     }
 
-    // ── Round 12: duplicate security-singular headers (audit #100) ────────
+    // ── Duplicate security-singular headers ─────────────────────────────
 
     /**
-     * Audit #100: Origin, Forwarded, X-Forwarded-For and X-Real-IP are
+     * Origin, Forwarded, X-Forwarded-For and X-Real-IP are
      * security-singular — a duplicate occurrence is parser ambiguity
      * (intermediaries disagree on which value is authoritative) and gets
      * 400 DUPLICATE_HEADER before any header-derived identity is trusted.
@@ -1159,7 +1159,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #100: the duplicate-header check is a WIRE-LEVEL check — it
+     * The duplicate-header check is a WIRE-LEVEL check — it
      * runs with the framing checks, before any body is read; a request with
      * a duplicate Origin AND a wrong content type still gets
      * DUPLICATE_HEADER (never 415). Framing ambiguity stays first (a
@@ -1187,10 +1187,10 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame('FRAMING_REJECTED', json_decode((string) $response->getContent(), true)['error']['code']);
     }
 
-    // ── Round 12: scoped syntactic rejection before shared infrastructure ─
+    // ── Scoped syntactic rejection before shared infrastructure ─────────
 
     /**
-     * Audit #103: a syntactically INVALID scope (bad charset, > 128 bytes)
+     * A syntactically INVALID scope (bad charset, > 128 bytes)
      * is rejected locally at 422 with ZERO Redis operations — the
      * identifier-charset check runs BEFORE the rate limiter, the risk
      * engine, the scope cap and the outstanding counters, so a malformed
@@ -1213,7 +1213,7 @@ final class ChallengeFlowTest extends TestCase
             $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], json_encode(['scope' => $badScope])));
             self::assertSame(422, $response->getStatusCode(), sprintf('scope %s must be refused locally', var_export($badScope, true)));
             self::assertSame('INVALID_SCOPE', json_decode((string) $response->getContent(), true)['error']['code']);
-            self::assertSame([], $client->calls, 'a syntactically invalid scope must be rejected with ZERO Redis operations (audit #103)');
+            self::assertSame([], $client->calls, 'a syntactically invalid scope must be rejected with ZERO Redis operations');
         }
 
         // Control: a VALID scope flows into the Redis limiter (the check is
@@ -1224,7 +1224,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit round 16: EVERY unresolvable scope — risk disabled, or unknown
+     * EVERY unresolvable scope — risk disabled, or unknown
      * in baseline/reject mode — maps to the single reserved
      * UNKNOWN_QUOTA_ID bucket. An attacker can never mint fresh quota
      * windows by inventing scope names, in ANY configuration (no HMAC
@@ -1257,7 +1257,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit round 15: when the Redis durability barrier cannot be met at
+     * When the Redis durability barrier cannot be met at
      * issuance (replica lag/failure), the challenge is NOT handed out — the
      * controller maps the expected operational failure to a private/
      * no-store 503 SERVICE_UNAVAILABLE with an opaque client message (the
@@ -1308,7 +1308,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit round 15: with risk.allowed_scopes configured, the per-scope
+     * With risk.allowed_scopes configured, the per-scope
      * quota operates over a SERVER-OWNED namespace — a scope outside the
      * allowlist is refused with 422 SCOPE_NOT_ALLOWED BEFORE the risk
      * assessment and the quota checks (zero Redis operations), so an
@@ -1348,7 +1348,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #104: the challenge-issuance sequence runs every quota check
+     * The challenge-issuance sequence runs every quota check
      * BEFORE the challenge state is created — local cap, issuer limiter,
      * scope cap and outstanding counters all precede the storage write.
      * The FakePredis call ORDER pins the limit/incr keys BEFORE the
@@ -1430,11 +1430,11 @@ final class ChallengeFlowTest extends TestCase
             self::assertLessThan(
                 $setIndex,
                 $i,
-                sprintf('the quota-check EVAL on %s must run BEFORE the challenge SET key (audit #104)', $firstKey)
+                sprintf('the quota-check EVAL on %s must run BEFORE the challenge SET key', $firstKey)
             );
             // The scope-cap and outstanding keys are the {kiwi:...} family
             // (Cluster safe) and carry ONLY keyed pseudonyms — never the
-            // raw scope or IP (audit #112).
+            // raw scope or IP.
             if (str_contains($firstKey, ':issuance:')) {
                 $sawScopeCap = true;
                 self::assertStringContainsString('{kiwi:order-test}:issuance:', $firstKey);
@@ -1450,7 +1450,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit #104: with the configured TTL wired, a refused outstanding
+     * With the configured TTL wired, a refused outstanding
      * admission happens BEFORE the challenge is minted — the 4th issuance
      * beyond the per-source cap never creates challenge state at all.
      */
@@ -1473,10 +1473,10 @@ final class ChallengeFlowTest extends TestCase
         self::assertCount(3, $this->storedRecords($storage), 'a pre-mint refusal must never create challenge state');
     }
 
-    // ── Round 12: duplicate JSON keys (audit #111) ────────────────────────
+    // ── Duplicate JSON keys ─────────────────────────────────────────────
 
     /**
-     * Audit #111: the raw challenge JSON is scanned for duplicate object
+     * The raw challenge JSON is scanned for duplicate object
      * keys BEFORE decoding — {"scope":"login","scope":"signup"} is a
      * parser-ambiguity probe (json_decode would silently keep the LAST
      * value; intermediaries may disagree) and gets 422 DUPLICATE_FIELD.
@@ -1516,11 +1516,11 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit round 14: duplicate detection compares SEMANTIC keys — the
+     * Duplicate detection compares SEMANTIC keys — the
      * escape-spelling bypass ({"scope":...,"\u0073cope":...}) must be a
      * duplicate too: json_decode canonicalizes both spellings into one
-     * logical key, so the scanner has to as well (the raw-textual
-     * comparison was the P1 parser-ambiguity hole).
+     * logical key, so the scanner has to as well (a raw-textual comparison
+     * would be the parser-ambiguity hole).
      */
     public function testDuplicateJsonKeysAcrossEscapeSpellingsAre422(): void
     {
@@ -1572,7 +1572,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit round 14: the challenge body is capped at 8 KiB — a declared
+     * The challenge body is capped at 8 KiB — a declared
      * oversized Content-Length is refused before any body is read, and the
      * actual read length is capped too (chunked uploads can skip a truthful
      * Content-Length). Both paths return 413 BODY_TOO_LARGE, never reach
@@ -1604,7 +1604,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
     /**
-     * Audit round 14: the duplicate scanner caps recursion at 32 levels —
+     * The duplicate scanner caps recursion at 32 levels —
      * a pathological nesting depth (beyond what the strict json_decode
      * accepts anyway) must not consume unbounded scanner stack.
      */
@@ -1619,7 +1619,7 @@ final class ChallengeFlowTest extends TestCase
     }
 
 
-    // ── Round 30 (P1): provider-compatible challenge metadata ──────────
+    // ── Provider-compatible challenge metadata ──────────────────────────
 
     public function testChallengeCapturesActionAndCdataAgainstTheNonce(): void
     {
@@ -1650,11 +1650,11 @@ final class ChallengeFlowTest extends TestCase
     }
 
 
-    // ── Round 30 (items 14+15): server-owned sitekey/action + binding ──
+    // ── Server-owned sitekey/action + binding ───────────────────────────
 
     public function testPerSitekeyBindingOptionIsRemoved(): void
     {
-        // Round 31 (item 15): a per-sitekey "binding" option could not be
+        // A per-sitekey "binding" option cannot be
         // enforced (the core binds by the GLOBAL binding_mode only) — it is
         // REMOVED, and configuring it must be refused by the config tree
         // (never a misleading "required" promise).

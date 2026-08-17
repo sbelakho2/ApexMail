@@ -1,4 +1,4 @@
-//! AUDIT #34 — TRUST-BOUNDARY PROPERTY TEST (mirror of the PHP
+//! TRUST-BOUNDARY PROPERTY TEST (mirror of the PHP
 //! RiskPropertyTest).
 //!
 //! The SignalVector carries NO client-visible fields: every one of its 13

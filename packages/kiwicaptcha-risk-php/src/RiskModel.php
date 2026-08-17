@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk;
 
 /**
- * The risk model generation implemented by this package (audit #110).
+ * The risk model generation implemented by this package.
  *
  * REVISION is a monotonically increasing integer that identifies the
  * current risk-model generation — the scoring/calibration semantics the
@@ -19,8 +19,8 @@ namespace KiwiCaptcha\Risk;
  * generation: 16 prior generations covered the fixed-point score
  * contract, class-normalized calibration, the random-sample resolution
  * gate, the outcome ledger and the rate-of-change clamp; this revision
- * adds the non-finite guards (audit #109) and the local-limiter warm-up
- * ramp (audit #105) to the model's behavior surface.
+ * adds the non-finite guards and the local-limiter warm-up
+ * ramp to the model's behavior surface.
  *
  * A model revision that MATERIALLY affects security (e.g. changes how
  * scores are computed or how calibration moves the bias) requires a
@@ -30,6 +30,6 @@ namespace KiwiCaptcha\Risk;
  */
 final class RiskModel
 {
-    /** The current model generation (monotonic; 17 = round 12 audit generation). */
+    /** The current model generation (monotonic). */
     public const REVISION = 17;
 }

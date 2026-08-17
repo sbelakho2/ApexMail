@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha;
 
 /**
- * Result of the storage one-shot consume TRANSITION (audit #74).
+ * Result of the storage one-shot consume TRANSITION.
  *
  * consume() no longer deletes the record: it atomically flips the stored
  * record's `state` from "pending" to "consumed" and KEEPS the record until

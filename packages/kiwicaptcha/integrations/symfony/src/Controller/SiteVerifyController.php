@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\AtomicStorageInterface;
@@ -18,12 +19,12 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Provider-compatible Siteverify endpoint (round 24): accepts the incumbent
- * backend shape — `response`, `secret`, optional `remoteip` — as form or
- * JSON, and returns the provider-shaped verification JSON
- * (`success`, `challenge_ts`, `hostname`, `error-codes`). It calls the
- * EXACT SAME atomic Kiwi verifier as the native integration — there is no
- * second verification implementation, and the deterministic consumed-result
+ * Provider-compatible Siteverify endpoint: accepts the incumbent backend
+ * shape — `response`, `secret`, optional `remoteip` — as form or JSON,
+ * and returns the provider-shaped verification JSON (`success`,
+ * `challenge_ts`, `hostname`, `error-codes`). It calls the EXACT SAME
+ * atomic Kiwi verifier as the native integration — there is no second
+ * verification implementation, and the deterministic consumed-result
  * machinery makes safe verification retries free (a replayed `response`
  * resolves to the stored deterministic outcome instead of re-deriving).
  *
@@ -34,6 +35,13 @@ use Symfony\Component\HttpFoundation\Response;
  *    endpoint with `remoteip`; a browser never sees the secret, so
  *    `remoteip` can never be supplied by an unauthenticated client.
  *  - The comparison is constant-time (`hash_equals`).
+ *  - The request body is read with a hard byte cap (16 KiB) BEFORE any
+ *    JSON decoding or business verification: the application-level
+ *    accepted input is bounded and oversized bodies are refused early.
+ *    Allocation-level request-body ceilings are a deployment concern —
+ *    mirror the bound in the reverse proxy (client_max_body_size etc.)
+ *    and in PHP (post_max_size) so oversized bytes never reach PHP at
+ *    all.
  *  - The underlying verifier remains authoritative: TTL, scope/region/
  *    issuer/policy expectations, nonce-bound IP binding, timing floor,
  *    Argon ceilings and atomic single-use consumption all apply exactly as
@@ -41,24 +49,31 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final class SiteVerifyController
 {
-    /** Round 30 (P1): documented bounded maximum for the `response` token. */
+    /** Documented bounded maximum for the `response` token. */
     private const MAX_RESPONSE_BYTES = 8192;
 
     /**
-     * Round 31 (P2): the hard bound on the PENDING_SAME wait. Only after
-     * this (the catastrophic path) does a waiter fall through to the
-     * verifier; the owner's lease (30s) is refreshed by an atomic takeover
-     * long before, so this bound is the absolute tail.
+     * The hard bound on the PENDING_SAME wait. A waiter that reaches this
+     * bound without a stored result and without winning the atomic
+     * takeover is answered with the retryable `temporarily-unavailable`
+     * error — it NEVER enters the verifier without holding the current
+     * owner token. The owner's lease (30s) is refreshed by an atomic
+     * takeover long before, so this bound is the absolute tail.
      */
     private const IDEMPOTENCY_WAIT_SECS = 90.0;
 
     /**
+     * Hard ceiling for the whole verification request body: 16 KiB covers
+     * every legitimate provider envelope (response+secret+remoteip).
+     */
+    private const MAX_BODY_BYTES = 16 * 1024;
+
+    /**
      * @param array<string, string> $siteverifySecrets map of
      *        server-to-server secret -> expected scope; EMPTY disables the
-     *        endpoint (round 26: a per-secret expected scope is REQUIRED —
-     *        no global-secret + expectedScope=null for multi-scope
-     *        deployments, so a weaker token can never satisfy a stronger
-     *        backend's secret)
+     *        endpoint. A per-secret expected scope is REQUIRED — there is
+     *        no global-secret + expectedScope=null combination, so a
+     *        weaker token can never satisfy a stronger backend's secret.
      */
     public function __construct(
         private readonly Verifier $verifier,
@@ -66,16 +81,18 @@ final class SiteVerifyController
         private readonly array $siteverifySecrets,
         private readonly ?AtomicStorageInterface $storage = null,
         private readonly ?LoggerInterface $logger = null,
-        // Round 30 (P1): server-owned compatibility metadata (action/cData
-        // bound at challenge issuance) and provider-style verification
-        // idempotency (idempotency_key). Null disables the respective
-        // feature: metadata never appears in the response, and an
-        // idempotency_key on the request is rejected (the operator must
-        // wire the stores for provider-style retries).
+        // Server-owned compatibility metadata (action/cData bound at
+        // challenge issuance) and provider-style verification idempotency
+        // (idempotency_key). Null disables the respective feature:
+        // metadata never appears in the response, and an idempotency_key
+        // on the request is rejected (the operator must wire the stores
+        // for provider-style retries).
         private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
         private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $idempotencyStore = null,
-        /** Round 30 (item 16): shared Redis log gate (optional). */
+        /** Shared Redis log gate (optional): flood-bounded invalid-secret diagnostics. */
         private readonly \Predis\Client|\Redis|null $logGate = null,
+        /** Hard bound on the PENDING_SAME wait in seconds (see {@see self::IDEMPOTENCY_WAIT_SECS}). */
+        private readonly float $idempotencyWaitSecs = self::IDEMPOTENCY_WAIT_SECS,
     ) {
     }
 
@@ -90,35 +107,39 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
         }
 
-        // Round 28 (P3): the endpoint is PUBLIC until the secret check —
-        // a narrow body ceiling (16 KiB covers every legitimate provider
-        // envelope: response+secret+remoteip) keeps an oversized-body
-        // flood from ever reaching the parser or the verifier. The ACTUAL
-        // body is measured (getContent() is cached by Symfony), not the
-        // client-settable Content-Length header.
+        // The body is read with a hard byte cap: at most MAX_BODY_BYTES + 1
+        // bytes are ever materialized from the request stream, so an
+        // oversized chunked body is refused (413) BEFORE it reaches the
+        // JSON parser or the verifier. The ACTUAL body is measured, not
+        // the client-settable Content-Length header. A form request is
+        // parsed by the framework before the controller runs, so the
+        // already-materialized content is length-guarded directly too.
+        $requestBody = $this->readBoundedBody($request);
+        if (\strlen($requestBody) > self::MAX_BODY_BYTES) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_REQUEST_ENTITY_TOO_LARGE);
+        }
         if (\strlen((string) $request->getContent()) > self::MAX_BODY_BYTES) {
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_REQUEST_ENTITY_TOO_LARGE);
         }
 
-        $body = $this->parseBody($request);
+        $body = $this->parseBody($request, $requestBody);
         if ($body === null) {
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         $response = $body['response'] ?? null;
         $secret = $body['secret'] ?? null;
         $remoteIp = \is_string($body['remoteip'] ?? null) ? $body['remoteip'] : null;
-        // Round 30 (P1): action / cData are NEVER accepted on the
-        // verification request — that would let a backend request tell
-        // Kiwi "this token's action was checkout", reversing the trust
-        // direction. They are captured at CHALLENGE ISSUANCE (widget
-        // data-action/data-cdata) and returned from the server-side
-        // metadata store.
+        // action / cData are NEVER accepted on the verification request —
+        // that would let a backend request tell Kiwi "this token's action
+        // was checkout", reversing the trust direction. They are captured
+        // at CHALLENGE ISSUANCE (widget data-action/data-cdata) and
+        // returned from the server-side metadata store.
         $idempotencyKey = \is_string($body['idempotency_key'] ?? null) ? $body['idempotency_key'] : null;
-        // Round 30 (P1): the token length is bounded BEFORE decoding —
-        // provider contracts document a 2048-char maximum; Kiwi's own
-        // legitimate encoding fits comfortably under 8192, which is the
-        // documented bound here (the 16 KiB whole-body ceiling stays as
-        // the outer envelope).
+        // The token length is bounded BEFORE decoding — provider
+        // contracts document a 2048-char maximum; Kiwi's own legitimate
+        // encoding fits comfortably under 8192, which is the documented
+        // bound here (the 16 KiB whole-body ceiling stays as the outer
+        // envelope).
         if (!\is_string($response) || $response === '') {
             return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-response']]);
         }
@@ -126,9 +147,9 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
         }
 
-        // Round 30 (P1): a UUID-shaped idempotency_key only — arbitrary
-        // short strings are rejected BEFORE the verifier (bounded
-        // cardinality, no attacker-controlled shapes).
+        // A UUID-shaped idempotency_key only — arbitrary short strings
+        // are rejected BEFORE the verifier (bounded cardinality, no
+        // attacker-controlled shapes).
         if ($idempotencyKey !== null) {
             if (!\preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $idempotencyKey)) {
                 return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
@@ -138,12 +159,12 @@ final class SiteVerifyController
             }
         }
 
-        // Round 26: the presented secret authenticates the backend AND
-        // resolves the EXPECTED SCOPE the verifier must enforce. Constant-
-        // time comparisons; the detail goes to the log only. A secret not
-        // in the server-owned map is rejected — an attacker-invented
-        // secret can never reach the verifier. Round 30 (P1): MISSING vs
-        // INVALID are distinct provider codes.
+        // The presented secret authenticates the backend AND resolves the
+        // EXPECTED SCOPE the verifier must enforce. Constant-time
+        // comparisons; the detail goes to the log only. A secret not in
+        // the server-owned map is rejected — an attacker-invented secret
+        // can never reach the verifier. MISSING vs INVALID are distinct
+        // provider codes.
         $expectedScope = null;
         if (!\is_string($secret) || $secret === '') {
             $this->noteInvalidSecret('missing', $this->logGateKey());
@@ -162,15 +183,16 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
         }
 
-        // Round 30 (P1): provider-style verification idempotency. The
-        // claim is atomic; only the OWNING request verifies the token.
-        // A same-key retry either returns the stored canonical response or
-        // (crash window) reconstructs the original outcome via the core's
-        // retained consumed-result machinery — ordinary replays WITHOUT a
-        // matching key stay timeout-or-duplicate.
+        // Provider-style verification idempotency. The claim is atomic;
+        // only the OWNING request verifies the token. A same-key retry
+        // either returns the stored canonical response or (crash window)
+        // reconstructs the original outcome via the core's retained
+        // consumed-result machinery — ordinary replays WITHOUT a matching
+        // key stay timeout-or-duplicate.
         $backendId = hash('sha256', $secret);
         $claim = IdempotencyClaim::Claimed;
         $claimOwner = null;
+        $claimedAt = null;
         $idempotent = false;
         if ($idempotencyKey !== null) {
             $idempotent = true;
@@ -183,15 +205,18 @@ final class SiteVerifyController
 
                 return new JsonResponse($stored !== null ? $this->canonicalizeResponse($stored) : ['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
             }
+            if ($claim === IdempotencyClaim::Claimed) {
+                $claimedAt = microtime(true);
+            }
         }
 
         try {
             $token = SolutionToken::decode($response);
         } catch (DecodeError) {
-            // Round 31 (P2): a malformed token is a DETERMINISTIC failure —
-            // the claiming request FINALIZES it so a same-key retry
-            // reproduces the identical canonical response instead of
-            // leaving the entry pending until TTL.
+            // A malformed token is a DETERMINISTIC failure — the claiming
+            // request FINALIZES it so a same-key retry reproduces the
+            // identical canonical response instead of leaving the entry
+            // pending until TTL.
             $canonical = $this->canonicalizeResponse([
                 'success' => false,
                 'challenge_ts' => null,
@@ -199,36 +224,47 @@ final class SiteVerifyController
                 'error-codes' => ['invalid-input-response'],
             ]);
             if ($claimOwner !== null) {
-                $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
+                $this->finalizeAsOwner($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, $claimedAt);
             }
 
             return new JsonResponse($canonical);
         }
 
-        // Round 31 (P2): PENDING_SAME — another request with the SAME key
-        // + hash owns verification. This request WAITS on the store ONLY —
-        // polling stored() for completion and, once the owner's lease has
-        // expired, attempting an atomic takeover. It NEVER invokes the
-        // verifier while the owner may still be running (a deliberately
-        // slow Argon solve can legitimately take tens of seconds) — the
-        // round-31 wait-then-verify order caused waiters to race the owner
-        // for the token's consume and finalize failures. Verification
-        // happens strictly AFTER this wait.
+        // PENDING_SAME — another request with the SAME key + hash owns
+        // verification. This request WAITS on the store ONLY: it polls
+        // stored() for completion and attempts an atomic takeover once the
+        // owner's lease has expired. It NEVER invokes the verifier without
+        // winning the takeover — a deliberately slow Argon solve can
+        // legitimately take tens of seconds, so the entry stays owned by
+        // whoever holds the owner token. Verification happens strictly
+        // while holding the current owner token; at the hard bound below
+        // the request is answered with a retryable error instead, leaving
+        // the entry pending for a later retry.
         if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
             $stored = null;
-            $waitDeadline = microtime(true) + self::IDEMPOTENCY_WAIT_SECS;
+            $waitDeadline = microtime(true) + $this->idempotencyWaitSecs;
             while (true) {
                 $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
-                if ($stored !== null || microtime(true) >= $waitDeadline) {
+                if ($stored !== null) {
                     break;
+                }
+                if (microtime(true) >= $waitDeadline) {
+                    // Hard bound without ownership: no stored result and no
+                    // takeover — another owner is still working the entry.
+                    // NOTHING is verified here: the client receives a
+                    // RETRYABLE provider error (the claim entry remains
+                    // pending, so a later retry can still take over or read
+                    // the stored result).
+                    return new JsonResponse(['success' => false, 'error-codes' => ['temporarily-unavailable']], Response::HTTP_SERVICE_UNAVAILABLE);
                 }
                 // The lease gate is inside the store's Lua: before expiry
                 // this attempt is an atomic no-op (StillPending).
                 [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300);
                 if ($takeover === IdempotencyClaim::TookOver) {
-                    // This request now OWNS the entry — it will verify below
-                    // and finalize with the takeover owner token.
+                    // This request now OWNS the entry — it will verify
+                    // below and finalize with the takeover owner token.
                     $claimOwner = $takeoverOwner;
+                    $claimedAt = microtime(true);
                     break;
                 }
                 usleep(100_000);
@@ -239,8 +275,8 @@ final class SiteVerifyController
         }
 
         // The SAME atomic verifier as the native path, WITH the expected
-        // scope resolved from the secret (round 26): a weaker login token
-        // presented to the financial secret is rejected (WrongScope) — the
+        // scope resolved from the secret: a weaker login token presented
+        // to the financial secret is rejected (WrongScope) — the
         // sitekey-allowlist mapping is enforced end to end. `remoteip` is
         // only honored because the caller proved possession of a valid
         // secret above; it is REQUIRED whenever IP binding is enabled
@@ -254,28 +290,26 @@ final class SiteVerifyController
             false,           // telemetry is never authoritative here
         );
 
-        // Round 26 (P1): the compatibility boundary distinguishes the FIRST
-        // redemption from replays. The native deterministic-result retry
-        // machinery stays inside the verifier, but a REPEATED Siteverify
-        // redemption of the same nonce must NOT report success again — it
-        // returns the provider vocabulary for a consumed token. The
-        // Round-30 exception: an idempotent retry that has PROVEN the
-        // same key+hash against a pending claim may interpret the stored
-        // result as the original outcome (crash recovery) — it is the
-        // SAME logical redemption, not a second one.
+        // The compatibility boundary distinguishes the FIRST redemption
+        // from replays. The native deterministic-result retry machinery
+        // stays inside the verifier, but a REPEATED Siteverify redemption
+        // of the same nonce must NOT report success again — it returns the
+        // provider vocabulary for a consumed token. An idempotent retry
+        // that has PROVEN the same key+hash against a pending claim may
+        // interpret the stored result as the original outcome (crash
+        // recovery) — it is the SAME logical redemption, not a second one.
         if ($outcome->isOk() && $outcome->fromStoredResult) {
-            // Round 30 (P1): a same-key + same-hash retry whose claim is
-            // STILL pending reconstructs the ORIGINAL success from the
-            // retained consumed state (crash recovery — the key+hash pair
-            // was proven against the pending claim, so this is the SAME
-            // logical redemption). Round 31 (P2): a TAKEOVER winner holds
-            // the owner token, so it finalizes the reconstructed outcome —
-            // the catastrophic deadline fall-through cannot and leaves the
-            // entry to expire on TTL.
+            // A same-key + same-hash retry whose claim is STILL pending
+            // reconstructs the ORIGINAL success from the retained consumed
+            // state (crash recovery — the key+hash pair was proven against
+            // the pending claim, so this is the SAME logical redemption).
+            // This path is only reachable while holding the current owner
+            // token (the takeover winner finalizes the reconstructed
+            // outcome).
             if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
                 $canonical = $this->canonicalizeResponse($this->canonicalSuccess($outcome));
                 if ($claimOwner !== null) {
-                    $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
+                    $this->finalizeAsOwner($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, $claimedAt);
                 }
 
                 return new JsonResponse($canonical);
@@ -292,7 +326,7 @@ final class SiteVerifyController
         if ($outcome->isOk()) {
             $canonical = $this->canonicalizeResponse($this->canonicalSuccess($outcome));
             if ($claimOwner !== null) {
-                $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
+                $this->finalizeAsOwner($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, $claimedAt);
             }
 
             return new JsonResponse($canonical);
@@ -309,10 +343,26 @@ final class SiteVerifyController
         if ($claimOwner !== null) {
             // A failed verification is ALSO finalized: a same-key retry
             // must reproduce the SAME canonical failure.
-            $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
+            $this->finalizeAsOwner($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, $claimedAt);
         }
 
         return new JsonResponse($canonical);
+    }
+
+    /**
+     * The owner's finalize: extend the lease first when this request's
+     * ownership (claim or takeover) has outlasted the lease window, so a
+     * slow-but-alive owner is not overtaken and the finalize cannot be
+     * rejected by a concurrent takeover. A failed renewal means ownership
+     * was already lost — the finalize is then an atomic no-op and the
+     * new owner's outcome stays authoritative.
+     */
+    private function finalizeAsOwner(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonical, ?float $claimedAt): void
+    {
+        if ($claimedAt !== null && microtime(true) - $claimedAt >= SiteVerifyIdempotencyStore::LEASE_SECONDS) {
+            $this->idempotencyStore?->renew($backendId, $idempotencyKey, $owner);
+        }
+        $this->idempotencyStore?->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonical);
     }
 
     /**
@@ -386,19 +436,13 @@ final class SiteVerifyController
     }
 
     /**
-     * @return array<string, mixed>|null
-     */
-    private const MAX_BODY_BYTES = 16 * 1024;
-
-    /**
-     * Round 30 (item 16): invalid-secret diagnostics are gated by a SHARED
-     * log gate (Redis INCR + EXPIRE) so the aggregation is deployment-wide
-     * — the round-28 per-controller-instance counters were useless across
-     * PHP-FPM workers (a fresh controller per request). Logging is
-     * logarithmic (1, 2, 4, 8...): early visibility + bounded flood
-     * amplification. Log-gate failure NEVER affects verification: on
-     * Redis errors the detailed log is suppressed (requests are still
-     * rejected).
+     * Invalid-secret diagnostics are gated by a SHARED log gate (Redis
+     * INCR + EXPIRE) so the aggregation is deployment-wide — counters
+     * held per controller instance are meaningless across PHP-FPM workers
+     * (a fresh controller per request). Logging is logarithmic (1, 2, 4,
+     * 8...): early visibility + bounded flood amplification. Log-gate
+     * failure NEVER affects verification: on Redis errors the detailed
+     * log is suppressed (requests are still rejected).
      */
     private const INVALID_SECRET_LOG_GATE_TTL_SECS = 5;
     private const INVALID_SECRET_LOG_INTERVAL = 5.0;
@@ -431,12 +475,33 @@ end
 return n
 LUA;
 
-    private function parseBody(Request $request): ?array
+    /**
+     * Read the request body with a hard byte cap: the input stream is
+     * consumed for at most MAX_BODY_BYTES + 1 bytes, so an oversized
+     * chunked body is refused by the caller's length check WITHOUT ever
+     * being materialized in full — the bounded read is the authoritative
+     * protection. When Symfony hands back a buffered stream (tests,
+     * already-consumed input) the read is still bounded.
+     */
+    private function readBoundedBody(Request $request): string
+    {
+        $stream = $request->getContent(true);
+        if (\is_resource($stream)) {
+            return (string) stream_get_contents($stream, self::MAX_BODY_BYTES + 1);
+        }
+
+        return (string) $request->getContent();
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function parseBody(Request $request, string $requestBody): ?array
     {
         $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
         if ($contentType === 'application/json') {
             try {
-                $decoded = json_decode((string) $request->getContent(), true, 32, JSON_THROW_ON_ERROR);
+                $decoded = json_decode($requestBody, true, 32, JSON_THROW_ON_ERROR);
 
                 return \is_array($decoded) ? $decoded : null;
             } catch (\JsonException) {

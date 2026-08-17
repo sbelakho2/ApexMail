@@ -436,7 +436,7 @@ final class VerifierGateTest extends TestCase
 
     public function testFutureIssuedBeyondClockSkewRejectedAsExpired(): void
     {
-        // Audit #76: a signed challenge claiming issued_at = now + 61s
+        // A signed challenge claiming issued_at = now + 61s
         // exceeds MAX_CLOCK_SKEW (60s) — no real issuer host is that far
         // ahead, so the TTL check rejects it as Expired.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT + 61, expiresAt: self::ISSUED_AT + 61 + 120);
@@ -452,7 +452,7 @@ final class VerifierGateTest extends TestCase
 
     public function testFutureIssuedAtTheClockSkewBoundaryVerifies(): void
     {
-        // Audit #76: issued_at = now + 60 sits exactly AT the MAX_CLOCK_SKEW
+        // issued_at = now + 60 sits exactly AT the MAX_CLOCK_SKEW
         // boundary — the future bound uses `>`, so the record is accepted
         // and verifies end-to-end.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT + 60, expiresAt: self::ISSUED_AT + 60 + 120);
@@ -480,7 +480,7 @@ final class VerifierGateTest extends TestCase
     public function testArgonTAboveProcessCeilingRejectsAsUnsupported(): void
     {
         // t=32 exceeds the absolute process ceiling (MAX_ARGON_TIME=16,
-        // audit #32): the record is SIGNED with the shared secret, so the
+        // The record is SIGNED with the shared secret, so the
         // failure is UnsupportedArgon2Params (not MalformedRecord) — the
         // signature authenticates the parameters before the ceiling check.
         $record = $this->argon2Record(t: 32);
@@ -679,7 +679,7 @@ final class VerifierGateTest extends TestCase
         $ip = '192.168.1.5';
         $bindingTag = Issuer::bindingTag($nonce, $ip, $secret);
 
-        // Round-11 canonical (audits #41/#42/#67/#91): the 17-field layout
+        // Canonical v2 layout: the field order
         // with region/request_binding/issuer as empty segments, policy_version
         // 1, and the FINAL kid segment 1.
         $canonicalV2 = 'v2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|||1';
@@ -834,7 +834,7 @@ final class VerifierGateTest extends TestCase
 
     public function testValidOutcomeExposesTheDecodedNonce(): void
     {
-        // Audit #37: the canonical replay id (jti) is the decoded token's
+        // The canonical replay id (jti) is the decoded token's
         // nonce — a VALID outcome must expose it.
         $record = $this->v2Sha256Record();
         $storage = new ArrayStorage();
@@ -864,7 +864,7 @@ final class VerifierGateTest extends TestCase
     public function testMalformedTokenNonceIsNull(): void
     {
         // The url-safe variant of a well-formed token decodes to the same
-        // plaintext but is NOT canonical base64 (audit #29) — the verifier
+        // plaintext but is NOT canonical base64 — the verifier
         // rejects it as MalformedToken and exposes no nonce. The telemetry
         // '?' bytes (positioned via duration=1000) guarantee the token's
         // base64 contains '/' so the variant genuinely differs.

@@ -78,6 +78,18 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         $this->records[$key] = array_replace($existing, ['state' => 'complete', 'result' => $canonicalResponse]);
     }
 
+    public function renew(string $backendId, string $idempotencyKey, string $owner): bool
+    {
+        $key = $this->key($backendId, $idempotencyKey);
+        $existing = $this->records[$key] ?? null;
+        if ($existing === null || $existing['state'] !== 'pending' || $existing['owner'] !== $owner) {
+            return false;
+        }
+        $this->records[$key] = array_replace($existing, ['lease_expires_at' => ($this->now)() + self::LEASE_SECONDS]);
+
+        return true;
+    }
+
     public function stored(string $backendId, string $idempotencyKey): ?array
     {
         $existing = $this->records[$this->key($backendId, $idempotencyKey)] ?? null;

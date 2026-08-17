@@ -131,7 +131,7 @@ final class ScoringPropertyTest extends TestCase
     }
 
     /**
-     * AUDIT #88 (a) — ASYMMETRIC TRUST: the exact-IP (source) signals must
+     * ASYMMETRIC TRUST: the exact-IP (source) signals must
      * outweigh the subnet (network) signals in the scorer weights, so one
      * attacker IP is always punished harder than the /64 aggregate it
      * shares. Pinned on the contract defaults; a future symmetric-weight
@@ -169,7 +169,7 @@ final class ScoringPropertyTest extends TestCase
     }
 
     /**
-     * AUDIT #88 (b) — ABSOLUTE USER-VISIBLE CAP: the score is clamped to
+     * ABSOLUTE USER-VISIBLE CAP: the score is clamped to
      * 0..1000, so a poisoned source (every signal at saturation) reaches
      * the cap but can NEVER exceed it — there is no unbounded punishment
      * mode.

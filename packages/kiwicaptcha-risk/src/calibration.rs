@@ -12,7 +12,7 @@
 //!   `HINCRBYFLOAT` + `EXPIRE 48h`. At most 24 keys per scope are ever read.
 //!   The sample counters live in the SAME scope/hour buckets as the
 //!   observations, so scope, window, label population and resolution
-//!   population are exactly one cohort (round 7: no namespace-wide
+//!   population are exactly one cohort (no namespace-wide
 //!   singleton counters).
 //! - Decision receipts `{kiwi:<ns>}:cal:receipt:<decision_id>` — a STRING
 //!   JSON `{"scope":..,"band":..,"action":"..","decision_hour":..,"score":..,
@@ -56,7 +56,7 @@
 //! minimum_resolution_ratio` (default 0.80), the target is SUSPENDED at 0 —
 //! the label-reporting process must demonstrably resolve a minimum
 //! fraction of the server-selected sample before the model may move. The
-//! counters are summed from the SAME 24 hourly buckets per scope (round 7:
+//! counters are summed from the SAME 24 hourly buckets per scope (the
 //! `sample_total` is HINCRBYed by `register_decision.lua` at DECISION time
 //! for sampled decisions, `sample_resolved` by `confirm.lua` on a sampled
 //! confirmation — both ATOMICALLY with the receipt/ledger work).
@@ -105,7 +105,7 @@
 //! original contribution with the EXACT recorded weight (ledger.w, clamped
 //! at zero) → add the corrected contribution → flip the ledger). If the
 //! decision-time bucket already expired the ledger still flips — the
-//! corrected outcome is authoritative for future events while the old
+//! corrected outcome is authoritative for future events while the prior
 //! ephemeral reputation pressure is left to decay naturally (Kiwi does not
 //! pretend to reverse already-decayed leaky counters). No synthetic
 //! identities are involved: the ledger itself is the once-only authority.
@@ -305,7 +305,7 @@ pub trait CalibrationStore: Send + Sync {
 }
 
 /// Redis-backed bounded aggregator implementing the calibration contract.
-/// Scope HMAC key (audit #112): the raw scope must NEVER appear in Redis
+/// Scope HMAC key: the raw scope must NEVER appear in Redis
 /// keys — an attacker can manufacture unbounded distinct scopes. Derived
 /// with HKDF info `kiwi/v2/scope-rate`, identical to the PHP side.
 pub struct RedisCalibrationStore {
@@ -380,7 +380,7 @@ impl BiasCache {
 }
 
 /// The CANONICAL calibration script, shared verbatim with PHP
-/// (`protocol/risk-v1/calibration.lua`). One invocation replaces the old
+/// (`protocol/risk-v1/calibration.lua`). One invocation replaces the
 /// two-script round trip: it aggregates the 24 hourly buckets (including
 /// their per-bucket sample counters), seeds and refreshes the rate-limit
 /// state (milli-points), applies the proportional per-minute allowance and
@@ -452,7 +452,7 @@ impl RedisCalibrationStore {
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`.
-    /// Derive the scope HMAC key (audit #112): HKDF-SHA256, info
+    /// Derive the scope HMAC key: HKDF-SHA256, info
     /// `kiwi/v2/scope-rate`, 32 bytes — identical to the PHP side.
     pub fn derive_scope_hmac_key(master: &[u8]) -> [u8; 32] {
         // HKDF-SHA256(master, salt, info) matching the PHP hash_hkdf call
@@ -463,7 +463,7 @@ impl RedisCalibrationStore {
         out
     }
 
-    /// Set the scope HMAC key (audit #112) — required for production use;
+    /// Set the scope HMAC key — required for production use;
     /// without it scope-based keys fall back to the raw scope (deprecated).
     pub fn with_scope_key(mut self, key: [u8; 32]) -> Self {
         self.scope_hmac_key = key;
@@ -541,7 +541,7 @@ impl RedisCalibrationStore {
     /// (`mode` + `sampling_probability_ppm`, default RandomSample / 100_000
     /// — preserved by the [`RedisCalibrationStore::with_limits`] and
     /// [`RedisCalibrationStore::with_receipt_ttl`] shorthands) and the
-    /// round-6 cost/resolution knobs: `minimum_resolution_ratio` (0..1,
+    /// cost/resolution knobs: `minimum_resolution_ratio` (0..1,
     /// default 0.80 — 0 disables the random-sample resolution gate),
     /// `false_positive_cost` (default 1.0) and `false_negative_cost`
     /// (default 2.0). `outcome_ttl_secs` is the ALWAYS-ON outcome-ledger
@@ -769,7 +769,7 @@ impl CalibrationStore for RedisCalibrationStore {
         let conn = guard.as_mut().expect("connection set by connection()");
 
         // HOT PATH: ONE canonical script invocation. Keys are the 24 hourly
-        // buckets + the rate-limit state (round 7: the sample counters live
+        // buckets + the rate-limit state (the sample counters live
         // INSIDE the buckets, so there are no singleton counter keys);
         // ARGV is now_ms (informational — the script's rate-limit clock is
         // Redis TIME), min_samples, max_adjustment, max_change_per_minute,
@@ -802,7 +802,7 @@ impl CalibrationStore for RedisCalibrationStore {
         };
         self.script_calls.fetch_add(1, Ordering::Relaxed);
 
-        // AUDIT #109: bounded conversion — the script guarantees a finite
+        // Bounded conversion — the script guarantees a finite
         // integer reply; the clamp is the defense-in-depth boundary.
         let bias = bounded_bias(bias, self.max_adjustment);
         self.cache_insert(scope, bias, now);
@@ -1041,7 +1041,7 @@ impl CalibrationStore for RedisCalibrationStore {
         let counts: Vec<i64> = invoke.invoke(conn).map_err(backend)?;
         let sampled_total = counts.first().copied().unwrap_or(0);
         let sampled_resolved = counts.get(1).copied().unwrap_or(0);
-        // AUDIT #109: the ratio is integer-derived (always finite); the
+        // The ratio is integer-derived (always finite); the
         // is_finite() guard is defensive and maps a never-occurring
         // non-finite ratio to 0.0 — fail-closed for the resolution gate
         // (bias movement stays suspended).
@@ -1539,8 +1539,8 @@ mod tests {
         fill(&s, 7, 100, 0, 10, now());
         assert_eq!(s.bias_for_scope(7, now()), 0);
         // Exactly ONE canonical script invocation over 24 bucket keys + the
-        // state key + the two sample counters (the old hot path issued TWO
-        // scripts).
+        // state key + the two sample counters (a two-script round trip
+        // is not used).
         assert_eq!(s.script_calls(), 1);
 
         // Cache hit: the second call issues ZERO scripts.
@@ -1563,7 +1563,7 @@ mod tests {
         conn.del::<_, ()>(keys).expect("del");
         // The rate-limit state must be cleared too: below the threshold the
         // stored bias now decays toward 0 at the allowed rate instead of
-        // snapping, so a surviving state key would keep the old value.
+        // snapping, so a surviving state key would keep the stale value.
         conn.del::<_, ()>(format!("{{kiwi:{ns}}}:cal:state:7"))
             .expect("del state");
         assert_eq!(
@@ -1685,7 +1685,7 @@ mod tests {
         cache.insert(1, 10, now);
         cache.insert(2, 20, now + Duration::from_millis(1));
         cache.insert(3, 30, now + Duration::from_millis(2));
-        // Full at cap 2: the OLDEST entry (scope 1) is evicted.
+        // Full at cap 2: the least-recently-used entry (scope 1) is evicted.
         assert_eq!(cache.get(1, now), None);
         assert_eq!(cache.get(2, now), Some(20));
         assert_eq!(cache.get(3, now), Some(30));
@@ -2595,7 +2595,7 @@ mod tests {
         assert!((m8.resolution_ratio - 0.6).abs() < 1e-9);
     }
 
-    // ── AUDIT #109 — NON-FINITE RISK GUARDS ─────────────────────────────
+    // ── NON-FINITE RISK GUARDS ───────────────────────────────────────────
     // Every float boundary in the scoring/calibration path must produce a
     // BOUNDED integer output — never NaN, never lower-risk-than-max. The
     // canonical calibration.lua guards its own output (non-finite final_mp

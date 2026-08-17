@@ -24,8 +24,8 @@ use Symfony\Component\Routing\RouteCollection;
  *
  * Routes:
  *  - POST  {prefix}/challenge          (the widget's challenge endpoint)
- *  - GET   {prefix}/health/live        (audit #51: liveness — always 200)
- *  - GET   {prefix}/health/ready       (audit #58: readiness — 200 only when
+ *  - GET   {prefix}/health/live        (liveness — always 200)
+ *  - GET   {prefix}/health/ready       (readiness — 200 only when
  *                                       signing keys + security Redis + the
  *                                       CENTRAL security-policy state are all
  *                                       compatible; risk.health.enabled
@@ -57,7 +57,7 @@ final class KiwiCaptchaRouteLoader extends Loader
 
         $prefix = rtrim($this->routePrefix, '/');
         $routes = new RouteCollection();
-        // Round 24: provider-compatible Siteverify + migration loader.
+        // Provider-compatible Siteverify + migration loader.
         $routes->add('kiwicaptcha_siteverify', new Route(
             $prefix.'/siteverify',
             ['_controller' => [SiteVerifyController::class, 'siteverify']],
@@ -76,9 +76,9 @@ final class KiwiCaptchaRouteLoader extends Loader
             [],
             ['GET'],
         ));
-        // Round 26 (P2): the compatibility loader links the stylesheet at
+        // The compatibility loader links the stylesheet at
         // {prefix}/widget.css — the production route must exist (the
-        // Playwright fixture previously hid its absence).
+        // Playwright fixture hid its absence).
         $routes->add('kiwicaptcha_widget_css', new Route(
             $prefix.'/widget.css',
             ['_controller' => [ApiJsController::class, 'widgetCss']],
@@ -99,7 +99,7 @@ final class KiwiCaptchaRouteLoader extends Loader
             ['POST'],
         ));
 
-        // Rollback-resistant health split (audit #51/#58): liveness is never
+        // Rollback-resistant health split: liveness is never
         // tied to saturation; readiness gate-keeps the security Redis + the
         // CENTRAL security-policy state. Both are GET-only.
         if ($this->healthEnabled) {

@@ -16,7 +16,7 @@ namespace KiwiCaptcha;
  * and solve a fresh one. This deliberately bounds the server-side cost of
  * memory-hard verification: each submitted token can cost at most one
  * Argon2id (or SHA-256) hash. Replay protection is the CONSUMED marker, not
- * absence (audit #74): the record survives until its TTL carrying the
+ * absence: the record survives until its TTL carrying the
  * deterministic verification result, so a retry returns the SAME outcome
  * (Valid/InsufficientWork) without re-deriving; a consumed record without a
  * committed result (crash between consume and commit) is reported as
@@ -35,9 +35,9 @@ namespace KiwiCaptcha;
  *   1. Structural validation of the stored record: scope shape, nonce/salt
  *      sizes, TTL ceiling (MAX_TTL_SECS), prefix binding, and the
  *      per-algorithm difficulty range (the protocol bounds 1..MAX_DIFFICULTY,
- *      audit #87 — the leading-zero comparison only ever runs against a
+ *      so the leading-zero comparison only ever runs against a
  *      validated difficulty).
- *   2. Kid gate (audit #91 + audit #117): a record whose kid is in the
+ *   2. Kid gate: a record whose kid is in the
  *      verifier's revokedKids set fails with UnknownKid IMMEDIATELY — even
  *      when the kid's secret is present in secretsByKid (compromise
  *      revocation overrides the normal rotation grace). Otherwise, when a
@@ -52,12 +52,12 @@ namespace KiwiCaptcha;
  *      master key, protocol v2 uses the full-parameter canonical payload
  *      (kid included) signed with the HKDF-derived K_challenge of the
  *      kid-selected secret.
- *   2b. Absolute Argon2id process ceilings (audit #32): the SIGNED
+ *   2b. Absolute Argon2id process ceilings: the SIGNED
  *      parameters are checked against MIN/MAX_ARGON_* AFTER signature
  *      authentication and BEFORE any allocation — out-of-range yields
  *      UnsupportedArgon2Params.
- *   3. TTL: now < expires_at AND now >= issued_at - MAX_CLOCK_SKEW (audit
- *      #76: a signed challenge claiming to be issued more than 60s in the
+ *   3. TTL: now < expires_at AND now >= issued_at - MAX_CLOCK_SKEW (a
+ *      signed challenge claiming to be issued more than 60s in the
  *      future is invalid).
  *   4. Scope: challenge scope matches the expected flow.
  *   5. IP binding: v2 records recompute the nonce-bound binding tag (keyed
@@ -65,16 +65,16 @@ namespace KiwiCaptcha;
  *      hash. An empty binding tag disables the check; with a nonempty
  *      binding tag a missing client IP fails closed (MissingClientIp) — a
  *      null IP NEVER skips the binding.
- *   5b. Region binding (audit #22, Option A): a verifier configured with an
+ *   5b. Region binding: a verifier configured with an
  *      expected region rejects any record whose region does not match
  *      exactly (WrongRegion) — including unbound (NULL) records, which
  *      FAIL CLOSED (a region-unbound record satisfies no region-bound
  *      verifier). When NO expected region is configured, region is not
  *      enforced and unbound records verify.
- *   5c. Security-policy epoch (audit #42) and deployment issuer (audit
- *      #67): a verifier configured with an expected policy epoch / issuer
- *      rejects records issued under a different epoch / by a different
- *      deployment (WrongPolicyVersion / WrongIssuer).
+ *   5c. Security-policy epoch and deployment issuer: a verifier configured
+ *      with an expected policy epoch / issuer rejects records issued under
+ *      a different epoch / by a different deployment (WrongPolicyVersion /
+ *      WrongIssuer).
  *   6. Minimum duration: measured SERVER-SIDE from the record's issued_at_ns
  *      (epoch microseconds) to the verification receipt time — the
  *      client-reported duration can no longer be forged to bypass the
@@ -94,7 +94,7 @@ namespace KiwiCaptcha;
  *      returns its committed deterministic result (Valid/InsufficientWork)
  *      without re-deriving, or ConsumeIndeterminate when no result was
  *      committed.
- *  10. POST-DERIVE FINAL REVALIDATION (audit #59): after the proof derives
+ *  10. POST-DERIVE FINAL REVALIDATION: after the proof derives
  *      successfully and BEFORE returning Valid, re-check with the CURRENT
  *      server clock (the verifier's now closure) and the CURRENT
  *      expectations: the challenge must not have expired during the
@@ -128,15 +128,15 @@ final class Verifier
     private const MAX_TTL_SECS = Config::MAX_TTL_SECS;
 
     /**
-     * Maximum tolerated FUTURE skew for a record's issuance timestamp
-     * (audit #76): a signed challenge claiming issued_at > now + 60s cannot
+     * Maximum tolerated FUTURE skew for a record's issuance timestamp:
+     * a signed challenge claiming issued_at > now + 60s cannot
      * have come from a real issuer host (even under clock drift) and is
      * rejected by the TTL check as Expired.
      */
     public const MAX_CLOCK_SKEW = 60;
 
     /**
-     * Absolute process ceilings for Argon2id parameters (audit #32).
+     * Absolute process ceilings for Argon2id parameters.
      *
      * After the challenge signature is authenticated, the signed parameters
      * are validated against these hard bounds BEFORE any memory allocation
@@ -185,7 +185,7 @@ final class Verifier
          */
         private ?string $region = null,
         /**
-         * The CURRENT security-policy epoch (audit #42). When non-null, a
+         * The CURRENT security-policy epoch. When non-null, a
          * record whose `policy_version` differs is rejected with
          * WrongPolicyVersion — outstanding challenges die immediately on
          * policy revocation (origin/action-policy changes, emergency
@@ -193,7 +193,7 @@ final class Verifier
          */
         private ?int $expectedPolicyVersion = null,
         /**
-         * Expected deployment issuer (audit #67). When non-null, a record
+         * Expected deployment issuer. When non-null, a record
          * whose `issuer` does not match EXACTLY — including a NULL (unbound)
          * record issuer — is rejected with WrongIssuer: a dev/staging/prod
          * compartment that holds even when deployments share secret keys.
@@ -201,7 +201,7 @@ final class Verifier
          */
         private ?string $expectedIssuer = null,
         /**
-         * Secret set keyed by signing key id (audit #91). When NON-EMPTY,
+         * Secret set keyed by signing key id. When NON-EMPTY,
          * the secret for the record's `kid` is selected for the signature
          * re-check (and the IP-binding re-derivation): a record whose kid is
          * unknown — or whose kid exceeds the newest configured kid (the
@@ -213,7 +213,7 @@ final class Verifier
          */
         private readonly array $secretsByKid = [],
         /**
-         * Compromised signing key ids (audit #117). A record whose `kid`
+         * Compromised signing key ids. A record whose `kid`
          * appears here is rejected with UnknownKid BEFORE any signature
          * work — IMMEDIATELY, even when the kid's secret is present in
          * secretsByKid: compromise revocation overrides the normal rotation
@@ -223,8 +223,8 @@ final class Verifier
          */
         private readonly array $revokedKids = [],
     ) {
-        // BC shim: pre-gate callers passed the clock override positionally
-        // as the second argument. A Closure in that slot is $now, not an
+        // Backward-compatibility shim: callers may pass the clock override
+        // positionally in the second slot. A Closure there is $now, not an
         // admission gate (the parameter is intentionally untyped so the
         // Closure can reach this branch — the type check happens below).
         if ($argonGate instanceof \Closure) {
@@ -318,7 +318,7 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::MalformedRecord);
         }
 
-        // 2. Kid gate (audit #117): a REVOKED kid is rejected with
+        // 2. Kid gate: a REVOKED kid is rejected with
         //    UnknownKid IMMEDIATELY — before the signature check and before
         //    the secret selection — so compromise revocation overrides the
         //    normal rotation grace (a perfectly-signed challenge under a
@@ -329,7 +329,7 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::UnknownKid);
         }
 
-        // 2. Kid resolution (audit #91): with a secretsByKid set, the
+        // 2. Kid resolution: with a secretsByKid set, the
         //    signature secret is selected per the record's kid — an unknown
         //    kid, or one beyond the newest configured kid (the
         //    rollback/forward guard — a future-keyed challenge must never
@@ -355,7 +355,7 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::BadSignature);
         }
 
-        // 2b. Absolute Argon2id process ceilings (audit #32): the SIGNED
+        // 2b. Absolute Argon2id process ceilings: the SIGNED
         //     parameters are validated AFTER signature authentication and
         //     BEFORE any allocation or computation. Out-of-range values are
         //     authentic-but-unsupported — UnsupportedArgon2Params, not
@@ -369,7 +369,7 @@ final class Verifier
 
         // 3. TTL. Both bounds use the verifier's clock: a challenge expired
         //    before the check (now >= expires_at) OR claiming to have been
-        //    issued more than MAX_CLOCK_SKEW in the future (audit #76 — a
+        //    issued more than MAX_CLOCK_SKEW in the future (a
         //    signed record cannot legitimately come from a host clock that
         //    far ahead) is rejected.
         $now = $this->now !== null ? (int) ($this->now)() : time();
@@ -399,7 +399,7 @@ final class Verifier
         //    have passed to issuance. Protocol v2 records carry a nonce-bound
         //    binding tag (recomputed here); v1 records carry the legacy
         //    stable IP hash. Both are keyed by the KID-SELECTED secret
-        //    (audit #91: K_ip_bind is derived from the same master secret
+        //    (K_ip_bind is derived from the same master secret
         //    that signed the challenge).
         if ($peek->bindingTag !== '') {
             if ($clientIp === null) {
@@ -415,7 +415,7 @@ final class Verifier
             }
         }
 
-        // 5b. Region binding (audit #22, Option A): a verifier configured
+        // 5b. Region binding: a verifier configured
         //     with an expected region rejects any record whose region does
         //     not match EXACTLY — an unbound (NULL) record region fails
         //     closed (a region-unbound record satisfies no region-bound
@@ -426,7 +426,7 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::WrongRegion);
         }
 
-        // 5c. Security-policy epoch (audit #42): the policy that authorized
+        // 5c. Security-policy epoch: the policy that authorized
         //     this challenge must still be in force — the verifier rejects
         //     records issued under a different epoch (WrongPolicyVersion).
         if ($this->expectedPolicyVersion !== null && ($peek->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
@@ -435,7 +435,7 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
         }
 
-        // 5d. Deployment issuer (audit #67): a verifier configured with an
+        // 5d. Deployment issuer: a verifier configured with an
         //     expected issuer rejects any record whose issuer does not match
         //     EXACTLY — an unbound (NULL) record issuer fails closed, because
         //     an unbound record is redeemable by every deployment and must
@@ -510,7 +510,7 @@ final class Verifier
         }
 
         try {
-            // 9. Consume (one-shot transition, audit #74) and re-derive the
+            // 9. Consume (one-shot transition) and re-derive the
             //    proof. The record is marked consumed and KEPT until its TTL.
             try {
                 $consumed = $this->storage->consume($token->nonce);
@@ -524,7 +524,7 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::RecordNotFound);
             }
 
-            // Consumed-state retry (audit #74): an already-consumed record
+            // Consumed-state retry: an already-consumed record
             // replays its committed deterministic result WITHOUT re-deriving
             // the proof — a retry sees exactly what the consuming attempt
             // saw (Valid/InsufficientWork). A consumed record without a
@@ -548,7 +548,7 @@ final class Verifier
             // instance is the robust check — a swapped/racing record fails
             // closed instead of verifying against bytes that were never
             // validated. The signature secret is re-resolved for the
-            // CONSUMED record's kid (audit #91): an instance whose kid is
+            // CONSUMED record's kid: an instance whose kid is
             // unknown (or ahead of the newest configured kid) cannot be
             // authenticated and fails closed as MalformedRecord.
             $consumedSecret = $this->secretForKey($record, $secretKey);
@@ -569,7 +569,7 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::UnsupportedArgon2Params);
             }
 
-            // Security-policy epoch on the CONSUMED instance (audit #42): a
+            // Security-policy epoch on the CONSUMED instance: a
             // racing swap that replaced the record between peek and consume
             // must fail closed here too — the instance that actually proves
             // the PoW must be from the current policy epoch.
@@ -577,7 +577,7 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
             }
 
-            // Deployment issuer on the CONSUMED instance (audit #67): the
+            // Deployment issuer on the CONSUMED instance: the
             // same racing-swap fail-closed guarantee as the policy check —
             // the instance that actually proves the PoW must be from the
             // expected deployment.
@@ -604,7 +604,7 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::InsufficientWork);
             }
 
-            // 10. POST-DERIVE FINAL REVALIDATION (audit #59): the expensive
+            // 10. POST-DERIVE FINAL REVALIDATION: the expensive
             //     derivation succeeded — re-check against the CURRENT server
             //     clock and the CURRENT expectations BEFORE accepting. The
             //     challenge may have expired DURING the derivation (the
@@ -652,19 +652,19 @@ final class Verifier
      * and the per-algorithm difficulty range. A record failing any check is
      * malformed — it cannot have come from a KiwiCaptcha issuer.
      *
-     * The difficulty guard (audit #87) is the protocol floor/ceiling pair
+     * The difficulty guard is the protocol floor/ceiling pair
      * MIN_DIFFICULTY..MAX_DIFFICULTY (1..20) applied to BOTH algorithms:
      * the leading-zero comparison only ever runs against a validated
      * difficulty, so the stored value cannot drive an unbounded comparison
      * (0, 21, 256, 65535 … are all rejected here, before any hash is
      * computed). Issuance keeps the narrower per-algorithm ceilings.
      *
-     * The scope check enforces the narrow identifier alphabet (audit #96)
-     * — `[A-Za-z0-9._:-]+`, 1..128 bytes — subsuming the legacy '|'
-     * separator rejection.
+     * The scope check enforces the narrow identifier alphabet
+     * — `[A-Za-z0-9._:-]+`, 1..128 bytes — the alphabet itself makes the
+     * legacy '|' separator rejection unnecessary.
      *
-     * Argon2id memory/time/parallelism are NOT bounded here anymore: the
-     * absolute process ceilings (audit #32) apply to the SIGNED parameters
+     * Argon2id memory/time/parallelism are NOT bounded here: the
+     * absolute process ceilings apply to the SIGNED parameters
      * AFTER signature authentication ({@see self::argon2CeilingsOk()}),
      * so a validly-signed out-of-range record is reported as
      * UnsupportedArgon2Params rather than MalformedRecord, while unsigned
@@ -700,7 +700,7 @@ final class Verifier
         if (!hash_equals($record->challenge.'|'.$record->salt.'|', $record->prefix)) {
             return false;
         }
-        // Audit #87: the uniform protocol difficulty bounds (1..20) guard
+        // The uniform protocol difficulty bounds (1..20) guard
         // the leading-zero comparison for BOTH algorithms — a stored value
         // outside the bounds is rejected here, before any hash computation.
         if ($record->targetBits < Config::MIN_DIFFICULTY || $record->targetBits > Config::MAX_DIFFICULTY) {
@@ -711,7 +711,7 @@ final class Verifier
     }
 
     /**
-     * Absolute process ceilings for Argon2id parameters (audit #32) — the
+     * Absolute process ceilings for Argon2id parameters — the
      * SIGNED record's memory/time/parallelism must sit within
      * [MIN..MAX]_ARGON_* before any allocation or computation. Runs after
      * signature authentication (cheap phase) and again at the computation
@@ -732,17 +732,6 @@ final class Verifier
     }
 
     /**
-     * Re-derive the proof-of-work hash.
-     *
-     * SHA-256: hash(prefix || decimal(counter) || salt_bytes)
-     * Argon2id: argon2id(password=prefix||decimal(counter), salt=salt_bytes,
-     *           m_cost=m_kib KiB, t_cost=t, p_cost=p, output=32 bytes)
-     *
-     * Returns null when the record is malformed or the algorithm cannot be
-     * computed (e.g. Argon2id parameters outside KiwiCaptcha's protocol
-     * profile — t < 3 or p != 1).
-     */
-    /**
      * Terminal cheap-failure cleanup. Deletion is NOT security-critical
      * once the challenge has been rejected, and a storage outage must not
      * turn a cheap invalid submission into an application exception — the
@@ -757,7 +746,7 @@ final class Verifier
     }
 
     /**
-     * Terminal result commit for a consumed record (audit #74). Best-effort
+     * Terminal result commit for a consumed record. Best-effort
      * by design: a failed commit must NEVER override the already-determined
      * verification outcome — without the stored result a retry of the
      * consumed record degrades to ConsumeIndeterminate, which is strictly
@@ -772,18 +761,8 @@ final class Verifier
     }
 
     /**
-     * @internal Race-test seam (audit #59): rotate the CURRENT deployment
-     * expectations (policy epoch, region, issuer) to model a rotation that
-     * lands between the cheap checks and the post-derive final revalidation.
-     * The final re-check always reads the CURRENT values, so a rotation
-     * performed at any point before it (e.g. by a stateful clock/storage
-     * stub mid-verification) is observed. All three parameters are applied
-     * as given. Not part of the public verification contract — production
-     * deployments configure the expectations once at construction.
-     */
-    /**
      * Public per-verification seam for the bounded-revocation-latency
-     * monitor (audit #81): sets the CURRENT security-policy epoch the
+     * monitor: sets the CURRENT security-policy epoch the
      * verifier enforces. The monitor refreshes this from the central
      * security-policy state with a short cache and a monotonic guard — a
      * stale/regressed value must never be applied. Cheap; safe to call
@@ -794,6 +773,16 @@ final class Verifier
         $this->expectedPolicyVersion = $policyVersion;
     }
 
+    /**
+     * @internal Test seam: rotate the CURRENT deployment
+     * expectations (policy epoch, region, issuer) to model a rotation that
+     * lands between the cheap checks and the post-derive final revalidation.
+     * The final re-check always reads the CURRENT values, so a rotation
+     * performed at any point before it (e.g. by a stateful clock/storage
+     * stub mid-verification) is observed. All three parameters are applied
+     * as given. Not part of the public verification contract — production
+     * deployments configure the expectations once at construction.
+     */
     public function rotateDeploymentExpectations(?int $policyVersion, ?string $region, ?string $issuer): void
     {
         $this->expectedPolicyVersion = $policyVersion;
@@ -801,6 +790,17 @@ final class Verifier
         $this->expectedIssuer = $issuer;
     }
 
+    /**
+     * Re-derive the proof-of-work hash.
+     *
+     * SHA-256: hash(prefix || decimal(counter) || salt_bytes)
+     * Argon2id: argon2id(password=prefix||decimal(counter), salt=salt_bytes,
+     *           m_cost=m_kib KiB, t_cost=t, p_cost=p, output=32 bytes)
+     *
+     * Returns null when the record is malformed or the algorithm cannot be
+     * computed (e.g. Argon2id parameters outside KiwiCaptcha's protocol
+     * profile — t < 3 or p != 1).
+     */
     private function deriveHash(ChallengeRecord $record, int $counter): ?string
     {
         $saltBytes = base64_decode($record->salt, true);
@@ -848,7 +848,7 @@ final class Verifier
      * Recompute the expected HMAC signature for a record (per its protocol
      * version) and compare it constant-time against the signature embedded
      * in the challenge string. Because the v2 canonical payload covers EVERY
-     * immutable parameter (kid included — audit #91), a valid signature
+     * immutable parameter (kid included), a valid signature
      * proves the whole record is authentic — used in the cheap phase AND
      * re-applied to the CONSUMED instance (TOCTOU guard).
      */
@@ -886,7 +886,7 @@ final class Verifier
     }
 
     /**
-     * Select the signature secret for a record (audit #91).
+     * Select the signature secret for a record.
      *
      * With an EMPTY secretsByKid set the legacy single-secret path stays:
      * the verify() $secretKey parameter is used for every record. With a
@@ -911,7 +911,7 @@ final class Verifier
     }
 
     /**
-     * Compromise-revocation gate (audit #117): true when the record's kid is
+     * Compromise-revocation gate: true when the record's kid is
      * in the verifier's revokedKids set. The check is a cheap set-membership
      * test that runs BEFORE any signature work — revocation overrides the
      * normal rotation grace, so a revoked kid fails with UnknownKid even
