@@ -1042,7 +1042,15 @@
     kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", gen: newGen, abortController: null, abortTimer: null, worker: null, retryTimer: null, countdownTimer: null, expiryTimer: null, errorFired: false };
     // Neutral role: the widget is a passive status/group, never a
     // checkbox, and it is NOT focusable — the retry button is.
-    if (!W.getAttribute("role")) W.setAttribute("role", "group");
+    // Round 31 (P1): ONE semantic component root. In compatibility mode
+    // initWidget's W is the incumbent PROVIDER WRAPPER — the role, lang,
+    // dir and accessible name must land on the actual visible inner
+    // [data-kiwi-widget] (the wrapper stays semantically neutral);
+    // otherwise AT sees a localized outer group wrapping a second inner
+    // group with a stale English label.
+    var compatInnerWidget = W.querySelector && W !== (W.querySelector("[data-kiwi-widget]") || W) ? W.querySelector("[data-kiwi-widget]") : null;
+    var a11yRoot = compatInnerWidget || W;
+    if (!compatInnerWidget && !W.getAttribute("role")) W.setAttribute("role", "group");
     var container = W.closest(".kiwi-container") || W;
     // Round 30 (item 18): the accessible group name is the TRANSLATED
     // security-check string (the aria-label hard-coded "KiwiCaptcha
@@ -1066,10 +1074,10 @@
       lang: (options && options.lang) || kiwiLangAttr || kiwiProviderLang || compatLoaderLang || undefined
     });
     var kiwiWidgetPack = kiwiPackFor(kiwiWidgetLang);
-    W.setAttribute("lang", kiwiWidgetLang);
-    if (kiwiWidgetPack.dir) W.setAttribute("dir", kiwiWidgetPack.dir);
+    a11yRoot.setAttribute("lang", kiwiWidgetLang);
+    if (kiwiWidgetPack.dir) a11yRoot.setAttribute("dir", kiwiWidgetPack.dir);
     // Round 30 (item 18): accessible name == the translated label string.
-    W.setAttribute("aria-label", kiwiWidgetPack.label);
+    a11yRoot.setAttribute("aria-label", kiwiWidgetPack.label);
     function kiwiT(key) { return (kiwiWidgetPack[key] !== undefined) ? kiwiWidgetPack[key] : kiwiLocalePacks[kiwiFallbackLang][key] || key; }
     var labelEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
     var announcerEl = W.querySelector("[data-kiwi-status]") || createAnnouncer(W);
@@ -1184,6 +1192,9 @@
       writeResponseAlias("");
       if (stateEl) stateEl.setAttribute("data-state", "expired");
       if (countdownEl) countdownEl.textContent = kiwiT("expired");
+      // Round 31 (P1): the credential is gone — the widget is NOT started
+      // anymore, so the (now visible) Retry button can reacquire.
+      delete W.dataset.kiwiStarted;
       dispatch("expired", {});
       announce(kiwiT("statusExpired"));
       if (options.expiredCallback) { try { options.expiredCallback(); } catch (e) {} }
@@ -1326,8 +1337,16 @@
       retryEl.dataset.kiwiRetryBound = "1";
       kiwiAddListener(retryEl, "click", function () {
         if (W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return;
+        // Round 31 (P1): reacquisition MUST restore the FULL original
+        // configuration — a blank initWidget(W) would fall back to DOM
+        // attributes/URL heuristics/default "login", silently downgrading
+        // a sitekey that maps server-side to a sensitive scope, and would
+        // lose callbacks/response-field/language/action/cData. The widget
+        // record always carries the options from the INITIAL render;
+        // BFCache restore (reset) preserves them the same way.
+        var preserved = (kiwiWidgets[widgetId] && kiwiWidgets[widgetId].options) || options;
         delete W.dataset.kiwiStarted;
-        initWidget(W);
+        initWidget(W, preserved);
       });
     }
     // destroy() teardown: idle the runtime state (countdown, telemetry,
@@ -1870,7 +1889,10 @@
       // Round 28 (P3): render through compatRender so the same endpoint/
       // scope/response-field defaults land on the holder (an explicit
       // native-default endpoint would 404 on a compat deployment).
-      var id2 = compatRender(inner, { sitekey: action });
+      // Round 31 (P1): the REAL sitekey and the requested action are
+      // transmitted INDEPENDENTLY — passing the action as the sitekey
+      // disconnected the server-owned (sitekey, action) -> scope policy.
+      var id2 = compatRender(inner, { sitekey: sitekey, action: action });
       if (!id2) {
         if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
         return Promise.reject(new Error("kiwicaptcha: hidden render failed"));
@@ -1943,8 +1965,9 @@
     } else if (compat === "hcaptcha") {
       window.hcaptcha = window.hcaptcha || Object.assign({}, compatApi, {
         getRespKey: function (idOrEl) {
-          var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
-            : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+          // Round 31 (item 10): the omitted argument must default to the
+          // FIRST created widget exactly like the shared resolver.
+          var id = compatResolveId(idOrEl);
           return id ? kiwiGetResponse(id) : "";
         }
       });

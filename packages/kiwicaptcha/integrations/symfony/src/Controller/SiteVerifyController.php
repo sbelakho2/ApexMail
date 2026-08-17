@@ -206,9 +206,17 @@ final class SiteVerifyController
         // existing pending claim, so `fromStoredResult` is the ORIGINAL
         // success — ordinary replays (no matching key) stay duplicate.
         if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
+            // Round 31 (item 12): PENDING_SAME FOLLOWS the owning request to
+            // completion — a deliberately slow Argon solve can legitimately
+            // take tens of seconds, and a fixed 1s wait would fall through
+            // into a re-derivation and possibly a different response. The
+            // poll runs for a bounded lease window (30s); only after that
+            // does the crash-recovery path below reconstruct the original
+            // outcome via the core's retained consumed state (the key+hash
+            // pair was proven against the pending claim).
             $stored = null;
-            for ($i = 0; $i < 20; $i++) {
-                usleep(50_000);
+            for ($i = 0; $i < 300; $i++) {
+                usleep(100_000);
                 $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
                 if ($stored !== null) {
                     break;

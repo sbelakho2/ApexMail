@@ -723,22 +723,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $idempotencyStoreRef = new Reference(ArraySiteVerifyIdempotencyStore::class);
         }
 
-        // Round 30 (item 15): a per-sitekey binding:none profile is only
-        // meaningful when the deployment's GLOBAL binding mode is unbound —
-        // otherwise it would silently claim a relaxation the issuer cannot
-        // honor. The combination is refused at compile time (server-owned
-        // relaxation, never client-requestable).
+        // Round 31 (item 15): the per-sitekey binding option was REMOVED —
+        // the core binds issuance by the GLOBAL binding_mode only, so a
+        // per-sitekey "required"/"none" claim could not be enforced. The
+        // global server-owned mode is the only binding control.
         $sitekeyPolicy = $riskConfig['sitekeys'] ?? [];
-        $globalBindingNone = $config['binding_mode'] === 'none';
-        foreach ($sitekeyPolicy as $sitekey => $policy) {
-            if (($policy['binding'] ?? 'required') === 'none' && !$globalBindingNone) {
-                throw new \LogicException(sprintf(
-                    'KiwiCaptcha: sitekey "%s" declares binding: none, but the deployment binding mode is not none — the per-sitekey relaxation cannot be honored. Either set risk.binding_mode: none (a deployment-wide server-owned choice) or remove the binding profile.',
-                    $sitekey,
-                ));
-            }
-        }
-
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
             $rateLimiterRef,

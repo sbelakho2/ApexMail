@@ -963,6 +963,21 @@
     return kiwiFallbackLang;
   }
   function kiwiPackFor(lang) { return kiwiLocalePacks[lang] || kiwiLocalePacks[kiwiFallbackLang]; }
+  // Round 30 (item 29): integrator callbacks must be observable — an
+  // exception is rethrown on a microtask (never corrupting Kiwi's own
+  // lifecycle, never double-invoking) so migration failures are
+  // diagnosable in the console.
+  function kiwiSafeCallback(fn) {
+    try {
+      fn();
+    } catch (err) {
+      if (typeof queueMicrotask === "function") {
+        queueMicrotask(function () { throw err; });
+      } else {
+        setTimeout(function () { throw err; }, 0);
+      }
+    }
+  }
   // Manual retry is a genuine native <button> (focusable, Enter/Space
   // activation built in) rendered in the error/unavailable states. It
   // triggers the SAME re-init path as the click/tap reacquire.
@@ -1027,8 +1042,22 @@
     kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", gen: newGen, abortController: null, abortTimer: null, worker: null, retryTimer: null, countdownTimer: null, expiryTimer: null, errorFired: false };
     // Neutral role: the widget is a passive status/group, never a
     // checkbox, and it is NOT focusable — the retry button is.
-    if (!W.getAttribute("role")) W.setAttribute("role", "group");
+    // Round 31 (P1): ONE semantic component root. In compatibility mode
+    // initWidget's W is the incumbent PROVIDER WRAPPER — the role, lang,
+    // dir and accessible name must land on the actual visible inner
+    // [data-kiwi-widget] (the wrapper stays semantically neutral);
+    // otherwise AT sees a localized outer group wrapping a second inner
+    // group with a stale English label.
+    var compatInnerWidget = W.querySelector && W !== (W.querySelector("[data-kiwi-widget]") || W) ? W.querySelector("[data-kiwi-widget]") : null;
+    var a11yRoot = compatInnerWidget || W;
+    if (!compatInnerWidget && !W.getAttribute("role")) W.setAttribute("role", "group");
     var container = W.closest(".kiwi-container") || W;
+    // Round 30 (item 18): the accessible group name is the TRANSLATED
+    // security-check string (the aria-label hard-coded "KiwiCaptcha
+    // security check" in the static markup would stay English while the
+    // visible UI localized — a lang/name divergence). The markup's
+    // static aria-label is replaced at init with the resolved locale.
+    var kiwiWidgetRoot = W;
     // Round 29 (WCAG 3.1.2): resolve the widget language and write it onto
     // the widget subtree (lang + dir for RTL packs). Preference order:
     // options.lang -> data-kiwi-lang on the widget/container ->
@@ -1037,10 +1066,18 @@
     // so the attribute is read from the subtree, not the script tag.)
     var kiwiLangAttr = (W.getAttribute ? W.getAttribute("data-kiwi-lang") : null)
       || (container && container.getAttribute ? container.getAttribute("data-kiwi-lang") : null);
-    var kiwiWidgetLang = kiwiResolveLang({ lang: (options && options.lang) || kiwiLangAttr || undefined });
+    // Round 30 (item 13): the language precedence is instance-level
+    // overrides (params.lang / data-kiwi-lang) -> provider language
+    // (Turnstile language) -> loader hl= -> navigator.language -> English.
+    var kiwiProviderLang = options && options.language ? String(options.language) : null;
+    var kiwiWidgetLang = kiwiResolveLang({
+      lang: (options && options.lang) || kiwiLangAttr || kiwiProviderLang || compatLoaderLang || undefined
+    });
     var kiwiWidgetPack = kiwiPackFor(kiwiWidgetLang);
-    W.setAttribute("lang", kiwiWidgetLang);
-    if (kiwiWidgetPack.dir) W.setAttribute("dir", kiwiWidgetPack.dir);
+    a11yRoot.setAttribute("lang", kiwiWidgetLang);
+    if (kiwiWidgetPack.dir) a11yRoot.setAttribute("dir", kiwiWidgetPack.dir);
+    // Round 30 (item 18): accessible name == the translated label string.
+    a11yRoot.setAttribute("aria-label", kiwiWidgetPack.label);
     function kiwiT(key) { return (kiwiWidgetPack[key] !== undefined) ? kiwiWidgetPack[key] : kiwiLocalePacks[kiwiFallbackLang][key] || key; }
     var labelEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
     var announcerEl = W.querySelector("[data-kiwi-status]") || createAnnouncer(W);
@@ -1155,6 +1192,9 @@
       writeResponseAlias("");
       if (stateEl) stateEl.setAttribute("data-state", "expired");
       if (countdownEl) countdownEl.textContent = kiwiT("expired");
+      // Round 31 (P1): the credential is gone — the widget is NOT started
+      // anymore, so the (now visible) Retry button can reacquire.
+      delete W.dataset.kiwiStarted;
       dispatch("expired", {});
       announce(kiwiT("statusExpired"));
       if (options.expiredCallback) { try { options.expiredCallback(); } catch (e) {} }
@@ -1297,8 +1337,16 @@
       retryEl.dataset.kiwiRetryBound = "1";
       kiwiAddListener(retryEl, "click", function () {
         if (W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return;
+        // Round 31 (P1): reacquisition MUST restore the FULL original
+        // configuration — a blank initWidget(W) would fall back to DOM
+        // attributes/URL heuristics/default "login", silently downgrading
+        // a sitekey that maps server-side to a sensitive scope, and would
+        // lose callbacks/response-field/language/action/cData. The widget
+        // record always carries the options from the INITIAL render;
+        // BFCache restore (reset) preserves them the same way.
+        var preserved = (kiwiWidgets[widgetId] && kiwiWidgets[widgetId].options) || options;
         delete W.dataset.kiwiStarted;
-        initWidget(W);
+        initWidget(W, preserved);
       });
     }
     // destroy() teardown: idle the runtime state (countdown, telemetry,
@@ -1328,6 +1376,23 @@
         var reqBody = { scope: scope };
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
         if (requestBinding) reqBody.request_binding = requestBinding;
+        // Round 30 (P1): provider-compatible challenge metadata is declared
+        // by the WIDGET at issuance (data-action / data-cdata on the
+        // container, or params.action/cData) — the server validates the
+        // provider shapes and binds them to the nonce; a Siteverify
+        // request can never supply them.
+        var kiwiAction = (container.getAttribute ? container.getAttribute("data-action") : null)
+          || (W.getAttribute ? W.getAttribute("data-action") : null)
+          || (options && options.action ? String(options.action) : null);
+        var kiwiCdata = (container.getAttribute ? container.getAttribute("data-cdata") : null)
+          || (W.getAttribute ? W.getAttribute("data-cdata") : null)
+          || (options && options.cData ? String(options.cData) : null);
+        if (kiwiAction) reqBody.action = kiwiAction;
+        if (kiwiCdata) reqBody.cdata = kiwiCdata;
+        // Round 30 (item 14): the public sitekey travels with the request
+        // so the server resolves (sitekey, action) -> security scope —
+        // the client never chooses protected scope names.
+        if (options && options.sitekey) reqBody.sitekey = String(options.sitekey);
         var timeoutAttr = W.getAttribute("data-kiwi-fetch-timeout-ms") || container.getAttribute("data-kiwi-fetch-timeout-ms") || "";
         var fetchTimeoutMs = parseInt(timeoutAttr, 10);
         if (!(fetchTimeoutMs > 0)) fetchTimeoutMs = KIWI_FETCH_TIMEOUT_MS;
@@ -1639,20 +1704,36 @@
       currentScript = scripts[scripts.length - 1];
     }
     compatScriptUrl = currentScript && currentScript.src ? currentScript.src : null;
-    var compatMatch = compatScriptUrl ? compatScriptUrl.match(/[?&]compat=(recaptcha|hcaptcha|turnstile)/) : null;
-    if (compatMatch) compat = compatMatch[1];
-    // Round 29 (P1): Google's standard explicit-loading form —
-    // render=explicit suppresses automatic rendering and the named onload
-    // callback runs after dependencies become ready. Both parameters are
-    // read from the loader URL exactly like the incumbent loader does.
-    var compatRenderMode = "auto";
-    var compatOnloadName = null;
-    if (compatScriptUrl) {
-      var renderMatch = compatScriptUrl.match(/[?&]render=explicit(?:&|$)/);
-      if (renderMatch) compatRenderMode = "explicit";
-      var onloadMatch = compatScriptUrl.match(/[?&]onload=([A-Za-z_$][A-Za-z0-9_$]*)/);
-      if (onloadMatch) compatOnloadName = onloadMatch[1];
+    // Round 30 (items 13+28): ONE coherent loader parser — URLSearchParams
+    // (no regexes): compat, render, onload, hl, with callback-identifier
+    // validation and locale normalization.
+    function parseCompatLoader(scriptUrl) {
+      var out = { provider: null, renderMode: "auto", onloadName: null, language: null };
+      if (!scriptUrl) return out;
+      var url;
+      try {
+        url = new URL(scriptUrl, document.baseURI);
+      } catch (e) {
+        return out;
+      }
+      var compatParam = url.searchParams.get("compat");
+      if (compatParam === "recaptcha" || compatParam === "hcaptcha" || compatParam === "turnstile") {
+        out.provider = compatParam;
+      }
+      if (url.searchParams.get("render") === "explicit") out.renderMode = "explicit";
+      var onloadParam = url.searchParams.get("onload");
+      if (typeof onloadParam === "string" && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(onloadParam)) {
+        out.onloadName = onloadParam;
+      }
+      var hl = url.searchParams.get("hl");
+      if (typeof hl === "string" && hl !== "") out.language = kiwiNormalizeLang(hl) || null;
+      return out;
     }
+    var compatLoader = parseCompatLoader(compatScriptUrl);
+    compat = compatLoader.provider;
+    var compatRenderMode = compatLoader.renderMode;
+    var compatOnloadName = compatLoader.onloadName;
+    var compatLoaderLang = compatLoader.language;
     if (compat && compatScriptUrl) {
       // Round 27 (P2): revalidate — force-cache would let the browser
       // reuse a stale /api.js representation, defeating the server's ETag
@@ -1758,12 +1839,29 @@
         // Round 29 (P3): Turnstile's configurable response field
         // (response-field-name / params["response-field-name"]) — the
         // default stays the provider-named field.
-        responseField: (params && typeof params["response-field-name"] === "string" && params["response-field-name"])
-          || el.getAttribute("data-response-field-name") || COMPAT_FIELD,
+        // Round 30 (item 12): Turnstile's response-field=false keeps the
+        // internal Kiwi token field and SKIPS the provider alias input;
+        // response-field-name overrides the alias name.
+        responseField: (params && params["response-field"] === false)
+          || el.getAttribute("data-response-field") === "false"
+          ? false
+          : ((params && typeof params["response-field-name"] === "string" && params["response-field-name"])
+            || el.getAttribute("data-response-field-name") || COMPAT_FIELD),
         // Round 29 (WCAG 3.1.2): grecaptcha.render(el, {lang: "de"}) or
         // data-kiwi-lang on the incumbent container.
         lang: (params && typeof params.lang === "string" && params.lang)
-          || el.getAttribute("data-kiwi-lang") || undefined
+          || el.getAttribute("data-kiwi-lang") || undefined,
+        // Round 30 (P1): Turnstile action/cData — forwarded to the
+        // challenge request at issuance (server-owned binding).
+        action: (params && typeof params.action === "string" && params.action)
+          || el.getAttribute("data-action") || undefined,
+        cData: (params && typeof params.cData === "string" && params.cData)
+          || el.getAttribute("data-cdata") || undefined,
+        // Round 30 (items 12+14): Turnstile language + the public sitekey
+        // (server-owned scope resolution).
+        language: (params && typeof params.language === "string" && params.language)
+          || el.getAttribute("data-language") || undefined,
+        sitekey: sitekey || undefined
       });
       if (id && !kiwiCompatFirstId) kiwiCompatFirstId = id;
       return id || 0;
@@ -1791,7 +1889,10 @@
       // Round 28 (P3): render through compatRender so the same endpoint/
       // scope/response-field defaults land on the holder (an explicit
       // native-default endpoint would 404 on a compat deployment).
-      var id2 = compatRender(inner, { sitekey: action });
+      // Round 31 (P1): the REAL sitekey and the requested action are
+      // transmitted INDEPENDENTLY — passing the action as the sitekey
+      // disconnected the server-owned (sitekey, action) -> scope policy.
+      var id2 = compatRender(inner, { sitekey: sitekey, action: action });
       if (!id2) {
         if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
         return Promise.reject(new Error("kiwicaptcha: hidden render failed"));
@@ -1857,15 +1958,16 @@
         // glue bootstrap (implicit rendering already waited).
         ready: function (fn) {
           if (typeof fn !== "function") return;
-          (kiwiCompatGlueReady || Promise.resolve()).then(function () { try { fn(); } catch (e) {} });
+          (kiwiCompatGlueReady || Promise.resolve()).then(function () { kiwiSafeCallback(fn); });
         },
         enterprise: undefined
       });
     } else if (compat === "hcaptcha") {
       window.hcaptcha = window.hcaptcha || Object.assign({}, compatApi, {
         getRespKey: function (idOrEl) {
-          var id = (typeof idOrEl === "string" && kiwiWidgets[idOrEl]) ? idOrEl
-            : (idOrEl && idOrEl.nodeType === 1 && idOrEl.querySelector ? (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance : null);
+          // Round 31 (item 10): the omitted argument must default to the
+          // FIRST created widget exactly like the shared resolver.
+          var id = compatResolveId(idOrEl);
           return id ? kiwiGetResponse(id) : "";
         }
       });
@@ -1879,10 +1981,8 @@
     // explicit Argon render can never race the glue bootstrap.
     (kiwiCompatGlueReady || Promise.resolve()).then(function () {
       if (compatOnloadName) {
-        try {
-          var onloadFn = window[compatOnloadName];
-          if (typeof onloadFn === "function") onloadFn();
-        } catch (e) {}
+        var onloadFn = window[compatOnloadName];
+        if (typeof onloadFn === "function") kiwiSafeCallback(onloadFn);
       }
       if (compatRenderMode === "explicit") return;
       // Implicit render: every incumbent container on the page. The initial

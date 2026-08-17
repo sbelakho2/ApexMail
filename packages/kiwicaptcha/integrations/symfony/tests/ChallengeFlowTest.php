@@ -1652,6 +1652,23 @@ final class ChallengeFlowTest extends TestCase
 
     // ── Round 30 (items 14+15): server-owned sitekey/action + binding ──
 
+    public function testPerSitekeyBindingOptionIsRemoved(): void
+    {
+        // Round 31 (item 15): a per-sitekey "binding" option could not be
+        // enforced (the core binds by the GLOBAL binding_mode only) — it is
+        // REMOVED, and configuring it must be refused by the config tree
+        // (never a misleading "required" promise).
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setDefinition('my.storage', new Definition(ArrayStorage::class, []));
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => str_repeat('a', 32),
+            'storage' => 'my.storage',
+            'risk' => ['sitekeys' => ['old-app-key' => ['default_scope' => 'login', 'binding' => 'none']]],
+        ]], $container);
+    }
+
     public function testServerOwnedSitekeyActionResolution(): void
     {
         $storage = new ArrayStorage();
@@ -1675,36 +1692,5 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame('UNKNOWN_ACTION', $rejectedBody['error']['code'] ?? null);
     }
 
-    public function testUnboundCompatibilityProfileRequiresGlobalUnboundMode(): void
-    {
-        // Item 15: the per-sitekey binding:none relaxation is SERVER-OWNED
-        // and deployment-wide — with a bound global mode the combination is
-        // refused at container compile time (the client can never request
-        // the weaker mode).
-        $container = new ContainerBuilder();
-        $container->setParameter('kernel.environment', 'test');
-        $container->setDefinition('my.storage', new Definition(ArrayStorage::class, []));
-        $this->expectException(\LogicException::class);
-        $this->expectExceptionMessage('binding: none');
-        (new KiwiCaptchaExtension())->load([[
-            'secret_key' => str_repeat('a', 32),
-            'storage' => 'my.storage',
-            'risk' => ['enabled' => false, 'sitekeys' => ['old-app-key' => ['default_scope' => 'login', 'binding' => 'none']]],
-        ]], $container);
-    }
-
-    public function testUnboundCompatibilityProfileAllowedWithGlobalNoneMode(): void
-    {
-        $container = new ContainerBuilder();
-        $container->setParameter('kernel.environment', 'test');
-        $container->setDefinition('my.storage', new Definition(ArrayStorage::class, []));
-        (new KiwiCaptchaExtension())->load([[
-            'secret_key' => str_repeat('a', 32),
-            'storage' => 'my.storage',
-            'binding_mode' => 'none',
-            'risk' => ['enabled' => false, 'sitekeys' => ['old-app-key' => ['default_scope' => 'login', 'binding' => 'none']]],
-        ]], $container);
-        self::assertTrue(true, 'binding:none with a global unbound mode is a valid server-owned combination');
-    }
 }
 
