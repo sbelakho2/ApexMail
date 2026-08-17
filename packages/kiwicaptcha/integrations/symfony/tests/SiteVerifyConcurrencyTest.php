@@ -262,11 +262,16 @@ final class SiteVerifyConcurrencyTest extends TestCase
 
 
     /**
-     * Round 31 (item 12): provider retry contract under a DELIBERATELY
+     * Round 31 (item 12, P2): provider retry contract under a DELIBERATELY
      * SLOW Argon solve — 20 concurrent requests with the same token and
      * the same UUID must ALL receive the identical canonical response
      * (the PENDING_SAME wait follows the owner to completion instead of
-     * re-deriving) with exactly one redemption.
+     * re-deriving) with exactly one redemption. The round-31 (P2) lease
+     * loop makes the wait structural: the test's elapsed time stays under
+     * the bound because the waiters POLL the store instead of each
+     * re-deriving the Argon proof (20 re-derivations at ~5-15s each would
+     * blow the bound), and the challenge record ends consumed exactly once
+     * with the winner's committed result.
      */
     public function testSlowArgonSameIdempotencyKeyYieldsIdenticalResponses(): void
     {
@@ -312,6 +317,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-idem-slow-start-');
         $workers = 20;
         $children = [];
+        $startedAt = microtime(true);
         for ($i = 0; $i < $workers; $i++) {
             $pid = pcntl_fork();
             if ($pid === -1) {
@@ -366,6 +372,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                 $crashed = true;
             }
         }
+        $elapsed = microtime(true) - $startedAt;
         self::assertFalse($crashed, 'every worker must exit cleanly');
         $raw = (string) file_get_contents($outFile);
         $responses = array_values(array_filter(explode("\n", $raw), static fn (string $l): bool => $l !== ''));
@@ -376,6 +383,22 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $successes = \count(array_filter($responses, static fn (string $r): bool => str_contains($r, '"success":true')));
         self::assertSame($workers, $successes, 'same-key retries must all succeed: '.implode(' || ', array_slice($responses, 0, 3)));
         self::assertSame(1, \count(array_unique($responses)), 'all responses must be byte-identical');
+        // Round 31 (P2): the waiters must NOT re-derive the Argon proof —
+        // 20 re-derivations at ~5-15s each would take ~100-300s. Bounded
+        // elapsed time is the proof they polled the store instead.
+        self::assertLessThan(
+            90.0,
+            $elapsed,
+            sprintf('waiters must wait on the store instead of each re-deriving the Argon proof; elapsed %.1fs', $elapsed),
+        );
+        // Exactly ONE redemption: the winner's consume left the record
+        // consumed with its committed valid result.
+        $check = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $record = $check->get('kiwicaptcha:'.$challenge->nonce);
+        $check->disconnect();
+        self::assertIsString($record, 'the winner must leave the challenge record in place (consumed, not deleted)');
+        self::assertStringContainsString('"state":"consumed"', $record, 'the winner must consume the token exactly once');
+        self::assertStringContainsString('"consumed_result":{"valid":1', $record, 'the winner must commit its valid result for replay safety');
     }
 }
 

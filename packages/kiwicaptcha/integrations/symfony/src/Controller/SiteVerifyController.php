@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\AtomicStorageInterface;
@@ -42,6 +43,14 @@ final class SiteVerifyController
 {
     /** Round 30 (P1): documented bounded maximum for the `response` token. */
     private const MAX_RESPONSE_BYTES = 8192;
+
+    /**
+     * Round 31 (P2): the hard bound on the PENDING_SAME wait. Only after
+     * this (the catastrophic path) does a waiter fall through to the
+     * verifier; the owner's lease (30s) is refreshed by an atomic takeover
+     * long before, so this bound is the absolute tail.
+     */
+    private const IDEMPOTENCY_WAIT_SECS = 90.0;
 
     /**
      * @param array<string, string> $siteverifySecrets map of
@@ -176,9 +185,57 @@ final class SiteVerifyController
             }
         }
 
-        $token = SolutionToken::decode($response);
-        if ($token instanceof DecodeError) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
+        try {
+            $token = SolutionToken::decode($response);
+        } catch (DecodeError) {
+            // Round 31 (P2): a malformed token is a DETERMINISTIC failure —
+            // the claiming request FINALIZES it so a same-key retry
+            // reproduces the identical canonical response instead of
+            // leaving the entry pending until TTL.
+            $canonical = $this->canonicalizeResponse([
+                'success' => false,
+                'challenge_ts' => null,
+                'hostname' => null,
+                'error-codes' => ['invalid-input-response'],
+            ]);
+            if ($claimOwner !== null) {
+                $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
+            }
+
+            return new JsonResponse($canonical);
+        }
+
+        // Round 31 (P2): PENDING_SAME — another request with the SAME key
+        // + hash owns verification. This request WAITS on the store ONLY —
+        // polling stored() for completion and, once the owner's lease has
+        // expired, attempting an atomic takeover. It NEVER invokes the
+        // verifier while the owner may still be running (a deliberately
+        // slow Argon solve can legitimately take tens of seconds) — the
+        // round-31 wait-then-verify order caused waiters to race the owner
+        // for the token's consume and finalize failures. Verification
+        // happens strictly AFTER this wait.
+        if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
+            $stored = null;
+            $waitDeadline = microtime(true) + self::IDEMPOTENCY_WAIT_SECS;
+            while (true) {
+                $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
+                if ($stored !== null || microtime(true) >= $waitDeadline) {
+                    break;
+                }
+                // The lease gate is inside the store's Lua: before expiry
+                // this attempt is an atomic no-op (StillPending).
+                [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300);
+                if ($takeover === IdempotencyClaim::TookOver) {
+                    // This request now OWNS the entry — it will verify below
+                    // and finalize with the takeover owner token.
+                    $claimOwner = $takeoverOwner;
+                    break;
+                }
+                usleep(100_000);
+            }
+            if ($stored !== null) {
+                return new JsonResponse($this->canonicalizeResponse($stored));
+            }
         }
 
         // The SAME atomic verifier as the native path, WITH the expected
@@ -197,36 +254,6 @@ final class SiteVerifyController
             false,           // telemetry is never authoritative here
         );
 
-        // Round 30 (P1): PENDING_SAME — another request with the SAME key
-        // + hash is verifying. Wait briefly for its completion; if it
-        // completes, return its stored canonical response. If it never
-        // does (crash between claim and finalize), the retained
-        // consumed-state machinery below reconstructs the original
-        // outcome: this request has PROVEN the key+hash pair against the
-        // existing pending claim, so `fromStoredResult` is the ORIGINAL
-        // success — ordinary replays (no matching key) stay duplicate.
-        if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
-            // Round 31 (item 12): PENDING_SAME FOLLOWS the owning request to
-            // completion — a deliberately slow Argon solve can legitimately
-            // take tens of seconds, and a fixed 1s wait would fall through
-            // into a re-derivation and possibly a different response. The
-            // poll runs for a bounded lease window (30s); only after that
-            // does the crash-recovery path below reconstruct the original
-            // outcome via the core's retained consumed state (the key+hash
-            // pair was proven against the pending claim).
-            $stored = null;
-            for ($i = 0; $i < 300; $i++) {
-                usleep(100_000);
-                $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
-                if ($stored !== null) {
-                    break;
-                }
-            }
-            if ($stored !== null) {
-                return new JsonResponse($this->canonicalizeResponse($stored));
-            }
-        }
-
         // Round 26 (P1): the compatibility boundary distinguishes the FIRST
         // redemption from replays. The native deterministic-result retry
         // machinery stays inside the verifier, but a REPEATED Siteverify
@@ -241,11 +268,17 @@ final class SiteVerifyController
             // STILL pending reconstructs the ORIGINAL success from the
             // retained consumed state (crash recovery — the key+hash pair
             // was proven against the pending claim, so this is the SAME
-            // logical redemption). The entry cannot be finalized by this
-            // request (the owner token lives with the crashed request);
-            // it expires on TTL and the same-key path remains correct.
+            // logical redemption). Round 31 (P2): a TAKEOVER winner holds
+            // the owner token, so it finalizes the reconstructed outcome —
+            // the catastrophic deadline fall-through cannot and leaves the
+            // entry to expire on TTL.
             if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
-                return new JsonResponse($this->canonicalizeResponse($this->canonicalSuccess($outcome)));
+                $canonical = $this->canonicalizeResponse($this->canonicalSuccess($outcome));
+                if ($claimOwner !== null) {
+                    $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
+                }
+
+                return new JsonResponse($canonical);
             }
 
             return new JsonResponse([
@@ -258,7 +291,7 @@ final class SiteVerifyController
 
         if ($outcome->isOk()) {
             $canonical = $this->canonicalizeResponse($this->canonicalSuccess($outcome));
-            if ($idempotent && $claim === IdempotencyClaim::Claimed && $claimOwner !== null) {
+            if ($claimOwner !== null) {
                 $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
             }
 
@@ -273,7 +306,7 @@ final class SiteVerifyController
             'error-codes' => [$this->mapError($error)],
         ];
         $canonical = $this->canonicalizeResponse($canonical);
-        if ($idempotent && $claim === IdempotencyClaim::Claimed && $claimOwner !== null) {
+        if ($claimOwner !== null) {
             // A failed verification is ALSO finalized: a same-key retry
             // must reproduce the SAME canonical failure.
             $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
@@ -373,17 +406,11 @@ final class SiteVerifyController
     private function noteInvalidSecret(string $kind, string $gateKey): void
     {
         $count = null;
-        if ($this->logGate instanceof \Predis\Client) {
+        if ($this->logGate !== null) {
             try {
-                $count = $this->logGate->eval(self::LOG_GATE_LUA, 1, $gateKey, self::INVALID_SECRET_LOG_GATE_TTL_SECS);
+                $count = RedisEval::eval($this->logGate, self::LOG_GATE_LUA, $gateKey, [self::INVALID_SECRET_LOG_GATE_TTL_SECS]);
             } catch (\Throwable) {
                 $count = null; // telemetry failure must not affect verification
-            }
-        } elseif ($this->logGate instanceof \Redis) {
-            try {
-                $count = $this->logGate->eval(self::LOG_GATE_LUA, [$gateKey], 1, self::INVALID_SECRET_LOG_GATE_TTL_SECS);
-            } catch (\Throwable) {
-                $count = null;
             }
         }
         $count = $count !== null ? (int) $count : null;

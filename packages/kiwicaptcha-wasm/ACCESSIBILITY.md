@@ -1,10 +1,12 @@
 # KiwiCaptcha accessibility — WCAG 2.2 AA evidence, scope and limitations
 
 Round 29 establishes the accessibility acceptance set for the KiwiCaptcha
-widget. This document describes the component's **tested conformance
-scope** — what KiwiCaptcha itself provides and verifies, what the
-integrating page must provide, and the known limitations. It describes the
-software, not organizational structure.
+widget; round 31/32 extends it with computed non-text-contrast evidence
+(WCAG 1.4.11) and the WCAG 2.2 new-criteria dispositions below. This
+document describes the component's **tested conformance scope** — what
+KiwiCaptcha itself provides and verifies, what the integrating page must
+provide, and the known limitations. It describes the software, not
+organizational structure.
 
 ## Positioning
 
@@ -17,10 +19,15 @@ disabilities is needed because the challenge itself is not cognitive.
 
 The defensible product claim is:
 
-> KiwiCaptcha's user-facing widget conforms to WCAG 2.2 Level AA within
-> its component scope and is designed to support accessible
-> identification and security workflows under Directive (EU) 2019/882
-> (European Accessibility Act).
+> KiwiCaptcha is engineered and automatically tested to support WCAG 2.2 Level AA within its component scope, and to support accessible identification and security workflows under Directive (EU) 2019/882 (European Accessibility Act).
+
+The stronger conformance statement — that KiwiCaptcha's user-facing
+widget conforms to WCAG 2.2 Level AA — is NOT published for any release
+until a release-specific manual assistive-technology (AT) qualification
+artifact is recorded (see the release-qualification artifacts below).
+No completed artifact exists for v1.6.24 or v1.6.25, and automated
+evidence alone is not conformance evidence under WCAG (conformance
+depends on accessibility-supported technology).
 
 Component conformance is not whole-page conformance: KiwiCaptcha cannot
 make an entire e-commerce site EAA-compliant by itself. The consuming
@@ -39,22 +46,43 @@ manual assistive-technology qualification checklist in the release gate.
 | --- | --- | --- |
 | Badge text >= 4.5:1 (>= 5:1 headroom) in light and dark themes, all states | 1.4.3 | contrast computed in the a11y suite for solving/done/failed/idle badges; axe `color-contrast` |
 | No state conveyed by color alone | 1.4.1 | badge text + `role=status` announcements carry every state |
-| Forced-colors / high-contrast mode | 1.4.3 (forced-colors) | `@media (forced-colors: active)` rules; emulated in the suite |
+| Forced-colors / high-contrast mode (accessibility-support evidence, not a WCAG success criterion) | — | `@media (forced-colors: active)` rules keep the widget and Retry discernible with system colors; emulated in the suite |
+| Non-text contrast: Retry control boundary and focus indicator >= 3:1 against the widget surface | 1.4.11 | the suite COMPUTES the border/outline colors and the composited button background over the widget surface and applies the WCAG formula — a computed check, not a CSS comment |
+| Focus not obscured: the Retry is the only focusable component control | 2.4.11 | asserted structurally in the suite (single focusable control; the widget renders no overlapping content above it) |
 | Progress indicator not exposed as a control/status object | 4.1.2 | `.kiwi-track` is `aria-hidden="true"` (no `role=progressbar`); meaningful states go to the live region |
 | Meaningful live region only | 4.1.3 | single polite `role=status` announcer; only Checking/verified/failed/expired/unavailable transitions |
 | Keyboard operation: every action keyboard-operable | 2.1.1 / 2.1.2 | the Retry button is a native `<button>`; the passive widget is never focusable; no keyboard trap |
 | No pointerdown-only activation | 2.5.2 | reacquisition uses the native button with click activation only |
-| Visible focus | 2.4.7 | `:focus-visible` ring on the Retry button |
+| Visible focus | 2.4.7 | `:focus-visible` ring on the Retry button (its 1.4.11 contrast is computed above) |
 | Pointer targets >= 24x24 CSS px (32px height) | 2.5.8 | `min-height: 32px; min-width: 24px` on the Retry button; bounding-box asserted |
 | No content/function loss at 200% text resize | 1.4.4 | 320 CSS px reflow + text-spacing overrides asserted; long German strings tested |
 | Text spacing overrides (1.4.12) | 1.4.12 | letter/word spacing + line-height overrides injected and asserted |
-| Reduced motion eliminates decorative motion | 2.3.3 / 2.3.1 | CSS animations + the SVG SMIL wink removed under `prefers-reduced-motion`; asserted |
+| Reduced motion eliminates decorative motion | 2.3.1 (A); 2.3.3 is Level AAA — the reduced-motion support satisfies 2.3.1 (A) plus above-AA 2.3.3 engineering | CSS animations + the SVG SMIL wink removed under `prefers-reduced-motion`; asserted |
 | Expiry never destroys host-form data or blocks reacquisition | 1.4.10 / 2.1.1 | expiry clears only the token field + fires the expired callback; the Retry button remains |
 | Language of the widget subtree programmatically determinable | 3.1.2 | `lang` attribute resolved from `options.lang` / `data-kiwi-lang` / `navigator.language`; `dir=rtl` for RTL packs; untranslated fallback marked `lang="en"` |
 | Correct name/role/value for the widget's UI components | 4.1.2 | `role=group` on the widget, native button with a name, hidden decorative SVG |
 | Decorative material absent from the accessibility tree | 1.1.1 / 4.1.2 | mascot SVG `aria-hidden` + `focusable=false` |
 | No cognitive/visual/audio test as a required fallback | 3.3.8 | the automatic computational challenge is the ONLY path (no puzzle/audio alternatives exist) |
 | Automated evidence across engines | — | axe + scenario suite in Chromium, Firefox and WebKit |
+
+## WCAG 2.2 new criteria — disposition matrix
+
+WCAG 2.2 added nine success criteria. The widget's disposition for every
+new criterion that touches its component scope:
+
+| WCAG 2.2 SC | Level | Disposition |
+| --- | --- | --- |
+| 2.4.11 Focus Not Obscured (Minimum) | AA | Supported — the Retry button is the only focusable component control, and the widget renders no overlapping content above it, so the focused control cannot be entirely hidden by author-created content; asserted structurally in the suite |
+| 2.4.12 Focus Not Obscured (Enhanced) | AAA | Above-AA engineering — the same structural guarantee (single focusable control, no overlapping author-created content) exceeds the AAA bar by design |
+| 2.5.7 Dragging Movements | N/A | No drag interaction exists in the widget; every action is a single click or keyboard activation, so a pointer-drag alternative is not applicable |
+| 2.5.8 Target Size Minimum | AA | Supported — the Retry button is >= 24x24 CSS px with a 32px height (an accessibility/security control has no reason to be cramped); bounding box asserted in the suite |
+| 3.2.6 Consistent Help | N/A (host-page responsibility) | KiwiCaptcha provides no help mechanism of its own; consistent placement of help is the integrating page's responsibility, not the component's |
+| 3.3.7 Redundant Entry | N/A | The widget captures no user-entered data, so nothing is ever re-requested |
+| 3.3.8 Accessible Authentication (Minimum) | AA | Strongly satisfied structurally — the automatic computational challenge is the ONLY path, and no cognitive test is ever required, so no alternative authentication path is needed |
+
+The two new criteria outside the component scope (3.2.6 above is a
+host-page responsibility, not a widget capability) have no widget-level
+disposition beyond N/A.
 
 ## Locale contract
 
@@ -78,10 +106,31 @@ release, the maintainers qualify the widget with:
 - NVDA + Firefox, NVDA + Chrome (Windows)
 - VoiceOver + Safari (macOS)
 - TalkBack + Chrome (Android)
+- at least one speech-recognition or switch-access pass (W3C's own
+  explanation of 2.4.11 discusses keyboard-equivalent switch and voice
+  input)
 
 The checklist: Tab order reaches the Retry button and the form fields,
 Enter/Space activate the button, the live region announces
 Checking/verified/failed/expired, and the widget never traps focus.
+
+### Release-qualification artifacts
+
+Each release records a qualification artifact with the template below.
+The stronger conformance statement (that the user-facing widget
+conforms to WCAG 2.2 Level AA) is published only when the artifact for
+that release is complete:
+
+- release tag and commit
+- browser versions (Chromium, Firefox, Safari, Android Chrome)
+- AT versions: NVDA, VoiceOver, TalkBack, plus the speech-recognition or
+  switch-access tool used
+- date and tester
+- pass/fail notes and known exceptions
+
+No completed artifact exists for any release yet — including v1.6.24 and
+v1.6.25 — so only the conservative claim in the Positioning section is
+published.
 
 ## Known limitations
 
@@ -99,13 +148,24 @@ Checking/verified/failed/expired, and the widget never traps focus.
 
 Directive (EU) 2019/882 Annex I requires covered services' identification,
 security and payment functionality to be perceivable, operable,
-understandable and robust. KiwiCaptcha maps its WCAG 2.2 AA evidence to
-the EAA POUR requirements and to the applicable standards as they mature:
+understandable and robust. The component-scoped EAA statement is:
+
+> KiwiCaptcha is designed to support EAA accessibility requirements for identification and security functionality when integrated into a conforming service.
+
+The phrase "KiwiCaptcha is EAA compliant" is deliberately not used: the
+Act regulates the covered service or product, not an embedded component.
+Host-page headings, labels, authentication architecture, customer
+support, accessibility information, mobile application behavior and
+national implementation remain outside the component and are the
+integrating service's responsibility.
+
+KiwiCaptcha maps its WCAG 2.2 AA evidence to the EAA POUR requirements
+and to the applicable standards as they mature:
 
 | EAA Annex I requirement | WCAG 2.2 AA evidence above | Kiwi test | EN 301 549 / M/587 clause |
 | --- | --- | --- | --- |
-| Perceivable (information and UI presented to all users) | 1.4.3, 1.4.1, 3.1.2, live region | a11y suite: contrast, forced-colors, lang/dir, announcements | EN 301 549 9.1.x (WCAG-mapped); M/587 update in progress |
-| Operable (navigation and interaction available to all users) | 2.1.1, 2.5.2, 2.5.8, 2.4.7 | a11y suite: keyboard-only, pointer targets, no pointerdown | EN 301 549 9.2.x; M/587 in progress |
+| Perceivable (information and UI presented to all users) | 1.4.3, 1.4.1, 1.4.11, 3.1.2, live region | a11y suite: contrast, forced-colors, lang/dir, announcements | EN 301 549 9.1.x (WCAG-mapped); M/587 update in progress |
+| Operable (navigation and interaction available to all users) | 2.1.1, 2.5.2, 2.5.8, 2.4.7, 2.4.11 | a11y suite: keyboard-only, pointer targets, no pointerdown | EN 301 549 9.2.x; M/587 in progress |
 | Understandable (information and operation are clear) | 3.3.8, 3.1.2 | automatic computational challenge; localized strings | EN 301 549 9.3.x; M/587 in progress |
 | Robust (compatible with assistive technology) | 4.1.2, 4.1.3 | axe semantics + role=status assertions + manual AT gate | EN 301 549 9.4.x; M/587 in progress |
 

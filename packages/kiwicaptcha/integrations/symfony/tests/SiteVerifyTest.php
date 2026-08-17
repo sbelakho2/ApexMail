@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
@@ -413,6 +414,98 @@ final class SiteVerifyTest extends TestCase
             'secret' => 'secret-B-'.str_repeat('b', 16), 'response' => $tokenB, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]))->getContent(), true);
         self::assertSame(true, $second['success'] ?? null, 'different backends must not collide on the same UUID');
+    }
+
+    // ── Round 31 (P2): the owner lease + atomic takeover ───────────────
+
+    public function testTakeoverReturnsTookOverToExactlyOneWaiterAfterLeaseExpiry(): void
+    {
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $uuid = '623e4567-e89b-42d3-a456-426614174000';
+        $hash = 'response-hash';
+
+        [$claim, $owner] = $store->claim($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::Claimed, $claim);
+        self::assertNotNull($owner);
+
+        [$second] = $store->claim($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::PendingSame, $second);
+
+        // While the owner's lease is valid the takeover attempt is a no-op.
+        [$whileHeld] = $store->takeover($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::StillPending, $whileHeld);
+
+        // Expire the lease: exactly ONE caller may win the takeover; the
+        // loser must see the record unchanged (the winner's refreshed
+        // lease keeps it pending).
+        $now += 31;
+        [$first, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::TookOver, $first);
+        self::assertNotNull($newOwner);
+        [$secondTakeover] = $store->takeover($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::StillPending, $secondTakeover, 'the loser sees StillPending — the winner refreshed the lease');
+    }
+
+    public function testFinalizeByTheOldOwnerIsRefusedAfterTakeover(): void
+    {
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $uuid = '723e4567-e89b-42d3-a456-426614174000';
+        $hash = 'response-hash';
+
+        [$claim, $oldOwner] = $store->claim($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::Claimed, $claim);
+
+        $now += 31;
+        [$takeover, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300);
+        self::assertSame(IdempotencyClaim::TookOver, $takeover);
+
+        // The crashed owner's finalize must be a no-op after the takeover.
+        $store->finalize($backendId, $uuid, $hash, $oldOwner, ['success' => true]);
+        self::assertNull($store->stored($backendId, $uuid), 'the old owner cannot finalize after the takeover');
+
+        // The takeover winner finalizes with ITS token.
+        $store->finalize($backendId, $uuid, $hash, $newOwner, ['success' => true]);
+        self::assertSame(['success' => true], $store->stored($backendId, $uuid));
+    }
+
+    public function testMalformedTokenFinalizesTheClaimDeterministically(): void
+    {
+        $storage = new ArrayStorage();
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $controller = $this->controller(idempotencyStore: $store, storage: $storage);
+        $uuid = '823e4567-e89b-42d3-a456-426614174000';
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $malformed = 'not-a-valid-solution-token';
+
+        $first = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $malformed, 'idempotency_key' => $uuid,
+        ]))->getContent();
+        $body = json_decode($first, true);
+        self::assertFalse($body['success'] ?? true);
+        self::assertSame(['invalid-input-response'], $body['error-codes'] ?? null);
+
+        // A same-key retry reproduces the IDENTICAL canonical failure.
+        $second = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $malformed, 'idempotency_key' => $uuid,
+        ]))->getContent();
+        self::assertSame($first, $second, 'a same-key malformed retry must return the identical canonical failure');
+        self::assertSame(['invalid-input-response'], json_decode($second, true)['error-codes'] ?? null);
+
+        // The claim was FINALIZED: the store exposes the failure.
+        $stored = $store->stored($backendId, $uuid);
+        self::assertIsArray($stored);
+        self::assertFalse($stored['success'] ?? true);
+        self::assertSame(['invalid-input-response'], $stored['error-codes'] ?? null);
     }
 }
 

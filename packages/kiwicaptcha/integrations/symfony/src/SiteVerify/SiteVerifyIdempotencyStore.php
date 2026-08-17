@@ -21,9 +21,18 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * consumed result as the original success and finalize the entry — this
  * does NOT make ordinary token replays successful (the key+hash pair must
  * match a pending claim for THIS pair).
+ *
+ * Round 31 (P2): every claim carries a LEASE (`lease_expires_at`, Unix
+ * seconds, set at claim creation and refreshed on takeover). A PENDING_SAME
+ * waiter whose lease has expired may atomically TAKEOVER the entry and
+ * become the owner — a crashed owner therefore blocks the key for at most
+ * one lease window instead of the full TTL.
  */
 interface SiteVerifyIdempotencyStore
 {
+    /** The lease window in seconds (see {@see self::takeover()}). */
+    public const LEASE_SECONDS = 30;
+
     /**
      * Atomically claim (or join) the idempotency entry for this
      * backend + key + response pair. `backendId` separates configured
@@ -44,4 +53,18 @@ interface SiteVerifyIdempotencyStore
 
     /** The stored canonical response for a COMPLETE_SAME claim, or null. */
     public function stored(string $backendId, string $idempotencyKey): ?array;
+
+    /**
+     * Atomically take over a PENDING_SAME claim whose lease has expired.
+     * Succeeds ONLY when the entry is still pending AND
+     * `lease_expires_at` is in the past: the caller then replaces the
+     * owner, refreshes the lease, and wins the takeover. A losing attempt
+     * leaves the record untouched.
+     *
+     * @return array{0: IdempotencyClaim, 1: ?string} TookOver + the NEW
+     *         owner token the winner must finalize with, or StillPending +
+     *         null when the lease is still held (or the entry is complete /
+     *         belongs to a different response hash)
+     */
+    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds): array;
 }
