@@ -133,7 +133,11 @@ final class ChallengeController
     private const IDENTIFIER_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
 
     /** The ONLY JSON fields the challenge POST accepts (audit #72). */
-    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding'];
+    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey'];
+
+    /** Round 30 (P1): Turnstile-compatible shapes, per Cloudflare's docs. */
+    private const ACTION_PATTERN = '/^[a-z0-9_-]{1,32}$/i';
+    private const CDATA_PATTERN = '/^[a-z0-9_-]{1,255}$/i';
 
     /**
      * SECURITY-SINGULAR headers (audit #100): each of these carries client
@@ -179,6 +183,10 @@ final class ChallengeController
         private readonly array $allowedScopes = [],
         /** Round 24: public sitekey -> scope alias map (migration compat). */
         private readonly array $sitekeyAllowlist = [],
+        /** Round 30 (P1): server-side provider-metadata sidecar (nullable). */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
+        /** Round 30 (item 14): server-owned sitekey policy map. */
+        private readonly array $sitekeyPolicy = [],
     ) {
     }
 
@@ -456,6 +464,9 @@ final class ChallengeController
         if ((array_key_exists('scope', $payload) && !\is_string($payload['scope']))
             || (array_key_exists('algorithm', $payload) && !\is_string($payload['algorithm']))
             || (array_key_exists('request_binding', $payload) && $payload['request_binding'] !== null && !\is_string($payload['request_binding']))
+            || (array_key_exists('action', $payload) && !\is_string($payload['action']))
+            || (array_key_exists('cdata', $payload) && !\is_string($payload['cdata']))
+            || (array_key_exists('sitekey', $payload) && !\is_string($payload['sitekey']))
         ) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request fields must be strings.']],
@@ -463,6 +474,24 @@ final class ChallengeController
             );
         }
         $scope = isset($payload['scope']) ? (string) $payload['scope'] : 'default';
+
+        // Round 30 (P1): provider-compatible challenge metadata is
+        // validated HERE, at issuance — provider shapes, bounded, so a
+        // malformed action/cData can never be persisted or returned.
+        $action = isset($payload['action']) && $payload['action'] !== '' ? (string) $payload['action'] : null;
+        $cdata = isset($payload['cdata']) && $payload['cdata'] !== '' ? (string) $payload['cdata'] : null;
+        if ($action !== null && !preg_match(self::ACTION_PATTERN, $action)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The action must be 1-32 characters of [a-z0-9_-].']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        if ($cdata !== null && !preg_match(self::CDATA_PATTERN, $cdata)) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The cdata must be 1-255 characters of [a-z0-9_-].']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
 
         // IDENTIFIER VALIDATION (audit #96): scope/tenant identifiers and
         // request bindings must match `[A-Za-z0-9._:-]+` with the 128-char
@@ -477,6 +506,32 @@ final class ChallengeController
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => 'The scope must be 1-128 characters of [A-Za-z0-9._:-].']],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
+        }
+
+        // Round 30 (item 14): SERVER-OWNED v3-style (sitekey, action)
+        // resolution. When the request carries a sitekey that has a
+        // configured policy, the security scope is resolved from the
+        // (sitekey, action) pair: the browser NEVER gets to choose
+        // protected scope names. Unknown actions are REJECTED (never
+        // silently mapped to a default); the per-sitekey binding profile
+        // also resolves here (required by default — the client can never
+        // request the weaker unbound mode).
+        $sitekey = isset($payload['sitekey']) && $payload['sitekey'] !== '' ? (string) $payload['sitekey'] : null;
+        $bindingProfile = null;
+        if ($sitekey !== null && isset($this->sitekeyPolicy[$sitekey])) {
+            $policy = $this->sitekeyPolicy[$sitekey];
+            $actionKey = $action ?? '';
+            if ($actionKey !== '' && isset($policy['actions'][$actionKey])) {
+                $scope = $policy['actions'][$actionKey];
+            } elseif ($actionKey === '') {
+                $scope = $policy['default_scope'] ?? 'login';
+            } else {
+                return $this->privateJson(
+                    ['error' => ['code' => 'UNKNOWN_ACTION', 'message' => 'The action is not configured for this sitekey.']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                );
+            }
+            $bindingProfile = $policy['binding'] ?? 'required';
         }
 
         // MIGRATION SITEKEY ALIAS (round 24): a public sitekey is optional
@@ -767,6 +822,12 @@ final class ChallengeController
             $hostname = $this->publicBaseUrl !== null
                 ? parse_url($this->publicBaseUrl, PHP_URL_HOST) ?: null
                 : null;
+            // Round 30 (item 15): the per-sitekey binding profile is
+            // SERVER-OWNED — an explicitly configured "none" profile is
+            // only valid when the deployment's GLOBAL binding mode is
+            // unbound (validated at container compile time; the client can
+            // never request the weaker mode). Issuance always uses the
+            // canonical client IP.
             $challenge = $profile !== null
                 ? $this->issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
                 : $this->issuer->issue($scope, $clientIp, $requestBinding, $hostname);
@@ -819,6 +880,33 @@ final class ChallengeController
                 return $this->privateJson(
                     ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied: outstanding challenge limit reached. Try again later.']],
                     Response::HTTP_TOO_MANY_REQUESTS,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+        }
+
+        // Round 30 (P1): provider-compatible challenge metadata (action /
+        // cData) is bound to the nonce AT ISSUANCE, server-side. If the
+        // metadata was explicitly supplied and the sidecar CANNOT persist
+        // it, the minted challenge is discarded and the request fails 503
+        // — a token whose verification would return no action/cData must
+        // never be handed out (ambiguous compatibility behavior).
+        if (($action !== null || $cdata !== null) && $this->metadataStore !== null) {
+            try {
+                $this->metadataStore->store($challenge->nonce, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata($action, $cdata, $scope), max(60, $challenge->ttlSecs) + 60);
+            } catch (\Throwable $e) {
+                error_log(sprintf('kiwicaptcha: siteverify metadata store failed for nonce %s: %s', $challenge->nonce, $e->getMessage()));
+                try {
+                    $this->storage?->delete($challenge->nonce);
+                } catch (\Throwable) {
+                    // Best-effort discard; the record expires on its own TTL.
+                }
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
                     $request,
                     $riskSession,
                     $mintedCookie,

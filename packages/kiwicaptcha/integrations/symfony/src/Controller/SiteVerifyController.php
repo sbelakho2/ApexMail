@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\AtomicStorageInterface;
@@ -39,6 +40,9 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final class SiteVerifyController
 {
+    /** Round 30 (P1): documented bounded maximum for the `response` token. */
+    private const MAX_RESPONSE_BYTES = 8192;
+
     /**
      * @param array<string, string> $siteverifySecrets map of
      *        server-to-server secret -> expected scope; EMPTY disables the
@@ -53,7 +57,22 @@ final class SiteVerifyController
         private readonly array $siteverifySecrets,
         private readonly ?AtomicStorageInterface $storage = null,
         private readonly ?LoggerInterface $logger = null,
+        // Round 30 (P1): server-owned compatibility metadata (action/cData
+        // bound at challenge issuance) and provider-style verification
+        // idempotency (idempotency_key). Null disables the respective
+        // feature: metadata never appears in the response, and an
+        // idempotency_key on the request is rejected (the operator must
+        // wire the stores for provider-style retries).
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $idempotencyStore = null,
+        /** Round 30 (item 16): shared Redis log gate (optional). */
+        private readonly \Predis\Client|\Redis|null $logGate = null,
     ) {
+    }
+
+    private function logGateKey(): string
+    {
+        return '{kiwicaptcha}:log-gate:siteverify-invalid-secret:'.(string) floor(time() / self::INVALID_SECRET_LOG_INTERVAL);
     }
 
     public function siteverify(Request $request): Response
@@ -79,44 +98,48 @@ final class SiteVerifyController
         $response = $body['response'] ?? null;
         $secret = $body['secret'] ?? null;
         $remoteIp = \is_string($body['remoteip'] ?? null) ? $body['remoteip'] : null;
-        // Round 29 (P3): Cloudflare's current Siteverify contract carries
-        // idempotency_key / action / cdata. Kiwi's deterministic
-        // consumed-result machinery IS the idempotency guarantee: a
-        // retried verification of the same `response` always resolves to
-        // the SAME stored outcome (safe retries are free, and a token can
-        // never produce a second success). `action` is client-declared
-        // metadata (the authoritative scope is resolved server-side from
-        // the presented secret) and `cdata` is echoed verbatim by
-        // Cloudflare for correlation — both are accepted and validated as
-        // bounded strings for shape, and included in the response shape.
-        $action = \is_string($body['action'] ?? null) ? $body['action'] : null;
-        $cdata = \is_string($body['cdata'] ?? null) ? $body['cdata'] : null;
+        // Round 30 (P1): action / cData are NEVER accepted on the
+        // verification request — that would let a backend request tell
+        // Kiwi "this token's action was checkout", reversing the trust
+        // direction. They are captured at CHALLENGE ISSUANCE (widget
+        // data-action/data-cdata) and returned from the server-side
+        // metadata store.
         $idempotencyKey = \is_string($body['idempotency_key'] ?? null) ? $body['idempotency_key'] : null;
-        if ($action !== null && (\strlen($action) < 1 || \strlen($action) > 1024)) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
+        // Round 30 (P1): the token length is bounded BEFORE decoding —
+        // provider contracts document a 2048-char maximum; Kiwi's own
+        // legitimate encoding fits comfortably under 8192, which is the
+        // documented bound here (the 16 KiB whole-body ceiling stays as
+        // the outer envelope).
+        if (!\is_string($response) || $response === '') {
+            return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-response']]);
         }
-        if ($cdata !== null && \strlen($cdata) > 4096) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
-        }
-        if ($idempotencyKey !== null && \strlen($idempotencyKey) > 128) {
+        if (\strlen($response) > self::MAX_RESPONSE_BYTES) {
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
         }
 
-        if (!\is_string($response) || $response === '') {
-            return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-response']]);
+        // Round 30 (P1): a UUID-shaped idempotency_key only — arbitrary
+        // short strings are rejected BEFORE the verifier (bounded
+        // cardinality, no attacker-controlled shapes).
+        if ($idempotencyKey !== null) {
+            if (!\preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $idempotencyKey)) {
+                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
+            if ($this->idempotencyStore === null) {
+                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
         }
 
         // Round 26: the presented secret authenticates the backend AND
         // resolves the EXPECTED SCOPE the verifier must enforce. Constant-
         // time comparisons; the detail goes to the log only. A secret not
         // in the server-owned map is rejected — an attacker-invented
-        // secret can never reach the verifier.
+        // secret can never reach the verifier. Round 30 (P1): MISSING vs
+        // INVALID are distinct provider codes.
         $expectedScope = null;
-        if (!\is_string($secret)) {
-            $this->noteInvalidSecret('missing');
-            $this->flushInvalidSecretLog(1);
+        if (!\is_string($secret) || $secret === '') {
+            $this->noteInvalidSecret('missing', $this->logGateKey());
 
-            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
+            return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-secret']]);
         }
         foreach ($this->siteverifySecrets as $configuredSecret => $scope) {
             if (hash_equals($configuredSecret, $secret)) {
@@ -125,10 +148,32 @@ final class SiteVerifyController
             }
         }
         if ($expectedScope === null) {
-            $this->noteInvalidSecret('invalid');
-            $this->flushInvalidSecretLog(1);
+            $this->noteInvalidSecret('invalid', $this->logGateKey());
 
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
+        }
+
+        // Round 30 (P1): provider-style verification idempotency. The
+        // claim is atomic; only the OWNING request verifies the token.
+        // A same-key retry either returns the stored canonical response or
+        // (crash window) reconstructs the original outcome via the core's
+        // retained consumed-result machinery — ordinary replays WITHOUT a
+        // matching key stay timeout-or-duplicate.
+        $backendId = hash('sha256', $secret);
+        $claim = IdempotencyClaim::Claimed;
+        $claimOwner = null;
+        $idempotent = false;
+        if ($idempotencyKey !== null) {
+            $idempotent = true;
+            [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300);
+            if ($claim === IdempotencyClaim::Conflict) {
+                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
+            if ($claim === IdempotencyClaim::CompleteSame) {
+                $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
+
+                return new JsonResponse($stored !== null ? $this->canonicalizeResponse($stored) : ['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
+            }
         }
 
         $token = SolutionToken::decode($response);
@@ -152,12 +197,49 @@ final class SiteVerifyController
             false,           // telemetry is never authoritative here
         );
 
+        // Round 30 (P1): PENDING_SAME — another request with the SAME key
+        // + hash is verifying. Wait briefly for its completion; if it
+        // completes, return its stored canonical response. If it never
+        // does (crash between claim and finalize), the retained
+        // consumed-state machinery below reconstructs the original
+        // outcome: this request has PROVEN the key+hash pair against the
+        // existing pending claim, so `fromStoredResult` is the ORIGINAL
+        // success — ordinary replays (no matching key) stay duplicate.
+        if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
+            $stored = null;
+            for ($i = 0; $i < 20; $i++) {
+                usleep(50_000);
+                $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
+                if ($stored !== null) {
+                    break;
+                }
+            }
+            if ($stored !== null) {
+                return new JsonResponse($this->canonicalizeResponse($stored));
+            }
+        }
+
         // Round 26 (P1): the compatibility boundary distinguishes the FIRST
         // redemption from replays. The native deterministic-result retry
         // machinery stays inside the verifier, but a REPEATED Siteverify
         // redemption of the same nonce must NOT report success again — it
-        // returns the provider vocabulary for a consumed token.
+        // returns the provider vocabulary for a consumed token. The
+        // Round-30 exception: an idempotent retry that has PROVEN the
+        // same key+hash against a pending claim may interpret the stored
+        // result as the original outcome (crash recovery) — it is the
+        // SAME logical redemption, not a second one.
         if ($outcome->isOk() && $outcome->fromStoredResult) {
+            // Round 30 (P1): a same-key + same-hash retry whose claim is
+            // STILL pending reconstructs the ORIGINAL success from the
+            // retained consumed state (crash recovery — the key+hash pair
+            // was proven against the pending claim, so this is the SAME
+            // logical redemption). The entry cannot be finalized by this
+            // request (the owner token lives with the crashed request);
+            // it expires on TTL and the same-key path remains correct.
+            if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
+                return new JsonResponse($this->canonicalizeResponse($this->canonicalSuccess($outcome)));
+            }
+
             return new JsonResponse([
                 'success' => false,
                 'challenge_ts' => null,
@@ -167,35 +249,77 @@ final class SiteVerifyController
         }
 
         if ($outcome->isOk()) {
-            // The consumed record is RETAINED until TTL (the consumed-state
-            // design), so the deterministic outcome's record metadata is
-            // available for the provider-shaped response.
-            $issuedAt = null;
-            $hostname = null;
-            if ($this->storage !== null && $outcome->nonce() !== null) {
-                $record = $this->storage->find($outcome->nonce());
-                if ($record !== null) {
-                    $issuedAt = $record->issuedAt;
-                    $hostname = $record->hostname;
-                }
+            $canonical = $this->canonicalizeResponse($this->canonicalSuccess($outcome));
+            if ($idempotent && $claim === IdempotencyClaim::Claimed && $claimOwner !== null) {
+                $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
             }
 
-            return new JsonResponse([
-                'success' => true,
-                'challenge_ts' => $issuedAt !== null ? gmdate('Y-m-d\TH:i:s\Z', $issuedAt) : null,
-                'hostname' => $hostname,
-                'error-codes' => [],
-            ]);
+            return new JsonResponse($canonical);
         }
 
         $error = $outcome->error();
-
-        return new JsonResponse([
+        $canonical = [
             'success' => false,
             'challenge_ts' => null,
             'hostname' => null,
             'error-codes' => [$this->mapError($error)],
-        ]);
+        ];
+        $canonical = $this->canonicalizeResponse($canonical);
+        if ($idempotent && $claim === IdempotencyClaim::Claimed && $claimOwner !== null) {
+            // A failed verification is ALSO finalized: a same-key retry
+            // must reproduce the SAME canonical failure.
+            $this->idempotencyStore->finalize($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical);
+        }
+
+        return new JsonResponse($canonical);
+    }
+
+    /**
+     * Canonicalize a provider response for storage/comparison: sorted keys
+     * make the stored round-trip byte-deterministic, so a same-key retry
+     * returns the IDENTICAL JSON bytes (the concurrency contract).
+     */
+    private function canonicalizeResponse(array $response): array
+    {
+        ksort($response);
+
+        return $response;
+    }
+
+    /**
+     * The provider-shaped success response, including the SERVER-STORED
+     * challenge metadata (action/cData bound at issuance — never echoed
+     * from the request) and the retained record's challenge_ts/hostname.
+     */
+    private function canonicalSuccess(VerifyOutcome $outcome): array
+    {
+        $issuedAt = null;
+        $hostname = null;
+        if ($this->storage !== null && $outcome->nonce() !== null) {
+            $record = $this->storage->find($outcome->nonce());
+            if ($record !== null) {
+                $issuedAt = $record->issuedAt;
+                $hostname = $record->hostname;
+            }
+        }
+        $action = null;
+        $cdata = null;
+        if ($this->metadataStore !== null && $outcome->nonce() !== null) {
+            $metadata = $this->metadataStore->find($outcome->nonce());
+            if ($metadata !== null) {
+                $action = $metadata->action;
+                $cdata = $metadata->cdata;
+            }
+        }
+
+        return [
+            'success' => true,
+            'challenge_ts' => $issuedAt !== null ? gmdate('Y-m-d\TH:i:s\Z', $issuedAt) : null,
+            'hostname' => $hostname,
+            'action' => $action,
+            'cdata' => $cdata,
+            'error-codes' => [],
+        ];
     }
 
     private function mapError(VerifyError $error): string
@@ -226,36 +350,51 @@ final class SiteVerifyController
     private const MAX_BODY_BYTES = 16 * 1024;
 
     /**
-     * Round 28 (P3): invalid/missing-secret attempts are AGGREGATED into a
-     * single log line per burst instead of one warning per attack request —
-     * an unauthenticated bot flood must not become an inexpensive public
-     * log-flood surface. The window is deliberately short (a burst is
-     * bounded in time) and the counter resets when the window elapses.
+     * Round 30 (item 16): invalid-secret diagnostics are gated by a SHARED
+     * log gate (Redis INCR + EXPIRE) so the aggregation is deployment-wide
+     * — the round-28 per-controller-instance counters were useless across
+     * PHP-FPM workers (a fresh controller per request). Logging is
+     * logarithmic (1, 2, 4, 8...): early visibility + bounded flood
+     * amplification. Log-gate failure NEVER affects verification: on
+     * Redis errors the detailed log is suppressed (requests are still
+     * rejected).
      */
-    private int $invalidSecretCount = 0;
-    private float $invalidSecretWindowStart = 0.0;
-    private const INVALID_SECRET_LOG_EVERY = 32;
-    private const INVALID_SECRET_WINDOW_SECS = 5.0;
+    private const INVALID_SECRET_LOG_GATE_TTL_SECS = 5;
+    private const INVALID_SECRET_LOG_INTERVAL = 5.0;
 
-    private function noteInvalidSecret(string $kind): void
+    private function noteInvalidSecret(string $kind, string $gateKey): void
     {
-        $now = microtime(true);
-        if ($this->invalidSecretWindowStart === 0.0 || $now - $this->invalidSecretWindowStart > self::INVALID_SECRET_WINDOW_SECS) {
-            $this->invalidSecretWindowStart = $now;
-            $this->invalidSecretCount = 0;
+        $count = null;
+        if ($this->logGate instanceof \Predis\Client) {
+            try {
+                $count = $this->logGate->eval(self::LOG_GATE_LUA, 1, $gateKey, self::INVALID_SECRET_LOG_GATE_TTL_SECS);
+            } catch (\Throwable) {
+                $count = null; // telemetry failure must not affect verification
+            }
+        } elseif ($this->logGate instanceof \Redis) {
+            try {
+                $count = $this->logGate->eval(self::LOG_GATE_LUA, [$gateKey], 1, self::INVALID_SECRET_LOG_GATE_TTL_SECS);
+            } catch (\Throwable) {
+                $count = null;
+            }
         }
-        ++$this->invalidSecretCount;
+        $count = $count !== null ? (int) $count : null;
+        // Log on the powers of two (1, 2, 4, 8...) and never per-request.
+        $isLogStep = $count !== null && ($count === 1 || ($count & ($count - 1)) === 0);
+        if ($isLogStep) {
+            $this->logger?->warning(sprintf('kiwicaptcha siteverify: invalid-secret attempts (%s) — %s secret', $kind, $count));
+        }
     }
 
-    private function flushInvalidSecretLog(int $attempts): void
-    {
-        // The first burst member logs immediately (operators see the first
-        // attempt); every 32nd attempt logs the running total instead of
-        // one line per request.
-        if ($this->invalidSecretCount <= 1 || $this->invalidSecretCount % self::INVALID_SECRET_LOG_EVERY === 0) {
-            $this->logger?->warning(sprintf('kiwicaptcha siteverify: invalid-secret attempts (%d in this burst, %d requests)', $this->invalidSecretCount, $attempts));
-        }
-    }
+    private const LOG_GATE_LUA = <<<'LUA'
+local key = KEYS[1]
+local ttl = tonumber(ARGV[1])
+local n = redis.call('INCR', key)
+if n == 1 then
+  redis.call('EXPIRE', key, ttl)
+end
+return n
+LUA;
 
     private function parseBody(Request $request): ?array
     {

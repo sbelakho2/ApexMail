@@ -247,7 +247,9 @@ final class ChallengeRecord
      * serde-mirror parser (audit #56).
      *
      * Accepts exactly what the Rust `ChallengeRecord` serde schema accepts:
-     * - only the 22 whitelisted keys (plus the legacy `ip_hash` alias, which
+     * - only the whitelisted keys in {@see self::WIRE_KEYS} (the canonical
+     *   schema — the list itself is the source of truth, not a prose count;
+     *   round 30) plus the legacy `ip_hash` alias, which
      *   must not appear alongside `binding_tag`); unknown keys — including
      *   trailing garbage — throw {@see MalformedRecordException};
      * - required fields must be present; optional fields default

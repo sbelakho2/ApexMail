@@ -8,6 +8,10 @@ use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
@@ -187,6 +191,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $container->setParameter('kiwi_captcha.argon2_semaphore_namespace', $config['argon2_semaphore_namespace']);
         $container->setParameter('kiwi_captcha.enforce_telemetry', $config['enforce_telemetry']);
         $container->setParameter('kiwi_captcha.min_duration_ms', $config['min_duration_ms']);
+
+        // Round 30 (item 17): production NEVER derives the expected origin
+        // from an arbitrary Host header. When same_origin_only (the
+        // default) is active in a production environment, public_base_url
+        // is REQUIRED and validated at container compile time — the
+        // config trap (falling back to request Host) becomes a boot error.
+        $environment = $this->environment($container);
+        if (\in_array($environment, ['test', 'dev'], true) === false
+            && ($config['same_origin_only'] || $config['risk']['enforce_origin'] || ($config['risk']['siteverify_secrets'] ?? []) !== [])
+        ) {
+            $this->requireProductionPublicBaseUrl($config['public_base_url'], $config['same_origin_only'], $environment);
+        }
 
         $storageRef = $this->resolveStorage($config['storage'], $this->environment($container), $container);
         $this->requireAtomicStorageWhenNeeded(
@@ -685,6 +701,44 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $scopeCapRef = new Reference('kiwi_captcha.risk.scope_issuance_cap');
         }
 
+        // Round 30 (P1): server-side provider-compatibility stores — the
+        // metadata sidecar (action/cData bound at challenge issuance) and
+        // the atomic idempotency store (provider-style idempotency_key).
+        // Redis-backed whenever the challenge storage is RedisStorage (the
+        // same client), in-memory otherwise (test/dev semantics — the
+        // stores are only wired into the controllers; production
+        // deployments with Siteverify use the Redis variants).
+        $metadataStoreRef = null;
+        $idempotencyStoreRef = null;
+        if ($redisRef !== null) {
+            $redisNamespace = $riskConfig['redis']['namespace'] ?? 'kiwicaptcha';
+            $container->setDefinition(RedisSiteVerifyMetadataStore::class, new Definition(RedisSiteVerifyMetadataStore::class, [$redisRef, $redisNamespace]));
+            $container->setDefinition(RedisSiteVerifyIdempotencyStore::class, new Definition(RedisSiteVerifyIdempotencyStore::class, [$redisRef, $redisNamespace]));
+            $metadataStoreRef = new Reference(RedisSiteVerifyMetadataStore::class);
+            $idempotencyStoreRef = new Reference(RedisSiteVerifyIdempotencyStore::class);
+        } else {
+            $container->setDefinition(ArraySiteVerifyMetadataStore::class, new Definition(ArraySiteVerifyMetadataStore::class, []));
+            $container->setDefinition(ArraySiteVerifyIdempotencyStore::class, new Definition(ArraySiteVerifyIdempotencyStore::class, []));
+            $metadataStoreRef = new Reference(ArraySiteVerifyMetadataStore::class);
+            $idempotencyStoreRef = new Reference(ArraySiteVerifyIdempotencyStore::class);
+        }
+
+        // Round 30 (item 15): a per-sitekey binding:none profile is only
+        // meaningful when the deployment's GLOBAL binding mode is unbound —
+        // otherwise it would silently claim a relaxation the issuer cannot
+        // honor. The combination is refused at compile time (server-owned
+        // relaxation, never client-requestable).
+        $sitekeyPolicy = $riskConfig['sitekeys'] ?? [];
+        $globalBindingNone = $config['binding_mode'] === 'none';
+        foreach ($sitekeyPolicy as $sitekey => $policy) {
+            if (($policy['binding'] ?? 'required') === 'none' && !$globalBindingNone) {
+                throw new \LogicException(sprintf(
+                    'KiwiCaptcha: sitekey "%s" declares binding: none, but the deployment binding mode is not none — the per-sitekey relaxation cannot be honored. Either set risk.binding_mode: none (a deployment-wide server-owned choice) or remove the binding profile.',
+                    $sitekey,
+                ));
+            }
+        }
+
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
             $rateLimiterRef,
@@ -720,6 +774,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$allowedScopes', $riskConfig['allowed_scopes'])
             // Round 24: migration sitekey -> scope alias map (server-owned).
             ->setArgument('$sitekeyAllowlist', $riskConfig['sitekey_allowlist'])
+            // Round 30 (P1): the provider-metadata sidecar (action/cData
+            // bound to the nonce at issuance).
+            ->setArgument('$metadataStore', $metadataStoreRef)
+            // Round 30 (item 14): server-owned (sitekey, action) -> scope
+            // policy + per-sitekey binding profiles.
+            ->setArgument('$sitekeyPolicy', $sitekeyPolicy)
             // Audit #108: the security-epoch monitor drives the issuance-side
             // max-stale fail-closed check — a stale central policy read
             // refuses issuance with 503 SERVICE_UNAVAILABLE.
@@ -753,6 +813,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // atomic backend — requireAtomicStorageWhenNeeded() refuses any
             // non-atomic combination (Psr6Storage included) at compile time.
             $riskConfig['siteverify_secrets'] !== [] ? new Reference(StorageInterface::class) : null,
+            null, // logger (autowired position — kept explicit for stability)
+            $riskConfig['siteverify_secrets'] !== [] ? $metadataStoreRef : null,
+            $riskConfig['siteverify_secrets'] !== [] ? $idempotencyStoreRef : null,
+            // Round 30 (item 16): the shared Redis log gate for
+            // invalid-secret flood suppression (null = suppressed detail).
+            $riskConfig['siteverify_secrets'] !== [] ? $redisRef : null,
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Migration compatibility loader (round 24) ──
@@ -875,6 +941,41 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return new Reference($storageId);
+    }
+
+    /**
+     * Round 30 (item 17): the production origin invariant. The challenge
+     * controller's same-origin check must compare against SERVER CONFIG
+     * (public_base_url), never the request's own scheme+host — otherwise a
+     * forged Host header defines the security boundary. Fail closed at
+     * boot: prod + same-origin enforcement + missing/invalid
+     * public_base_url is a configuration error.
+     */
+    private function requireProductionPublicBaseUrl(mixed $publicBaseUrl, bool $sameOriginOnly, string $environment): void
+    {
+        if (!\is_string($publicBaseUrl) || $publicBaseUrl === '') {
+            throw new \LogicException(sprintf(
+                'KiwiCaptcha: production (environment "%s") with same-origin enforcement (or Siteverify configured) REQUIRES public_base_url — the expected origin must come from server config, never the request Host header. Set e.g. public_base_url: "https://captcha.example.com".',
+                $environment,
+            ));
+        }
+        $parts = parse_url($publicBaseUrl);
+        $scheme = $parts['scheme'] ?? null;
+        $host = $parts['host'] ?? null;
+        $isHttps = $scheme === 'https';
+        if (!$isHttps) {
+            throw new \LogicException('KiwiCaptcha: public_base_url must be an absolute https:// URL in production (got "'.$publicBaseUrl.'").');
+        }
+        if ($host === null || (isset($parts['user']) || isset($parts['pass']))) {
+            throw new \LogicException('KiwiCaptcha: public_base_url must carry a hostname and NO username/password (got "'.$publicBaseUrl.'").');
+        }
+        if (isset($parts['query']) || isset($parts['fragment'])) {
+            throw new \LogicException('KiwiCaptcha: public_base_url must not carry a query or fragment (got "'.$publicBaseUrl.'").');
+        }
+        $path = $parts['path'] ?? '';
+        if ($path !== '' && $path !== '/') {
+            throw new \LogicException('KiwiCaptcha: public_base_url must have an empty path or "/" (got "'.$publicBaseUrl.'").');
+        }
     }
 
     /**

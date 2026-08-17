@@ -5,10 +5,14 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Storage\ArrayStorage;
+use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
@@ -24,13 +28,40 @@ final class SiteVerifyTest extends TestCase
     private const SECRET = '0123456789abcdef0123456789abcdef';
     private const SITEVERIFY_SECRET = 'compat-secret-42';
 
-    private function controller(array $secrets = [self::SITEVERIFY_SECRET => 'login']): SiteVerifyController
-    {
-        $storage = new ArrayStorage();
-        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+    private function controller(
+        array $secrets = [self::SITEVERIFY_SECRET => 'login'],
+        ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
+        ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $idempotencyStore = null,
+        ?ArrayStorage $storage = null,
+    ): SiteVerifyController {
+        $storage ??= new ArrayStorage();
         $verifier = new Verifier($storage);
 
-        return new SiteVerifyController($verifier, self::SECRET, $secrets, $storage);
+        return new SiteVerifyController($verifier, self::SECRET, $secrets, $storage, null, $metadataStore, $idempotencyStore);
+    }
+
+    private function issuedToken(ArrayStorage $storage, string $scope = 'login', ?string $remoteIp = '127.0.0.1'): array
+    {
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue($scope, $remoteIp);
+        $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        // The timing floor applies server-side (issuance -> verify); the
+        // tests must clear minDurationMs like the existing suite does.
+        usleep(($challenge->minDurationMs + 10) * 1000);
+
+        return [SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode(), $challenge->nonce];
+    }
+
+    private function solve(string $prefix, string $salt, int $targetBits): int
+    {
+        $saltBytes = base64_decode($salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $targetBits);
+
+        return $counter - 1;
     }
 
     private function solveSolution(\KiwiCaptcha\ChallengeRecord $record): string
@@ -223,4 +254,165 @@ final class SiteVerifyTest extends TestCase
         self::assertFalse($json['success']);
         self::assertSame(['timeout-or-duplicate'], $json['error-codes']);
     }
+
+
+    // ── Round 30 (P1): provider metadata + idempotency semantics ──────
+
+    public function testMissingSecretMapsToMissingInputSecret(): void
+    {
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $controller = $this->controller();
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['response' => $token]));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('missing-input-secret', $body['error-codes'][0] ?? null);
+    }
+
+    public function testWrongSecretMapsToInvalidInputSecret(): void
+    {
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $controller = $this->controller();
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', ['secret' => str_repeat('x', 24), 'response' => $token]));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('invalid-input-secret', $body['error-codes'][0] ?? null);
+    }
+
+    public function testMalformedIdempotencyKeyIsRejectedBeforeTheVerifier(): void
+    {
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $controller = $this->controller(secrets: [self::SITEVERIFY_SECRET => 'login'], idempotencyStore: new ArraySiteVerifyIdempotencyStore());
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'idempotency_key' => 'not-a-uuid',
+        ]));
+        self::assertSame(400, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('bad-request', $body['error-codes'][0] ?? null);
+    }
+
+    public function testOversizedResponseTokenIsRejectedBeforeDecoding(): void
+    {
+        $storage = new ArrayStorage();
+        $controller = $this->controller();
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => str_repeat('A', 9000),
+        ]));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('invalid-input-response', $body['error-codes'][0] ?? null);
+    }
+
+    public function testRequestSuppliedActionIsIgnoredAndServerBoundMetadataIsReturned(): void
+    {
+        // The full trust chain: metadata bound at ISSUANCE (sidecar) is
+        // returned on verification; a forged request action/cdata is
+        // ignored (it is not even parsed anymore).
+        $storage = new ArrayStorage();
+        [$token, $nonce] = $this->issuedToken($storage);
+        $metadataStore = new ArraySiteVerifyMetadataStore();
+        $metadataStore->store($nonce, new SiteVerifyMetadata('checkout', 'order_19382', 'login'), 300);
+        $controller = $this->controller(metadataStore: $metadataStore, storage: $storage);
+
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '127.0.0.1',
+            'action' => 'admin',   // forged — must be ignored
+            'cdata' => 'forged',   // forged — must be ignored
+        ]));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame(true, $body['success'] ?? null, 'metadata test body: '.(string) $response->getContent());
+        self::assertSame('checkout', $body['action'] ?? null);
+        self::assertSame('order_19382', $body['cdata'] ?? null);
+    }
+
+    public function testIdempotentRetryReturnsTheIdenticalCanonicalResponse(): void
+    {
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $controller = $this->controller(idempotencyStore: $store, storage: $storage);
+        $uuid = '123e4567-e89b-42d3-a456-426614174000';
+
+        $first = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]))->getContent(), true);
+        self::assertSame(true, $first['success'] ?? null);
+
+        $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]))->getContent(), true);
+        self::assertSame($first, $second, 'a same-key retry must return the IDENTICAL canonical response');
+
+        // Same token + a DIFFERENT key -> timeout-or-duplicate (no idempotency).
+        $third = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => '223e4567-e89b-42d3-a456-426614174000',
+        ]))->getContent(), true);
+        self::assertSame(false, $third['success'] ?? null);
+        self::assertSame('timeout-or-duplicate', $third['error-codes'][0] ?? null);
+    }
+
+    public function testSameKeyWithDifferentTokenIsRejected(): void
+    {
+        $storage = new ArrayStorage();
+        [$tokenA] = $this->issuedToken($storage);
+        [$tokenB] = $this->issuedToken($storage);
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $controller = $this->controller(idempotencyStore: $store);
+        $uuid = '323e4567-e89b-42d3-a456-426614174000';
+
+        $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $tokenA, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $tokenB, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]))->getContent(), true);
+        self::assertSame('bad-request', $second['error-codes'][0] ?? null, 'same key + different token must be rejected');
+    }
+
+    public function testFailedVerificationFinalizesTheSameCanonicalFailure(): void
+    {
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $controller = $this->controller(idempotencyStore: $store);
+        $uuid = '423e4567-e89b-42d3-a456-426614174000';
+        // A WRONG remoteip makes the bound verification fail.
+        $first = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
+        ]))->getContent(), true);
+        self::assertSame(false, $first['success'] ?? null);
+        // Retry with the correct remoteip and the SAME key -> the SAME
+        // canonical failure (idempotency freezes the outcome).
+        $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]))->getContent(), true);
+        self::assertSame($first, $second);
+    }
+
+    public function testIdempotencyNamespacesDoNotCollideAcrossSecrets(): void
+    {
+        // Different configured secrets (backends) share the same UUID
+        // WITHOUT colliding: each backend's namespace is separate, so each
+        // claims and succeeds with its own token.
+        $storage = new ArrayStorage();
+        [$tokenA] = $this->issuedToken($storage);
+        [$tokenB] = $this->issuedToken($storage);
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $uuid = '523e4567-e89b-42d3-a456-426614174000';
+        $controllerA = $this->controller(secrets: ['secret-A-'.str_repeat('a', 16) => 'login'], idempotencyStore: $store, storage: $storage);
+        $controllerB = $this->controller(secrets: ['secret-B-'.str_repeat('b', 16) => 'login'], idempotencyStore: $store, storage: $storage);
+        $first = json_decode((string) $controllerA->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => 'secret-A-'.str_repeat('a', 16), 'response' => $tokenA, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]))->getContent(), true);
+        self::assertSame(true, $first['success'] ?? null);
+        $second = json_decode((string) $controllerB->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => 'secret-B-'.str_repeat('b', 16), 'response' => $tokenB, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]))->getContent(), true);
+        self::assertSame(true, $second['success'] ?? null, 'different backends must not collide on the same UUID');
+    }
 }
+

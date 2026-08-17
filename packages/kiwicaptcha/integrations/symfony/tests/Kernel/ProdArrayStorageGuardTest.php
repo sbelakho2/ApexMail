@@ -31,7 +31,7 @@ final class ProdArrayStorageGuardTest extends TestCase
     {
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', $environment);
-        (new KiwiCaptchaExtension())->load([['secret_key' => str_repeat('a', 32)]], $container);
+        (new KiwiCaptchaExtension())->load([['secret_key' => str_repeat('a', 32), 'public_base_url' => 'https://captcha.example.com']], $container);
 
         return $container;
     }
@@ -55,7 +55,7 @@ final class ProdArrayStorageGuardTest extends TestCase
         $container->setParameter('kernel.environment', 'prod');
         $container->setDefinition('my.shared.storage', new Definition(RedisStorage::class, [new \stdClass()]));
         (new KiwiCaptchaExtension())->load(
-            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.shared.storage']],
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.shared.storage', 'public_base_url' => 'https://captcha.example.com']],
             $container,
         );
 
@@ -69,7 +69,7 @@ final class ProdArrayStorageGuardTest extends TestCase
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'prod');
         (new KiwiCaptchaExtension())->load(
-            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.shared.storage']],
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.shared.storage', 'public_base_url' => 'https://captcha.example.com']],
             $container,
         );
     }
@@ -82,7 +82,7 @@ final class ProdArrayStorageGuardTest extends TestCase
         $container->setParameter('kernel.environment', 'prod');
         $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
         (new KiwiCaptchaExtension())->load(
-            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.psr6.storage']],
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.psr6.storage', 'public_base_url' => 'https://captcha.example.com']],
             $container,
         );
     }
@@ -93,11 +93,58 @@ final class ProdArrayStorageGuardTest extends TestCase
         $container->setParameter('kernel.environment', 'prod');
         $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
         (new KiwiCaptchaExtension())->load(
-            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.psr6.storage', 'allow_best_effort_storage' => true]],
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.psr6.storage', 'allow_best_effort_storage' => true, 'public_base_url' => 'https://captcha.example.com']],
             $container,
         );
 
         self::assertFalse($container->hasDefinition('kiwi_captcha.storage.array'));
+    }
+
+    public function testProdRequiresPublicBaseUrlWhenSameOriginEnforced(): void
+    {
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('REQUIRES public_base_url');
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        (new KiwiCaptchaExtension())->load(
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'kiwi_captcha.storage.redis', 'public_base_url' => null]],
+            $container,
+        );
+    }
+
+    public function testProdRejectsHttpPublicBaseUrl(): void
+    {
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('absolute https:// URL');
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        (new KiwiCaptchaExtension())->load(
+            [['secret_key' => str_repeat('a', 32), 'public_base_url' => 'http://captcha.example.com']],
+            $container,
+        );
+    }
+
+    public function testProdRejectsQueryAndPathInPublicBaseUrl(): void
+    {
+        $this->expectException(\LogicException::class);
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        (new KiwiCaptchaExtension())->load(
+            [['secret_key' => str_repeat('a', 32), 'public_base_url' => 'https://captcha.example.com/app?x=1']],
+            $container,
+        );
+    }
+
+    public function testDevAllowsMissingPublicBaseUrl(): void
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'dev');
+        $container->setDefinition('my.storage', new Definition(ArrayStorage::class, []));
+        (new KiwiCaptchaExtension())->load(
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.storage']],
+            $container,
+        );
+        self::assertTrue(true, 'dev must allow the Host-derived fallback');
     }
 
     public function testSiteverifyRequiresAtomicStorageInTestEnvironment(): void

@@ -42,6 +42,11 @@
   }
 
   .kiwi-container {
+    /* Round 30 (WCAG 1.4.4): the widget's typography scales from this
+       variable (1 = design size). A test can set it to 2 to exercise a
+       TRUE 200% text enlargement — the fixed-pixel sizes below are all
+       derived from it. */
+    --kiwi-font-scale: 1;
     /* Brand accent — Google blue. Trustworthy, not alarming. */
     --kiwi-primary: #146de2;
     --kiwi-primary-rgb: 20, 109, 226;
@@ -54,10 +59,16 @@
     --kiwi-bg: #fafafa;
     --kiwi-text: #333333;
     --kiwi-text-muted: #737373;
-    /* Round 29: the badge's neutral-state foreground must clear 4.5:1 on
-       the --kiwi-border surface (muted #737373 measured 3.59:1) — #5c5c5c
-       gives 5.07:1 with headroom. */
-    --kiwi-badge-text: #5c5c5c;
+    /* Round 30: semantic badge foregrounds per theme — the state
+       selectors reference ONLY these variables (never hard-coded colors),
+       and both themes clear >= 5:1 on their 12% tint surfaces:
+       light: neutral 5.07:1, solving 5.85:1, success 6.27:1, failure
+       5.17:1; dark: neutral 5.01:1, solving 9.15:1, success 9.84:1,
+       failure 9.23:1. */
+    --kiwi-badge-neutral-text: #5c5c5c;
+    --kiwi-badge-solving-text: #1055ad;
+    --kiwi-badge-success-text: #00603e;
+    --kiwi-badge-error-text: #b91c1c;
     --kiwi-border: #e0e0e0;
 
     /* Shadow — subtle, single-layer (Turnstile-style, not heavy). */
@@ -79,7 +90,10 @@
       --kiwi-bg: #222222;
       --kiwi-text: #f5f5f5;
       --kiwi-text-muted: #a3a3a3;
-      --kiwi-badge-text: #a3a3a3;
+      --kiwi-badge-neutral-text: #a3a3a3;
+      --kiwi-badge-solving-text: #bfdbfe;
+      --kiwi-badge-success-text: #a7f3d0;
+      --kiwi-badge-error-text: #fecaca;
       --kiwi-primary: #60a5fa;
       --kiwi-primary-rgb: 96, 165, 250;
       --kiwi-success: #34d399;
@@ -167,7 +181,7 @@
 
   /* --- Label (14px / weight 400 — reCAPTCHA/Friendly convention) --- */
   .kiwi-label {
-    font-size: 14px;
+    font-size: calc(0.875rem * var(--kiwi-font-scale));
     font-weight: 400;
     line-height: 1.2;
     color: var(--kiwi-text);
@@ -176,14 +190,14 @@
 
   /* --- Badge (11px floor — Cloudflare fixed their 10px as too small) --- */
   .kiwi-badge {
-    font-size: 11px;
+    font-size: calc(0.6875rem * var(--kiwi-font-scale));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
     padding: 2px 6px;
     border-radius: var(--kiwi-radius);
     background: var(--kiwi-border);
-    color: var(--kiwi-badge-text);
+    color: var(--kiwi-badge-neutral-text);
     /* Round 29: NO color transition — a 0.3s cross-fade passes through
        low-contrast mixes of the two state colors (the badge changes
        instantly; WCAG 1.4.3 applies to every visible state). */
@@ -197,15 +211,15 @@
      announcements carry the state for non-color users. */
   .kiwi-widget[data-state="solving"] .kiwi-badge {
     background: rgba(var(--kiwi-primary-rgb), 0.12);
-    color: #1055ad;
+    color: var(--kiwi-badge-solving-text);
   }
   .kiwi-widget[data-state="done"] .kiwi-badge {
     background: rgba(var(--kiwi-success-rgb), 0.12);
-    color: #00603e;
+    color: var(--kiwi-badge-success-text);
   }
   .kiwi-widget[data-state="failed"] .kiwi-badge {
     background: rgba(var(--kiwi-error-rgb), 0.12);
-    color: #b91c1c;
+    color: var(--kiwi-badge-error-text);
   }
 
   /* --- Progress bar (4px — Friendly Captcha convention) --- */
@@ -248,14 +262,14 @@
   }
   /* Info text — neutral color, never red (Cloudflare rule). */
   .kiwi-info {
-    font-size: 11px;
+    font-size: calc(0.6875rem * var(--kiwi-font-scale));
     color: var(--kiwi-text-muted);
     font-weight: 400;
     margin: 0;
   }
   /* Timer — uses muted color, not primary (was red before; now neutral). */
   .kiwi-timer {
-    font-size: 11px;
+    font-size: calc(0.6875rem * var(--kiwi-font-scale));
     font-weight: 600;
     color: var(--kiwi-text-muted);
     font-variant-numeric: tabular-nums;
@@ -267,7 +281,7 @@
      the widget is passive and never focusable itself. */
   .kiwi-retry {
     display: none;
-    font-size: 11px;
+    font-size: calc(0.6875rem * var(--kiwi-font-scale));
     font-weight: 600;
     font-family: inherit;
     line-height: 1.2;

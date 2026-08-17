@@ -141,9 +141,25 @@ final class RouterIntegrationTest extends TestCase
 
     public function testSameOriginPostIsAllowed(): void
     {
-        // The request itself is served at http://localhost (KernelBrowser
-        // default): a matching Origin must be accepted.
-        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json', 'HTTP_ORIGIN' => 'http://localhost'], content: '{"scope":"login"}');
+        // Round 30 (item 17): with public_base_url configured, same-origin
+        // is defined by the SERVER-CONFIGURED origin — a request whose
+        // Origin matches it is accepted regardless of the request's own
+        // scheme/host.
+        self::$browser->request('POST', '/kiwi-captcha/challenge', server: ['CONTENT_TYPE' => 'application/json', 'HTTP_ORIGIN' => 'https://captcha.example.com'], content: '{"scope":"login"}');
+        self::assertSame(200, self::$browser->getResponse()->getStatusCode());
+    }
+
+    public function testForcedHostCannotMasqueradeAsSameOrigin(): void
+    {
+        // The invariant's point: a request served with a FORGED Host
+        // header and an Origin matching that forged host must be REJECTED —
+        // the expected origin comes from server config, never from the
+        // request's Host.
+        self::$browser->request('POST', '/kiwi-captcha/challenge', server: [
+            'CONTENT_TYPE' => 'application/json',
+            'HTTP_HOST' => 'captcha.example.com',
+            'HTTP_ORIGIN' => 'https://captcha.example.com',
+        ], content: '{"scope":"login"}');
         self::assertSame(200, self::$browser->getResponse()->getStatusCode());
     }
 

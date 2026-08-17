@@ -26,7 +26,7 @@ use KiwiCaptcha\ConsumedResult;
  * - Predis: eval() (the same script; the server must support Lua, i.e. any
  *   Redis >= 2.6).
  *
- * Records are stored as JSON: the canonical 21-key `ChallengeRecord` schema
+ * Records are stored as JSON: the canonical `ChallengeRecord::WIRE_KEYS` schema
  * (LANGUAGE-NEUTRAL — a Rust service using the same Redis instance can read
  * them, and vice versa) WRAPPED with the two runtime fields `state`
  * ("pending"|"consumed") and `consumed_result` (null | {valid, binding}).

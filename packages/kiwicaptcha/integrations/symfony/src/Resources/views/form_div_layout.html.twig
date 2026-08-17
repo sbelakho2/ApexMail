@@ -18,9 +18,7 @@
                 <path d="M10 7c-4 1-8 3-8.5 3.5-.3.3-.3.8 0 1 1 0.5 8 2.5 9.5 2.5" fill="currentColor"/>
                 <path d="M14 29v2m6-2v2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
                 <circle cx="16.5" cy="4.5" r="1" fill="white"/>
-                <circle cx="17" cy="4" r="0.6" fill="currentColor">
-                    <animate attributeName="opacity" values="1;1;0;1;1" keyTimes="0;0.95;0.97;0.99;1" dur="5s" repeatCount="indefinite" />
-                </circle>
+                <circle cx="17" cy="4" r="0.6" fill="currentColor"/>
                 <path d="M19 14c1.5 0 2.5 1 2.5 2s-1 2-2.5 2-2.5-1-2.5-2 1-2 2.5-2z" fill="white" opacity="0.2"/>
             </svg>
             <div class="kiwi-glow"></div>
@@ -38,15 +36,17 @@
                 <span class="kiwi-timer" data-kiwi-timer></span>
             </div>
         </div>
+        {# The dedicated live region (audit round 14): the ONLY aria-live
+           element on the widget. State changes land here via
+           data-kiwi-status (the driver's announcer); the countdown,
+           label, badge and hint stay OUTSIDE the live region so a
+           ticking timer can never spam the screen reader. Visually
+           hidden, screen-reader only. Round 30 (P1): INSIDE
+           .kiwi-widget — matching the Rust renderer and the driver's
+           widget-local lookup (the previous sibling position was a
+           structural divergence). #}
+        <span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span>
     </div>
-    {# The dedicated live region (audit round 14): the ONLY aria-live
-       element on the widget. State changes land here via
-       data-kiwi-status (the driver's announcer); the countdown, label,
-       badge and hint stay OUTSIDE the live region so a ticking timer can
-       never spam the screen reader. Visually hidden, screen-reader only.
-       Actionable errors announce through the driver's role="alert"
-       element (also data-kiwi-status-driven), created on demand. #}
-    <span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span>
 </div>
 <script{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_wasm|raw }}

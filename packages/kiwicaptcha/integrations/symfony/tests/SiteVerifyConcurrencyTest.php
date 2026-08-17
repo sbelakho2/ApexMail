@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use KiwiCaptcha\Challenge;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -92,7 +93,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                     $success = ($body['success'] ?? false) === true ? '1' : '0';
                     $client->disconnect();
                 } catch (\Throwable $e) {
-                    fwrite(STDERR, 'child error: '.$e->getMessage()."\n");
+                    fwrite(STDERR, 'CHILDERR: '.$e->getMessage()."\n");
                 }
                 $out = fopen($outFile, 'a');
                 flock($out, LOCK_EX);
@@ -142,5 +143,120 @@ final class SiteVerifyConcurrencyTest extends TestCase
         } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
 
         return $counter - 1;
+    }
+
+    /**
+     * Round 30 (P1): provider retry contract — 100 CONCURRENT requests with
+     * the SAME valid token and the SAME idempotency UUID must ALL receive
+     * the IDENTICAL canonical success response, with only ONE logical
+     * redemption. This is a SEPARATE contract from the native single-use
+     * race above: ordinary replays (no key) still produce exactly one
+     * success.
+     */
+    public function testOneHundredConcurrentSameIdempotencyKeyYieldsIdenticalResponses(): void
+    {
+        if (!\function_exists('pcntl_fork')) {
+            self::markTestSkipped('pcntl is not installed; cannot fork concurrent verifications');
+        }
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        try {
+            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $probe->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the concurrency test');
+        }
+
+        $issuer = new Issuer(
+            new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120),
+            new RedisStorage($probe),
+        );
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $solution = $this->solveSolution($challenge);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+        // Flush any leftover idempotency entry from a previous run (the
+        // UUID + backend namespace must start clean for the race).
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $probe->disconnect();
+
+        $outFile = tempnam(sys_get_temp_dir(), 'kiwi-idem-');
+        $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-idem-start-');
+
+        $workers = 100;
+        $children = [];
+        for ($i = 0; $i < $workers; $i++) {
+            $pid = pcntl_fork();
+            if ($pid === -1) {
+                self::markTestSkipped('pcntl_fork failed; concurrency test not run');
+            }
+            if ($pid === 0) {
+                $fp = @fopen($startBarrier, 'r');
+                if ($fp !== false) {
+                    flock($fp, LOCK_SH);
+                    fread($fp, 1);
+                    fclose($fp);
+                }
+                $line = 'error';
+                try {
+                    $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+                    $storage = new RedisStorage($client);
+                    $controller = new SiteVerifyController(
+                        new Verifier($storage),
+                        self::SECRET,
+                        [self::SITEVERIFY_SECRET => 'login'],
+                        $storage,
+                        null,
+                        null,
+                        new RedisSiteVerifyIdempotencyStore($client),
+                    );
+                    $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                        'secret' => self::SITEVERIFY_SECRET,
+                        'response' => $token,
+                        'remoteip' => '127.0.0.1',
+                        'idempotency_key' => $uuid,
+                    ]));
+                    $line = (string) $response->getContent();
+                    $client->disconnect();
+                } catch (\Throwable $e) {
+                    fwrite(STDERR, 'child error: '.$e->getMessage()."\n");
+                }
+                $out = fopen($outFile, 'a');
+                flock($out, LOCK_EX);
+                fwrite($out, $line."\n");
+                fclose($out);
+                exit(0);
+            }
+            $children[] = $pid;
+        }
+
+        $barrierFile = fopen($startBarrier, 'w');
+        fwrite($barrierFile, 'go');
+        fclose($barrierFile);
+
+        $crashed = false;
+        foreach ($children as $pid) {
+            pcntl_waitpid($pid, $status);
+            if (pcntl_wexitstatus($status) !== 0) {
+                $crashed = true;
+            }
+        }
+        self::assertFalse($crashed, 'every worker must exit cleanly');
+
+        $raw = (string) file_get_contents($outFile);
+        $responses = array_values(array_filter(explode("\n", $raw), static fn (string $l): bool => $l !== ''));
+        @unlink($outFile);
+        @unlink($startBarrier);
+
+        self::assertCount($workers, $responses, 'all 100 workers must report an outcome');
+        $successes = \count(array_filter($responses, static fn (string $r): bool => str_contains($r, '"success":true')));
+        self::assertSame($workers, $successes, 'with the SAME idempotency key every retry must succeed: '.implode(' || ', array_slice($responses, 0, 5)));
+        // ALL responses byte-identical (canonical provider response).
+        $unique = \count(array_unique($responses));
+        self::assertSame(1, $unique, 'all 100 responses must be the IDENTICAL canonical JSON: '.implode(' || ', array_slice($responses, 0, 3)));
+        $first = json_decode($responses[0], true);
+        self::assertSame([], $first['error-codes'] ?? null);
     }
 }

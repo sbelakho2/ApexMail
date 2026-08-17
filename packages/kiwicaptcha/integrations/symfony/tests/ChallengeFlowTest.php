@@ -5,6 +5,10 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
+use Symfony\Component\DependencyInjection\Definition;
+use Symfony\Component\DependencyInjection\ContainerBuilder;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
@@ -1613,4 +1617,94 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame(422, $response->getStatusCode(), 'a non-object document at extreme depth is INVALID_JSON (never a crash)');
         self::assertSame('INVALID_JSON', json_decode((string) $response->getContent(), true)['error']['code']);
     }
+
+
+    // ── Round 30 (P1): provider-compatible challenge metadata ──────────
+
+    public function testChallengeCapturesActionAndCdataAgainstTheNonce(): void
+    {
+        $storage = new ArrayStorage();
+        $metadataStore = new ArraySiteVerifyMetadataStore();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $controller = new ChallengeController($issuer, metadataStore: $metadataStore);
+
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","action":"checkout","cdata":"order_19382"}'));
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode((string) $response->getContent(), true);
+        $metadata = $metadataStore->find($data['nonce']);
+        self::assertNotNull($metadata, 'the metadata must be stored against the issued nonce');
+        self::assertSame('checkout', $metadata->action);
+        self::assertSame('order_19382', $metadata->cdata);
+    }
+
+    public function testChallengeRejectsMalformedProviderMetadata(): void
+    {
+        $controller = new ChallengeController($this->issuer());
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","action":"checkout admin!"}'));
+        self::assertSame(422, $response->getStatusCode());
+        $data = json_decode((string) $response->getContent(), true);
+        self::assertSame('INVALID_METADATA', $data['error']['code'] ?? null);
+
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login","cdata":"'.str_repeat('x', 300).'"}'));
+        self::assertSame(422, $response->getStatusCode());
+    }
+
+
+    // ── Round 30 (items 14+15): server-owned sitekey/action + binding ──
+
+    public function testServerOwnedSitekeyActionResolution(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $controller = new ChallengeController($issuer, sitekeyPolicy: [
+            '6Lc_v3_checkout' => ['default_scope' => 'login', 'actions' => ['checkout' => 'commerce_high_value'], 'binding' => 'required'],
+        ]);
+
+        // (sitekey, action) -> the mapped policy scope, NOT the action
+        // string itself.
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"6Lc_v3_checkout","action":"checkout","sitekey":"6Lc_v3_checkout"}'));
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode((string) $response->getContent(), true);
+        $decodedPrefix = base64_decode((string) (explode('.', $data['prefix'])[0] ?? ''), true);
+        self::assertStringContainsString('commerce_high_value', (string) $decodedPrefix, 'the challenge must be issued under the SERVER-resolved scope');
+
+        // Unknown action -> REJECTED (never silently mapped).
+        $rejected = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"6Lc_v3_checkout","action":"admin","sitekey":"6Lc_v3_checkout"}'));
+        self::assertSame(422, $rejected->getStatusCode());
+        $rejectedBody = json_decode((string) $rejected->getContent(), true);
+        self::assertSame('UNKNOWN_ACTION', $rejectedBody['error']['code'] ?? null);
+    }
+
+    public function testUnboundCompatibilityProfileRequiresGlobalUnboundMode(): void
+    {
+        // Item 15: the per-sitekey binding:none relaxation is SERVER-OWNED
+        // and deployment-wide — with a bound global mode the combination is
+        // refused at container compile time (the client can never request
+        // the weaker mode).
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setDefinition('my.storage', new Definition(ArrayStorage::class, []));
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('binding: none');
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => str_repeat('a', 32),
+            'storage' => 'my.storage',
+            'risk' => ['enabled' => false, 'sitekeys' => ['old-app-key' => ['default_scope' => 'login', 'binding' => 'none']]],
+        ]], $container);
+    }
+
+    public function testUnboundCompatibilityProfileAllowedWithGlobalNoneMode(): void
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setDefinition('my.storage', new Definition(ArrayStorage::class, []));
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => str_repeat('a', 32),
+            'storage' => 'my.storage',
+            'binding_mode' => 'none',
+            'risk' => ['enabled' => false, 'sitekeys' => ['old-app-key' => ['default_scope' => 'login', 'binding' => 'none']]],
+        ]], $container);
+        self::assertTrue(true, 'binding:none with a global unbound mode is a valid server-owned combination');
+    }
 }
+

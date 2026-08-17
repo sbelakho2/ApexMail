@@ -1904,8 +1904,12 @@
         }
       }
     });
-    // Support grecaptcha.render(el, params) called LATER (dynamic widgets).
-    if (compat === "recaptcha" && typeof MutationObserver !== "undefined") {
+    // Dynamic implicit-render convenience: a .g-recaptcha node inserted
+    // later is auto-rendered. Round 30 (P1): NEVER in explicit mode —
+    // render=explicit means the application controls rendering (Google's
+    // documented contract), so a later container must stay untouched
+    // until an explicit grecaptcha.render() call.
+    if (compat === "recaptcha" && compatRenderMode !== "explicit" && typeof MutationObserver !== "undefined") {
       new MutationObserver(function (mutations) {
         for (var m = 0; m < mutations.length; m++) {
           var nodes = mutations[m].addedNodes;
