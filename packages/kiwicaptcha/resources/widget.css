@@ -307,6 +307,7 @@
      stays a passive, non-focusable group). */
   .kiwi-widget[data-state="idle"] .kiwi-retry,
   .kiwi-widget[data-state="failed"] .kiwi-retry,
+  .kiwi-widget[data-state="expired"] .kiwi-retry,
   .kiwi-widget[data-state="kiwi:worker-unavailable"] .kiwi-retry {
     display: inline-flex;
   }
