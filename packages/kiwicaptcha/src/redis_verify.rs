@@ -237,17 +237,21 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 /// notation, which the strict cross-language parsers reject. PHP mirrors
 /// this script byte-for-byte.
 const CONSUME_TRANSITION_LUA: &str = r#"
+-- The state marker is replaced IN PLACE (the record's JSON bytes are
+-- never re-encoded — large integers would switch to scientific
+-- notation). Byte-compatible with the PHP consume script: both write
+-- the same runtime envelope from issuance onward, so either
+-- implementation can transition records written by the other.
 local v = redis.call('GET', KEYS[1])
 if not v then return false end
-local d = cjson.decode(v)
-if type(d) ~= 'table' or d[1] ~= nil then return false end
-if d.state == 'consumed' then
+if string.find(v, '"state":"consumed"', 1, true) then
     return {v, 0}
 end
-if string.sub(v, -1) ~= '}' then return false end
+local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)
+if n ~= 1 then return false end
 local ttl = redis.call('TTL', KEYS[1])
 if ttl < 1 then ttl = 1 end
-redis.call('SET', KEYS[1], string.sub(v, 1, -2) .. ',"state":"consumed"}', 'EX', ttl)
+redis.call('SET', KEYS[1], updated, 'EX', ttl)
 return {v, 1}
 "#;
 
@@ -258,22 +262,25 @@ return {v, 1}
 /// are kept untouched — only the small result object is freshly encoded
 /// (bools + a short string, immune to the cjson large-integer issue).
 const COMMIT_RESULT_LUA: &str = r#"
+-- The `"consumed_result":null` marker written by store() is replaced
+-- IN PLACE, byte-compatible with the PHP commit script (both languages
+-- splice the same runtime envelope; the small result object is freshly
+-- encoded — valid is a REAL JSON boolean, binding a string or null).
 local v = redis.call('GET', KEYS[1])
 if not v then return 0 end
-local d = cjson.decode(v)
-if type(d) ~= 'table' or d[1] ~= nil then return 0 end
-if d.state ~= 'consumed' then return 0 end
-if d.consumed_result ~= nil then return 0 end
-if string.sub(v, -1) ~= '}' then return 0 end
+if not string.find(v, '"state":"consumed"', 1, true) then return 0 end
+if not string.find(v, '"consumed_result":null', 1, true) then return 0 end
 local result
 if ARGV[2] ~= '' then
     result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
 else
-    result = cjson.encode({valid = ARGV[1] == '1'})
+    result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
 end
+local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
+if n ~= 1 then return 0 end
 local ttl = redis.call('TTL', KEYS[1])
 if ttl < 1 then ttl = 1 end
-redis.call('SET', KEYS[1], string.sub(v, 1, -2) .. ',"consumed_result":' .. result .. '}', 'EX', ttl)
+redis.call('SET', KEYS[1], updated, 'EX', ttl)
 return 1
 "#;
 

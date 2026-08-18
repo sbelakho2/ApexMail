@@ -261,12 +261,26 @@ fn valid_solution_verifies_and_wire_format_is_language_neutral() {
         .get_connection()
         .unwrap();
     let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    // The stored JSON carries the shared runtime envelope (state marker +
+    // consumed_result) on top of the canonical record — exactly like the
+    // PHP store's format; the canonical fields must equal the record's
+    // serialization once the runtime fields are stripped.
+    let mut canonical: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    canonical
+        .as_object_mut()
+        .expect("stored JSON must be an object")
+        .remove("state");
+    canonical
+        .as_object_mut()
+        .expect("stored JSON must be an object")
+        .remove("consumed_result");
     assert_eq!(
-        serde_json::to_string(&issued.record).unwrap(),
-        raw,
-        "stored wire format must be the canonical ChallengeRecord JSON"
+        serde_json::to_value(&issued.record).unwrap(),
+        canonical,
+        "stored wire format must be the canonical ChallengeRecord JSON plus the runtime envelope"
     );
-    let decoded: ChallengeRecord = serde_json::from_str(&raw).unwrap();
+    let decoded: ChallengeRecord =
+        serde_json::from_value(canonical.clone()).unwrap();
     assert_eq!(decoded.nonce, issued.record.nonce);
     assert_eq!(decoded.protocol_version, 2);
 
@@ -1675,7 +1689,7 @@ fn consumed_state_transition_and_outcome_commit_lifecycle() {
     let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
     let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(stored["state"], "consumed");
-    assert!(stored.get("consumed_result").is_none());
+    assert_eq!(stored["consumed_result"], serde_json::Value::Null);
 
     // 2. Consume while consumed with NO committed outcome: first=false,
     //    no stored result (the crash-window case → ConsumeIndeterminate
