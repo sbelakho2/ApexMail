@@ -290,6 +290,11 @@ final class VerifierGateTest extends TestCase
                 return $this->peek;
             }
 
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
             public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 return new \KiwiCaptcha\ConsumedRecord($this->swapped, true, false, null);
@@ -334,6 +339,11 @@ final class VerifierGateTest extends TestCase
             public function find(string $nonce): ?ChallengeRecord
             {
                 return $this->current;
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
             }
 
             public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord

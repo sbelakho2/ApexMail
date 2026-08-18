@@ -54,6 +54,16 @@ final class ArrayStorage implements AtomicStorageInterface
         return new ConsumedRecord($entry['record'], true, false, null);
     }
 
+    public function consumedState(string $nonce): ?ConsumedRecord
+    {
+        $entry = $this->records[$nonce] ?? null;
+        if ($entry === null || !$entry['consumed']) {
+            return null;
+        }
+
+        return new ConsumedRecord($entry['record'], false, true, $entry['result']);
+    }
+
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
     {
         $entry = $this->records[$nonce] ?? null;

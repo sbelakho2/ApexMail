@@ -78,7 +78,7 @@ interface SiteVerifyIdempotencyStore
      *         the OWNER token when this request claimed the entry (null
      *         otherwise) — only the owner may finalize it
      */
-    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array;
+    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array;
 
     /**
      * Persist the canonical provider response for a COMPLETE claim so a
@@ -109,19 +109,11 @@ interface SiteVerifyIdempotencyStore
      */
     public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array;
 
-    /**
-     * Refresh the owner's lease on a still-pending claim. Succeeds ONLY
-     * when the caller still holds the CURRENT owner token AND the entry
-     * is still pending; the expiry is extended by a full lease window.
-     * The owner calls this just before finalizing when its verification
-     * outlasted the lease window, so a concurrent takeover cannot reject
-     * the finalize.
-     *
-     * @return bool true when the lease was extended (the caller is still
-     *              the current owner); false when the caller lost
-     *              ownership (an atomic takeover won) or the entry is no
-     *              longer pending — a failed renewal means the caller must
-     *              not attempt to finalize (it would be a no-op anyway)
+        /**
+     * After verification, atomically confirm that this request still owns
+     * the pending claim and extend the lease through finalization. A
+     * false result means ownership was lost and the caller must use the
+     * authoritative stored outcome.
      */
     public function renew(string $backendId, string $idempotencyKey, string $owner): bool;
 }

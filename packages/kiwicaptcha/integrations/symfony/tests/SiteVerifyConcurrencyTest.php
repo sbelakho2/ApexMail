@@ -178,7 +178,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
         // Flush any leftover idempotency entry from a previous run (the
         // UUID + backend namespace must start clean for the race).
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
         $probe->disconnect();
 
@@ -309,7 +309,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = SolutionToken::create($challenge->nonce, $counter - 1, 5000, [])->encode();
         $uuid = 'a7c2c4a0-9f4b-4d1e-9c8a-0f3d5e7b1a2b';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
         $probe->disconnect();
 
@@ -423,7 +423,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
         }
         $uuid = 'b1c2d3e4-5f6a-4b7c-8d9e-0f1a2b3c4d5e';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
 
         // A storage whose consume() blocks 6s inside the verifier — a
@@ -465,7 +465,12 @@ final class SiteVerifyConcurrencyTest extends TestCase
                         return $this->inner->find($nonce);
                     }
 
-                    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                                public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     {
                         sleep(6); // the blocked-verification window
                         return $this->inner->consume($nonce);
@@ -529,7 +534,12 @@ final class SiteVerifyConcurrencyTest extends TestCase
                 return $this->inner->find($nonce);
             }
 
-            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                        public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 $this->consumes++;
 
@@ -608,7 +618,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
         }
         $uuid = 'c2d3e4f5-6a7b-4c8d-9e0f-1a2b3c4d5e6f';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
 
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 180), new RedisStorage($probe));
@@ -647,7 +657,12 @@ final class SiteVerifyConcurrencyTest extends TestCase
                         return $this->inner->find($nonce);
                     }
 
-                    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                                public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     {
                         sleep(6); // outlasts the 3s lease
                         return null; // the owner's LOCAL outcome is a failure
@@ -721,7 +736,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
 
         $takerBody = json_decode((string) $takerResponse->getContent(), true);
         $ownerBody = json_decode($ownerLine, true);
-        self::assertSame(true, $takerBody['success'] ?? null, 'the taker verifies and finalizes its canonical success');
+        self::assertSame(true, $takerBody['success'] ?? null, 'the taker verifies and finalizes its canonical success: '.(string) $takerResponse->getContent());
         self::assertSame(true, $ownerBody['success'] ?? null, 'the displaced owner must return the STORED authoritative success, not its local failure: '.$ownerLine);
         self::assertSame($takerBody, $ownerBody, "the displaced owner returns the taker's canonical result byte-for-byte");
     }
@@ -740,7 +755,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             self::markTestSkipped('no Redis at 127.0.0.1:6399');
         }
         $store = new RedisSiteVerifyIdempotencyStore($probe);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $uuid = 'd1e2f3a4-5b6c-4d7e-8f90-a1b2c3d4e5f6';
         $key = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del($key);
@@ -775,7 +790,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         }
         // A 1-second lease makes the expiry instant in the test.
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $uuid = 'e2f3a4b5-6c7d-4e8f-90a1-b2c3d4e5f6a7';
         $key = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del($key);

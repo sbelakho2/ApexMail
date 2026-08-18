@@ -228,6 +228,24 @@ LUA;
         return new ConsumedRecord($record, (bool) $consumedNow, (bool) $consumedBefore, $result);
     }
 
+    public function consumedState(string $nonce): ?ConsumedRecord
+    {
+        $raw = $this->client->get($this->prefix.$nonce);
+        if (!\is_string($raw) || $raw === '' || !str_contains($raw, '"state":"consumed"')) {
+            return null;
+        }
+        $record = $this->decode($raw);
+        if ($record === null) {
+            return null;
+        }
+        $result = null;
+        if (preg_match('/"consumed_result":\s*(\{.*?\})/', $raw, $m) === 1) {
+            $result = $this->decodeResult($m[1]);
+        }
+
+        return new ConsumedRecord($record, false, true, $result);
+    }
+
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
     {
         $key = $this->prefix.$nonce;

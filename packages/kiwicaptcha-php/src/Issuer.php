@@ -78,6 +78,35 @@ final class Issuer
     }
 
     /**
+     * Return an issuer with the same secret, storage, clock and region
+     * but the given challenge lifetime. The Config is cloned with only
+     * ttlSecs replaced; storage and the clock override are carried over
+     * directly (no reflection). The caller keeps the same storage.
+     */
+    public function withTtl(int $ttlSecs): self
+    {
+        $c = $this->config;
+        $clone = new Config(
+            secretKey: $c->secretKey,
+            algorithm: $c->algorithm,
+            mKib: $c->mKib,
+            t: $c->t,
+            p: $c->p,
+            targetBits: $c->targetBits,
+            argon2TargetBits: $c->argon2TargetBits,
+            ttlSecs: $ttlSecs,
+            minDurationMs: $c->minDurationMs,
+            solverMaxHashes: $c->solverMaxHashes,
+            bindingMode: $c->bindingMode,
+            policyVersion: $c->policyVersion,
+            issuer: $c->issuer,
+            kid: $c->kid,
+        );
+
+        return new self($clone, $this->storage, $this->now, $this->region);
+    }
+
+    /**
      * @throws \InvalidArgumentException when the scope is empty, longer than
      *                                   128 bytes, or outside the identifier
      *                                   alphabet [A-Za-z0-9._:-];

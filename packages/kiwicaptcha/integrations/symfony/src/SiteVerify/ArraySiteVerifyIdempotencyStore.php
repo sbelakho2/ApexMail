@@ -30,19 +30,20 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         $this->now = $now ?? static fn (): int => time();
     }
 
-    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array
+    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
     {
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
         if ($existing === null) {
             $owner = bin2hex(random_bytes(16));
+            $lease = $leaseSeconds ?? $this->leaseSeconds;
             $this->records[$key] = [
                 'hash' => $responseHash,
                 'remoteip_fingerprint' => $remoteipFingerprint,
                 'state' => 'pending',
                 'owner' => $owner,
                 'result' => null,
-                'lease_expires_at' => ($this->now)() + $this->leaseSeconds,
+                'lease_expires_at' => ($this->now)() + $lease,
             ];
 
             return [IdempotencyClaim::Claimed, $owner];

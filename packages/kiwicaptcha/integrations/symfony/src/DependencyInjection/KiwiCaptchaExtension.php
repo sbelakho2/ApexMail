@@ -12,6 +12,7 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyMetadataStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
@@ -154,6 +155,57 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 'kiwi_captcha.min_duration_ms must be < challenge_ttl_secs * 1000 — '.
                 'a floor at or above the TTL leaves no acceptable submission time'
             );
+        }
+        // ── Siteverify crash-recovery ordering invariants ────────────────
+        // The Siteverify idempotency store's crash recovery rests on the
+        // strict ordering (SiteVerifyIdempotencyStore::LEASE_SECONDS):
+        //
+        //   max verification window  <  lease (60)  <  waiter bound (90)
+        //                            <  effective challenge TTL
+        //
+        // The controller enforces only waiter > lease; the effective token
+        // lifetime and the Argon admission lease complete the ordering and
+        // are validated HERE — a configuration that breaks the ordering
+        // makes crash recovery impossible (a PENDING_SAME waiter gives up
+        // before the owner lease can be taken over, or a lease-bounded
+        // verification outlasts the Siteverify lease and is displaced at
+        // takeover). The checks apply ONLY when Siteverify is enabled
+        // (risk.siteverify_secrets non-empty); without it the native
+        // behavior stays unrestricted.
+        if ($config['risk']['siteverify_secrets'] !== []) {
+            $waiterBoundSecs = (int) SiteVerifyController::IDEMPOTENCY_WAIT_SECS;
+            if ($config['challenge_ttl_secs'] <= $waiterBoundSecs) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha.challenge_ttl_secs %d must exceed the Siteverify PENDING_SAME waiter bound (%ds) for crash recovery to be possible — a PENDING_SAME waiter would give up before the owner lease can be taken over',
+                    $config['challenge_ttl_secs'],
+                    $waiterBoundSecs,
+                ));
+            }
+            foreach ($config['risk']['sitekeys'] as $sitekey => $spec) {
+                if ($config['min_duration_ms'] !== null && $spec['ttl_secs'] !== null && $config['min_duration_ms'] >= $spec['ttl_secs'] * 1000) {
+                    throw new \LogicException(sprintf(
+                        'kiwi_captcha.min_duration_ms %d must be < sitekey %s ttl_secs %d * 1000 — a floor at or above the TTL leaves no acceptable submission time (TooFast before expiry, Expired after)',
+                        $config['min_duration_ms'],
+                        $sitekey,
+                        $spec['ttl_secs'],
+                    ));
+                }
+                if ($spec['ttl_secs'] !== null && $spec['ttl_secs'] <= $waiterBoundSecs) {
+                    throw new \LogicException(sprintf(
+                        'kiwi_captcha.risk.sitekeys.%s.ttl_secs %d must exceed the Siteverify PENDING_SAME waiter bound (%ds) for crash recovery to be possible — a PENDING_SAME waiter would give up before the owner lease can be taken over',
+                        $sitekey,
+                        $spec['ttl_secs'],
+                        $waiterBoundSecs,
+                    ));
+                }
+            }
+            if ($config['argon2_lease_ms'] >= SiteVerifyIdempotencyStore::LEASE_SECONDS * 1000) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha.argon2_lease_ms %d must be below the Siteverify ownership lease (%ds) or the Siteverify lease must be raised — a lease-bounded verification could otherwise outlast the Siteverify lease and be displaced at takeover',
+                    $config['argon2_lease_ms'],
+                    SiteVerifyIdempotencyStore::LEASE_SECONDS,
+                ));
+            }
         }
         // A STATIC transaction binding must satisfy the same
         // shape rule the controller enforces per request (1..128
@@ -807,6 +859,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The shared Redis log gate for
             // invalid-secret flood suppression (null = suppressed detail).
             $riskConfig['siteverify_secrets'] !== [] ? $redisRef : null,
+            null, // idempotency wait bound (default)
+            $config['risk']['policy_version'] ?? 1, // security-policy epoch in the idempotency identity
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Migration compatibility loader ──

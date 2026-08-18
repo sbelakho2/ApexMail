@@ -85,6 +85,14 @@ final class Psr6Storage implements StorageInterface
         }
     }
 
+    public function consumedState(string $nonce): ?ConsumedRecord
+    {
+        // PSR-6 pools expose no atomic consumed-state inspection without
+        // a transition; reconstruction is unavailable on this backend
+        // (the bundle refuses non-atomic storage for Siteverify anyway).
+        return null;
+    }
+
     public function consume(string $nonce): ?ConsumedRecord
     {
         // Read first, transition second. PSR-6 offers no atomic get-and-set,

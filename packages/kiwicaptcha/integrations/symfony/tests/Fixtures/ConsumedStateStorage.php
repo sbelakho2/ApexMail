@@ -55,7 +55,12 @@ final class ConsumedStateStorage implements StorageInterface
         return $this->inner->find($nonce);
     }
 
-    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     {
         if ($this->throwOnConsume) {
             throw new \RuntimeException('simulated lost consume response');

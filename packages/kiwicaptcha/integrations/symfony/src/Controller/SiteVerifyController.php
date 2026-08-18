@@ -102,6 +102,13 @@ final class SiteVerifyController
         private readonly \Predis\Client|\Redis|null $logGate = null,
         /** Hard bound on the PENDING_SAME wait in seconds (see {@see self::IDEMPOTENCY_WAIT_SECS}). */
         private readonly float $idempotencyWaitSecs = self::IDEMPOTENCY_WAIT_SECS,
+        /**
+         * The security-policy epoch (risk.policy_version): part of the
+         * idempotency backend identity, so a same-key request after a
+         * policy change is a NEW logical operation (a conflict), never a
+         * replay of the pre-change outcome.
+         */
+        private readonly int $policyVersion = 0,
     ) {
         // The lease-ordering invariant is ENFORCED at construction: the
         // waiter bound must exceed the owner lease, otherwise the
@@ -265,6 +272,65 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
         }
 
+        // The idempotency backend identity binds the secret, the
+        // SERVER-RESOLVED expected scope and the security-policy epoch:
+        // a same-key request after a scope remap or policy bump is a NEW
+        // logical operation (a conflict), never a replay of the
+        // pre-change outcome.
+        $backendId = hash('sha256', $secret.'|'.$expectedScope.'|'.$this->policyVersion);
+
+        // The token is decoded BEFORE the claim so the claim's lease can
+        // be derived from THIS token's REMAINING signed validity (not the
+        // configured maximum lifetime): a valid token submitted late in
+        // its lifetime leaves less room than the default lease, and a
+        // fixed 60s lease could otherwise expire after the signed
+        // challenge, making the crash-recovery takeover reconstruct an
+        // outcome the verifier would refuse as expired. The derivation
+        // keeps lease < effectiveWait < remaining whenever a record is
+        // visible; without a record the defaults apply.
+        try {
+            $token = SolutionToken::decode($response);
+        } catch (DecodeError) {
+            // A malformed token is a DETERMINISTIC failure — the claiming
+            // request FINALIZES it so a same-key retry reproduces the
+            // identical canonical response instead of leaving the entry
+            // pending until TTL.
+            $claim = IdempotencyClaim::Claimed;
+            $claimOwner = null;
+            if ($idempotencyKey !== null && $this->idempotencyStore !== null) {
+                [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp));
+            }
+            $canonical = $this->canonicalizeResponse([
+                'success' => false,
+                'challenge_ts' => null,
+                'hostname' => null,
+                'error-codes' => ['invalid-input-response'],
+            ]);
+            if ($claimOwner !== null) {
+                $this->finalizeAsOwner($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, microtime(true));
+            }
+
+            return new JsonResponse($canonical);
+        }
+
+        $claimLease = null;
+        $effectiveWait = $this->idempotencyWaitSecs;
+        $storeLease = $this->idempotencyStore?->leaseSeconds() ?? SiteVerifyIdempotencyStore::LEASE_SECONDS;
+        $record = $this->storage?->find($token->nonce);
+        if ($record !== null) {
+            $remainingSecs = $record->expiresAt - time();
+            if ($remainingSecs > 0) {
+                // The derived lease never exceeds the store's configured
+                // lease (the operator's contract) nor the remaining signed
+                // validity minus a margin, and the effective waiter bound
+                // stays STRICTLY between the lease and the remaining
+                // validity (lease + 1 <= wait < remaining) so the atomic
+                // takeover is always reachable before the deadline.
+                $claimLease = max(1, min($storeLease, SiteVerifyIdempotencyStore::LEASE_SECONDS, $remainingSecs - 15));
+                $effectiveWait = max($claimLease + 1, min($effectiveWait, $remainingSecs - 5));
+            }
+        }
+
         // Provider-style verification idempotency. The claim is atomic;
         // only the OWNING request verifies the token. A same-key retry
         // either returns the stored canonical response or (crash window)
@@ -274,16 +340,13 @@ final class SiteVerifyController
         // binds backend identity + response hash + canonicalized remoteip
         // into the claim: the same UUID with a CHANGED remoteip is a
         // CONFLICT, never a join or a reuse.
-        $backendId = hash('sha256', $secret);
         $claim = IdempotencyClaim::Claimed;
         $claimOwner = null;
         $claimedAt = null;
-        $remoteipFingerprint = null;
         $idempotent = false;
         if ($idempotencyKey !== null) {
             $idempotent = true;
-            $remoteipFingerprint = $this->remoteipFingerprint($remoteIp);
-            [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $remoteipFingerprint);
+            [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), $claimLease);
             if ($claim === IdempotencyClaim::Conflict) {
                 return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
@@ -295,26 +358,6 @@ final class SiteVerifyController
             if ($claim === IdempotencyClaim::Claimed) {
                 $claimedAt = microtime(true);
             }
-        }
-
-        try {
-            $token = SolutionToken::decode($response);
-        } catch (DecodeError) {
-            // A malformed token is a DETERMINISTIC failure — the claiming
-            // request FINALIZES it so a same-key retry reproduces the
-            // identical canonical response instead of leaving the entry
-            // pending until TTL.
-            $canonical = $this->canonicalizeResponse([
-                'success' => false,
-                'challenge_ts' => null,
-                'hostname' => null,
-                'error-codes' => ['invalid-input-response'],
-            ]);
-            if ($claimOwner !== null) {
-                $this->finalizeAsOwner($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, $claimedAt);
-            }
-
-            return new JsonResponse($canonical);
         }
 
         // PENDING_SAME — another request with the SAME key + hash owns
@@ -329,7 +372,7 @@ final class SiteVerifyController
         // the entry pending for a later retry.
         if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
             $stored = null;
-            $waitDeadline = microtime(true) + $this->idempotencyWaitSecs;
+            $waitDeadline = microtime(true) + $effectiveWait;
             while (true) {
                 $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
                 if ($stored !== null) {
@@ -349,10 +392,11 @@ final class SiteVerifyController
                 // remoteip fingerprint is bound in the record, so the
                 // takeover enforces the COMPLETE claim identity (the
                 // claim() pass already checked it — defense-in-depth).
-                [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $remoteipFingerprint);
+                [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp));
                 if ($takeover === IdempotencyClaim::TookOver) {
                     // This request now OWNS the entry — it will verify
                     // below and finalize with the takeover owner token.
+                    $claim = IdempotencyClaim::TookOver;
                     $claimOwner = $takeoverOwner;
                     $claimedAt = microtime(true);
                     break;
@@ -362,6 +406,30 @@ final class SiteVerifyController
             if ($stored !== null) {
                 return new JsonResponse($this->canonicalizeResponse($stored));
             }
+        }
+
+        // Crash recovery FIRST: this request now OWNS the claim (claim or
+        // takeover) — if the token was already consumed and a
+        // deterministic outcome was committed, reconstruct it directly.
+        // This works even when the signed challenge has expired in the
+        // meantime (a token submitted late in its lifetime): the retained
+        // outcome is the original logical result, not a fresh redemption.
+        // Reconstruction runs ONLY on the takeover path — the request has
+        // PROVEN the idempotency identity against the pre-existing entry
+        // (same backend + key + response hash + remote-IP fingerprint).
+        // A freshly claimed entry (an ordinary replay under a different or
+        // new key) must NOT reconstruct: the compatibility boundary keeps
+        // mapping a consumed token to timeout-or-duplicate via the
+        // verifier's own replay path.
+        $reconstructed = $idempotent && $claim === IdempotencyClaim::TookOver
+            ? $this->verifier->reconstructStoredOutcome($response)
+            : null;
+        if ($reconstructed !== null) {
+            if ($claimOwner !== null) {
+                $this->finalizeAsOwner($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $this->canonicalizeResponse($this->outcomeToCanonical($reconstructed)), $claimedAt);
+            }
+
+            return new JsonResponse($this->canonicalizeResponse($this->outcomeToCanonical($reconstructed)));
         }
 
         // The SAME atomic verifier as the native path, WITH the expected
@@ -387,10 +455,10 @@ final class SiteVerifyController
             );
         } catch (\InvalidArgumentException) {
             // Defensive boundary: the remoteip was validated above, so
-            // the core's IP canonicalization cannot throw here — but a
-            // future core change must never reopen the 500 escape, so an
+            // the core's IP canonicalization cannot throw here — an
             // unexpected InvalidArgumentException from the IP path maps
-            // to the provider bad-request JSON instead.
+            // to the provider bad-request JSON; exceptions must not
+            // cross the HTTP compatibility boundary.
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         if ($claimOwner !== null && !$this->confirmOwnership($backendId, $idempotencyKey, $claimOwner)) {
@@ -498,6 +566,24 @@ final class SiteVerifyController
      * challenge metadata (action/cData bound at issuance — never echoed
      * from the request) and the retained record's challenge_ts/hostname.
      */
+    /**
+     * The canonical provider response for an outcome: the success shape
+     * with server-bound metadata, or the mapped failure shape.
+     */
+    private function outcomeToCanonical(VerifyOutcome $outcome): array
+    {
+        if ($outcome->isOk()) {
+            return $this->canonicalSuccess($outcome);
+        }
+
+        return [
+            'success' => false,
+            'challenge_ts' => null,
+            'hostname' => null,
+            'error-codes' => [$this->mapError($outcome->error())],
+        ];
+    }
+
     private function canonicalSuccess(VerifyOutcome $outcome): array
     {
         $issuedAt = null;

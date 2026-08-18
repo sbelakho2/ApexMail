@@ -207,6 +207,11 @@ final class ConsumedStateRetryTest extends TestCase
                 return $this->inner->find($nonce);
             }
 
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                return null;
+            }
+
             public function consume(string $nonce): ?ConsumedRecord
             {
                 return $this->inner->consume($nonce);
@@ -250,6 +255,11 @@ final class ConsumedStateRetryTest extends TestCase
             public function find(string $nonce): ?ChallengeRecord
             {
                 return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                return null;
             }
 
             public function consume(string $nonce): ?ConsumedRecord

@@ -249,7 +249,12 @@ final class ChallengeFlowTest extends TestCase
                 return $this->inner->find($nonce);
             }
 
-            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                        public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 return $this->inner->consume($nonce);
             }
@@ -342,7 +347,12 @@ final class ChallengeFlowTest extends TestCase
                 return $this->inner->find($nonce);
             }
 
-            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                        public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 return $this->inner->consume($nonce);
             }
@@ -1276,7 +1286,12 @@ final class ChallengeFlowTest extends TestCase
                 return null;
             }
 
-            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                        public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 return null;
             }
@@ -1382,7 +1397,12 @@ final class ChallengeFlowTest extends TestCase
                 return $this->inner->find($nonce);
             }
 
-            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                        public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 return $this->inner->consume($nonce);
             }

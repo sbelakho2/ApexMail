@@ -388,7 +388,7 @@ final class SiteVerifyTest extends TestCase
         [$token] = $this->issuedToken($storage);
         $store = new ArraySiteVerifyIdempotencyStore();
         $controller = $this->controller(idempotencyStore: $store, storage: $storage);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $uuid = '923e4567-e89b-42d3-a456-426614174000';
 
         // The owner claims with remoteip 127.0.0.1 and stalls: the entry
@@ -497,7 +497,7 @@ final class SiteVerifyTest extends TestCase
         };
         // A SHORT configurable lease makes the expiry instant in the test.
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $uuid = '623e4567-e89b-42d3-a456-426614174000';
         $hash = 'response-hash';
         $fingerprint = 'ip:127.0.0.1';
@@ -534,7 +534,7 @@ final class SiteVerifyTest extends TestCase
             return ++$now;
         };
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $uuid = '723e4567-e89b-42d3-a456-426614174000';
         $hash = 'response-hash';
         $fingerprint = 'ip:127.0.0.1';
@@ -561,7 +561,7 @@ final class SiteVerifyTest extends TestCase
         $store = new ArraySiteVerifyIdempotencyStore();
         $controller = $this->controller(idempotencyStore: $store, storage: $storage);
         $uuid = '823e4567-e89b-42d3-a456-426614174000';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $malformed = 'not-a-valid-solution-token';
 
         $first = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
@@ -606,7 +606,12 @@ final class SiteVerifyTest extends TestCase
                 return $this->inner->find($nonce);
             }
 
-            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                        public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
                 $this->consumes++;
 
@@ -632,7 +637,7 @@ final class SiteVerifyTest extends TestCase
             return ++$now;
         };
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $uuid = 'a3e4567e-e89b-42d3-a456-426614174000';
         $hash = hash('sha256', $token);
         $fingerprint = 'ip:127.0.0.1';
@@ -687,7 +692,7 @@ final class SiteVerifyTest extends TestCase
             return $now;
         };
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $uuid = 'b3e4567e-e89b-42d3-a456-426614174000';
         $hash = 'response-hash';
         $fingerprint = 'ip:127.0.0.1';
@@ -760,7 +765,7 @@ final class SiteVerifyTest extends TestCase
         ]));
         self::assertSame(400, $response->getStatusCode());
         self::assertSame(['bad-request'], json_decode((string) $response->getContent(), true)['error-codes']);
-        self::assertNull($store->stored(hash('sha256', self::SITEVERIFY_SECRET), $uuid), 'no idempotency entry may exist under a malformed remoteip');
+        self::assertNull($store->stored(hash('sha256', self::SITEVERIFY_SECRET.'|login|0'), $uuid), 'no idempotency entry may exist under a malformed remoteip');
     }
 
     public function testMappedV6RemoteipFingerprintIsTheSameIdentityAsPlainIpv4(): void
@@ -797,7 +802,7 @@ final class SiteVerifyTest extends TestCase
         // hash bound in the record: a finalize with the correct owner but
         // a WRONG hash is a no-op and the entry stays pending.
         $store = new ArraySiteVerifyIdempotencyStore();
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $uuid = 'e23e4567-e89b-42d3-a456-426614174000';
         $hash = 'response-hash';
         $fingerprint = 'ip:127.0.0.1';
@@ -824,7 +829,7 @@ final class SiteVerifyTest extends TestCase
             return $now;
         };
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $uuid = 'f23e4567-e89b-42d3-a456-426614174000';
         $hash = 'response-hash';
 
@@ -839,6 +844,93 @@ final class SiteVerifyTest extends TestCase
         // The correct fingerprint takes over after the expired lease.
         [$second] = $store->takeover($backendId, $uuid, $hash, 300, 'ip:127.0.0.1');
         self::assertSame(IdempotencyClaim::TookOver, $second);
+    }
+
+
+    /**
+     * Crash recovery for a token submitted LATE in its lifetime: the
+     * owner consumes + commits the token but dies before finalizing; the
+     * signed challenge expires; the retry (same key) takes over after the
+     * derived lease and must RECONSTRUCT the original committed success —
+     * a fresh verification would now answer Expired (timeout-or-duplicate),
+     * violating the identical-canonical-response promise.
+     */
+    public function testLateTokenCrashRecoveryReconstructsTheOriginalSuccessAfterExpiry(): void
+    {
+        $storage = new ArrayStorage();
+        $realNow = time();
+        // A token with a SHORT remaining lifetime: the owner verifies it
+        // ~1s after issuance (remaining ~4s), the derived claim lease is
+        // ~1s and the waiter bound ~2s — both inside the remaining
+        // validity, so the takeover happens before the signed expiry.
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 5), $storage);
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        $store = new ArraySiteVerifyIdempotencyStore();
+        // The "crash" seam: finalize() is a no-op for the owner, exactly
+        // like a process dying between the core commit and the Siteverify
+        // finalize. Everything else delegates.
+        $crashingStore = new class($store) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore {
+            public function __construct(private readonly \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $inner)
+            {
+            }
+
+            public function leaseSeconds(): int
+            {
+                return $this->inner->leaseSeconds();
+            }
+
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            {
+                return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+            }
+
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array
+            {
+                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint);
+            }
+
+            public function renew(string $backendId, string $idempotencyKey, string $owner): bool
+            {
+                return $this->inner->renew($backendId, $idempotencyKey, $owner);
+            }
+
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            {
+                // The owner's finalize never lands (process death).
+            }
+
+            public function stored(string $backendId, string $idempotencyKey): ?array
+            {
+                return $this->inner->stored($backendId, $idempotencyKey);
+            }
+        };
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $uuid = 'e4f5a6b7-8c9d-4eaf-b012-3c4d5e6f7081';
+
+        // The owner claims, verifies (committed success) and "dies"
+        // WITHOUT finalizing.
+        $owner = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore);
+        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $ownerBody = json_decode((string) $ownerResponse->getContent(), true);
+        self::assertSame(true, $ownerBody['success'] ?? null);
+        // The owner consumed + committed but never finalized: the entry is
+        // still pending with a committed core result.
+        self::assertNull($store->stored($backendId, $uuid), 'the owner crashed before the Siteverify finalize');
+
+        // Wait past the signed expiry (ttl 5s) and the derived lease.
+        sleep(7);
+        $waiter = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore);
+        $retry = $waiter->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $retryBody = json_decode((string) $retry->getContent(), true);
+        self::assertSame(true, $retryBody['success'] ?? null, 'the retry must reconstruct the ORIGINAL committed success after the signed expiry: '.(string) $retry->getContent());
+        self::assertSame($ownerBody, $retryBody, 'the identical canonical response promise holds even for a late-lifetime crash');
     }
 }
 

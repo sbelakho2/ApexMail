@@ -144,10 +144,11 @@ LUA;
     ) {
     }
 
-    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array
+    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
     {
         $owner = bin2hex(random_bytes(16));
-        $result = RedisEval::eval($this->redis, self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), $this->leaseSeconds, $remoteipFingerprint]);
+        $lease = $leaseSeconds ?? $this->leaseSeconds;
+        $result = RedisEval::eval($this->redis, self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), $lease, $remoteipFingerprint]);
 
         $claim = match ((string) $result) {
             'claimed' => IdempotencyClaim::Claimed,
