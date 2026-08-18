@@ -1404,7 +1404,15 @@
         try {
           resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody), signal: abortController.signal });
           if (!resp.ok) throw new Error("Challenge failed");
-          data = await resp.json();
+          try {
+            data = await resp.json();
+          } catch (e) {
+            // A non-JSON challenge body is a challenge-content failure —
+            // the browser parser's message would leak response text into
+            // the widget error surface, so it is replaced with a stable
+            // driver-owned message.
+            throw new Error("Challenge malformed");
+          }
         } finally {
           clearTimeout(abortTimer);
           var rw2 = kiwiWidgets[widgetId];
@@ -1885,6 +1893,26 @@
       if (id && !kiwiCompatFirstId) kiwiCompatFirstId = id;
       return id || 0;
     }
+    // hCaptcha async execute() rejects with a stable error-code STRING
+    // (network-error | challenge-error | internal-error) that migrated
+    // applications branch on like the incumbent API. Map the driver's
+    // underlying rejection to that code — the message text is the stable
+    // signal, because fail() forwards e.message into a fresh Error:
+    // transport failures (aborted fetches, fetch TypeErrors, non-2xx
+    // challenge responses) -> "network-error"; challenge-content and
+    // solve failures (malformed challenge payloads, downgraded
+    // challenges, exhausted searches) -> "challenge-error"; everything
+    // else (worker/solver conditions, unknown widget ids) ->
+    // "internal-error". The bare non-async execute keeps rejecting with
+    // Error objects.
+    function kiwiHcaptchaErrorCode(err) {
+      var name = err && err.name;
+      if (name === "AbortError" || name === "TypeError") return "network-error";
+      var lower = String((err && err.message) || "").toLowerCase();
+      if (lower.indexOf("abort") !== -1 || lower.indexOf("fetch") !== -1 || lower.indexOf("network") !== -1 || lower.indexOf("load failed") !== -1 || lower.indexOf("challenge failed") !== -1) return "network-error";
+      if (lower.indexOf("solve") !== -1 || lower.indexOf("downgrad") !== -1 || lower.indexOf("exhaust") !== -1 || lower.indexOf("challenge malformed") !== -1) return "challenge-error";
+      return "internal-error";
+    }
     function compatExecute(arg, opts) {
       // execute() with no argument targets the first created widget.
       if (arg === undefined || arg === null) {
@@ -1918,11 +1946,14 @@
         if (compat === "hcaptcha" && opts && opts.async === true) {
           // hCaptcha async execute: resolve with the token AND the stable
           // per-widget response key ({response, key}); the bare non-async
-          // form resolves the token string.
+          // form resolves the token string. Rejections are normalized to
+          // the incumbent's stable error-code STRING (see
+          // kiwiHcaptchaErrorCode) — an Error object is never surfaced
+          // through the async form.
           return execPromise.then(function (token) {
             var rec = kiwiWidgets[id];
             return { response: token, key: (rec && rec.responseKey) || "" };
-          });
+          }).catch(function (err) { throw kiwiHcaptchaErrorCode(err); });
         }
         return execPromise;
       }

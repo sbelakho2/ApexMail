@@ -51,8 +51,9 @@ namespace KiwiCaptcha;
  * under (e.g. "dev", "staging", "prod") — a dev/staging/production
  * compartment that works even when deployments share secret keys. Like
  * `region` it is ALWAYS present in `toArray()` (null when unset) and is
- * part of the signed v2 canonical payload (final segment, appended AFTER
- * `request_binding` — see {@see Issuer::canonicalPayload()}). A verifier
+ * part of the signed v2 canonical payload (appended AFTER
+ * `request_binding`, with `kid` following as the FINAL field — see
+ * {@see Issuer::canonicalPayload()}). A verifier
  * configured with an expected issuer rejects records whose issuer does not
  * match exactly ({@see \KiwiCaptcha\VerifyError::WrongIssuer}).
  *

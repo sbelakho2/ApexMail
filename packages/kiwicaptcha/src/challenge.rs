@@ -689,9 +689,11 @@ pub const MAX_TTL_SECS: u64 = 300;
 /// invalid. Shared with the PHP core.
 pub const MAX_CLOCK_SKEW_SECS: u64 = 60;
 
-/// Maximum Argon2id time cost a record may claim. `t` above this is
-/// rejected by `validate_record` (and at issuance) so verification never runs
-/// an unbounded-cost memory-hard computation.
+/// Maximum Argon2id time cost at ISSUANCE (browser-solver policy): the
+/// browser solver caps at 6, so higher values would be unsolvable for
+/// legit clients and issuance refuses them. Distinct from the verifier's
+/// structural ceiling [`MAX_ARGON_TIME`] (16): `validate_record` accepts
+/// signed records with t in 7..=16, but no KiwiCaptcha issuer mints them.
 pub const MAX_ARGON_T: u32 = 6;
 
 /// Maximum difficulty for Argon2id challenges.

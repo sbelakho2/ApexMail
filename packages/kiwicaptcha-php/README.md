@@ -56,7 +56,9 @@ Byte-for-byte compatible with the reference implementation in
   abuse probe, not a solution.
 - **record validation**: every field is validated on the verify path —
   scope, TTL, binding, algorithm-specific parameter profile (Argon2id
-  `t >= 3 && p == 1`, `m_kib >= 8*1024`), and the PoW result. Malformed
+  `t >= 3 && p == 1`, `m_kib >= 8` — the verifier's structural minimum;
+  issuance recommends 8192+ KiB, e.g. 8192 low-memory shared hosting or
+  65536 desktop), and the PoW result. Malformed
   or out-of-profile records fail closed with a distinguishable error.
 - **clock skew tolerance**: verification absorbs up to 5 s of host-clock
   skew (`Verifier::SKEW_TOLERANCE_US`) for the server-measured

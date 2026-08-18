@@ -4,7 +4,9 @@
 
 ### Added
 - Deployment issuer binding: `ChallengeRecord.issuer` (the canonical wire
-  schema's final field, `...|request_binding|issuer`), `Config.issuer`, and
+  schema's field appended after `request_binding` —
+  `...|request_binding|issuer|kid`, `kid` the FINAL field), `Config.issuer`,
+  and
   `Verifier.expectedIssuer` + `VerifyError::WrongIssuer` — a
   dev/staging/production compartment that holds even with shared secret
   keys.

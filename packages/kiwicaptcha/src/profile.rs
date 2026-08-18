@@ -54,8 +54,9 @@ pub enum ProfileError {
     #[error("Argon2id target bits must be within 1..=10 (got {0})")]
     InvalidArgonTargetBits(u8),
     /// Argon2id time cost must be `3..=MAX_ARGON_T` (6) — the protocol
-    /// profile requires `t >= 3` (libsodium-representable) and the verifier
-    /// declares `t > 6` malformed.
+    /// profile requires `t >= 3` (libsodium-representable) and caps at 6,
+    /// the browser-solver ceiling (distinct from the verifier's structural
+    /// ceiling, `MAX_ARGON_TIME` = 16).
     #[error("Argon2id time cost t must be within 3..=6 (got {0})")]
     InvalidArgonT(u32),
     /// Argon2id parallelism must be exactly 1 — libsodium (PHP) only

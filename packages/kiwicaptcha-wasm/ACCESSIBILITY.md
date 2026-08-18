@@ -13,8 +13,10 @@ KiwiCaptcha's normal operation does not require a human to pass a
 cognitive, visual, audio, memory or dexterity test: the proof-of-work is
 computed automatically in the browser. That is a structural accessibility
 advantage under WCAG 2.2 **3.3.8 Accessible Authentication (Minimum)** —
-no alternative authentication path for users with cognitive
-disabilities is needed because the challenge itself is not cognitive.
+which applies to every step of the complete authentication process.
+KiwiCaptcha correctly adds no cognitive-function test of its own, while
+the host login flow remains responsible for its own password, passcode
+and copy-paste compliance.
 
 The defensible product claim is:
 

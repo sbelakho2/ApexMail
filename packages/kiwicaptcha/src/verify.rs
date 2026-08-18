@@ -1215,8 +1215,10 @@ mod tests {
 
     #[test]
     fn issuance_rejects_argon_t_above_protocol_ceiling() {
-        // The verifier declares t > MAX_ARGON_T (6) malformed — issuance
-        // must refuse it (PHP Config already does; Rust must match).
+        // The verifier's structural ceiling is MAX_ARGON_TIME (16), so t=7
+        // is structurally acceptable — but issuance refuses t > MAX_ARGON_T
+        // (6), the browser-solver ceiling (PHP Config already does; Rust
+        // must match).
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,

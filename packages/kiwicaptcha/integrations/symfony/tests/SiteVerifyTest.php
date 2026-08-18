@@ -569,7 +569,7 @@ final class SiteVerifyTest extends TestCase
         ]));
         self::assertSame(503, $response->getStatusCode());
         $body = json_decode((string) $response->getContent(), true);
-        self::assertSame(['temporarily-unavailable'], $body['error-codes'] ?? null);
+        self::assertSame(['internal-error'], $body['error-codes'] ?? null);
         self::assertSame(0, $counting->consumes, 'a waiter that hits the bound must never enter the verifier');
         self::assertNull($store->stored($backendId, $uuid), 'the claim entry stays pending for a later retry');
 

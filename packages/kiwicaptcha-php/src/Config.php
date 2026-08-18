@@ -68,9 +68,12 @@ final class Config
     public const MAX_TTL_SECS = 300;
 
     /**
-     * Ceiling for Argon2id time cost. The browser solver caps at 6; higher
-     * values would be unsolvable for legit clients, so issuance refuses them
-     * (the verifier declares t > 6 malformed).
+     * Ceiling for Argon2id time cost at ISSUANCE (browser-solver policy):
+     * the browser solver caps at 6, so higher values would be unsolvable
+     * for legit clients and issuance refuses them. This is distinct from
+     * the verifier's structural ceiling (Verifier::MAX_ARGON_TIME = 16) —
+     * a signed record with t in 7..=16 passes the verifier's structural
+     * gates but is never issued.
      */
     public const MAX_ARGON_T = 6;
 

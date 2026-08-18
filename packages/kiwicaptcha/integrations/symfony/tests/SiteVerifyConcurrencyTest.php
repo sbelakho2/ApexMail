@@ -400,5 +400,284 @@ final class SiteVerifyConcurrencyTest extends TestCase
         self::assertStringContainsString('"state":"consumed"', $record, 'the winner must consume the token exactly once');
         self::assertStringContainsString('"consumed_result":{"valid":1', $record, 'the winner must commit its valid result for replay safety');
     }
+
+
+    /**
+     * The live-owner lease HEARTBEAT: the owner renews its idempotency
+     * lease WHILE blocked inside the verifier, so a concurrent request
+     * can never legally take over a live-but-slow owner. Deterministic
+     * test: the owner's consume() sleeps 5s (short heartbeat interval),
+     * and a second request issued mid-verification must wait for the
+     * stored result instead of taking over or verifying itself.
+     */
+    public function testHeartbeatPreventsTakeoverWhileOwnerBlockedInVerifier(): void
+    {
+        if (!\function_exists('pcntl_fork') || !\function_exists('pcntl_alarm') || !\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('pcntl/predis not available');
+        }
+        try {
+            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399');
+        }
+        $uuid = 'b1c2d3e4-5f6a-4b7c-8d9e-0f1a2b3c4d5e';
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+
+        // A storage whose consume() blocks 5s inside the verifier — the
+        // exact window where a missing heartbeat would let a takeover win.
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), new RedisStorage($probe));
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $solution = $this->solveSolution($challenge);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        $probe->disconnect();
+
+        $outFile = tempnam(sys_get_temp_dir(), 'kiwi-hb-');
+        $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-hb-start-');
+        $owner = pcntl_fork();
+        self::assertNotSame(-1, $owner);
+        if ($owner === 0) {
+            $fp = @fopen($startBarrier, 'r');
+            if ($fp !== false) {
+                flock($fp, LOCK_SH);
+                fread($fp, 1);
+                fclose($fp);
+            }
+            $line = 'error';
+            try {
+                $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+                $sleepy = new class(new RedisStorage($client)) implements \KiwiCaptcha\AtomicStorageInterface {
+                    public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+                    {
+                    }
+
+                    public function store(\KiwiCaptcha\ChallengeRecord $record): void
+                    {
+                        $this->inner->store($record);
+                    }
+
+                    public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+                    {
+                        return $this->inner->find($nonce);
+                    }
+
+                    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                    {
+                        sleep(5); // the blocked-verification window
+                        return $this->inner->consume($nonce);
+                    }
+
+                    public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+                    {
+                        return $this->inner->commitResult($nonce, $valid, $binding);
+                    }
+
+                    public function delete(string $nonce): void
+                    {
+                        $this->inner->delete($nonce);
+                    }
+                };
+                $controller = new SiteVerifyController(
+                    new Verifier($sleepy),
+                    self::SECRET,
+                    [self::SITEVERIFY_SECRET => 'login'],
+                    $sleepy,
+                    null,
+                    null,
+                    new RedisSiteVerifyIdempotencyStore($client),
+                    null,
+                    90.0,
+                    true,   // heartbeat enabled
+                    2,      // 2s heartbeat interval
+                );
+                $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                    'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+                ]));
+                $line = (string) $response->getContent();
+                $client->disconnect();
+            } catch (\Throwable $e) {
+                fwrite(STDERR, 'CHILDERR: '.$e->getMessage()."\n");
+            }
+            $out = fopen($outFile, 'a');
+            flock($out, LOCK_EX);
+            fwrite($out, $line."\n");
+            fclose($out);
+            exit(0);
+        }
+
+        $barrierFile = fopen($startBarrier, 'w');
+        fwrite($barrierFile, 'go');
+        fclose($barrierFile);
+        // The second request fires while the owner is INSIDE the verifier.
+        sleep(3);
+        $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+        $storage = new RedisStorage($client);
+        $waiter = new SiteVerifyController(
+            new Verifier($storage),
+            self::SECRET,
+            [self::SITEVERIFY_SECRET => 'login'],
+            $storage,
+            null,
+            null,
+            new RedisSiteVerifyIdempotencyStore($client),
+        );
+        $waiterResponse = $waiter->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $client->disconnect();
+
+        pcntl_waitpid($owner, $status);
+        self::assertSame(0, pcntl_wexitstatus($status), 'the owner must exit cleanly');
+        $raw = (string) file_get_contents($outFile);
+        $ownerLine = trim($raw);
+        @unlink($outFile);
+        @unlink($startBarrier);
+
+        $waiterBody = json_decode((string) $waiterResponse->getContent(), true);
+        $ownerBody = json_decode($ownerLine, true);
+        self::assertSame(true, $ownerBody['success'] ?? null, 'the owner verifies successfully: '.$ownerLine);
+        self::assertSame(true, $waiterBody['success'] ?? null, 'the waiter must receive the stored canonical success, not take over');
+        self::assertSame($waiterBody, $ownerBody, 'both requests observe the identical canonical result');
+        self::assertNotSame('took_over', $ownerBody['error-codes'][0] ?? null);
+    }
+
+    /**
+     * A DISPLACED owner must never return its own locally computed result:
+     * once ownership is lost mid-verification (heartbeat disabled), the
+     * request returns the stored authoritative outcome — the taker's
+     * canonical failure — not its local success.
+     */
+    public function testDisplacedOwnerReturnsAuthoritativeResultNotItsOwn(): void
+    {
+        if (!\function_exists('pcntl_fork') || !\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('pcntl/predis not available');
+        }
+        try {
+            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399');
+        }
+        $uuid = 'c2d3e4f5-6a7b-4c8d-9e0f-1a2b3c4d5e6f';
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 180), new RedisStorage($probe));
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $solution = $this->solveSolution($challenge);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        $probe->disconnect();
+
+        $outFile = tempnam(sys_get_temp_dir(), 'kiwi-disp-');
+        $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-disp-start-');
+        $owner = pcntl_fork();
+        self::assertNotSame(-1, $owner);
+        if ($owner === 0) {
+            $fp = @fopen($startBarrier, 'r');
+            if ($fp !== false) {
+                flock($fp, LOCK_SH);
+                fread($fp, 1);
+                fclose($fp);
+            }
+            $line = 'error';
+            try {
+                $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 40.0, 'read_write_timeout' => 40.0]);
+                $sleepy = new class(new RedisStorage($client)) implements \KiwiCaptcha\AtomicStorageInterface {
+                    public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+                    {
+                    }
+
+                    public function store(\KiwiCaptcha\ChallengeRecord $record): void
+                    {
+                        $this->inner->store($record);
+                    }
+
+                    public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+                    {
+                        return $this->inner->find($nonce);
+                    }
+
+                    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                    {
+                        sleep(35); // longer than the 30s lease
+                        return $this->inner->consume($nonce);
+                    }
+
+                    public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+                    {
+                        return $this->inner->commitResult($nonce, $valid, $binding);
+                    }
+
+                    public function delete(string $nonce): void
+                    {
+                        $this->inner->delete($nonce);
+                    }
+                };
+                $controller = new SiteVerifyController(
+                    new Verifier($sleepy),
+                    self::SECRET,
+                    [self::SITEVERIFY_SECRET => 'login'],
+                    $sleepy,
+                    null,
+                    null,
+                    new RedisSiteVerifyIdempotencyStore($client),
+                    null,
+                    90.0,
+                    false, // heartbeat DISABLED — the displacement scenario
+                );
+                $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                    'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+                ]));
+                $line = (string) $response->getContent();
+                $client->disconnect();
+            } catch (\Throwable $e) {
+                fwrite(STDERR, 'CHILDERR: '.$e->getMessage()."\n");
+            }
+            $out = fopen($outFile, 'a');
+            flock($out, LOCK_EX);
+            fwrite($out, $line."\n");
+            fclose($out);
+            exit(0);
+        }
+
+        $barrierFile = fopen($startBarrier, 'w');
+        fwrite($barrierFile, 'go');
+        fclose($barrierFile);
+        // After the owner's lease expires (30s), the taker verifies with a
+        // DIFFERENT remoteip — a binding mismatch — and finalizes a
+        // canonical FAILURE as the authoritative outcome.
+        sleep(33);
+        $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 40.0, 'read_write_timeout' => 40.0]);
+        $storage = new RedisStorage($client);
+        $taker = new SiteVerifyController(
+            new Verifier($storage),
+            self::SECRET,
+            [self::SITEVERIFY_SECRET => 'login'],
+            $storage,
+            null,
+            null,
+            new RedisSiteVerifyIdempotencyStore($client),
+        );
+        $takerResponse = $taker->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
+        ]));
+        $client->disconnect();
+
+        pcntl_waitpid($owner, $status);
+        self::assertSame(0, pcntl_wexitstatus($status), 'the owner must exit cleanly');
+        $raw = (string) file_get_contents($outFile);
+        $ownerLine = trim($raw);
+        @unlink($outFile);
+        @unlink($startBarrier);
+
+        $takerBody = json_decode((string) $takerResponse->getContent(), true);
+        $ownerBody = json_decode($ownerLine, true);
+        self::assertSame(false, $takerBody['success'] ?? null, 'the taker finalizes the binding-mismatch failure');
+        self::assertSame(false, $ownerBody['success'] ?? null, 'the displaced owner must return the STORED authoritative failure, not its local success: '.$ownerLine);
+        self::assertSame($takerBody, $ownerBody, "the displaced owner returns the taker's canonical result byte-for-byte");
+    }
 }
 
