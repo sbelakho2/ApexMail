@@ -43,15 +43,6 @@ interface StorageInterface
     public function consume(string $nonce): ?ConsumedRecord;
 
     /**
-     * READ-ONLY consumed-state inspection: returns the retained
-     * ConsumedRecord for an already-consumed record WITHOUT any state
-     * transition (a fresh record is untouched), or null when the record
-     * is missing or not yet consumed. Used for idempotent reconstruction
-     * of a committed outcome after the signed challenge has expired.
-     */
-    public function consumedState(string $nonce): ?ConsumedRecord;
-
-    /**
      * Commit the deterministic verification result of a consumed record.
      * Only succeeds (returns true) when the record exists, is in the
      * CONSUMED state, and has no committed result yet (atomic in the Redis

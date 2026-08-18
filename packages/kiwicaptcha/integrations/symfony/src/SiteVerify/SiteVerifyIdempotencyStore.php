@@ -102,12 +102,22 @@ interface SiteVerifyIdempotencyStore
      * caller skipped claim(). A losing attempt leaves the record
      * untouched.
      *
+     * @param int|null $leaseSeconds the lease window for the NEW owner in
+     *                               seconds, overriding the store's
+     *                               configured lease (null = the store's
+     *                               configured lease). The controller
+     *                               passes the per-token lease derived at
+     *                               claim time so a late token's short
+     *                               lease is maintained for the whole
+     *                               lifecycle instead of reverting to the
+     *                               store default on takeover.
+     *
      * @return array{0: IdempotencyClaim, 1: ?string} TookOver + the NEW
      *         owner token the winner must finalize with, or StillPending +
      *         null when the lease is still held (or the entry is complete /
      *         belongs to a different response hash or remoteip fingerprint)
      */
-    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array;
+    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array;
 
         /**
      * After verification, atomically confirm that this request still owns

@@ -588,13 +588,28 @@ impl RedisChallengeStore {
         // or an integer (no non-finite floats) — but the no-panic invariant
         // maps even the impossible serialization failure to a
         // typed storage error instead of panicking.
-        let value = serde_json::to_string(record).map_err(|e| {
+        let mut value = serde_json::to_string(record).map_err(|e| {
             redis::RedisError::from((
                 redis::ErrorKind::TypeError,
                 "ChallengeRecord JSON serialization failed",
                 e.to_string(),
             ))
         })?;
+        // Runtime envelope, byte-compatible with the PHP store: the
+        // `state` marker and the `consumed_result` field are spliced into
+        // the RAW JSON (never re-encoded — large integers must stay
+        // decimal), exactly as PHP writes them, so the atomic
+        // pending->consumed transition works across the two
+        // implementations. The canonical record fields are untouched.
+        if !value.ends_with('}') {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::TypeError,
+                "ChallengeRecord JSON must end with an object brace",
+                String::new(),
+            )));
+        }
+        value.truncate(value.len() - 1);
+        value.push_str(",\"state\":\"pending\",\"consumed_result\":null}");
         let now_unix = now_epoch_micros() / 1_000_000;
         let ttl = (record.expires_at as i64)
             .saturating_sub(now_unix as i64)

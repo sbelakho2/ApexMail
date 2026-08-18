@@ -206,6 +206,22 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     SiteVerifyIdempotencyStore::LEASE_SECONDS,
                 ));
             }
+            // Retention guarantee: the retained consumed-state record
+            // (RedisStorage ttl_margin_secs) must OUTLIVE the maximum
+            // takeover/retry horizon. With the default margin (0) the
+            // record expires exactly at token expiry, so a token submitted
+            // late in its lifetime — whose crash-recovery takeover happens
+            // after the signed expiry — reads nothing and the reconstruction
+            // fails. The margin must therefore cover at least the
+            // PENDING_SAME waiter bound (the absolute tail of the
+            // takeover/retry window).
+            if ($config['risk']['redis']['ttl_margin_secs'] < $waiterBoundSecs) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha.risk.redis.ttl_margin_secs %d must be >= the Siteverify PENDING_SAME waiter bound (%ds) when siteverify_secrets is configured — the retained consumed-state evidence must outlive the maximum takeover/retry horizon, otherwise a late-lifetime crash recovery reads an expired record and cannot reconstruct the committed outcome',
+                    $config['risk']['redis']['ttl_margin_secs'],
+                    $waiterBoundSecs,
+                ));
+            }
         }
         // A STATIC transaction binding must satisfy the same
         // shape rule the controller enforces per request (1..128

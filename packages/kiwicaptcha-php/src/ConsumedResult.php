@@ -44,6 +44,11 @@ final class ConsumedResult
     public static function fromArray(array $data): self
     {
         $valid = $data['valid'] ?? null;
+        // The production Lua now writes a real JSON boolean; legacy records
+        // from earlier commits store 1/0 — both forms decode here.
+        if (\is_int($valid) && ($valid === 1 || $valid === 0)) {
+            $valid = $valid === 1;
+        }
         if (!\is_bool($valid)) {
             throw new \InvalidArgumentException('consumed_result.valid must be a boolean');
         }

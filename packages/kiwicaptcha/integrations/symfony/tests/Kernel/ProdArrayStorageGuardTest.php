@@ -158,7 +158,7 @@ final class ProdArrayStorageGuardTest extends TestCase
             [[
                 'secret_key' => str_repeat('a', 32),
                 'storage' => 'my.psr6.storage',
-                'risk' => ['siteverify_secrets' => ['compat-secret-42' => 'login']],
+                'risk' => ['redis' => ['ttl_margin_secs' => 90], 'siteverify_secrets' => ['compat-secret-42' => 'login']],
             ]],
             $container,
         );
@@ -176,7 +176,7 @@ final class ProdArrayStorageGuardTest extends TestCase
                 'secret_key' => str_repeat('a', 32),
                 'storage' => 'my.psr6.storage',
                 'allow_best_effort_storage' => true,
-                'risk' => ['siteverify_secrets' => ['compat-secret-42' => 'login']],
+                'risk' => ['redis' => ['ttl_margin_secs' => 90], 'siteverify_secrets' => ['compat-secret-42' => 'login']],
             ]],
             $container,
         );

@@ -887,9 +887,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
-            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
             {
-                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint);
+                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
             }
 
             public function renew(string $backendId, string $idempotencyKey, string $owner): bool
@@ -931,6 +931,133 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $retryBody = json_decode((string) $retry->getContent(), true);
         self::assertSame(true, $retryBody['success'] ?? null, 'the retry must reconstruct the ORIGINAL committed success after the signed expiry: '.(string) $retry->getContent());
         self::assertSame($ownerBody, $retryBody, 'the identical canonical response promise holds even for a late-lifetime crash');
+    }
+
+    // ── The pre-claim storage peek inside the hardened boundary ────────
+
+    public function testThrowingStoragePeekMapsToRetryableInternalError(): void
+    {
+        // The pre-claim peek (the per-token lease derivation's storage
+        // read) sits INSIDE the hardened boundary: a storage outage on an
+        // IDEMPOTENT request must degrade to the retryable provider error
+        // (503 internal-error), never escape as a 500.
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $throwing = new class($storage) implements \KiwiCaptcha\AtomicStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\StorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                throw new \RuntimeException('storage outage');
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                throw new \RuntimeException('storage outage');
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                throw new \RuntimeException('storage outage');
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                throw new \RuntimeException('storage outage');
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $controller = new SiteVerifyController(
+            new Verifier($throwing),
+            self::SECRET,
+            [self::SITEVERIFY_SECRET => 'login'],
+            $throwing,
+            null,
+            null,
+            new ArraySiteVerifyIdempotencyStore(),
+        );
+
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '127.0.0.1',
+            'idempotency_key' => 'f13e4567-e89b-42d3-a456-426614174000',
+        ]));
+        self::assertSame(503, $response->getStatusCode(), 'a storage outage on the idempotent peek must map to 503, never a 500');
+        self::assertSame(['internal-error'], json_decode((string) $response->getContent(), true)['error-codes']);
+    }
+
+    public function testNonIdempotentRequestSkipsTheStoragePeek(): void
+    {
+        // The peek (and the per-token lease derivation) is IDEMPOTENT-ONLY:
+        // a non-idempotent request with the SAME throwing storage must not
+        // touch the peek — its storage needs stay inside the verifier's
+        // own hardened handling, which returns a normal provider JSON
+        // (StorageUnavailable -> bad-request), never a 500.
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $throwing = new class($storage) implements \KiwiCaptcha\AtomicStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\StorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                throw new \RuntimeException('storage outage');
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                throw new \RuntimeException('storage outage');
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                throw new \RuntimeException('storage outage');
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                throw new \RuntimeException('storage outage');
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $controller = new SiteVerifyController(
+            new Verifier($throwing),
+            self::SECRET,
+            [self::SITEVERIFY_SECRET => 'login'],
+            $throwing,
+        );
+
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '127.0.0.1',
+        ]));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame(200, $response->getStatusCode(), 'the non-idempotent path skips the peek; the verifier handles its own storage failure');
+        self::assertFalse($body['success'] ?? true);
+        self::assertSame(['bad-request'], $body['error-codes'] ?? null, 'the verifier degrades its storage failure to the provider bad-request vocabulary');
     }
 }
 

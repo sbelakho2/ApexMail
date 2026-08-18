@@ -276,35 +276,6 @@ final class Verifier
      * verification burns the challenge (no maxAttempts parameter — the
      * one-shot semantics ARE the attempt bound).
      */
-    /**
-     * Reconstruct the DETERMINISTIC stored outcome of an already-consumed
-     * token without treating the call as a fresh redemption. The retained
-     * consumed record and its committed outcome are read even when the
-     * signed challenge has already expired — the expiry gate applies only
-     * to fresh verifications; a reconstruction replays the original
-     * logical outcome. Returns null when the record is missing, was never
-     * consumed, or has no committed outcome (crash between consume and
-     * commit — intrinsically ambiguous).
-     */
-    public function reconstructStoredOutcome(string $rawToken): ?VerifyOutcome
-    {
-        $decoded = SolutionToken::decode($rawToken);
-        if ($decoded instanceof DecodeError) {
-            return null;
-        }
-        $consumed = $this->storage->consumedState($decoded->nonce);
-        if ($consumed === null) {
-            return null;
-        }
-        if ($consumed->consumedResult === null) {
-            return null;
-        }
-
-        return $consumed->consumedResult->valid
-            ? VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true)
-            : VerifyOutcome::invalid(VerifyError::InsufficientWork);
-    }
-
     public function verify(
         string $rawToken,
         string $secretKey,

@@ -160,10 +160,13 @@ LUA;
         return [$claim, $claim === IdempotencyClaim::Claimed ? $owner : null];
     }
 
-    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array
+    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
     {
         $owner = bin2hex(random_bytes(16));
-        $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $remoteipFingerprint, $this->leaseSeconds, max(1, $ttlSeconds)]);
+        // The takeover Lua already receives the lease via ARGV[4]; pass
+        // the per-call override so a late token's derived short lease is
+        // maintained across the takeover (null = the configured lease).
+        $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $remoteipFingerprint, $leaseSeconds ?? $this->leaseSeconds, max(1, $ttlSeconds)]);
 
         $takeover = match ((string) $result) {
             'took_over' => IdempotencyClaim::TookOver,

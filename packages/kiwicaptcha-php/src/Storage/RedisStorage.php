@@ -39,7 +39,7 @@ use KiwiCaptcha\ConsumedResult;
  * Implements {@see \KiwiCaptcha\AtomicStorageInterface}: the fused
  * read-transition makes consume() strict single-use under concurrency.
  */
-final class RedisStorage implements AtomicStorageInterface
+final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface
 {
     /**
      * Atomic consume transition: GET the record; if present and not yet
@@ -101,7 +101,9 @@ LUA;
 -- Same raw-splice rule as CONSUME_SCRIPT: the stored JSON is never
 -- re-encoded through cjson (large integers would switch to scientific
 -- notation). The `"consumed_result":null` marker written by store() is
--- replaced in place; the binding is embedded as a JSON string.
+-- replaced in place. ONLY the small result object is encoded — valid
+-- must be a REAL JSON boolean (matching the Rust commit Lua and the
+-- strict ConsumedResult parser), binding a string or null.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return 0
@@ -112,11 +114,10 @@ end
 if not string.find(v, '"consumed_result":null', 1, true) then
   return 0
 end
-local binding = cjson.encode(ARGV[2])
-if ARGV[3] == "0" then
-  binding = 'null'
-end
-local encoded = '{"valid":' .. ARGV[1] .. ',"binding":' .. binding .. '}'
+local encoded = cjson.encode({
+  valid = (ARGV[1] == '1'),
+  binding = (ARGV[3] == "0") and cjson.null or ARGV[2]
+})
 local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. encoded, 1)
 if n ~= 1 then
   return 0

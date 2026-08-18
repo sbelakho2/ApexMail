@@ -25,7 +25,7 @@ use KiwiCaptcha\StorageInterface;
  * must implement the compare-and-set contract themselves; see
  * {@see Psr6Storage} for the documented counter-example.
  */
-final class ArrayStorage implements AtomicStorageInterface
+final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface
 {
     /** @var array<string, array{record: ChallengeRecord, consumed: bool, result: ConsumedResult|null}> */
     private array $records = [];

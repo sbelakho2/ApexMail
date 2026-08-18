@@ -633,7 +633,7 @@ final class Configuration implements ConfigurationInterface
                                     ->min(1)
                                 ->end()
                                 ->integerNode('ttl_margin_secs')
-                                    ->info('Extra retention on challenge/replay-security state beyond token validity, in seconds (default 0). The challenge record and every consumed-state guard must outlive token validity + max clock skew + failover margin, so a replayed/expired token can never land on a state that already expired and re-accepted it. Pair with a noeviction policy on the security Redis (see README).')
+                                    ->info('Extra retention on challenge/replay-security state beyond token validity, in seconds (default 0). When risk.siteverify_secrets is configured, this must be >= the Siteverify PENDING_SAME waiter bound (90 seconds, enforced at container compile time): the retained consumed-state evidence must outlive the maximum takeover/retry horizon, or a late-lifetime crash recovery finds the consumed record expired. The challenge record and every consumed-state guard must outlive token validity + max clock skew + failover margin, so a replayed/expired token can never land on a state that already expired and re-accepted it. Pair with a noeviction policy on the security Redis (see README).')
                                     ->defaultValue(0)
                                     ->min(0)
                                 ->end()

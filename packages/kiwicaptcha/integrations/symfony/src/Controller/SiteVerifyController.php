@@ -84,6 +84,8 @@ final class SiteVerifyController
      *        no global-secret + expectedScope=null combination, so a
      *        weaker token can never satisfy a stronger backend's secret.
      */
+    private ?\KiwiCaptcha\ConsumedOutcomeRecovery $recovery;
+
     public function __construct(
         private readonly Verifier $verifier,
         private readonly string $secretKey,
@@ -109,7 +111,9 @@ final class SiteVerifyController
          * replay of the pre-change outcome.
          */
         private readonly int $policyVersion = 0,
+        ?\KiwiCaptcha\ConsumedOutcomeRecovery $recovery = null,
     ) {
+        $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
         // The lease-ordering invariant is ENFORCED at construction: the
         // waiter bound must exceed the owner lease, otherwise the
         // crash-recovery takeover is unreachable (a waiter would give up
@@ -286,19 +290,37 @@ final class SiteVerifyController
         // fixed 60s lease could otherwise expire after the signed
         // challenge, making the crash-recovery takeover reconstruct an
         // outcome the verifier would refuse as expired. The derivation
-        // keeps lease < effectiveWait < remaining whenever a record is
-        // visible; without a record the defaults apply.
+        // MINIMIZES the lease and the effective waiter bound within the
+        // remaining validity; at very small remainings the ordering can
+        // collapse (the lower bounds dominate), and correctness then
+        // rests on the retained consumed-state recovery BEYOND expiry
+        // (risk.redis.ttl_margin_secs must outlive the takeover/retry
+        // horizon — enforced at container compile time when Siteverify
+        // is enabled). Without a record the defaults apply.
         try {
             $token = SolutionToken::decode($response);
         } catch (DecodeError) {
             // A malformed token is a DETERMINISTIC failure — the claiming
             // request FINALIZES it so a same-key retry reproduces the
             // identical canonical response instead of leaving the entry
-            // pending until TTL.
+            // pending until TTL. The claim outcomes follow the decoded
+            // branch's conflict semantics: a same-key entry bound to a
+            // DIFFERENT malformed response is a CONFLICT (the response
+            // hash is part of the claim identity), and a COMPLETE_SAME
+            // entry (same malformed hash) returns the stored canonical
+            // result instead of re-finalizing.
             $claim = IdempotencyClaim::Claimed;
             $claimOwner = null;
             if ($idempotencyKey !== null && $this->idempotencyStore !== null) {
                 [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp));
+            }
+            if ($claim === IdempotencyClaim::Conflict) {
+                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
+            if ($claim === IdempotencyClaim::CompleteSame) {
+                $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
+
+                return new JsonResponse($stored !== null ? $this->canonicalizeResponse($stored) : ['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
             }
             $canonical = $this->canonicalizeResponse([
                 'success' => false,
@@ -313,21 +335,38 @@ final class SiteVerifyController
             return new JsonResponse($canonical);
         }
 
+        // The pre-claim storage peek is IDEMPOTENT-ONLY: the per-token
+        // lease derivation sizes the claim against THIS token's remaining
+        // signed validity, and a non-idempotent request has no claim to
+        // size (its storage needs stay inside the verifier's own hardened
+        // boundary). The peek sits INSIDE a hard error boundary — a
+        // storage outage degrades to the retryable provider error instead
+        // of escaping as a 500.
         $claimLease = null;
         $effectiveWait = $this->idempotencyWaitSecs;
-        $storeLease = $this->idempotencyStore?->leaseSeconds() ?? SiteVerifyIdempotencyStore::LEASE_SECONDS;
-        $record = $this->storage?->find($token->nonce);
-        if ($record !== null) {
-            $remainingSecs = $record->expiresAt - time();
-            if ($remainingSecs > 0) {
-                // The derived lease never exceeds the store's configured
-                // lease (the operator's contract) nor the remaining signed
-                // validity minus a margin, and the effective waiter bound
-                // stays STRICTLY between the lease and the remaining
-                // validity (lease + 1 <= wait < remaining) so the atomic
-                // takeover is always reachable before the deadline.
-                $claimLease = max(1, min($storeLease, SiteVerifyIdempotencyStore::LEASE_SECONDS, $remainingSecs - 15));
-                $effectiveWait = max($claimLease + 1, min($effectiveWait, $remainingSecs - 5));
+        if ($idempotencyKey !== null) {
+            try {
+                $record = $this->storage?->find($token->nonce);
+            } catch (\Throwable) {
+                return new JsonResponse(['success' => false, 'error-codes' => ['internal-error']], Response::HTTP_SERVICE_UNAVAILABLE);
+            }
+            if ($record !== null) {
+                $remainingSecs = $record->expiresAt - time();
+                if ($remainingSecs > 0) {
+                    // The derived lease never exceeds the store's
+                    // configured lease (the operator's contract) nor the
+                    // remaining signed validity minus a margin; the
+                    // effective waiter bound is clamped BELOW the
+                    // remaining validity. The derivation minimizes both
+                    // within the remaining validity — at very small
+                    // remainings the lower bounds dominate and the strict
+                    // ordering can collapse, so correctness then rests on
+                    // the retained consumed-state recovery beyond expiry
+                    // (the ttl_margin_secs guarantee).
+                    $storeLease = $this->idempotencyStore?->leaseSeconds() ?? SiteVerifyIdempotencyStore::LEASE_SECONDS;
+                    $claimLease = max(1, min($storeLease, SiteVerifyIdempotencyStore::LEASE_SECONDS, $remainingSecs - 15));
+                    $effectiveWait = max($claimLease + 1, min($effectiveWait, $remainingSecs - 5));
+                }
             }
         }
 
@@ -392,7 +431,10 @@ final class SiteVerifyController
                 // remoteip fingerprint is bound in the record, so the
                 // takeover enforces the COMPLETE claim identity (the
                 // claim() pass already checked it — defense-in-depth).
-                [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp));
+                // The takeover refreshes the lease with the SAME per-token
+                // lease derived at claim time, so a late token's short
+                // lease is maintained through the whole takeover lifecycle.
+                [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), $claimLease);
                 if ($takeover === IdempotencyClaim::TookOver) {
                     // This request now OWNS the entry — it will verify
                     // below and finalize with the takeover owner token.
@@ -422,7 +464,7 @@ final class SiteVerifyController
         // mapping a consumed token to timeout-or-duplicate via the
         // verifier's own replay path.
         $reconstructed = $idempotent && $claim === IdempotencyClaim::TookOver
-            ? $this->verifier->reconstructStoredOutcome($response)
+            ? $this->recovery->recover($response)
             : null;
         if ($reconstructed !== null) {
             if ($claimOwner !== null) {
@@ -460,6 +502,13 @@ final class SiteVerifyController
             // to the provider bad-request JSON; exceptions must not
             // cross the HTTP compatibility boundary.
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+        } catch (\Throwable) {
+            // Hardened boundary tail: anything else escaping the
+            // verifier (a storage failure past its own internal
+            // handling) maps to the retryable provider error — an
+            // exception must never cross the HTTP compatibility
+            // boundary as a 500.
+            return new JsonResponse(['success' => false, 'error-codes' => ['internal-error']], Response::HTTP_SERVICE_UNAVAILABLE);
         }
         if ($claimOwner !== null && !$this->confirmOwnership($backendId, $idempotencyKey, $claimOwner)) {
             // Ownership was lost while verifying (the lease window expired

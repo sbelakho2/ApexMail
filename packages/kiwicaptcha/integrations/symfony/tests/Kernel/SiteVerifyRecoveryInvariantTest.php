@@ -43,7 +43,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         $this->expectExceptionMessage('waiter bound');
         $this->load([
             'challenge_ttl_secs' => 30,
-            'risk' => ['siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]);
     }
 
@@ -53,6 +53,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         $this->expectExceptionMessage('waiter bound');
         $this->load([
             'risk' => [
+                'redis' => ['ttl_margin_secs' => 90],
                 'sitekeys' => ['sitekey-k' => ['ttl_secs' => 30]],
                 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login'],
             ],
@@ -68,6 +69,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
             'challenge_ttl_secs' => 120,
             'min_duration_ms' => 60000,
             'risk' => [
+                'redis' => ['ttl_margin_secs' => 90],
                 'sitekeys' => ['sitekey-k' => ['ttl_secs' => 30]],
                 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login'],
             ],
@@ -80,7 +82,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         $this->expectExceptionMessage('ownership lease');
         $this->load([
             'argon2_lease_ms' => 60000,
-            'risk' => ['siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]);
     }
 
@@ -95,6 +97,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
     {
         $container = $this->load([
             'risk' => [
+                'redis' => ['ttl_margin_secs' => 90],
                 'enabled' => false,
                 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login'],
             ],
