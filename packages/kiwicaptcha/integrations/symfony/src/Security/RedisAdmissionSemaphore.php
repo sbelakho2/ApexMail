@@ -38,8 +38,8 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
     private const DEFAULT_LEASE_MS = 45_000;
 
     /**
-     * Atomic acquire with the bounded WAITERS guard (audit #31) AND the
-     * PER-SCOPE budget (audit #47):
+     * Atomic acquire with the bounded WAITERS guard AND the
+     * PER-SCOPE budget:
      *   KEYS[1]  = lease set key (global)
      *   KEYS[2]  = waiters counter key
      *   KEYS[3]  = per-scope lease set key ('' = no scope)
@@ -195,7 +195,7 @@ LUA;
      * Acquire an Argon2id admission slot.
      *
      * @param string|null $scope the scope string (the challenge's scope) for
-     *                           the PER-SCOPE budget (audit #47): the scope's
+     *                           the PER-SCOPE budget: the scope's
      *                           own lease set ({kiwicaptcha:argon2:leases:
      *                           <ns>}:<scope>) is checked against
      *                           argon2_max_per_tenant IN ADDITION to the

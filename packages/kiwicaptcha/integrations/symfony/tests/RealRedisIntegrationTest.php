@@ -85,7 +85,7 @@ final class RealRedisIntegrationTest extends TestCase
         }
         self::assertSame(1, $first, 'exactly one of 50 parallel consumers performs the first transition');
         self::assertSame(49, $before, 'the other 49 observe the consumed-before state');
-        self::assertNotNull($storage->find($record->nonce), 'the consumed record PERSISTS until its TTL (audit #74 transition)');
+        self::assertNotNull($storage->find($record->nonce), 'the consumed record PERSISTS until its TTL (the consumed-state transition)');
     }
 
     public function testSemaphoreCapAndStaleReleaseSafety(): void
@@ -197,7 +197,7 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
 
         $replay = $verifier->verify($token, $secret, 'login', '198.51.100.7', $nowNs);
-        self::assertTrue($replay->isOk(), 'a same-context replay returns the SAME stored result (audit #74), never a second derivation');
+        self::assertTrue($replay->isOk(), 'a same-context replay returns the SAME stored result, never a second derivation');
         self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result');
         self::assertSame($challenge->nonce, $replay->nonce, 'the replay exposes the canonical jti');
     }

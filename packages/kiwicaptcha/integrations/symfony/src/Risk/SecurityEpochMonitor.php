@@ -7,7 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
 use KiwiCaptcha\Verifier;
 
 /**
- * Bounded-revocation-latency security-epoch monitor (audit #81).
+ * Bounded-revocation-latency security-epoch monitor.
  *
  * Reads the CENTRAL security-policy state — the `{kiwi:<ns>}:security-policy`
  * hash's `min_policy_epoch` field, the same key the readiness probe consults
@@ -27,7 +27,7 @@ use KiwiCaptcha\Verifier;
  *     keeps enforcing the newest epoch it ever saw, never a weaker one.
  *  3. BOUNDED latency: the central value is re-read at most once per cache
  *     window, so the revocation latency is one TTL, never unbounded.
- *  4. MAX-STALE FAIL-CLOSED (audit #108): after the last SUCCESSFUL central
+ *  4. MAX-STALE FAIL-CLOSED: after the last SUCCESSFUL central
  *     read, once `now > last_success + risk.security_epoch_max_stale_secs`
  *     (default 60 s, min 10 s) the monitor reports {@see isStale()}. A stale
  *     monitor is the deliberate constrained degradation: the cached max may
@@ -100,7 +100,7 @@ final class SecurityEpochMonitor
      *                                                   expectations
      * @param string|null                $issuer        the verifier's expected
      *                                                   deployment issuer
-     *                                                   (audit #67) — same
+     *                                                   — same
      *                                                   re-apply rule
      * @param int                        $maxStaleSecs  max-stale window
      *                                                   (risk.security_epoch_
@@ -109,7 +109,6 @@ final class SecurityEpochMonitor
      *                                                   last_success +
      *                                                   max_stale, the
      *                                                   monitor reports stale
-     *                                                   (audit #108)
      */
     public function __construct(
         private readonly Verifier $verifier,
@@ -179,7 +178,7 @@ final class SecurityEpochMonitor
     }
 
     /**
-     * MAX-STALE FAIL-CLOSED (audit #108): true when the central policy state
+     * MAX-STALE FAIL-CLOSED: true when the central policy state
      * has NOT been confirmed successfully for longer than the max-stale
      * window (risk.security_epoch_max_stale_secs). The cached max may then
      * be outdated — an emergency revocation could have landed while this

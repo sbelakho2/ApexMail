@@ -1,6 +1,6 @@
 -- Risk Protocol v1 — canonical production state script (v4 semantics).
 --
--- SCRIPT BOUNDS (audit #101) — all bounded constants, no attacker-sized
+-- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
 --   max keys touched:     10 (KEYS[1..10])
 --   max Redis calls:      22 (1 TIME + 9 HMGET + 6 HSET + 4 EXPIRE +

@@ -1,7 +1,7 @@
 -- Calibration: class-normalized score bias + proportional rate limit
 -- (canonical, shared PHP/Rust).
 --
--- SCRIPT BOUNDS (audit #101) — all bounded constants:
+-- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     25 (24 hourly buckets + 1 rate-limit state)
 --   max Redis calls:      30 (24 HGETALL + 1 TIME + 2 HGET + 3 HSET)
 --   max collection cardinality: 12 flat fields per bucket hash (6 fields
@@ -143,7 +143,7 @@ local final_mp = raw_mp
 if final_mp > upper then final_mp = upper end
 if final_mp < lower then final_mp = lower end
 
--- NON-FINITE GUARD (audit #109): a corrupted bucket/state value (e.g. a
+-- NON-FINITE GUARD: a corrupted bucket/state value (e.g. a
 -- hash field replaced by "1e999", whose Lua 5.1 tonumber is +Inf) can
 -- propagate NaN/±Inf into final_mp through the fp/fn means or the stored
 -- bias_mp: NaN fails EVERY clamp comparison above, and Lua cannot convert

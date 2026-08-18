@@ -1,7 +1,7 @@
 -- Calibration confirmation: outcome ledger CAS + receipt + bucket,
 -- ATOMICALLY (canonical, shared PHP/Rust).
 --
--- SCRIPT BOUNDS (audit #101) — all bounded constants:
+-- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     3
 --   max Redis calls:      8 (2 GET + 1 DEL + 1 SET + 2 HINCRBYFLOAT +
 --                           1 EXPIRE + 1 HINCRBY)

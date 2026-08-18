@@ -68,8 +68,8 @@ final class KiwiCaptchaRuntime
     }
 
     /**
-     * The EXPLICIT `frame-ancestors` CSP directive for the widget PAGE
-     * (audit #71): the space-separated allowlisted origins
+     * The EXPLICIT `frame-ancestors` CSP directive for the widget PAGE:
+     * the space-separated allowlisted origins
      * (risk.challenge_origin_allowlist) — always explicit, never
      * default-src inheritance. Returns null when the allowlist is empty
      * (no CSP promise to make).
@@ -103,7 +103,7 @@ final class KiwiCaptchaRuntime
             'scope' => $context['scope'] ?? 'login',
             'nonce' => $context['nonce'] ?? null,
             'telemetry' => $context['telemetry'] ?? $this->telemetry,
-            // Audit #41: the transaction binding rendered into
+            // The transaction binding rendered into
             // data-kiwi-request-binding (defaults to the configured static
             // risk.request_binding; the app may pass a dynamic per-render
             // binding).

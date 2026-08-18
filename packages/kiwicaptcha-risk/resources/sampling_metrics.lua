@@ -1,7 +1,7 @@
 -- Sampling metrics: per-scope sample totals for the resolution gate
 -- (canonical, shared PHP/Rust).
 --
--- SCRIPT BOUNDS (audit #101) — all bounded constants:
+-- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     24
 --   max Redis calls:      24 (HGETALL)
 --   max collection cardinality: 12 flat fields per bucket hash (6 fields
@@ -14,7 +14,7 @@
 --              are one cohort)
 -- ARGV[1]      now (epoch ms — informational; unused)
 --
--- Output clamp (audit #109/#113): corrupted bucket values (e.g. a huge
+-- Output clamp: corrupted bucket values (e.g. a huge
 -- string like 9223372036854775807) must never reach the caller as an
 -- out-of-range number — both parsers cast the reply to an integer and a
 -- float beyond the platform int range is UB. The totals are clamped at

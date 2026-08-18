@@ -8,7 +8,7 @@ use Symfony\Component\HttpFoundation\Request;
 
 /**
  * Request factory for tests that POST to the challenge endpoint: the widget
- * always sends `Content-Type: application/json` (the audit #77 narrow-HTTP
+ * always sends `Content-Type: application/json` (the narrow-HTTP
  * contract — anything else is 415). Symfony's Request::create() forces
  * `application/x-www-form-urlencoded` onto every POST, which would make
  * every fixture request look like a smuggling attempt.

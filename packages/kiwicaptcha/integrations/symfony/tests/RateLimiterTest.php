@@ -202,9 +202,9 @@ final class RateLimiterTest extends TestCase
 
     public function testSharedWindowIsSlidingNotFixed(): void
     {
-        // The PSR-6 path must implement a true sliding window too (the old
-        // [window_start, hits] fixed bucket allowed boundary bursts to double
-        // the rate).
+        // The PSR-6 path must implement a true sliding window too — the
+        // [window_start, hits] fixed bucket would allow boundary bursts to
+        // double the rate.
         $pool = new ArrayAdapter();
         $now = 1_000.0;
         $limiter = new IssuanceRateLimiter(2, 60, $pool, static function () use (&$now): float {

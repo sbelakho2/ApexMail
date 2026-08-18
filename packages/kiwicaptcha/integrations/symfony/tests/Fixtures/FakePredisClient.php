@@ -433,8 +433,8 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'waiters')) {
-            // Acquire with the bounded WAITERS guard (audit #31) + the
-            // PER-SCOPE budget (audit #47): KEYS[1] global lease set,
+            // Acquire with the bounded WAITERS guard + the
+            // PER-SCOPE budget: KEYS[1] global lease set,
             // KEYS[2] waiters counter, KEYS[3] per-scope lease set ('' =
             // no scope); ARGV[1] global cap, ARGV[2] leaseMs, ARGV[3]
             // token, ARGV[4] maxWaiters, ARGV[5] per-scope cap, ARGV[6]
@@ -489,7 +489,7 @@ final class FakePredisClient extends \Predis\Client
         }
 
         if (str_contains($script, 'per-scope lease removal')) {
-            // Release with the PER-SCOPE budget (audit #47): KEYS[1] global
+            // Release with the PER-SCOPE budget: KEYS[1] global
             // set, KEYS[2] per-scope set ('' = no scope); ARGV[1] token,
             // ARGV[2] hasScope. Removes the token from BOTH sets.
             $removed = $this->fakeZrem([$keys[0], $rest[0]]);
@@ -512,7 +512,7 @@ final class FakePredisClient extends \Predis\Client
         if (str_contains($script, 'Scope issuance cap')) {
             // ScopeIssuanceCap::allow: KEYS[1] =
             // {kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>
-            // (audit #112 — the raw scope is never a key component);
+            // (the raw scope is never a key component);
             // ARGV[1] = cap. INCR -> EXPIRE 60 on the first increment ->
             // refuse beyond the cap (0), else 1.
             $key = (string) $keys[0];

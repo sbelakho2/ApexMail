@@ -37,7 +37,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     public const VERIFIED_JTI_ATTRIBUTE = '_kiwi_captcha_verified_jti';
 
     /**
-     * Request attribute holding the transaction binding (audit #41) the
+     * Request attribute holding the transaction binding the
      * application controller copied from the POSTed `kiwi_request_binding`
      * field BEFORE form validation. When the attribute is absent the
      * validator falls back to the raw POST field of the same name. The
@@ -53,10 +53,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     /** @var string|null the record's transaction binding of the last valid verification */
     private ?string $lastVerifiedRequestBinding = null;
 
-    /** @var string|null the last valid verification's signed receipt payload (audit #80) */
+    /** @var string|null the last valid verification's signed receipt payload */
     private ?string $lastReceiptPayload = null;
 
-    /** @var string|null the last valid verification's Ed25519 receipt signature (audit #80) */
+    /** @var string|null the last valid verification's Ed25519 receipt signature */
     private ?string $lastReceiptSignature = null;
 
     /**
@@ -69,28 +69,26 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *                                   meaningful when the widget collects
      *                                   telemetry)
      * @param LoggerInterface|null $logger internal verification detail on
-     *                                     failures (audit #57): the public
+     *                                     failures: the public
      *                                     violation code is collapsed, the
      *                                     precise core reason stays in the
      *                                     logs
      * @param StorageInterface|null $storage the challenge storage — required
      *                                       for the ambiguous-consume
-     *                                       deterministic-retry resolution
-     *                                       (audit #74): on
-     *                                       ConsumeIndeterminate the stored
+     *                                       deterministic-retry resolution:
+     *                                       on ConsumeIndeterminate the stored
      *                                       consumed record (state +
      *                                       consumed_result) decides the
      *                                       outcome instead of a second
      *                                       derivation
      * @param ClientIpResolver|null $clientIpResolver trusted client-IP policy
-     *                                               (audit #64) — the SAME
-     *                                               canonical IP the challenge
+     *                                               — the SAME canonical IP the challenge
      *                                               controller bound the
      *                                               record to (a resolver
      *                                               mismatch would fail every
      *                                               bound challenge)
      * @param SecurityEpochMonitor|null $epochMonitor the security-epoch
-     *                                               monitor (audit #81) —
+     *                                               monitor —
      *                                               refreshed before every
      *                                               verification so the
      *                                               verifier's expected policy
@@ -99,7 +97,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * @param ResultReceiptSigner|null $receiptSigner the optional Ed25519
      *                                               signer for EXPORTED
      *                                               verification results
-     *                                               (audit #80) — null =
+     *                                               — null =
      *                                               receipt signing disabled
      */
     public function __construct(
@@ -133,7 +131,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * The transaction binding of the last successfully verified challenge
      * (VerifyOutcome::requestBinding() — the SIGNED record binding, null
      * when the record is unbound), or null when no verification succeeded
-     * yet. Audit #41 passthrough.
+     * yet.
      */
     public function verifiedRequestBinding(): ?string
     {
@@ -142,7 +140,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The canonical JSON payload of the last successfully verified
-     * challenge's Ed25519 RECEIPT (audit #80/#106): {jti, tenant, action,
+     * challenge's Ed25519 RECEIPT: {jti, tenant, action,
      * request_binding, issued_at, expires_at, issuer} — the full
      * replay-critical set signed from the CONSUMED record, or null when no
      * verification succeeded yet or no signing key is configured
@@ -161,7 +159,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The base64 Ed25519 detached signature (64 bytes) of the last
-     * successfully verified challenge's receipt payload (audit #80), or null
+     * successfully verified challenge's receipt payload, or null
      * when no verification succeeded yet or receipt signing is disabled.
      * Verification:
      *
@@ -192,7 +190,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             throw new UnexpectedTypeException($value, 'string');
         }
 
-        // SECURITY-EPOCH REFRESH (audit #81): before the verification runs,
+        // SECURITY-EPOCH REFRESH: before the verification runs,
         // re-read the central security-policy epoch (bounded by the short
         // cache window) and rotate the verifier's expected policy version to
         // the CURRENT monotonic max — a central policy bump revokes
@@ -200,7 +198,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // unavailable central value can never weaken the epoch.
         $this->epochMonitor?->refresh();
 
-        // MAX-STALE FAIL-CLOSED (audit #108): once now exceeds the last
+        // MAX-STALE FAIL-CLOSED: once now exceeds the last
         // successful central read by risk.security_epoch_max_stale_secs,
         // the cached epoch may be outdated (an emergency revocation could
         // have landed while this node could not read) — verification fails
@@ -208,7 +206,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // (retryable, never invalid_or_expired: the token is not burned,
         // the server is temporarily refusing to trust its own cache).
         if ($this->epochMonitor !== null && $this->epochMonitor->isStale()) {
-            $this->logger?->info('KiwiCaptcha: verification refused — security-policy state stale (audit #108)', [
+            $this->logger?->info('KiwiCaptcha: verification refused — security-policy state stale', [
                 'scope' => $constraint->scope,
             ]);
             $this->context->buildViolation($constraint->message)
@@ -225,7 +223,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // the verifier). Records issued with BindingMode::None carry an
         // empty tag and verify regardless.
         //
-        // Audit #64: the client IP comes through the bundle's trusted
+        // The client IP comes through the bundle's trusted
         // client-IP policy (ClientIpResolver) — the SAME canonical IP the
         // challenge controller used when it minted (and bound) the record.
         // A request with ambiguous double-forwarding from a trusted peer is
@@ -238,7 +236,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                     ? $this->clientIpResolver->resolve($request)
                     : $request->getClientIp();
             } catch (AmbiguousForwardingException $e) {
-                $this->logger?->info('KiwiCaptcha: verification refused — ambiguous forwarding headers (audit #64)', [
+                $this->logger?->info('KiwiCaptcha: verification refused — ambiguous forwarding headers', [
                     'scope' => $constraint->scope,
                 ]);
                 $this->context->buildViolation($constraint->message)
@@ -249,7 +247,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             }
         }
 
-        // Audit #47: pass the scope into the Argon2id admission gate. The
+        // Pass the scope into the Argon2id admission gate. The
         // core Verifier calls acquire() without arguments, so the scope
         // travels through the request: stamp it here and let the bundle's
         // RequestScopeAdmissionGate forward it into the semaphore's
@@ -261,7 +259,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // regular failed verification — fail closed as a captcha violation.
         $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry);
 
-        // ── AMBIGUOUS-CONSUME DETERMINISTIC RETRY (audit #74) ──────────────
+        // ── AMBIGUOUS-CONSUME DETERMINISTIC RETRY ────────────────────────────
         // ConsumeIndeterminate means the consume transition MAY have happened
         // but its response was lost: the challenge may already be consumed —
         // with (or without) a committed result. The validator resolves the
@@ -271,7 +269,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         //     exposed, NO second derivation, no repeated side effects);
         //   - stored valid result + a DIFFERENT binding -> invalid_or_expired
         //     (a challenge minted for one transaction is never redeemable
-        //     for another — the round-9 rule applied to the retry);
+        //     for another — the same rule applied to the retry);
         //   - stored INVALID result -> invalid_or_expired (the original
         //     derive failed);
         //   - record still pending / consumed without a committed result /
@@ -279,7 +277,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         //     (temporary_unavailable — retryable, never silently valid).
         // The stored-result VALID outcome (a re-verify of a consumed record
         // with a committed result — the core returns the SAME outcome
-        // without re-deriving) takes the identical retry path: the round-9
+        // without re-deriving) takes the identical retry path: the
         // binding check below applies to it, and the stored-result flag
         // suppresses the repeated side effects (risk feedback, post-solve,
         // outstanding decrement — they already ran exactly once on the
@@ -291,7 +289,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 return;
             }
             if ($resolved === 'invalid') {
-                $this->logger?->info('KiwiCaptcha: ambiguous consume resolved to a refused outcome (audit #74)', [
+                $this->logger?->info('KiwiCaptcha: ambiguous consume resolved to a refused outcome', [
                     'scope' => $constraint->scope,
                 ]);
                 $this->context->buildViolation($constraint->message)
@@ -304,20 +302,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // indeterminate outcome to temporary_unavailable.
         }
 
-        // TRANSACTION BINDING (audit #41): after a VALID verification, the
+        // TRANSACTION BINDING: after a VALID verification, the
         // consumed record's SIGNED request_binding must equal the binding
         // the request carried (the request attribute the application
         // controller copied from the POSTed kiwi_request_binding field — or
         // the raw POST field). A bound record with a missing/mismatched
         // binding is rejected with the SAME invalid_or_expired outcome
-        // (audit #57's collapsed code): a challenge minted for one
+        // (the collapsed violation code): a challenge minted for one
         // transaction is never redeemable for another. Unbound records
         // (binding null) skip the check entirely. For a stored-result
         // retry the outcome's requestBinding() IS the stored consumed
-        // binding, so the SAME rule gives the audit #74 contract: same
+        // binding, so the SAME rule gives the stored-result contract: same
         // binding -> same success, different binding -> invalid_or_expired.
         if ($outcome->isOk() && !$this->requestBindingMatches($outcome, $request)) {
-            $this->logger?->info('KiwiCaptcha: valid proof rejected — request binding mismatch (audit #41)', [
+            $this->logger?->info('KiwiCaptcha: valid proof rejected — request binding mismatch', [
                 'scope' => $constraint->scope,
             ]);
             $this->context->buildViolation($constraint->message)
@@ -344,7 +342,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // id becomes the request's current decision id
         // ({@see RiskGateway::setCurrentDecisionId()}), so the application
         // can confirm this challenge's original decision. On post_solve_check
-        // scopes the old mapping is still consumed (cleanup — it can never be
+        // scopes the superseded mapping is still consumed (cleanup — it can never be
         // confirmed against a stale decision), and the fresh POST-SOLVE
         // decision becomes the current confirmation target instead.
         //
@@ -360,7 +358,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // (they require a decision id), so a valid solve that passes the
         // re-assessment is recorded as plain SolveSuccess feedback.
         //
-        // A STORED-RESULT outcome (audit #74 retry) skips this block
+        // A STORED-RESULT outcome (a retry) skips this block
         // entirely: the post-solve assessment, the nonce->decision
         // consumption and the outstanding decrement all ran EXACTLY ONCE on
         // the original verification — a retry must return the same outcome
@@ -411,7 +409,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             }
         }
 
-        // JTI + BINDING passthrough (audit #37/#41): a VALID verification
+        // JTI + BINDING passthrough: a VALID verification
         // exposes the canonical jti — the core's VerifyOutcome::nonce(), the
         // challenge nonce of the CONSUMED record — and the record's signed
         // transaction binding (VerifyOutcome::requestBinding()) to the
@@ -445,7 +443,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 $this->lastVerifiedRequestBinding = $outcome->requestBinding();
             }
 
-            // RESULT RECEIPT (audit #80/#106): a VALID verification can be
+            // RESULT RECEIPT: a VALID verification can be
             // exported as an Ed25519-signed receipt for third parties holding
             // the PUBLIC key. The receipt is signed from the CONSUMED
             // RECORD's own fields and carries the FULL replay-critical set —
@@ -460,11 +458,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 $this->signReceipt($this->findRecordByNonce($jti));
             }
 
-            // Anti-stockpiling (audit #26): the source's outstanding
+            // Anti-stockpiling: the source's outstanding
             // challenge counter is decremented (best-effort, floored at 0)
             // when a challenge verifies successfully — a solved challenge is
             // no longer outstanding. Never breaks the solve. Skipped for a
-            // stored-result retry (audit #74): the ORIGINAL verification
+            // stored-result retry: the ORIGINAL verification
             // already decremented it.
             if (!$fromStoredResult) {
                 $this->outstanding?->solved((string) ($clientIp ?? ''));
@@ -473,7 +471,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
         if (!$outcome->isOk()) {
             $code = $this->publicCode($outcome->error);
-            // Audit #57: the collapsed public code; the PRECISE core reason
+            // The collapsed public code; the PRECISE core reason
             // (WrongScope, Expired, BadSignature, ...) stays in the logs —
             // never exposed to the client (no oracle for which check
             // failed).
@@ -508,14 +506,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * Audit #57's public violation-code collapse: every token-level failure
+     * Public violation-code collapse: every token-level failure
      * collapses to invalid_or_expired; the capacity refusals stay distinct
      * (rate_limited / temporary_unavailable). Internal detail is logged, the
      * client only ever sees the collapsed code.
      *
      * ConsumeIndeterminate is NOT a token-level failure: it is a storage
-     * I/O ambiguity (the consume may or may not have happened) — the audit
-     * #74 resolution tries the stored record first, and an UNRESOLVABLE
+     * I/O ambiguity (the consume may or may not have happened) — the
+     * resolution tries the stored record first, and an UNRESOLVABLE
      * indeterminate outcome maps to temporary_unavailable (retryable, like
      * StorageUnavailable), never to invalid_or_expired — the client must
      * not be told its token is burned when it may still redeem.
@@ -532,7 +530,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * Audit #74's ambiguous-consume resolution: decide the outcome of a
+     * Ambiguous-consume resolution: decide the outcome of a
      * ConsumeIndeterminate verification from the STORED consumed record
      * instead of re-deriving.
      *
@@ -579,8 +577,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // the retry) — no re-derive, no repeated side effects. The receipt
         // is re-signed for the retry from the SAME consumed record — the
         // payload is byte-identical (record fields only, no per-request
-        // timestamp), so a retry's receipt matches the original exactly
-        // (audit #106).
+        // timestamp), so a retry's receipt matches the original exactly.
         $this->lastVerifiedJti = $record->nonce;
         $request?->attributes->set(self::VERIFIED_JTI_ATTRIBUTE, $record->nonce);
         $binding = $this->consumedBindingOf($record);
@@ -593,7 +590,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * Sign the Ed25519 result receipt from a consumed record (audit #106):
+     * Sign the Ed25519 result receipt from a consumed record:
      * the payload is built from the RECORD's own fields (jti, tenant,
      * action, request_binding, issued_at, expires_at, issuer) — never from
      * per-request state — so a stored-result retry re-signs the SAME
@@ -632,7 +629,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The consumed record behind a token: decoded nonce -> storage find,
-     * restricted to records in the CONSUMED state (the audit #74 state
+     * restricted to records in the CONSUMED state (the consumed-state
      * transition). null when the state cannot be resolved.
      */
     private function findConsumedRecord(string $token): ?ChallengeRecord
@@ -659,7 +656,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * Whether the record is in the consumed state (the consumed-state
-     * TRANSITION of the audit #74 storage contract). Probing
+     * TRANSITION of the consumed-state storage contract). Probing
      * `ChallengeRecord::consumed` defensively: cores predating the
      * transition never set it (false) — on those cores consumed records
      * are DELETED by consume(), so a ConsumeIndeterminate followed by a
@@ -674,7 +671,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * The stored consumed result of a consumed record: true = the original
      * derivation was VALID, false = it FAILED, null = consumed but no
      * result committed (indeterminate). The parallel core exposes it as
-     * `ChallengeRecord::$consumedResult` (audit #74).
+     * `ChallengeRecord::$consumedResult`.
      */
     private function consumedResultOf(ChallengeRecord $record): ?bool
     {
@@ -702,7 +699,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     /**
      * The request's transaction binding: the documented attribute first,
      * then the raw POSTed kiwi_request_binding field (the widget fallback).
-     * Shared by the round-9 check and the audit #74 retry resolution.
+     * Shared by the request-binding check and the retry resolution.
      */
     private function requestBindingFromRequest(?Request $request): ?string
     {

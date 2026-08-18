@@ -16,7 +16,7 @@ use Psr\Log\NullLogger;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * Trusted client-IP policy (audit #64): the explicit risk.client_ip_mode
+ * Trusted client-IP policy: the explicit risk.client_ip_mode
  * decides how the canonical client IP is derived. "direct" ALWAYS ignores
  * forwarding headers (socket peer only); "symfony_trusted_proxies" routes
  * through Symfony's trusted-proxy machinery configured from the CIDR list —

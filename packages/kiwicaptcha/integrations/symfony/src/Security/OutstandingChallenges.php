@@ -9,7 +9,7 @@ use KiwiCaptcha\Risk\RiskKeys;
 
 /**
  * Anti-stockpiling: bounded outstanding UNSOLVED challenges per source and
- * deployment-wide (the audit #26 counter design).
+ * deployment-wide.
  *
  * Keys (one hash-tag family {kiwi:<ns>} — Cluster safe):
  *   {kiwi:<ns>}:outstanding:<hex>          per-source counter

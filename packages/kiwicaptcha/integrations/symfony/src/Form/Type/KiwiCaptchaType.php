@@ -72,7 +72,7 @@ class KiwiCaptchaType extends AbstractType
             // Telemetry mode rendered into data-kiwi-telemetry; follows the
             // bundle config (forced 'off' under strict privacy mode).
             'telemetry' => $this->telemetry,
-            // Transaction binding (audit #41): rendered into
+            // Transaction binding: rendered into
             // data-kiwi-request-binding; the widget sends it with the
             // challenge POST and carries it in the hidden
             // kiwi_request_binding form field. Defaults to the configured

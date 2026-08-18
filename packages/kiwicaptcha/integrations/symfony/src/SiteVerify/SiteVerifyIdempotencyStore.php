@@ -14,6 +14,8 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  *                                    canonical response (only one redemption)
  *   same response + DIFFERENT key -> second key gets timeout-or-duplicate
  *   same key + DIFFERENT response -> rejected (CONFLICT)
+ *   same key + DIFFERENT remoteip -> rejected (CONFLICT — the claim binds
+ *                                    the canonicalized remoteip fingerprint)
  *
  * The crash window (claim -> consume -> crash before finalize) is
  * recovered through the CORE's retained consumed-state machinery: a retry
@@ -23,28 +25,45 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * match a pending claim for THIS pair).
  *
  * Lease semantics: every claim and every successful takeover starts a
- * lease window of {@see self::LEASE_SECONDS}. A PENDING_SAME waiter whose
- * owner's lease has expired may atomically TAKEOVER the entry and become
- * the owner — a crashed owner therefore blocks the key for at most one
- * lease window instead of the full TTL. A live owner whose verification
- * outlasts the window renews the lease ({@see self::renew()}) so a
- * slow-but-alive owner is not overtaken mid-verification.
+ * lease window (default 150 seconds, configurable per store constructor).
+ * A PENDING_SAME waiter whose owner's lease has expired may atomically
+ * TAKEOVER the entry and become the owner — a crashed owner therefore
+ * blocks the key for at most one lease window instead of the full TTL. A
+ * live owner whose verification outlasts the window renews the lease
+ * ({@see self::renew()}) so a slow-but-alive owner is not overtaken
+ * mid-verification. The lease must comfortably exceed the maximum
+ * supported verification/request execution window plus a safety margin —
+ * the same lease-must-exceed-runtime requirement the Argon semaphore
+ * configuration documents — and no process-global signal state is
+ * involved in keeping an owner alive.
  */
 interface SiteVerifyIdempotencyStore
 {
-    /** The lease window in seconds (see {@see self::takeover()}). */
-    public const LEASE_SECONDS = 30;
+    /**
+     * The default lease window in seconds (see {@see self::takeover()}):
+     * 150s inside the 300s token/idempotency window. Verification
+     * runtime is bounded by the Argon semaphore configuration, which
+     * documents the same lease-must-exceed-runtime requirement — this
+     * lease covers any supported verification window plus a large safety
+     * margin, so a slow-but-alive owner is never overtaken.
+     */
+    public const LEASE_SECONDS = 150;
 
     /**
      * Atomically claim (or join) the idempotency entry for this
      * backend + key + response pair. `backendId` separates configured
-     * siteverify secrets/policies so namespaces never collide.
+     * siteverify secrets/policies so namespaces never collide, and
+     * `remoteipFingerprint` (the canonicalized request remoteip, or
+     * 'no-ip') is bound into the record: a later claim with the SAME key
+     * but a DIFFERENT fingerprint CONFLICTS — the same UUID with a
+     * changed remoteip must never join, overtake or reuse an entry whose
+     * outcome was derived under another IP.
      *
      * @return array{0: IdempotencyClaim, 1: ?string} the claim outcome and
      *         the OWNER token when this request claimed the entry (null
      *         otherwise) — only the owner may finalize it
      */
-    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds): array;
+    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array;
 
     /**
      * Persist the canonical provider response for a COMPLETE claim so a

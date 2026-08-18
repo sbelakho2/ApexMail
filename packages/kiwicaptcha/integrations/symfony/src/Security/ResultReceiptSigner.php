@@ -7,7 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
 use KiwiCaptcha\ChallengeRecord;
 
 /**
- * OPTIONAL Ed25519 signer for EXPORTED verification results (audit #80).
+ * OPTIONAL Ed25519 signer for EXPORTED verification results.
  *
  * The result verification itself is CENTRAL-ONLY by design: the HMAC secret
  * never leaves the server, so a third party can never re-derive a
@@ -15,7 +15,7 @@ use KiwiCaptcha\ChallengeRecord;
  * receipt of a server-verified result: when risk.result_receipt_signing_key
  * (base64 32-byte Ed25519 seed) is configured, the validator signs every
  * valid verification into the canonical payload — the FULL REPLAY-CRITICAL
- * SET (audit #106), taken from the CONSUMED record
+ * SET, taken from the CONSUMED record
  * ({@see ChallengeRecord}, passed to {@see sign()})
  *
  *     {jti, tenant, action, request_binding, issued_at, expires_at, issuer}
@@ -30,7 +30,7 @@ use KiwiCaptcha\ChallengeRecord;
  *   - expires_at      the record's expiry epoch (seconds) — a receipt is
  *                     only acceptable while now <= expires_at (+ application
  *                     skew)
- *   - issuer          the deployment issuer (audit #67; null when unset)
+ *   - issuer          the deployment issuer; null when unset
  *
  * with sodium_crypto_sign_detached, and the application can hand the payload
  * + signature to any party holding the PUBLIC key (derived from the seed via
@@ -47,7 +47,7 @@ use KiwiCaptcha\ChallengeRecord;
  *         base64_decode($publicKeyBase64),
  *     )
  *
- * SINGLE-USE SEMANTICS (audit #106): signature verification alone is NOT
+ * SINGLE-USE SEMANTICS: signature verification alone is NOT
  * sufficient for single-use actions — a valid signature proves the payload
  * was signed by the server, NOT that the jti has not already been consumed
  * elsewhere. An integrator accepting a receipt for a one-time action MUST
@@ -121,7 +121,7 @@ final class ResultReceiptSigner
      * Sign a valid verification result into a detached Ed25519 receipt.
      *
      * The payload carries the FULL replay-critical set from the CONSUMED
-     * record (audit #106): jti (the nonce), tenant (the record's scope),
+     * record: jti (the nonce), tenant (the record's scope),
      * action (the record's PoW algorithm), request_binding, issued_at /
      * expires_at (epoch SECONDS — the record wire unit) and issuer — so an
      * integrator can key its idempotency, freshness and scope checks on the

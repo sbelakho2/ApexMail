@@ -30,13 +30,13 @@ final class Configuration implements ConfigurationInterface
                     ->defaultNull()
                 ->end()
                 ->integerNode('kid')
-                    ->info('Signing key id (1..4294967295) stamped into every issued challenge. Paired with secrets_by_kid + revoked_kids this is the controlled HMAC-key rotation control: bump kid + add the new secret to secrets_by_kid; the old secret remains valid for verification until its kid is revoked.')
+                    ->info('Signing key id (1..4294967295) stamped into every issued challenge. Paired with secrets_by_kid + revoked_kids this is the controlled HMAC-key rotation control: bump kid + add the new secret to secrets_by_kid; the superseded secret remains valid for verification until its kid is revoked.')
                     ->min(1)
                     ->max(4294967295)
                     ->defaultValue(1)
                 ->end()
                 ->arrayNode('secrets_by_kid')
-                    ->info('Verification-only secrets for historical signing key ids (map of kid => secret, each >= 16 bytes). With the CURRENT signing secret in secret_key and kid matching, key rotation is: add the old secret here, bump kid + update secret_key with the new one. Verification of records signed under old kids uses these secrets.')
+                    ->info('Verification-only secrets for historical signing key ids (map of kid => secret, each >= 16 bytes). With the CURRENT signing secret in secret_key and kid matching, key rotation is: add the superseded secret here, bump kid + update secret_key with the new one. Verification of records signed under superseded kids uses these secrets.')
                     ->scalarPrototype()->end()
                     ->useAttributeAsKey('kid')
                     ->normalizeKeys(false)
@@ -136,9 +136,12 @@ final class Configuration implements ConfigurationInterface
                     // enforced by KiwiCaptcha\Config when the extension builds
                     // it, so this tree must not duplicate those protocol
                     // constraints (see the difficulty_bits comment). The
-                    // protocol CEILING (MAX_ARGON_T = 6) is shared from the
-                    // core: t above it is declared malformed by the verifier,
-                    // so the tree refuses it at configuration time.
+                    // issuance-side ceiling (Config::MAX_ARGON_T = 6) is the
+                    // browser-solver cap; the verifier's structural ceiling
+                    // is Verifier::MAX_ARGON_TIME = 16 (a signed record with
+                    // t in 7..16 passes the structural gates but is never
+                    // issued), so the tree refuses the issuance ceiling at
+                    // configuration time.
                     ->defaultValue(3)
                     ->min(1)
                     ->max(Config::MAX_ARGON_T)
@@ -495,11 +498,11 @@ final class Configuration implements ConfigurationInterface
                             ->defaultValue([])
                         ->end()
                         ->arrayNode('hard_limits')
-                            ->info('Cheap admission layer BEFORE the risk engine (in-process, per process): catastrophic floods get an immediate 429 without touching Redis.')
+                            ->info('Cheap admission layer BEFORE the risk engine (in-process, per process): overwhelming floods get an immediate 429 without touching Redis.')
                             ->addDefaultsIfNotSet()
                             ->children()
                                 ->integerNode('process_per_second')
-                                    ->info('Per-PROCESS emergency cap protecting the process from catastrophic work when Redis/state controls fail (default 10000). Per-source throttling belongs to the distributed keyed layer — the risk-v1 source velocity signals plus the caller\'s own keyed rate limiter (fed back as SourceRateLimitHit). The process-local check runs BEFORE any Redis issuance limiter : a saturated window refuses with the 429 risk-denied response without a single Redis round trip.')
+                                    ->info('Per-PROCESS emergency cap protecting the process from overwhelming work when Redis/state controls fail (default 10000). Per-source throttling belongs to the distributed keyed layer — the risk-v1 source velocity signals plus the caller\'s own keyed rate limiter (fed back as SourceRateLimitHit). The process-local check runs BEFORE any Redis issuance limiter : a saturated window refuses with the 429 risk-denied response without a single Redis round trip.')
                                     ->defaultValue(10000)
                                     ->min(1)
                                 ->end()

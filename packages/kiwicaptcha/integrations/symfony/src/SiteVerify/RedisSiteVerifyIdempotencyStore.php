@@ -8,18 +8,26 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * Redis-backed atomic idempotency store.
  *
  * Key: `{kiwi:<namespace>}:siteverify-idem:<backend_id>:<uuid>`
- * Value: JSON {response_hash, state: pending|complete, owner, result,
- * lease_expires_at}
+ * Value: JSON {response_hash, remoteip_fingerprint, state:
+ * pending|complete, owner, result, lease_expires_at}
  * TTL: bounded (the caller passes the window).
  *
  * The claim is a single Lua script — atomic even under concurrency.
  * `owner` is a random per-request token so only the owning request can
  * finalize (a stale retry can never overwrite a completed outcome). The
- * owner's lease (`lease_expires_at`, set from the server clock via
- * redis TIME at claim creation) bounds how long a crashed owner blocks
- * the key: after expiry an atomic TAKEOVER transfers ownership to a
- * waiter, and a live owner extends the lease with RENEW before a
- * long-running verification finalizes.
+ * claim binds the canonicalized remoteip fingerprint alongside the
+ * response hash: a retry with the same key but a DIFFERENT fingerprint
+ * is a CONFLICT (a changed remoteip can materially change the
+ * verification outcome, so no entry may be joined or reused across
+ * fingerprints). Records written without a fingerprint (created by an
+ * older release) carry none and therefore CONFLICT with every claim —
+ * fail-closed — and expire on TTL. The owner's lease
+ * (`lease_expires_at`, set from the server clock via redis TIME at
+ * claim creation) is CONFIGURABLE (`leaseSeconds`, default
+ * {@see SiteVerifyIdempotencyStore::LEASE_SECONDS}) and bounds how long
+ * a crashed owner blocks the key: after expiry an atomic TAKEOVER
+ * transfers ownership to a waiter, and the lease length itself (not any
+ * process-global timer) protects a live owner mid-verification.
  */
 final class RedisSiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStore
 {
@@ -31,15 +39,16 @@ local response_hash = ARGV[1]
 local owner = ARGV[2]
 local ttl = tonumber(ARGV[3])
 local lease_seconds = tonumber(ARGV[4])
+local fingerprint = ARGV[5]
 -- redis TIME returns bulk strings; tonumber makes the arithmetic explicit.
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', key)
 if not existing then
-  redis.call('SET', key, cjson.encode({ response_hash = response_hash, state = 'pending', owner = owner, result = cjson.null, lease_expires_at = now + lease_seconds }), 'EX', ttl)
+  redis.call('SET', key, cjson.encode({ response_hash = response_hash, remoteip_fingerprint = fingerprint, state = 'pending', owner = owner, result = cjson.null, lease_expires_at = now + lease_seconds }), 'EX', ttl)
   return 'claimed'
 end
 local rec = cjson.decode(existing)
-if rec.response_hash ~= response_hash then
+if rec.response_hash ~= response_hash or rec.remoteip_fingerprint ~= fingerprint then
   return 'conflict'
 end
 if rec.state == 'complete' then
@@ -118,13 +127,14 @@ LUA;
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
         private readonly string $namespace = 'kiwicaptcha',
+        private readonly int $leaseSeconds = self::LEASE_SECONDS,
     ) {
     }
 
-    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds): array
+    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array
     {
         $owner = bin2hex(random_bytes(16));
-        $result = RedisEval::eval($this->redis, self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), self::LEASE_SECONDS]);
+        $result = RedisEval::eval($this->redis, self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), $this->leaseSeconds, $remoteipFingerprint]);
 
         $claim = match ((string) $result) {
             'claimed' => IdempotencyClaim::Claimed,
@@ -139,7 +149,7 @@ LUA;
     public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds): array
     {
         $owner = bin2hex(random_bytes(16));
-        $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, self::LEASE_SECONDS, max(1, $ttlSeconds)]);
+        $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $this->leaseSeconds, max(1, $ttlSeconds)]);
 
         $takeover = match ((string) $result) {
             'took_over' => IdempotencyClaim::TookOver,
@@ -160,7 +170,7 @@ LUA;
 
     public function renew(string $backendId, string $idempotencyKey, string $owner): bool
     {
-        $result = RedisEval::eval($this->redis, self::RENEW_LUA, $this->key($backendId, $idempotencyKey), [$owner, self::LEASE_SECONDS, max(1, $this->retentionTtl($idempotencyKey))]);
+        $result = RedisEval::eval($this->redis, self::RENEW_LUA, $this->key($backendId, $idempotencyKey), [$owner, $this->leaseSeconds, max(1, $this->retentionTtl($idempotencyKey))]);
 
         return (string) $result === '1';
     }

@@ -403,16 +403,17 @@ final class SiteVerifyConcurrencyTest extends TestCase
 
 
     /**
-     * The live-owner lease HEARTBEAT: the owner renews its idempotency
-     * lease WHILE blocked inside the verifier, so a concurrent request
-     * can never legally take over a live-but-slow owner. Deterministic
-     * test: the owner's consume() sleeps 5s (short heartbeat interval),
-     * and a second request issued mid-verification must wait for the
-     * stored result instead of taking over or verifying itself.
+     * The lease WINDOW covers the verification window without any
+     * process-global timer: the owner verifies with a consume() that
+     * sleeps 6s under the DEFAULT lease (150s), and a second request
+     * fired mid-verification must wait for the stored result
+     * (PendingSame — the takeover gate inside the lease stays closed)
+     * instead of taking over or verifying itself. Both responses are
+     * byte-identical and the token is consumed exactly once.
      */
-    public function testHeartbeatPreventsTakeoverWhileOwnerBlockedInVerifier(): void
+    public function testOwnershipLeaseCoversTheVerificationWindow(): void
     {
-        if (!\function_exists('pcntl_fork') || !\function_exists('pcntl_alarm') || !\class_exists(\Predis\Client::class)) {
+        if (!\function_exists('pcntl_fork') || !\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('pcntl/predis not available');
         }
         try {
@@ -425,8 +426,9 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $backendId = hash('sha256', self::SITEVERIFY_SECRET);
         $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
 
-        // A storage whose consume() blocks 5s inside the verifier — the
-        // exact window where a missing heartbeat would let a takeover win.
+        // A storage whose consume() blocks 6s inside the verifier — a
+        // window far inside the DEFAULT 150s lease, during which the
+        // takeover gate must stay closed.
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), new RedisStorage($probe));
         $challenge = $issuer->issue('login', '127.0.0.1');
         $solution = $this->solveSolution($challenge);
@@ -434,8 +436,8 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $probe->disconnect();
 
-        $outFile = tempnam(sys_get_temp_dir(), 'kiwi-hb-');
-        $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-hb-start-');
+        $outFile = tempnam(sys_get_temp_dir(), 'kiwi-lease-');
+        $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-lease-start-');
         $owner = pcntl_fork();
         self::assertNotSame(-1, $owner);
         if ($owner === 0) {
@@ -447,7 +449,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             }
             $line = 'error';
             try {
-                $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+                $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 20.0, 'read_write_timeout' => 20.0]);
                 $sleepy = new class(new RedisStorage($client)) implements \KiwiCaptcha\AtomicStorageInterface {
                     public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
                     {
@@ -465,7 +467,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
 
                     public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     {
-                        sleep(5); // the blocked-verification window
+                        sleep(6); // the blocked-verification window
                         return $this->inner->consume($nonce);
                     }
 
@@ -486,11 +488,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                     $sleepy,
                     null,
                     null,
-                    new RedisSiteVerifyIdempotencyStore($client),
-                    null,
-                    90.0,
-                    true,   // heartbeat enabled
-                    2,      // 2s heartbeat interval
+                    new RedisSiteVerifyIdempotencyStore($client), // DEFAULT 150s lease
                 );
                 $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                     'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
@@ -512,13 +510,47 @@ final class SiteVerifyConcurrencyTest extends TestCase
         fclose($barrierFile);
         // The second request fires while the owner is INSIDE the verifier.
         sleep(3);
-        $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
+        $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 20.0, 'read_write_timeout' => 20.0]);
         $storage = new RedisStorage($client);
+        $counting = new class($storage) implements \KiwiCaptcha\AtomicStorageInterface {
+            public int $consumes = 0;
+
+            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                $this->consumes++;
+
+                return $this->inner->consume($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
         $waiter = new SiteVerifyController(
-            new Verifier($storage),
+            new Verifier($counting),
             self::SECRET,
             [self::SITEVERIFY_SECRET => 'login'],
-            $storage,
+            $counting,
             null,
             null,
             new RedisSiteVerifyIdempotencyStore($client),
@@ -540,14 +572,29 @@ final class SiteVerifyConcurrencyTest extends TestCase
         self::assertSame(true, $ownerBody['success'] ?? null, 'the owner verifies successfully: '.$ownerLine);
         self::assertSame(true, $waiterBody['success'] ?? null, 'the waiter must receive the stored canonical success, not take over');
         self::assertSame($waiterBody, $ownerBody, 'both requests observe the identical canonical result');
-        self::assertNotSame('took_over', $ownerBody['error-codes'][0] ?? null);
+        self::assertSame(0, $counting->consumes, 'the waiter never entered the verifier — the 150s lease kept the takeover gate closed');
+
+        // Exactly ONE consumption (the owner's): the challenge record
+        // stays in place, consumed, with the committed valid result.
+        $check = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $record = $check->get('kiwicaptcha:'.$challenge->nonce);
+        $check->disconnect();
+        self::assertIsString($record, 'the owner must leave the challenge record in place (consumed, not deleted)');
+        self::assertStringContainsString('"state":"consumed"', $record, 'the token must be consumed exactly once');
+        self::assertStringContainsString('"consumed_result":{"valid":1', $record, 'the owner must commit its valid result for replay safety');
     }
 
     /**
      * A DISPLACED owner must never return its own locally computed result:
-     * once ownership is lost mid-verification (heartbeat disabled), the
-     * request returns the stored authoritative outcome — the taker's
-     * canonical failure — not its local success.
+     * with a CONFIGURABLE SHORT lease (3s) the owner's lease expires while
+     * it is still inside the verifier (its consume() sleeps 6s and returns
+     * null — so its LOCAL outcome is a failure), the taker wins the atomic
+     * takeover and finalizes its canonical SUCCESS, and the displaced
+     * owner returns the taker's stored bytes, not its local failure. The
+     * taker reuses the owner's remoteip: the idempotency fingerprint
+     * binds remoteip into the claim, so a different remoteip is a
+     * CONFLICT by design (covered by the SiteVerifyTest fingerprint
+     * cases).
      */
     public function testDisplacedOwnerReturnsAuthoritativeResultNotItsOwn(): void
     {
@@ -584,7 +631,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
             }
             $line = 'error';
             try {
-                $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 40.0, 'read_write_timeout' => 40.0]);
+                $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
                 $sleepy = new class(new RedisStorage($client)) implements \KiwiCaptcha\AtomicStorageInterface {
                     public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
                     {
@@ -602,8 +649,8 @@ final class SiteVerifyConcurrencyTest extends TestCase
 
                     public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                     {
-                        sleep(35); // longer than the 30s lease
-                        return $this->inner->consume($nonce);
+                        sleep(6); // outlasts the 3s lease
+                        return null; // the owner's LOCAL outcome is a failure
                     }
 
                     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
@@ -623,10 +670,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                     $sleepy,
                     null,
                     null,
-                    new RedisSiteVerifyIdempotencyStore($client),
-                    null,
-                    90.0,
-                    false, // heartbeat DISABLED — the displacement scenario
+                    new RedisSiteVerifyIdempotencyStore($client, 'kiwicaptcha', 3), // 3s lease
                 );
                 $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                     'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
@@ -646,11 +690,13 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $barrierFile = fopen($startBarrier, 'w');
         fwrite($barrierFile, 'go');
         fclose($barrierFile);
-        // After the owner's lease expires (30s), the taker verifies with a
-        // DIFFERENT remoteip — a binding mismatch — and finalizes a
-        // canonical FAILURE as the authoritative outcome.
-        sleep(33);
-        $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 40.0, 'read_write_timeout' => 40.0]);
+        // After the owner's 3s lease expires (its verification sleeps 6s),
+        // the taker — SAME key + token + remoteip, so the fingerprint
+        // matches — wins the atomic takeover, verifies (the record is
+        // still unconsumed; the owner's consume never delegated) and
+        // finalizes its canonical SUCCESS.
+        sleep(4);
+        $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
         $storage = new RedisStorage($client);
         $taker = new SiteVerifyController(
             new Verifier($storage),
@@ -659,10 +705,10 @@ final class SiteVerifyConcurrencyTest extends TestCase
             $storage,
             null,
             null,
-            new RedisSiteVerifyIdempotencyStore($client),
+            new RedisSiteVerifyIdempotencyStore($client, 'kiwicaptcha', 3),
         );
         $takerResponse = $taker->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
-            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $client->disconnect();
 
@@ -675,8 +721,8 @@ final class SiteVerifyConcurrencyTest extends TestCase
 
         $takerBody = json_decode((string) $takerResponse->getContent(), true);
         $ownerBody = json_decode($ownerLine, true);
-        self::assertSame(false, $takerBody['success'] ?? null, 'the taker finalizes the binding-mismatch failure');
-        self::assertSame(false, $ownerBody['success'] ?? null, 'the displaced owner must return the STORED authoritative failure, not its local success: '.$ownerLine);
+        self::assertSame(true, $takerBody['success'] ?? null, 'the taker verifies and finalizes its canonical success');
+        self::assertSame(true, $ownerBody['success'] ?? null, 'the displaced owner must return the STORED authoritative success, not its local failure: '.$ownerLine);
         self::assertSame($takerBody, $ownerBody, "the displaced owner returns the taker's canonical result byte-for-byte");
     }
 }

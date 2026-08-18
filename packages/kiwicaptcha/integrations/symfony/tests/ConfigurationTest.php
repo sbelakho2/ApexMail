@@ -181,7 +181,7 @@ final class ConfigurationTest extends TestCase
     public function testLegacyCalibrationReceiptTtlNodeIsGone(): void
     {
         $calibration = $this->process()['risk']['calibration'];
-        self::assertArrayNotHasKey('receipt_ttl_secs', $calibration, 'the old receipt_ttl_secs node is replaced by outcome_receipt_ttl_secs + risk.nonce_to_decision_ttl_secs');
+        self::assertArrayNotHasKey('receipt_ttl_secs', $calibration, 'the superseded receipt_ttl_secs node is replaced by outcome_receipt_ttl_secs + risk.nonce_to_decision_ttl_secs');
     }
 
     public function testHardLimitsUseSinglePerProcessCap(): void
@@ -190,8 +190,8 @@ final class ConfigurationTest extends TestCase
 
         self::assertArrayHasKey('process_per_second', $hardLimits, 'the hard limit is the single per-process cap');
         self::assertSame(10000, $hardLimits['process_per_second'], 'process_per_second defaults to 10000');
-        self::assertArrayNotHasKey('source_per_second', $hardLimits, 'the old two-window source cap is gone');
-        self::assertArrayNotHasKey('global_per_second', $hardLimits, 'the old two-window global cap is gone');
+        self::assertArrayNotHasKey('source_per_second', $hardLimits, 'the two-window source cap is gone');
+        self::assertArrayNotHasKey('global_per_second', $hardLimits, 'the two-window global cap is gone');
 
         self::assertSame(1, $this->process(['risk' => ['hard_limits' => ['process_per_second' => 1]]])['risk']['hard_limits']['process_per_second']);
         self::assertSame(250, $this->process(['risk' => ['hard_limits' => ['process_per_second' => 250]]])['risk']['hard_limits']['process_per_second']);
@@ -328,7 +328,7 @@ final class ConfigurationTest extends TestCase
 
     public function testRiskAllowedScopesNode(): void
     {
-        // Audit round 15: allowed_scopes defaults to [] (accept any scope)
+        // allowed_scopes defaults to [] (accept any scope)
         // and accepts a list of identifier-alphabet names; hostile entries
         // are rejected at config load.
         self::assertSame([], $this->process()['risk']['allowed_scopes'], 'allowed_scopes defaults to empty (accept-any)');
@@ -346,7 +346,7 @@ final class ConfigurationTest extends TestCase
 
     public function testSiteverifySecretsRequireStrongKeys(): void
     {
-        // Round 27: the siteverify secrets are the entire server-to-server
+        // The siteverify secrets are the entire server-to-server
         // authentication boundary — configuration rejects weak keys.
         $processed = $this->process(['risk' => ['siteverify_secrets' => ['0123456789abcdef' => 'login']]])['risk']['siteverify_secrets'];
         self::assertSame(['0123456789abcdef' => 'login'], $processed);
@@ -441,7 +441,7 @@ final class ConfigurationTest extends TestCase
 
     public function testArgon2MaxPerTenantDefaultsAndBounds(): void
     {
-        self::assertSame(8, $this->process()['argon2_max_per_tenant'], 'argon2_max_per_tenant defaults to 8 (per-scope Argon budget, audit #47)');
+        self::assertSame(8, $this->process()['argon2_max_per_tenant'], 'argon2_max_per_tenant defaults to 8 (per-scope Argon budget)');
         self::assertSame(1, $this->process(['argon2_max_per_tenant' => 1])['argon2_max_per_tenant']);
         self::assertSame(25, $this->process(['argon2_max_per_tenant' => 25])['argon2_max_per_tenant']);
     }
@@ -455,7 +455,7 @@ final class ConfigurationTest extends TestCase
     public function testRiskPolicyVersionIsTheChallengeSecurityEpoch(): void
     {
         self::assertSame(1, $this->process()['risk']['policy_version'], 'risk.policy_version defaults to 1 (the CHALLENGE security-policy epoch — independent of the risk-v1 contract version)');
-        self::assertSame(2, $this->process(['risk' => ['policy_version' => 2]])['risk']['policy_version'], 'bumping the epoch invalidates outstanding challenges (audit #42)');
+        self::assertSame(2, $this->process(['risk' => ['policy_version' => 2]])['risk']['policy_version'], 'bumping the epoch invalidates outstanding challenges');
     }
 
     public function testRiskPolicyVersionBelowOneIsRejected(): void
@@ -466,7 +466,7 @@ final class ConfigurationTest extends TestCase
 
     public function testRiskRequestBindingDefaultsToNullAndAcceptsAStaticBinding(): void
     {
-        self::assertNull($this->process()['risk']['request_binding'], 'risk.request_binding defaults to null (no static transaction binding, audit #41)');
+        self::assertNull($this->process()['risk']['request_binding'], 'risk.request_binding defaults to null (no static transaction binding)');
         self::assertSame('static-txn', $this->process(['risk' => ['request_binding' => 'static-txn']])['risk']['request_binding']);
     }
 
@@ -482,7 +482,7 @@ final class ConfigurationTest extends TestCase
         self::assertFalse($this->process(['risk' => ['health' => ['enabled' => false]]])['risk']['health']['enabled']);
     }
 
-    // ── Round 10: trusted client-IP policy (audit #64) ────────────────────
+// ── trusted client-IP policy ──────────────────────────────────────────────
 
     public function testClientIpModeDefaultsToSymfonyTrustedProxies(): void
     {
@@ -510,7 +510,7 @@ final class ConfigurationTest extends TestCase
         self::assertTrue($this->process(['risk' => ['reject_ambiguous_forwarding' => true]])['risk']['reject_ambiguous_forwarding']);
     }
 
-    // ── Round 10: memory-budget readiness (audit #68) ─────────────────────
+// ── memory-budget readiness ───────────────────────────────────────────────
 
     public function testContainerMemoryMibDefaultsToNullAndAcceptsBudgets(): void
     {
@@ -524,7 +524,7 @@ final class ConfigurationTest extends TestCase
         $this->process(['risk' => ['container_memory_mib' => 0]]);
     }
 
-    // ── Round 10: server-configured public origin (audit #78) ─────────────
+// ── server-configured public origin ───────────────────────────────────────
 
     public function testPublicBaseUrlDefaultsToNullAndAcceptsOrigins(): void
     {
@@ -532,11 +532,11 @@ final class ConfigurationTest extends TestCase
         self::assertSame('https://captcha.example.com', $this->process(['public_base_url' => 'https://captcha.example.com'])['public_base_url']);
     }
 
-    // ── Round 12: max-stale fail-closed (audit #108) ──────────────────────
+// ── max-stale fail-closed ─────────────────────────────────────────────────
 
     public function testSecurityEpochMaxStaleDefaultsAndBounds(): void
     {
-        self::assertSame(60, $this->process()['risk']['security_epoch_max_stale_secs'], 'security_epoch_max_stale_secs defaults to 60 (the max-stale fail-closed window, audit #108)');
+        self::assertSame(60, $this->process()['risk']['security_epoch_max_stale_secs'], 'security_epoch_max_stale_secs defaults to 60 (the max-stale fail-closed window)');
         self::assertSame(10, $this->process(['risk' => ['security_epoch_max_stale_secs' => 10]])['risk']['security_epoch_max_stale_secs']);
         self::assertSame(3600, $this->process(['risk' => ['security_epoch_max_stale_secs' => 3600]])['risk']['security_epoch_max_stale_secs']);
     }

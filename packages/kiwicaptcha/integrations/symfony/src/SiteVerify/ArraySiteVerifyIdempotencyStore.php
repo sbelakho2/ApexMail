@@ -9,7 +9,7 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  */
 final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStore
 {
-    /** @var array<string, array{hash: string, state: string, owner: string, result: ?array, lease_expires_at: int}> */
+    /** @var array<string, array{hash: string, remoteip_fingerprint: string, state: string, owner: string, result: ?array, lease_expires_at: int}> */
     private array $records = [];
 
     private readonly \Closure $now;
@@ -18,13 +18,19 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
      * @param \Closure|null $now test seam: returns the current Unix seconds
      *                           used for lease comparisons (defaults to
      *                           time()); advancing it simulates lease expiry
+     * @param int           $leaseSeconds the ownership lease window in
+     *                                    seconds (defaults to the interface
+     *                                    constant) — every claim, takeover
+     *                                    and renew uses THIS value
      */
-    public function __construct(?\Closure $now = null)
-    {
+    public function __construct(
+        ?\Closure $now = null,
+        private readonly int $leaseSeconds = self::LEASE_SECONDS,
+    ) {
         $this->now = $now ?? static fn (): int => time();
     }
 
-    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds): array
+    public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array
     {
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
@@ -32,15 +38,16 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
             $owner = bin2hex(random_bytes(16));
             $this->records[$key] = [
                 'hash' => $responseHash,
+                'remoteip_fingerprint' => $remoteipFingerprint,
                 'state' => 'pending',
                 'owner' => $owner,
                 'result' => null,
-                'lease_expires_at' => ($this->now)() + self::LEASE_SECONDS,
+                'lease_expires_at' => ($this->now)() + $this->leaseSeconds,
             ];
 
             return [IdempotencyClaim::Claimed, $owner];
         }
-        if ($existing['hash'] !== $responseHash) {
+        if ($existing['hash'] !== $responseHash || ($existing['remoteip_fingerprint'] ?? null) !== $remoteipFingerprint) {
             return [IdempotencyClaim::Conflict, null];
         }
         if ($existing['state'] === 'complete') {
@@ -63,7 +70,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
             return [IdempotencyClaim::StillPending, null];
         }
         $owner = bin2hex(random_bytes(16));
-        $this->records[$key] = array_replace($existing, ['owner' => $owner, 'lease_expires_at' => $now + self::LEASE_SECONDS]);
+        $this->records[$key] = array_replace($existing, ['owner' => $owner, 'lease_expires_at' => $now + $this->leaseSeconds]);
 
         return [IdempotencyClaim::TookOver, $owner];
     }
@@ -85,7 +92,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         if ($existing === null || $existing['state'] !== 'pending' || $existing['owner'] !== $owner) {
             return false;
         }
-        $this->records[$key] = array_replace($existing, ['lease_expires_at' => ($this->now)() + self::LEASE_SECONDS]);
+        $this->records[$key] = array_replace($existing, ['lease_expires_at' => ($this->now)() + $this->leaseSeconds]);
 
         return true;
     }

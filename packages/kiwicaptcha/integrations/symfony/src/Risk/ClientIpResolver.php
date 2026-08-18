@@ -9,7 +9,7 @@ use Symfony\Component\HttpFoundation\IpUtils;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * Trusted client-IP policy (audit #64): ONE explicit mode decides how the
+ * Trusted client-IP policy: ONE explicit mode decides how the
  * canonical client IP is derived, and every IP consumer in the bundle — the
  * challenge controller (issuance binding tag, rate-limit identity, risk
  * source pseudonym) and the validator (binding re-check, post-solve risk
@@ -42,7 +42,7 @@ use Symfony\Component\HttpFoundation\Request;
  * invalid_or_expired); with the default false the anomaly is logged and the
  * request proceeds with Symfony's derivation.
  *
- * DUPLICATE SECURITY-SINGULAR HEADERS (audit #100): a request carrying
+ * DUPLICATE SECURITY-SINGULAR HEADERS: a request carrying
  * Origin, Forwarded, X-Forwarded-For or X-Real-IP MORE THAN ONCE is parser
  * ambiguity — different intermediaries will pick different values, so the
  * header-derived identity is untrustworthy. The challenge CONTROLLER rejects
@@ -108,7 +108,7 @@ final class ClientIpResolver
             && $request->headers->has('X-Forwarded-For')
             && $request->headers->has('Forwarded')
         ) {
-            $message = 'kiwicaptcha.risk: a trusted proxy sent BOTH X-Forwarded-For and Forwarded — the canonical client IP is ambiguous (audit #64)';
+            $message = 'kiwicaptcha.risk: a trusted proxy sent BOTH X-Forwarded-For and Forwarded — the canonical client IP is ambiguous';
             if ($this->rejectAmbiguousForwarding) {
                 throw new AmbiguousForwardingException($message);
             }

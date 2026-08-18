@@ -1,7 +1,7 @@
 -- Calibration correction: flip the outcome ledger + reverse/redo the
 -- bucket contribution, ATOMICALLY (canonical, shared PHP/Rust).
 --
--- SCRIPT BOUNDS (audit #101) — all bounded constants:
+-- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     2
 --   max Redis calls:      15 (1 GET + 4 HINCRBYFLOAT + 4 HGET + 4 HSET +
 --                            1 EXPIRE + 1 SET)
@@ -23,7 +23,7 @@
 -- corrected contribution: abuse_count/abuse_score_sum <-> legit_count/
 -- legit_score_sum. If the decision-time bucket has already expired
 -- (outside the calibration window), the ledger still flips — the
--- corrected outcome is authoritative for future events while the old
+-- corrected outcome is authoritative for future events while the superseded
 -- ephemeral reputation pressure is left to decay naturally (Kiwi does
 -- not pretend to reverse already-decayed leaky counters). Reversed
 -- fields are clamped at zero.

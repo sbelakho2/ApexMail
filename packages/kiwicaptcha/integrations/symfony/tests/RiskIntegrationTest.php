@@ -248,7 +248,7 @@ final class RiskIntegrationTest extends TestCase
     public function testProfileResolverEscalatesWithinAlgorithmFamily(): void
     {
         // SHA app, floor 8: sha actions escalate; argon actions map to the
-        // FIXED-ENVELOPE ladder (audit #79): ALL THREE share the
+        // FIXED-ENVELOPE ladder: ALL THREE share the
         // server-controlled memory envelope (default 16384 KiB, t=3, p=1) —
         // risk escalates the TARGET DIFFICULTY (expected nonce search space
         // 1/4/8), never the server verification cost — regardless of the
@@ -262,7 +262,7 @@ final class RiskIntegrationTest extends TestCase
         $argon16 = $resolver->profileFor(RiskAction::Argon16);
         self::assertSame(PoWAlgorithm::Argon2id, $argon16?->algorithm);
         self::assertSame(1, $argon16?->targetBits, 'Argon16 escalates to the ladder rung 1');
-        self::assertSame(16384, $argon16?->mKib, 'argon profiles share the FIXED verification envelope (audit #79)');
+        self::assertSame(16384, $argon16?->mKib, 'argon profiles share the FIXED verification envelope');
         self::assertSame(3, $argon16?->t);
         self::assertSame(1, $argon16?->p);
         $argon32 = $resolver->profileFor(RiskAction::Argon32);
@@ -304,7 +304,7 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * Audit #79's core invariant: the SERVER verification cost ceiling is
+     * Core invariant: the SERVER verification cost ceiling is
      * risk-INDEPENDENT. Even the MAXIMUM adaptive escalation (Argon64) keeps
      * the memory at the fixed envelope — risk only raises the expected nonce
      * search space, which stays within the widget-solvable ceiling (target
@@ -383,7 +383,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(900, $risk['source_epoch_secs']);
         self::assertSame(1800, $risk['state_ttl_secs']);
         self::assertSame(60, $risk['dedupe_ttl_secs']);
-        self::assertSame(1, $risk['policy_version'], 'policy_version is the CHALLENGE security-policy epoch (audit #42) — default 1, independent of the risk-v1 contract version ('.RiskPolicy::CONTRACT_VERSION.')');
+        self::assertSame(1, $risk['policy_version'], 'policy_version is the CHALLENGE security-policy epoch — default 1, independent of the risk-v1 contract version ('.RiskPolicy::CONTRACT_VERSION.')');
         self::assertSame(8000, $risk['saturations']['src_fast']);
         self::assertSame(70000, $risk['saturations']['global']);
         self::assertSame(190, $risk['weights']['source_fast']);
@@ -416,15 +416,15 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame('minimum', $risk['unknown_scope']['mode']);
         self::assertSame('strict', $risk['continuity_cookie']['samesite'], 'samesite is defined exactly once, default strict');
         self::assertTrue($risk['continuity_cookie']['http_only']);
-        // Audit #79: the FIXED Argon2id verification-memory envelope and the
+        // The FIXED Argon2id verification-memory envelope and the
         // target-difficulty escalation ladder.
         self::assertSame(16384, $risk['argon_verification_memory_kib'], 'the adaptive Argon memory envelope defaults to 16384 KiB');
         self::assertSame([1, 4, 8], $risk['argon_escalation_target_bits'], 'the default Argon target-bits ladder is [1, 4, 8]');
-        // Audit #81: the security-epoch monitor's short cache window.
+        // The security-epoch monitor's short cache window.
         self::assertSame(1, $risk['security_epoch_cache_secs'], 'the central security-epoch read is cached 1 s by default');
-        // Audit #80: the Ed25519 receipt signer is OFF by default.
+        // The Ed25519 receipt signer is OFF by default.
         self::assertNull($risk['result_receipt_signing_key']);
-        // Audit #89: the per-scope issuance cap is OFF by default.
+        // The per-scope issuance cap is OFF by default.
         self::assertSame(0, $risk['max_challenges_per_scope_per_minute'], 'the per-scope issuance cap defaults to unlimited');
     }
 
@@ -1659,7 +1659,7 @@ final class RiskIntegrationTest extends TestCase
         // sample() books the TOTAL counter — one INCR per sampled
         // decision); one of them was confirmed. The counters are booked
         // deterministically here (sample() itself is probabilistic). The
-        // counters live in the scope/hour buckets (round-7), so the sample
+        // counters live in the scope/hour buckets, so the sample
         // receipts are registered at the CURRENT hour to sit inside the
         // 24-hour metrics window.
         $currentHour = intdiv((int) floor(microtime(true) * 1000), 3_600_000);
@@ -1860,7 +1860,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(0, $store->ledger[$decision->decisionId]['status'], 'the assessment registers the outcome ledger (status 0)');
 
         // First correction: the ledger flips (the corrected outcome is
-        // authoritative for future events). Round-7 design: no synthetic
+        // authoritative for future events). No synthetic
         // opposite-event compensation — the ephemeral reputation pressure
         // is left to decay naturally (Kiwi does not pretend to reverse
         // already-decayed leaky counters).
@@ -2261,7 +2261,7 @@ final class RiskIntegrationTest extends TestCase
     }
 
     /**
-     * NONCE -> DECISION CONSUMPTION (post_solve_check scope): the old
+     * NONCE -> DECISION CONSUMPTION (post_solve_check scope): the stale
      * mapping is still consumed (cleanup — it can never confirm against a
      * stale decision), and the fresh POST-SOLVE decision becomes the
      * current confirmation target.
@@ -2321,7 +2321,7 @@ final class RiskIntegrationTest extends TestCase
         $violations = $engineValidator->validate($dto);
         self::assertCount(0, $violations);
 
-        // The old mapping was consumed for cleanup and discarded.
+        // The stale mapping was consumed for cleanup and discarded.
         self::assertArrayNotHasKey('{kiwi:t}:decision:'.$challenge->nonce, $client->strings, 'the stale mapping must be consumed even on post_solve_check scopes');
         // The fresh POST-SOLVE decision is the current confirmation target —
         // never the stale pre-issue decision.

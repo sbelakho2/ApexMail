@@ -46,6 +46,14 @@ use Symfony\Component\HttpFoundation\Response;
  *    issuer/policy expectations, nonce-bound IP binding, timing floor,
  *    Argon ceilings and atomic single-use consumption all apply exactly as
  *    in the native path.
+ *  - Verification idempotency ownership is protected by a LEASE WINDOW,
+ *    not a process-global timer: the store's ownership lease (default
+ *    150s) comfortably exceeds the maximum supported verification /
+ *    request execution window plus a safety margin, so a live owner is
+ *    never overtaken mid-verify — no process-global signal state is
+ *    touched. The claim additionally binds the canonicalized remoteip
+ *    fingerprint, so the same idempotency key with a changed remoteip
+ *    CONFLICTS instead of reusing an outcome derived under another IP.
  */
 final class SiteVerifyController
 {
@@ -57,8 +65,9 @@ final class SiteVerifyController
      * bound without a stored result and without winning the atomic
      * takeover is answered with the retryable provider `internal-error`
      * error — it NEVER enters the verifier without holding the current
-     * owner token. The owner's lease (30s) is refreshed by an atomic
-     * takeover long before, so this bound is the absolute tail.
+     * owner token. The owner's lease (150s) comfortably exceeds the
+     * maximum supported verification window, so this bound is the
+     * absolute tail.
      */
     private const IDEMPOTENCY_WAIT_SECS = 90.0;
 
@@ -93,85 +102,43 @@ final class SiteVerifyController
         private readonly \Predis\Client|\Redis|null $logGate = null,
         /** Hard bound on the PENDING_SAME wait in seconds (see {@see self::IDEMPOTENCY_WAIT_SECS}). */
         private readonly float $idempotencyWaitSecs = self::IDEMPOTENCY_WAIT_SECS,
-        /**
-         * Owner-lease heartbeat: while this request performs the
-         * ownership-critical verification, a SIGALRM timer renews the
-         * idempotency lease so a slow-but-alive owner is never overtaken.
-         * Disabling it (tests) falls back to the finalize-time renewal.
-         */
-        private readonly bool $heartbeatEnabled = true,
-        private readonly int $heartbeatIntervalSecs = 0,
     ) {
     }
 
-    /** @var \Closure|int|null the previous SIGALRM handler (int = SIG_DFL/SIG_IGN) */
-    private \Closure|int|null $previousAlarmHandler = null;
-    private bool $previousAsyncSignals = false;
-    private bool $heartbeatActive = false;
-
-    private function installHeartbeat(string $backendId, string $idempotencyKey, string $responseHash, string $owner): void
+    /**
+     * The owner's post-verify ownership confirmation. Ownership is
+     * protected by the LEASE WINDOW alone (the store's lease comfortably
+     * exceeds the maximum supported verification window), so the owner
+     * confirms ownership AFTER the verification by attempting an atomic
+     * renewal: it succeeds only while this request still holds the
+     * current owner token. When it fails, ownership was taken over after
+     * the lease expired mid-verification — the caller must then NOT
+     * return its own local result as authoritative.
+     */
+    private function confirmOwnership(string $backendId, string $idempotencyKey, string $owner): bool
     {
-        if (!$this->heartbeatEnabled || !\function_exists('pcntl_alarm') || !\extension_loaded('pcntl')) {
-            return;
-        }
-        $interval = $this->heartbeatIntervalSecs > 0
-            ? $this->heartbeatIntervalSecs
-            : max(1, intdiv(SiteVerifyIdempotencyStore::LEASE_SECONDS, 2));
-        $this->previousAsyncSignals = \function_exists('pcntl_async_signals')
-            ? pcntl_async_signals(true)
-            : false;
-        $this->previousAlarmHandler = pcntl_signal_get_handler(SIGALRM);
-        $store = $this->idempotencyStore;
-        $heartbeat = function () use ($store, $backendId, $idempotencyKey, $owner, $responseHash, $interval): void {
-            try {
-                $store?->renew($backendId, $idempotencyKey, $owner);
-            } catch (\Throwable) {
-                // A failed renewal (ownership lost, store unavailable) just
-                // stops the heartbeat; the post-verify ownership check
-                // below handles the outcome authoritatively.
-            }
-            if (\function_exists('pcntl_alarm')) {
-                pcntl_alarm($interval);
-            }
-        };
-        pcntl_signal(SIGALRM, $heartbeat);
-        pcntl_alarm($interval);
-        $this->heartbeatActive = true;
-    }
-
-    private function disarmHeartbeat(): void
-    {
-        if (!$this->heartbeatActive) {
-            return;
-        }
-        if (\function_exists('pcntl_alarm')) {
-            pcntl_alarm(0);
-        }
-        if ($this->previousAlarmHandler !== null) {
-            pcntl_signal(SIGALRM, $this->previousAlarmHandler);
-        }
-        if (\function_exists('pcntl_async_signals')) {
-            pcntl_async_signals($this->previousAsyncSignals);
-        }
-        $this->heartbeatActive = false;
-        $this->previousAlarmHandler = null;
+        return $this->idempotencyStore?->renew($backendId, $idempotencyKey, $owner) ?? false;
     }
 
     /**
-     * The owner's post-verify ownership confirmation. When the heartbeat
-     * is unavailable and the lease expired mid-verification, ownership may
-     * have been taken over; the caller must then NOT return its own local
-     * result as authoritative.
+     * The idempotency fingerprint of the request remoteip: 'no-ip' when
+     * absent (or whitespace-only), otherwise 'ip:' + the canonicalized
+     * address — IPv4/IPv6 are normalized via inet_pton/inet_ntop so
+     * equivalent spellings of one address collide; anything else keeps
+     * its raw trimmed form. The claim binds this fingerprint, so
+     * verification-affecting remoteip changes cannot reuse a stored
+     * outcome derived under another IP.
      */
-    private function stillOwns(string $backendId, string $idempotencyKey, string $owner): bool
+    private function remoteipFingerprint(?string $remoteIp): string
     {
-        if ($this->heartbeatActive) {
-            return true;
+        $trimmed = $remoteIp !== null ? trim($remoteIp) : '';
+        if ($trimmed === '') {
+            return 'no-ip';
         }
+        $binary = @inet_pton($trimmed);
+        $canonical = $binary !== false ? (string) inet_ntop($binary) : $trimmed;
 
-        // Heartbeat never installed (disabled or pcntl unavailable):
-        // confirm ownership by attempting an atomic renewal.
-        return $this->idempotencyStore?->renew($backendId, $idempotencyKey, $owner) ?? false;
+        return 'ip:'.$canonical;
     }
 
     private function logGateKey(): string
@@ -263,7 +230,10 @@ final class SiteVerifyController
         // either returns the stored canonical response or (crash window)
         // reconstructs the original outcome via the core's retained
         // consumed-result machinery — ordinary replays WITHOUT a matching
-        // key stay timeout-or-duplicate.
+        // key stay timeout-or-duplicate. The idempotency fingerprint
+        // binds backend identity + response hash + canonicalized remoteip
+        // into the claim: the same UUID with a CHANGED remoteip is a
+        // CONFLICT, never a join or a reuse.
         $backendId = hash('sha256', $secret);
         $claim = IdempotencyClaim::Claimed;
         $claimOwner = null;
@@ -271,7 +241,8 @@ final class SiteVerifyController
         $idempotent = false;
         if ($idempotencyKey !== null) {
             $idempotent = true;
-            [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300);
+            $remoteipFingerprint = $this->remoteipFingerprint($remoteIp);
+            [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $remoteipFingerprint);
             if ($claim === IdempotencyClaim::Conflict) {
                 return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
@@ -356,32 +327,24 @@ final class SiteVerifyController
         // only honored because the caller proved possession of a valid
         // secret above; it is REQUIRED whenever IP binding is enabled
         // (the default) — a bound challenge without it fails closed.
-        // An owner that may verify for longer than the lease installs a
-        // lease HEARTBEAT for the duration of the verification, so a
-        // live-but-slow owner is never legally overtaken mid-verify.
-        $heartbeatOwner = ($claim === IdempotencyClaim::Claimed || $claim === IdempotencyClaim::TookOver) && $claimOwner !== null && $idempotencyKey !== null
-            ? $claimOwner
-            : null;
-        if ($heartbeatOwner !== null) {
-            $this->installHeartbeat($backendId, $idempotencyKey, hash('sha256', $response), $heartbeatOwner);
-        }
-        try {
-            $outcome = $this->verifier->verify(
-                $response,
-                $this->secretKey,
-                $expectedScope,
-                $remoteIp,
-                null,            // region expectation is application policy
-                false,           // telemetry is never authoritative here
-            );
-        } finally {
-            $this->disarmHeartbeat();
-        }
-        if ($heartbeatOwner !== null && !$this->stillOwns($backendId, $idempotencyKey, $heartbeatOwner)) {
-            // Ownership was lost while verifying (heartbeat unavailable
-            // and the lease expired): the local result is NOT
-            // authoritative. Return the stored authoritative result, or a
-            // retryable provider error when none exists yet.
+        // Owner protection is the lease window: the store's ownership
+        // lease (default 150s) comfortably exceeds the maximum supported
+        // verification window plus a safety margin, so a live-but-slow
+        // owner is never overtaken mid-verify — no process-global signal
+        // state is touched.
+        $outcome = $this->verifier->verify(
+            $response,
+            $this->secretKey,
+            $expectedScope,
+            $remoteIp,
+            null,            // region expectation is application policy
+            false,           // telemetry is never authoritative here
+        );
+        if ($claimOwner !== null && !$this->confirmOwnership($backendId, $idempotencyKey, $claimOwner)) {
+            // Ownership was lost while verifying (the lease window expired
+            // mid-verification): the local result is NOT authoritative.
+            // Return the stored authoritative result, or a retryable
+            // provider error when none exists yet.
             $stored = $this->idempotencyStore?->stored($backendId, $idempotencyKey);
             if ($stored !== null) {
                 return new JsonResponse($this->canonicalizeResponse($stored));

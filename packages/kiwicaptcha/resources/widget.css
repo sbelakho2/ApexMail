@@ -26,7 +26,7 @@
   /* No external font fetches — system-ui stack keeps CSP strict and matches
      the industry convention (reCAPTCHA uses Roboto/system; Turnstile and
      Friendly inherit the host page's system font). */
-  /* Screen-reader-only live region (audit round 14): visually hidden, but
+  /* Screen-reader-only live region: visually hidden, but
      kept in the layout tree so role=status announcements reach assistive
      tech without any visual footprint. */
   .kiwi-sr-only {
@@ -42,8 +42,8 @@
   }
 
   .kiwi-container {
-    /* Round 30 (WCAG 1.4.4): the widget's typography scales from this
-       variable (1 = design size). A test can set it to 2 to exercise a
+    /* The widget's typography scales from this variable (WCAG 1.4.4).
+       (1 = design size). A test can set it to 2 to exercise a
        TRUE 200% text enlargement — the fixed-pixel sizes below are all
        derived from it. */
     --kiwi-font-scale: 1;
@@ -59,7 +59,7 @@
     --kiwi-bg: #fafafa;
     --kiwi-text: #333333;
     --kiwi-text-muted: #737373;
-    /* Round 30: semantic badge foregrounds per theme — the state
+    /* Semantic badge foregrounds per theme — the state
        selectors reference ONLY these variables (never hard-coded colors),
        and both themes clear >= 5:1 on their 12% tint surfaces:
        light: neutral 5.07:1, solving 5.85:1, success 6.27:1, failure
@@ -125,7 +125,7 @@
     border-color: var(--kiwi-primary);
     box-shadow: 0 2px 6px rgb(0 0 0 / 0.1);
   }
-  /* Round-13: the widget itself is never focusable (no tabindex, no
+  /* The widget itself is never focusable (no tabindex, no
      checkbox semantics — an auto-solving PoW is a status/group, not a
      control). The manual Retry button carries the visible focus ring
      (WCAG 2.4.7); it is the only interactive element in the widget. */
@@ -145,7 +145,7 @@
     justify-content: center;
     background: rgba(var(--kiwi-primary-rgb), 0.08);
     color: var(--kiwi-primary);
-    transition: background 0.3s ease, color 0.3s ease, transform 0.3s ease;
+    transition: background .3s ease, color 0.3s ease, transform 0.3s ease;
     position: relative;
   }
   .kiwi-icon-wrapper svg { width: 20px; height: 20px; }
@@ -198,11 +198,11 @@
     border-radius: var(--kiwi-radius);
     background: var(--kiwi-border);
     color: var(--kiwi-badge-neutral-text);
-    /* Round 29: NO color transition — a 0.3s cross-fade passes through
+    /* NO color transition — a 0.3s cross-fade passes through
        low-contrast mixes of the two state colors (the badge changes
        instantly; WCAG 1.4.3 applies to every visible state). */
   }
-  /* Round 29 (WCAG 1.4.3): the state colors on their 12% tints measured
+  /* The state colors on their 12% tints measured
      3.86-3.96:1 — below the 4.5:1 normal-text threshold. The badge
      foregrounds are darkened (blue 5.71:1, green 6.09:1, red 5.05:1 on
      the #FAFAFA-tinted surfaces) so antialiasing and future palette
@@ -275,7 +275,7 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* --- Manual Retry (round-13) ---
+  /* --- Manual Retry ---
      A genuine native <button> (focusable; Enter/Space activation is
      built-in). Hidden in every state except the error/unavailable states:
      the widget is passive and never focusable itself. */
@@ -286,7 +286,7 @@
     font-family: inherit;
     line-height: 1.2;
     padding: 4px 10px;
-    /* Round 29 (WCAG 2.5.8): the 11px/1.2/4px-padding/1px-border button
+    /* The 11px/1.2/4px-padding/1px-border button (WCAG 2.5.8)
        measured ~23.2 CSS px tall — below the 24x24 AA baseline. The
        target is a full 32px minimum height (an accessibility/security
        control has no reason to be cramped) and 24px minimum width. */
@@ -301,7 +301,7 @@
   .kiwi-retry:hover {
     background: rgba(var(--kiwi-primary-rgb), 0.08);
   }
-  /* Round 29 (WCAG 2.5.2/2.1.1): idle also shows the native Retry —
+  /* Idle also shows the native Retry (WCAG 2.5.2/2.1.1) —
      after a reset/BFCache restore the widget needs manual reacquisition,
      and the button is the keyboard-accessible path (the widget itself
      stays a passive, non-focusable group). */
@@ -312,7 +312,7 @@
     display: inline-flex;
   }
 
-  /* --- Narrow aria-live announcer (round-13) ---
+  /* --- Narrow aria-live announcer ---
      The ONLY aria-live traffic in the widget. Visually hidden but present
      in the accessibility tree (role=status => polite); announces only
      meaningful transitions, never the countdown/progress (visual only). */
@@ -344,7 +344,7 @@
     100% { left: 150%; }
   }
 
-  /* --- Reduced motion (round-13) ---
+  /* --- Reduced motion ---
      Kills every decorative animation/transition (solving pulse, success
      shine, logo blink, state transitions) for users who ask for it; the
      widget remains fully functional, just static. */
@@ -360,9 +360,9 @@
     }
   }
 
-  /* Round 29 (forced-colors): the widget's custom palette is replaced by
-     the user's system colors; the Retry button keeps its border/background
-     contrast from the OS palette and the focus ring stays visible. */
+  /* The widget's custom palette is replaced by the user's system colors
+     (forced-colors): the Retry button keeps its border/background contrast
+     from the OS palette and the focus ring stays visible. */
   @media (forced-colors: active) {
     .kiwi-widget {
       border: 1px solid CanvasText;

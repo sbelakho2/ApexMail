@@ -1,7 +1,7 @@
 # KiwiCaptcha accessibility — WCAG 2.2 AA evidence, scope and limitations
 
-Round 29 establishes the accessibility acceptance set for the KiwiCaptcha
-widget. This document describes the component's **tested conformance
+This document establishes the accessibility acceptance set for the KiwiCaptcha
+widget: it describes the component's **tested conformance
 scope** — what KiwiCaptcha itself provides and verifies, what the
 integrating page must provide, and the known limitations. It describes the
 software, not organizational structure.

@@ -1,7 +1,7 @@
 -- Decision registration: receipt + sample denominator + outcome ledger,
 -- ATOMICALLY (canonical, shared PHP/Rust).
 --
--- SCRIPT BOUNDS (audit #101) — all bounded constants:
+-- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     3
 --   max Redis calls:      4 (2 SET + 1 HINCRBY + 1 EXPIRE)
 --   max collection cardinality: none (cjson encode of the bounded ledger

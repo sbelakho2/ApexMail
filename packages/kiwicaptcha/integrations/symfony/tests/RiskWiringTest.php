@@ -366,8 +366,8 @@ final class RiskWiringTest extends TestCase
         $container = $this->load($risk);
 
         $args = $container->getDefinition(ChallengeController::class)->getArguments();
-        self::assertSame('static-txn', $args[10], 'risk.request_binding must reach the controller as the static default (audit #41)');
-        self::assertTrue($args[11], 'risk.enforce_origin must reach the controller (audit #43)');
+        self::assertSame('static-txn', $args[10], 'risk.request_binding must reach the controller as the static default');
+        self::assertTrue($args[11], 'risk.enforce_origin must reach the controller');
 
         // Defaults: no static binding, origin enforcement off.
         $args = $this->load($this->riskDefaults())->getDefinition(ChallengeController::class)->getArguments();
@@ -379,7 +379,7 @@ final class RiskWiringTest extends TestCase
     {
         $container = $this->load($this->riskDefaults());
 
-        self::assertSame(1, $container->getDefinition('kiwi_captcha.config')->getArgument('$policyVersion'), 'risk.policy_version (default 1) must reach the core Config (audit #42)');
+        self::assertSame(1, $container->getDefinition('kiwi_captcha.config')->getArgument('$policyVersion'), 'risk.policy_version (default 1) must reach the core Config');
         self::assertSame(1, $container->getDefinition('kiwi_captcha.verifier')->getArgument('$expectedPolicyVersion'), 'risk.policy_version must reach the core Verifier as expectedPolicyVersion');
 
         $risk = $this->riskDefaults();
@@ -411,7 +411,7 @@ final class RiskWiringTest extends TestCase
             self::assertStringContainsString('request_binding', $e->getMessage());
         }
 
-        // Audit #96: out-of-charset bytes are refused at compile time too.
+        // Out-of-charset bytes are refused at compile time too.
         try {
             $risk = $this->riskDefaults();
             $risk['request_binding'] = 'static binding';
@@ -541,7 +541,7 @@ final class RiskWiringTest extends TestCase
     {
         $container = $this->load($this->riskDefaults());
         $health = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class);
-        self::assertSame(16384, $health->getArgument('$argonEnvelopeMemoryKib'), 'the memory-budget invariant uses the FIXED verification envelope (audit #79)');
+        self::assertSame(16384, $health->getArgument('$argonEnvelopeMemoryKib'), 'the memory-budget invariant uses the FIXED verification envelope');
 
         $risk = $this->riskDefaults();
         $risk['argon_verification_memory_kib'] = 65536;

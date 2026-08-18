@@ -1914,36 +1914,55 @@
       return "internal-error";
     }
     function compatExecute(arg, opts) {
-      // execute() with no argument targets the first created widget.
-      if (arg === undefined || arg === null) {
-        return kiwiCompatFirstId ? kiwiExecute(kiwiCompatFirstId) : Promise.reject(new Error("kiwicaptcha: no widget has been rendered"));
-      }
-      // Argument resolution order: a widget id, then an element id, then
-      // a selector matching an existing rendered container. Only a string
-      // that matches NONE of those can be a v3-style sitekey — and the
-      // hidden-holder v3 path is reCAPTCHA-only; Turnstile and hCaptcha
-      // reject unresolvable targets instead of fabricating a widget.
+      // The hCaptcha async mode ({async:true}) is determined BEFORE
+      // argument resolution: the async form normalizes BOTH resolution
+      // failures — "missing-captcha" (no widget exists) and
+      // "invalid-captcha-id" (the target resolves to nothing) — and the
+      // execution outcome ({response, key} / error-code STRING). The
+      // other providers and the bare (non-async) hCaptcha execute keep
+      // Error-object rejections and the v3 sitekey path.
+      var hcaptchaAsync = compat === "hcaptcha" && opts && opts.async === true;
       var id = null;
-      if (typeof arg === "string" && kiwiWidgets[arg]) {
-        id = arg;
+      if (arg === undefined || arg === null) {
+        // execute() with no argument targets the first created widget via
+        // the shared resolver; hCaptcha async rejects a widget-less page
+        // with the incumbent's "missing-captcha" STRING.
+        id = compatResolveId(null);
+        if (hcaptchaAsync && !id) return Promise.reject("missing-captcha");
+        if (!id) return Promise.reject(new Error("kiwicaptcha: no widget has been rendered"));
       } else {
-        var targetEl = null;
-        if (typeof arg === "string") {
-          try { targetEl = document.getElementById(arg); } catch (e) {}
-          if (!targetEl) {
-            try {
-              var selectorMatches = document.querySelectorAll(arg);
-              targetEl = selectorMatches.length ? selectorMatches[0] : null;
-            } catch (e) {}
+        // Argument resolution order: a widget id, then an element id, then
+        // a selector matching an existing rendered container. Only a string
+        // that matches NONE of those can be a v3-style sitekey — and the
+        // hidden-holder v3 path is reCAPTCHA-only; Turnstile and hCaptcha
+        // reject unresolvable targets instead of fabricating a widget.
+        if (typeof arg === "string" && kiwiWidgets[arg]) {
+          id = arg;
+        } else {
+          var targetEl = null;
+          if (typeof arg === "string") {
+            try { targetEl = document.getElementById(arg); } catch (e) {}
+            if (!targetEl) {
+              try {
+                var selectorMatches = document.querySelectorAll(arg);
+                targetEl = selectorMatches.length ? selectorMatches[0] : null;
+              } catch (e) {}
+            }
+          } else if (arg && arg.nodeType === 1) {
+            targetEl = arg;
           }
-        } else if (arg && arg.nodeType === 1) {
-          targetEl = arg;
+          if (targetEl) id = compatResolveId(targetEl);
         }
-        if (targetEl) id = compatResolveId(targetEl);
+        if (hcaptchaAsync && !id) {
+          // hCaptcha async rejects an unresolvable target (not a widget
+          // id, element or container selector) with the incumbent's
+          // "invalid-captcha-id" STRING.
+          return Promise.reject("invalid-captcha-id");
+        }
       }
       if (id) {
         var execPromise = kiwiExecute(id);
-        if (compat === "hcaptcha" && opts && opts.async === true) {
+        if (hcaptchaAsync) {
           // hCaptcha async execute: resolve with the token AND the stable
           // per-widget response key ({response, key}); the bare non-async
           // form resolves the token string. Rejections are normalized to

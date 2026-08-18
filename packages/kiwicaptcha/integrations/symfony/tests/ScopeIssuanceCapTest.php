@@ -14,13 +14,13 @@ use KiwiCaptcha\Storage\ArrayStorage;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Per-scope issuance cap (audit #89): a Redis fixed-window counter
+ * Per-scope issuance cap: a Redis fixed-window counter
  * ({kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>, INCR +
  * EXPIRE 60 in one atomic Lua script) bounds how many challenges a scope
  * may issue per minute — the public site key + claimed origin can no longer
  * create unlimited billed verification work per scope.
  *
- * The RAW SCOPE STRING IS NEVER A REDIS KEY COMPONENT (audit #112): the
+ * The RAW SCOPE STRING IS NEVER A REDIS KEY COMPONENT: the
  * scope is attacker-controlled (bounded alphabet, unbounded cardinality),
  * so the window key carries hex(hmac_sha256(scope, K_scope)) where K_scope
  * is derived from the bundle's master with hash_hkdf info
@@ -63,7 +63,7 @@ final class ScopeIssuanceCapTest extends TestCase
     }
 
     /**
-     * Audit round 22: the security cap's canonical scope id is MANDATORY —
+     * The security cap's canonical scope id is MANDATORY —
      * calling allow() without one is a compile-time/static-analysis error
      * (there is no nullable fallback that silently recreates the
      * per-name-HMAC attack surface).
@@ -84,7 +84,7 @@ final class ScopeIssuanceCapTest extends TestCase
     }
 
     /**
-     * Audit round 22: the per-name HMAC form survives ONLY as the
+     * The per-name HMAC form survives ONLY as the
      * explicitly-named legacy soft-quota API — it hides bytes but does not
      * bound cardinality, and the name makes the distinction impossible to
      * miss.
@@ -106,7 +106,7 @@ final class ScopeIssuanceCapTest extends TestCase
     }
 
     /**
-     * Audit #112: the window key carries the keyed scope pseudonym — the
+     * The window key carries the keyed scope pseudonym — the
      * raw scope string never appears in ANY Redis key the cap touches, and
      * distinct scopes map to distinct windows.
      */
@@ -121,7 +121,7 @@ final class ScopeIssuanceCapTest extends TestCase
         foreach ($redis->calls as $call) {
             foreach ((array) $call[1] as $arg) {
                 if (\is_string($arg) && str_contains($arg, ':issuance:')) {
-                    self::assertStringNotContainsString('login', $arg, 'the raw scope must never appear in an issuance key (audit #112)');
+                    self::assertStringNotContainsString('login', $arg, 'the raw scope must never appear in an issuance key');
                 }
             }
         }
@@ -138,7 +138,7 @@ final class ScopeIssuanceCapTest extends TestCase
     }
 
     /**
-     * Audit round 15: when the caller supplies the risk policy's canonical
+     * When the caller supplies the risk policy's canonical
      * SERVER-OWNED scope id, the quota keys on THAT identity — the
      * namespace is bounded by the server-owned set (two spellings of one
      * scope share a window; the HMAC fallback is only for unscoped calls).
@@ -171,7 +171,7 @@ final class ScopeIssuanceCapTest extends TestCase
     }
 
     /**
-     * Audit round 19: the window minute comes from the Redis server clock
+     * The window minute comes from the Redis server clock
      * and the cap FAILS CLOSED when that clock is unavailable — a TIME
      * failure raises instead of silently switching to each host's wall
      * clock (around minute boundaries, skewed hosts would use different
@@ -269,7 +269,7 @@ final class ScopeIssuanceCapTest extends TestCase
 
     public function testUnresolvedScopesShareTheReservedWindow(): void
     {
-        // Audit round 16: without a risk gateway every scope resolves to
+        // Without a risk gateway every scope resolves to
         // the single reserved UNKNOWN_QUOTA_ID — invented names share one
         // window instead of minting fresh per-name quotas.
         $storage = new ArrayStorage();

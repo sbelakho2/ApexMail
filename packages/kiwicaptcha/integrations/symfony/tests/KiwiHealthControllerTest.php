@@ -9,7 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Rollback-resistant readiness (audit #51/#58): /health/live is ALWAYS 200
+ * Rollback-resistant readiness: /health/live is ALWAYS 200
  * while the process runs (never tied to saturation); /health/ready is 200
  * only when the signing keys are configured, the security Redis answers a
  * (cached, debounced) PING, and the CENTRAL security-policy state
@@ -189,7 +189,7 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertGreaterThan($probesBefore, $afterFirst);
     }
 
-    // ── Round 10: memory-budget readiness invariant (audit #68) ───────────
+// ── memory-budget readiness invariant ─────────────────────────────────────
 
     public function testMaxProfileMemoryReadsTheCoreProfileConstant(): void
     {

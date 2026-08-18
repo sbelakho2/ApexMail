@@ -29,9 +29,9 @@ The stronger conformance statement — that KiwiCaptcha's user-facing
 widget conforms to WCAG 2.2 Level AA — is NOT published for any release
 until a release-specific manual assistive-technology (AT) qualification
 artifact is recorded (see the release-qualification artifacts below).
-No completed artifact exists for v1.6.24 or v1.6.25, and automated
-evidence alone is not conformance evidence under WCAG (conformance
-depends on accessibility-supported technology).
+No completed manual AT qualification artifact exists for any release
+yet, and automated evidence alone is not conformance evidence under
+WCAG (conformance depends on accessibility-supported technology).
 
 A component test scope is not whole-page conformance: KiwiCaptcha cannot
 make an entire e-commerce site EAA-compliant by itself. The consuming
@@ -132,9 +132,7 @@ that release is complete:
 - date and tester
 - pass/fail notes and known exceptions
 
-No completed artifact exists for any release yet — including v1.6.24 and
-v1.6.25 — so only the conservative claim in the Positioning section is
-published.
+Only the conservative claim in the Positioning section is published.
 
 ## Known limitations
 

@@ -367,7 +367,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         new RedisAdmissionSemaphore($client, 1, 'default', self::LEASE_MS, 0);
     }
 
-    // ── Round 9: per-scope budget (audit #47) ─────────────────────────────
+// ── per-scope budget ──────────────────────────────────────────────────────
 
     /** The per-scope lease set key of a namespace + scope (mirrors the semaphore's derivation). */
     private function scopeKey(string $scope, string $namespace = 'default'): string

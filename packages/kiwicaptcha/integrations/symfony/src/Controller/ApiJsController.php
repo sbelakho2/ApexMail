@@ -9,7 +9,7 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
- * Serves the first-party incumbent-compatibility loader (round 24):
+ * Serves the first-party incumbent-compatibility loader:
  * `GET {prefix}/api.js[?compat=recaptcha|hcaptcha|turnstile]` returns the
  * canonical wasm glue + widget driver as ONE same-origin external script.
  * The driver's built-in compat section auto-detects the `compat` query
@@ -18,7 +18,7 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  * (grecaptcha/hcaptcha/turnstile), and keeps the provider-named response
  * field in sync — an incumbent page changes only its provider script URL.
  *
- * Round 28 (P3) wording: the response is a MUTABLE public asset (the
+ * The response is a MUTABLE public asset (the
  * stable {prefix}/api.js URL changes on every upgrade) with ETag + no-cache
  * revalidation — the bytes ARE the same canonical assets the browser tests
  * verify, but only versioned/content-addressed URLs (e.g.
@@ -34,7 +34,7 @@ final class ApiJsController
 {
     /**
      * Marker splitting the glue from the driver in the concatenated
-     * loader (round 26): the driver's compat section fetches its own
+     * loader: the driver's compat section fetches its own
      * script source and extracts the glue part for the Blob-worker
      * prelude, so Argon2id stays worker-only and working through the
      * external /api.js path.
@@ -54,7 +54,7 @@ final class ApiJsController
         $body = $this->cachedBody();
         $etag = '"'.hash('sha256', $body).'"';
 
-        // Round 26 (P2): the stable {prefix}/api.js URL is MUTABLE (it
+        // The stable {prefix}/api.js URL is MUTABLE (it
         // changes on every upgrade), so year-long immutable caching is
         // wrong — a browser/CDN could retain a vulnerable loader for a
         // year after the server was upgraded. The stable migration URL

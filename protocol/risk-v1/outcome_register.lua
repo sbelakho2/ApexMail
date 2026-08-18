@@ -3,7 +3,7 @@
 -- ConfirmedLegitimate/ConfirmedAbuse work identically with or without
 -- calibration. Three small scripts; each takes the ledger key.
 --
--- SCRIPT BOUNDS (audit #101) — all bounded constants:
+-- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     1
 --   max Redis calls:      1 (SET)
 --   max collection cardinality: none

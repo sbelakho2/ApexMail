@@ -1,6 +1,6 @@
 -- Outcome ledger confirm: PENDING -> L/A exactly once.
 --
--- SCRIPT BOUNDS (audit #101) — all bounded constants:
+-- SCRIPT BOUNDS — all bounded constants:
 --   max keys touched:     1
 --   max Redis calls:      2 (GET + SET)
 --   max collection cardinality: none

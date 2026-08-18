@@ -18,7 +18,7 @@ use Symfony\Component\Validator\ConstraintValidatorFactory;
 use Symfony\Component\Validator\Validation;
 
 /**
- * Asymmetric result receipts (audit #80/#106): the result verification is
+ * Asymmetric result receipts: the result verification is
  * CENTRAL-ONLY (the HMAC secret never leaves the server — no third party can
  * re-derive a result). The OPTIONAL Ed25519 receipt signer exports VALID
  * verification results as {jti, tenant, action, request_binding, issued_at,
@@ -60,7 +60,7 @@ final class ResultReceiptTest extends TestCase
 
         $stack = new RequestStack();
         $stack->push(JsonRequest::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
-        // The receipt is signed from the CONSUMED RECORD (audit #106), so
+        // The receipt is signed from the CONSUMED RECORD, so
         // the validator needs the challenge storage wired — exactly as the
         // extension wires it.
         $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, receiptSigner: $signer, storage: $storage);
@@ -89,7 +89,7 @@ final class ResultReceiptTest extends TestCase
         self::assertNotNull($signature);
 
         // The payload carries the FULL replay-critical set from the consumed
-        // record (audit #106): jti, tenant (scope), action (PoW algorithm),
+        // record: jti, tenant (scope), action (PoW algorithm),
         // request_binding, issued_at / expires_at (epoch ms), issuer.
         $receipt = json_decode($payload, true);
         self::assertSame($nonce, $receipt['jti'], 'the receipt jti is the verified challenge nonce');
@@ -128,7 +128,7 @@ final class ResultReceiptTest extends TestCase
         $signature = (string) $validator->verifiedReceiptSignature();
         $publicKey = base64_decode($signer->publicKeyBase64(), true);
 
-        // Audit #106: a tampered JTI — the single-use replay id — must fail
+        // A tampered JTI — the single-use replay id — must fail
         // verification (a swapped jti would otherwise let an integrator
         // key the idempotency on an attacker-chosen value).
         $tampered = json_decode($payload, true);
@@ -221,7 +221,7 @@ final class ResultReceiptTest extends TestCase
 
     /**
      * A real minted record (issue + store) to exercise sign() with — the
-     * receipt payload is built from the record's own fields (audit #106).
+     * receipt payload is built from the record's own fields.
      */
     private function issuedRecord(): \KiwiCaptcha\ChallengeRecord
     {

@@ -143,7 +143,7 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * P1: a post-solve assessment with no usable risk signal (bogus or
+     * A post-solve assessment with no usable risk signal (bogus or
      * MISSING client IP — e.g. BindingMode::None deployments) must NOT
      * silently skip the adaptive re-check. The scope's DEGRADED decision
      * applies exactly like on the pre-issue path: degraded=deny fails the
@@ -164,7 +164,7 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * P1: with a degraded=sha20 scope the degraded fallback applies the
+     * With a degraded=sha20 scope the degraded fallback applies the
      * minimum friction (the PoW challenge itself) — the valid solve passes
      * (no Deny/StepUp in the degraded decision), exactly like a normal
      * post-solve decision, instead of crashing or silently skipping.
@@ -284,7 +284,7 @@ final class ValidatorTest extends TestCase
             $violations = $engine->validate($dto);
 
             self::assertCount(1, $violations);
-            // Audit #57: capacity exhaustion keeps its DISTINCT public code
+            // Capacity exhaustion keeps its DISTINCT public code
             // (rate_limited — a retryable refusal, not a burned token).
             self::assertSame(KiwiCaptcha::RATE_LIMITED_ERROR, $violations[0]->getCode());
         } finally {
@@ -389,7 +389,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(1, $client->counters[$sourceKey], 'a failed verification must not decrement the outstanding counter');
     }
 
-    // ── Round 9: transaction binding (audit #41) ──────────────────────────
+// ── transaction binding ───────────────────────────────────────────────────
 
     /**
      * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
@@ -451,7 +451,7 @@ final class ValidatorTest extends TestCase
 
         $violations = $engine->validate($dto);
         self::assertCount(1, $violations);
-        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'a binding mismatch must collapse to the SAME invalid_or_expired code (audit #57)');
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'a binding mismatch must collapse to the SAME invalid_or_expired code');
     }
 
     public function testBoundChallengeWithNoRequestBindingFails(): void
@@ -564,10 +564,10 @@ final class ValidatorTest extends TestCase
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
 
         self::assertCount(0, $engine->validate($dto));
-        self::assertSame('txn-123', $validator->verifiedRequestBinding(), 'the record\'s SIGNED request binding must be exposed after a valid solve (audit #41)');
+        self::assertSame('txn-123', $validator->verifiedRequestBinding(), 'the record\'s SIGNED request binding must be exposed after a valid solve');
     }
 
-    // ── Round 9: security-policy epoch (audit #42) ─────────────────────────
+// ── security-policy epoch ──────────────────────────────────────────────────
 
     public function testWrongPolicyVersionSurfacesAsInvalidOrExpired(): void
     {
@@ -595,7 +595,7 @@ final class ValidatorTest extends TestCase
 
         $violations = $engine->validate($dto);
         self::assertCount(1, $violations);
-        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'WrongPolicyVersion must collapse to invalid_or_expired (audit #57)');
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'WrongPolicyVersion must collapse to invalid_or_expired');
         self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'a policy-rejected solve must not expose a jti');
     }
 
@@ -623,7 +623,7 @@ final class ValidatorTest extends TestCase
         self::assertCount(0, $engine->validate($dto), 'a record issued at the expected policy epoch must verify');
     }
 
-    // ── Round 9: public code collapsing (audit #57) ────────────────────────
+// ── public code collapsing ─────────────────────────────────────────────────
 
     public function testTokenLevelFailuresCollapseToInvalidOrExpired(): void
     {
@@ -651,7 +651,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
     }
 
-    // ── Round 10: ambiguous-consume deterministic retry (audit #74) ───────
+// ── ambiguous-consume deterministic retry ─────────────────────────────────
 
     /**
      * @return array{0: \Symfony\Component\Validator\Validator\ValidatorInterface, 1: RequestStack, 2: KiwiCaptchaValidator}
@@ -680,7 +680,7 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * Whether the vendored core already carries the audit #74 consumed-state
+     * Whether the vendored core already carries the consumed-state
      * fields (ChallengeRecord::$consumed / $consumedResult / $consumedBinding
      * and the WIRE_KEYS entries). The parallel core work adds them; until
      * then the full stored-result scenarios cannot be constructed.
@@ -713,7 +713,7 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * Audit #74, retryable contract (runs on the CURRENT core): a
+     * Retryable contract (runs on the CURRENT core): a
      * ConsumeIndeterminate (lost consume response) NEVER burns the token and
      * NEVER re-derives — the first attempt surfaces as temporary_unavailable
      * (the record is still pending), and a retry consumes + derives exactly
@@ -777,19 +777,19 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * Audit #74 (a): the FULL stored-result retry — first verification
+     * (a) the FULL stored-result retry — first verification
      * succeeds (consume transition + derive + committed result); a lost
      * response makes the client re-submit the SAME token with the SAME
      * binding: the retry resolves from the STORED RESULT — the SAME success
      * (jti + binding exposed) with NO second consume, NO second derive.
      *
-     * Requires the round-10 core (consumed-state record fields + the
+     * Requires the current core (consumed-state record fields + the
      * stored-result re-verify path); skipped until it is vendored.
      */
     public function testStoredResultRetryWithSameBindingSucceedsWithoutSecondDerive(): void
     {
         if (!$this->coreSupportsConsumedState()) {
-            self::markTestSkipped('the round-10 core (consumed-state record + stored-result re-verify) is not vendored yet');
+            self::markTestSkipped('the consumed-state record + stored-result re-verify path is not vendored yet');
         }
 
         $storage = new ConsumedStateStorage();
@@ -799,7 +799,7 @@ final class ValidatorTest extends TestCase
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
 
         // FIRST verification: real derive — consume transition + committed
-        // result (the round-10 verifier commits after deriving).
+        // result (the verifier commits after deriving).
         [$engine, $stack, $validator] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-123');
         $dto = new class {
             public ?string $captcha = null;
@@ -810,7 +810,7 @@ final class ValidatorTest extends TestCase
         self::assertCount(0, $engine->validate($dto));
         self::assertSame($challenge->nonce, $stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE));
         self::assertSame(1, $storage->consumes);
-        self::assertSame(1, $storage->commits, 'the round-10 verifier must commit the derivation result');
+        self::assertSame(1, $storage->commits, 'the verifier must commit the derivation result');
 
         // LOST RESPONSE: the client never saw the reply and re-submits the
         // same token with the same binding.
@@ -831,14 +831,14 @@ final class ValidatorTest extends TestCase
     }
 
     /**
-     * Audit #74 (b): the retry with a DIFFERENT request binding is refused
+     * (b) the retry with a DIFFERENT request binding is refused
      * with invalid_or_expired — a challenge bound to one transaction is
      * never redeemable for another, retries included.
      */
     public function testStoredResultRetryWithDifferentBindingFailsInvalidOrExpired(): void
     {
         if (!$this->coreSupportsConsumedState()) {
-            self::markTestSkipped('the round-10 core (consumed-state record + stored-result re-verify) is not vendored yet');
+            self::markTestSkipped('the consumed-state record + stored-result re-verify path is not vendored yet');
         }
 
         $storage = new ConsumedStateStorage();
@@ -858,7 +858,7 @@ final class ValidatorTest extends TestCase
         self::assertCount(0, $engine->validate($dto));
 
         // Retry with a DIFFERENT binding: the stored-result outcome carries
-        // the stored binding, the round-9 check rejects the mismatch.
+        // the stored binding, the binding check rejects the mismatch.
         [$engine2, $stack2] = $this->buildRetryEngine($verifier, $storage, binding: 'txn-OTHER');
         $dto2 = new class {
             public ?string $captcha = null;
@@ -881,7 +881,7 @@ final class ValidatorTest extends TestCase
     public function testStoredResultRetryOfAFailedDeriveFailsInvalidOrExpired(): void
     {
         if (!$this->coreSupportsConsumedState()) {
-            self::markTestSkipped('the round-10 core (consumed-state record + stored-result re-verify) is not vendored yet');
+            self::markTestSkipped('the consumed-state record + stored-result re-verify path is not vendored yet');
         }
 
         $storage = new ConsumedStateStorage();
@@ -918,7 +918,7 @@ final class ValidatorTest extends TestCase
     public function testConsumedWithoutCommittedResultStaysTemporaryUnavailable(): void
     {
         if (!$this->coreSupportsConsumedState()) {
-            self::markTestSkipped('the round-10 core (consumed-state record + stored-result re-verify) is not vendored yet');
+            self::markTestSkipped('the consumed-state record + stored-result re-verify path is not vendored yet');
         }
 
         $storage = new ConsumedStateStorage();
@@ -943,10 +943,10 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR, $violations[0]->getCode(), 'consumed-without-result must stay indeterminate (temporary_unavailable)');
     }
 
-    // ── Round 11: QUIC IP-migration policy (audit #92) ─────────────────────
+// ── QUIC IP-migration policy ───────────────────────────────────────────────
 
     /**
-     * Audit #92 documentation test: the STRICT binding stays — a challenge
+     * Documentation test: the STRICT binding stays — a challenge
      * bound to IP A verified from IP B fails closed with IpMismatch at the
      * core level (the collapsed invalid_or_expired through the validator).
      * The documented migration policy (README): exact IP -> normal; same
@@ -974,7 +974,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(\KiwiCaptcha\VerifyError::IpMismatch, $outcome->error, 'the strict IP binding must fail closed on a different source');
 
         // Through the validator: the same mismatch collapses to
-        // invalid_or_expired (audit #57) — the client never learns WHICH
+        // invalid_or_expired — the client never learns WHICH
         // check failed (no oracle).
         $challenge2 = $issuer->issue('login', '198.51.100.7');
         usleep(((int) $challenge2->minDurationMs + 10) * 1000);

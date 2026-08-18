@@ -18,7 +18,7 @@ use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
 /**
- * Audit #35/#36: the risk metrics keys and decision logs must never carry
+ * The risk metrics keys and decision logs must never carry
  * identity or bearer material. Metric keys are bounded to the tuple
  * "decisions:<scope>:<action>:<band>" plus the fixed counter/gauge/latency
  * names — NO challenge id, nonce, decision id, IP, user agent, session or

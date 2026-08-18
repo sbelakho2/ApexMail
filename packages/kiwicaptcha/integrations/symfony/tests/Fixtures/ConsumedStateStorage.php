@@ -9,13 +9,13 @@ use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\StorageInterface;
 
 /**
- * Emulates the audit #74 consumed-state storage contract on top of an
+ * Emulates the consumed-state storage contract on top of an
  * ArrayStorage:
  *
  *  - consume() is a STATE TRANSITION (pending -> consumed), never a delete —
  *    records persist until their TTL;
  *  - commitResult($nonce, $valid, $binding) records the outcome of the
- *    derivation (what the round-10 core does after deriving);
+ *    derivation (what the core does after deriving);
  *  - find() returns the record WITH the consumed state attached
  *    (`consumed` / `consumed_result` / `consumed_binding`) when the core's
  *    ChallengeRecord supports those fields — and the plain record on cores
@@ -94,7 +94,7 @@ final class ConsumedStateStorage implements StorageInterface
 
     /**
      * Attach the consumed-state fields to the record when the core's
-     * ChallengeRecord supports them (the round-10 WIRE_KEYS); on cores that
+     * ChallengeRecord supports them (the current WIRE_KEYS); on cores that
      * predate the transition the plain record is returned (consumed records
      * were deleted there anyway).
      */
