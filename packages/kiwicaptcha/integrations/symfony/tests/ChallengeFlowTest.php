@@ -1692,5 +1692,89 @@ final class ChallengeFlowTest extends TestCase
         self::assertSame('UNKNOWN_ACTION', $rejectedBody['error']['code'] ?? null);
     }
 
+    // ── Per-sitekey challenge lifetime (Turnstile-migration TTL override) ─
+
+    /**
+     * A sitekey policy with ttl_secs issues the challenge with THAT
+     * lifetime instead of the issuer/global default: the response carries
+     * the override and the STORED record's lifetime (expires_at -
+     * issued_at) is the override too — the signed lifetime drives every
+     * TTL derived from the challenge (metadata sidecar, post-mint
+     * admission).
+     */
+    public function testSitekeyTtlOverrideIssuesWithThePerSitekeyLifetime(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $controller = new ChallengeController($issuer, storage: $storage, challengeTtlSecs: 120, sitekeyPolicy: [
+            '6Lc_migrated' => ['default_scope' => 'login', 'actions' => [], 'ttl_secs' => 300],
+        ]);
+
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"6Lc_migrated","sitekey":"6Lc_migrated"}'));
+        self::assertSame(200, $response->getStatusCode());
+
+        $data = json_decode((string) $response->getContent(), true);
+        self::assertSame(300, $data['ttlSecs'], 'the issued challenge must carry the per-sitekey TTL');
+
+        $record = $storage->find($data['nonce']);
+        self::assertNotNull($record);
+        self::assertSame(300, $record->expiresAt - $record->issuedAt, 'the stored record lifetime must be the per-sitekey TTL');
+    }
+
+    public function testSitekeyWithoutTtlOverrideKeepsTheGlobalDefault(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $controller = new ChallengeController($issuer, storage: $storage, challengeTtlSecs: 120, sitekeyPolicy: [
+            '6Lc_plain' => ['default_scope' => 'login', 'actions' => []],
+        ]);
+
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"6Lc_plain","sitekey":"6Lc_plain"}'));
+        self::assertSame(200, $response->getStatusCode());
+
+        $data = json_decode((string) $response->getContent(), true);
+        self::assertSame(120, $data['ttlSecs'], 'a sitekey without ttl_secs must keep the global default lifetime');
+    }
+
+    /**
+     * The config tree bounds ttl_secs to 1..Config::MAX_TTL_SECS (300) —
+     * a value above the ceiling is refused at configuration time, never
+     * minted.
+     */
+    public function testSitekeyTtlOverrideAboveCeilingIsRefused(): void
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setDefinition('my.storage', new Definition(ArrayStorage::class, []));
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => str_repeat('a', 32),
+            'storage' => 'my.storage',
+            'risk' => ['sitekeys' => ['old-app-key' => ['default_scope' => 'login', 'ttl_secs' => 301]]],
+        ]], $container);
+    }
+
+    /**
+     * The TTL-variant issuer replicates the wired issuer's region, so a
+     * region-bound deployment (risk.region) keeps its signed region on
+     * overridden-TTL challenges — the verifier's expected-region check
+     * still passes.
+     */
+    public function testSitekeyTtlOverridePreservesTheIssuedRegion(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage, null, 'eu');
+        $controller = new ChallengeController($issuer, storage: $storage, sitekeyPolicy: [
+            '6Lc_region' => ['default_scope' => 'login', 'actions' => [], 'ttl_secs' => 300],
+        ]);
+
+        $response = $controller->challenge(JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"6Lc_region","sitekey":"6Lc_region"}'));
+        self::assertSame(200, $response->getStatusCode());
+
+        $record = $storage->find(json_decode((string) $response->getContent(), true)['nonce']);
+        self::assertNotNull($record);
+        self::assertSame('eu', $record->region, 'the TTL-variant issuer must keep the wired issuer\'s region');
+    }
+
 }
 

@@ -25,17 +25,20 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * match a pending claim for THIS pair).
  *
  * Lease semantics: every claim and every successful takeover starts a
- * lease window (default 150 seconds, configurable per store constructor).
+ * lease window (default 60 seconds, configurable per store constructor).
  * A PENDING_SAME waiter whose owner's lease has expired may atomically
  * TAKEOVER the entry and become the owner — a crashed owner therefore
- * blocks the key for at most one lease window instead of the full TTL. A
- * live owner whose verification outlasts the window renews the lease
- * ({@see self::renew()}) so a slow-but-alive owner is not overtaken
- * mid-verification. The lease must comfortably exceed the maximum
- * supported verification/request execution window plus a safety margin —
- * the same lease-must-exceed-runtime requirement the Argon semaphore
- * configuration documents — and no process-global signal state is
- * involved in keeping an owner alive.
+ * blocks the key for at most one lease window instead of the full TTL.
+ * The lease exceeds the maximum supported verification / request
+ * execution window plus a safety margin — the same lease-must-exceed-
+ * runtime requirement the Argon semaphore configuration documents — and
+ * the owner confirms its ownership AFTER the verification by an atomic
+ * renewal ({@see self::renew()}). Safety therefore depends on the
+ * verification never outlasting the lease: a verification that outlasts
+ * the lease may be displaced, in which case the displaced owner's local
+ * result is never authoritative — it returns the stored outcome of the
+ * takeover winner instead. No process-global signal state is involved in
+ * keeping an owner alive.
  */
 interface SiteVerifyIdempotencyStore
 {
@@ -80,7 +83,7 @@ interface SiteVerifyIdempotencyStore
     /**
      * Persist the canonical provider response for a COMPLETE claim so a
      * same-key retry returns the identical bytes. No-op unless this
-     * request owns the claim.
+     * request owns the claim AND the response hash matches the record.
      */
     public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void;
 
@@ -89,17 +92,22 @@ interface SiteVerifyIdempotencyStore
 
     /**
      * Atomically take over a PENDING_SAME claim whose lease has expired.
-     * Succeeds ONLY when the entry is still pending AND
+     * Succeeds ONLY when the entry is still pending, the response hash
+     * AND the remoteip fingerprint both match the bound record, and
      * `lease_expires_at` is in the past: the caller then replaces the
-     * owner, refreshes the lease, and wins the takeover. A losing attempt
-     * leaves the record untouched.
+     * owner, refreshes the lease, and wins the takeover. The fingerprint
+     * check is defense-in-depth — every waiter passes through claim()
+     * first, where the fingerprint is already enforced — but the store
+     * enforces the complete claim identity itself even if a future
+     * caller skipped claim(). A losing attempt leaves the record
+     * untouched.
      *
      * @return array{0: IdempotencyClaim, 1: ?string} TookOver + the NEW
      *         owner token the winner must finalize with, or StillPending +
      *         null when the lease is still held (or the entry is complete /
-     *         belongs to a different response hash)
+     *         belongs to a different response hash or remoteip fingerprint)
      */
-    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds): array;
+    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array;
 
     /**
      * Refresh the owner's lease on a still-pending claim. Succeeds ONLY

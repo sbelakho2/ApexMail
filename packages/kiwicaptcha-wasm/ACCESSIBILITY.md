@@ -82,7 +82,7 @@ new criterion that touches its component scope:
 | 2.5.8 Target Size Minimum | AA | Supported — the Retry button is >= 24x24 CSS px with a 32px height (an accessibility/security control has no reason to be cramped); bounding box asserted in the suite |
 | 3.2.6 Consistent Help | N/A (host-page responsibility) | KiwiCaptcha provides no help mechanism of its own; consistent placement of help is the integrating page's responsibility, not the component's |
 | 3.3.7 Redundant Entry | N/A | The widget captures no user-entered data, so nothing is ever re-requested |
-| 3.3.8 Accessible Authentication (Minimum) | AA | Strongly satisfied structurally — the automatic computational challenge is the ONLY path, and no cognitive test is ever required, so no alternative authentication path is needed |
+| 3.3.8 Accessible Authentication (Minimum) | AA | Strongly satisfied structurally — the automatic computational challenge is the ONLY path, and no cognitive test is ever required. KiwiCaptcha introduces no cognitive-function test. Conformance of the complete authentication process remains the integrating application's responsibility. |
 
 The two new criteria outside the component scope (3.2.6 above is a
 host-page responsibility, not a widget capability) have no widget-level

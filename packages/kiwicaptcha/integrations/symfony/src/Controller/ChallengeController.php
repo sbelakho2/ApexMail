@@ -15,6 +15,7 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
+use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\StorageInterface;
@@ -209,6 +210,8 @@ final class ChallengeController
         private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
         /** Server-owned sitekey policy map. */
         private readonly array $sitekeyPolicy = [],
+        /** Lazily-built TTL-variant issuers (per-sitekey override), keyed by TTL. */
+        private array $ttlOverrideIssuers = [],
     ) {
     }
 
@@ -539,8 +542,17 @@ final class ChallengeController
         // binding_mode only — the client can never request the weaker
         // unbound mode.
         $sitekey = isset($payload['sitekey']) && $payload['sitekey'] !== '' ? (string) $payload['sitekey'] : null;
+        $sitekeyTtlSecs = null;
         if ($sitekey !== null && isset($this->sitekeyPolicy[$sitekey])) {
             $policy = $this->sitekeyPolicy[$sitekey];
+            // PER-SITEKEY CHALLENGE LIFETIME: the
+            // provider-migration TTL override (risk.sitekeys.<sitekey>.ttl_secs,
+            // bounded 1..300 by the config tree — 300 for close Turnstile
+            // token-lifetime parity). When configured, the challenge is
+            // issued with this lifetime instead of the global
+            // challenge_ttl_secs; a sitekey without ttl_secs keeps the
+            // global default.
+            $sitekeyTtlSecs = ($policy['ttl_secs'] ?? null) !== null ? (int) $policy['ttl_secs'] : null;
             $actionKey = $action ?? '';
             if ($actionKey !== '' && isset($policy['actions'][$actionKey])) {
                 $scope = $policy['actions'][$actionKey];
@@ -806,20 +818,24 @@ final class ChallengeController
         }
 
         // ANTI-STOCKPILING PRE-MINT ADMISSION: when the
-        // configured challenge TTL is wired, the bounded outstanding
-        // counters are admitted BEFORE the challenge state is created —
+        // effective challenge TTL is known (the configured global
+        // challenge_ttl_secs, or a per-sitekey ttl_secs override), the
+        // bounded outstanding counters are admitted BEFORE the challenge
+        // state is created —
         // the challenge-issuance sequence is local cap -> issuer limiter ->
         // risk assessment -> scope cap -> outstanding counters -> mint +
         // store, so every quota check runs before the storage write (the
         // FakePredis call ORDER test pins the limit/incr keys before the
         // challenge SET key). ONE atomic Lua checks BOTH caps before
         // incrementing (per-source + global, EXPIRE = challenge lifetime +
-        // ttl margin — the configured TTL equals the lifetime the issuer
-        // signs, profiles never change it). A refused admission never mints
+        // ttl margin — the effective TTL equals the lifetime the issuer
+        // signs: the global default or the per-sitekey override, profiles
+        // never change it). A refused admission never mints
         // anything. A Redis failure propagates (fail closed: no challenge
         // without a checked stockpile bound).
-        if ($this->outstanding !== null && $this->challengeTtlSecs !== null) {
-            $admitted = $this->outstanding->issue($clientIp, $this->challengeTtlSecs);
+        $ttlSecs = $sitekeyTtlSecs ?? $this->challengeTtlSecs;
+        if ($this->outstanding !== null && $ttlSecs !== null) {
+            $admitted = $this->outstanding->issue($clientIp, $ttlSecs);
             if ($admitted !== 1) {
                 return $this->privateJson(
                     ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied: outstanding challenge limit reached. Try again later.']],
@@ -843,10 +859,15 @@ final class ChallengeController
                 ? parse_url($this->publicBaseUrl, PHP_URL_HOST) ?: null
                 : null;
             // Issuance always uses the
-            // canonical client IP.
+            // canonical client IP. A per-sitekey ttl_secs override mints
+            // through a TTL-variant issuer ({@see self::issuerForTtl()}) so
+            // the SIGNED lifetime carries the override — and with it every
+            // TTL derived from the issued challenge (the metadata sidecar
+            // below, the post-mint admission).
+            $issuer = $this->issuerForTtl($ttlSecs);
             $challenge = $profile !== null
-                ? $this->issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
-                : $this->issuer->issue($scope, $clientIp, $requestBinding, $hostname);
+                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
+                : $issuer->issue($scope, $clientIp, $requestBinding, $hostname);
         } catch (\InvalidArgumentException $e) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
@@ -875,7 +896,8 @@ final class ChallengeController
         }
 
         // Anti-stockpiling POST-MINT FALLBACK: a direct
-        // controller construction WITHOUT a wired challenge TTL admits the
+        // controller construction WITHOUT any known challenge lifetime
+        // (no wired global TTL and no per-sitekey override) admits the
         // minted record with its ACTUAL lifetime AFTER issuance; a refusal
         // here is a RACE the pre-issuance checks did not see (concurrent
         // issuances): the minted record is discarded best-effort and the
@@ -884,7 +906,7 @@ final class ChallengeController
         // wiring always provides the TTL (the extension passes
         // challenge_ttl_secs), so the pre-mint path above is the deployment
         // behavior.
-        if ($this->outstanding !== null && $this->challengeTtlSecs === null) {
+        if ($this->outstanding !== null && $ttlSecs === null) {
             $admitted = $this->outstanding->issue($clientIp, max(1, $challenge->ttlSecs));
             if ($admitted !== 1) {
                 try {
@@ -908,7 +930,10 @@ final class ChallengeController
         // metadata was explicitly supplied and the sidecar CANNOT persist
         // it, the minted challenge is discarded and the request fails 503
         // — a token whose verification would return no action/cData must
-        // never be handed out (ambiguous compatibility behavior).
+        // never be handed out (ambiguous compatibility behavior). The
+        // sidecar retention (max(60, ttl) + 60) derives from the ISSUED
+        // challenge's actual ttlSecs, so a per-sitekey ttl_secs override
+        // extends the metadata lifetime with the token's real validity.
         if (($action !== null || $cdata !== null) && $this->metadataStore !== null) {
             try {
                 $this->metadataStore->store($challenge->nonce, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata($action, $cdata, $scope), max(60, $challenge->ttlSecs) + 60);
@@ -942,6 +967,65 @@ final class ChallengeController
         }
 
         return $this->privateJson($challenge->toArray(), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+    }
+
+    /**
+     * The issuer to mint with for a given challenge lifetime: the wired
+     * issuer when $ttlSecs is null or equals its Config's TTL, otherwise a
+     * TTL-variant issuer built once per TTL ({@see self::buildTtlVariantIssuer()})
+     * — the core signs the lifetime from the issuer Config, so the
+     * per-sitekey override (risk.sitekeys.<sitekey>.ttl_secs) requires a
+     * variant issuer.
+     */
+    private function issuerForTtl(?int $ttlSecs): Issuer
+    {
+        if ($ttlSecs === null || $ttlSecs === $this->issuer->config()->ttlSecs) {
+            return $this->issuer;
+        }
+
+        return $this->ttlOverrideIssuers[$ttlSecs] ??= $this->buildTtlVariantIssuer($ttlSecs);
+    }
+
+    /**
+     * A TTL-variant Issuer: a clone of the wired issuer's Config with
+     * ONLY ttlSecs replaced, issued against the SAME storage (the
+     * extension wires the identical storage reference into the controller
+     * and the issuer), replicating the wired issuer's clock and region —
+     * so a region-bound deployment (risk.region) keeps its signed region
+     * on overridden-TTL challenges and the verifier's expected-region
+     * check still passes.
+     *
+     * @throws \LogicException when the controller has no storage wired
+     *                         (the extension always wires one)
+     */
+    private function buildTtlVariantIssuer(int $ttlSecs): Issuer
+    {
+        if ($this->storage === null) {
+            throw new \LogicException(
+                'risk.sitekeys.<sitekey>.ttl_secs requires the challenge storage to be wired to the controller (the extension always wires it).'
+            );
+        }
+        $config = $this->issuer->config();
+        $reflection = new \ReflectionObject($this->issuer);
+        $now = $reflection->getProperty('now')->getValue($this->issuer);
+        $region = $reflection->getProperty('region')->getValue($this->issuer);
+
+        return new Issuer(new Config(
+            secretKey: $config->secretKey,
+            algorithm: $config->algorithm,
+            mKib: $config->mKib,
+            t: $config->t,
+            p: $config->p,
+            targetBits: $config->targetBits,
+            argon2TargetBits: $config->argon2TargetBits,
+            ttlSecs: $ttlSecs,
+            minDurationMs: $config->minDurationMs,
+            solverMaxHashes: $config->solverMaxHashes,
+            bindingMode: $config->bindingMode,
+            policyVersion: $config->policyVersion,
+            issuer: $config->issuer,
+            kid: $config->kid,
+        ), $this->storage, $now, $region);
     }
 
     /**

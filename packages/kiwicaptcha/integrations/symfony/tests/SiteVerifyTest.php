@@ -510,17 +510,17 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(IdempotencyClaim::PendingSame, $second);
 
         // While the owner's lease is valid the takeover attempt is a no-op.
-        [$whileHeld] = $store->takeover($backendId, $uuid, $hash, 300);
+        [$whileHeld] = $store->takeover($backendId, $uuid, $hash, 300, $fingerprint);
         self::assertSame(IdempotencyClaim::StillPending, $whileHeld);
 
         // Expire the lease: exactly ONE caller may win the takeover; the
         // loser must see the record unchanged (the winner's refreshed
         // lease keeps it pending).
         $now += 4;
-        [$first, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300);
+        [$first, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300, $fingerprint);
         self::assertSame(IdempotencyClaim::TookOver, $first);
         self::assertNotNull($newOwner);
-        [$secondTakeover] = $store->takeover($backendId, $uuid, $hash, 300);
+        [$secondTakeover] = $store->takeover($backendId, $uuid, $hash, 300, $fingerprint);
         self::assertSame(IdempotencyClaim::StillPending, $secondTakeover, 'the loser sees StillPending — the winner refreshed the lease');
     }
 
@@ -543,7 +543,7 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(IdempotencyClaim::Claimed, $claim);
 
         $now += 4;
-        [$takeover, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300);
+        [$takeover, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300, $fingerprint);
         self::assertSame(IdempotencyClaim::TookOver, $takeover);
 
         // The displaced owner's finalize must be a no-op after the takeover.
@@ -702,7 +702,7 @@ final class SiteVerifyTest extends TestCase
 
         // The waiter's takeover attempt is refused: the renewed lease is
         // still held.
-        [$takeover] = $store->takeover($backendId, $uuid, $hash, 300);
+        [$takeover] = $store->takeover($backendId, $uuid, $hash, 300, $fingerprint);
         self::assertSame(IdempotencyClaim::StillPending, $takeover, 'the renewed lease blocks the takeover of a live owner');
 
         // A foreign owner token cannot renew (ownership is bound to the
@@ -711,13 +711,134 @@ final class SiteVerifyTest extends TestCase
 
         // Once the RENEWED lease expires, the takeover succeeds.
         $now += 4;
-        [$later, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300);
+        [$later, $newOwner] = $store->takeover($backendId, $uuid, $hash, 300, $fingerprint);
         self::assertSame(IdempotencyClaim::TookOver, $later, 'a takeover succeeds only after the renewed lease expires');
         self::assertNotNull($newOwner);
 
         // A complete entry can no longer be renewed.
         $store->finalize($backendId, $uuid, $hash, $newOwner, ['success' => true]);
         self::assertFalse($store->renew($backendId, $uuid, $newOwner), 'a completed entry cannot be renewed');
+    }
+
+    // ── Malformed remoteip + fingerprint identity ──────────────────────
+
+    public function testMalformedRemoteipIsRejectedAsBadRequest(): void
+    {
+        // A malformed remoteip (e.g. a forwarding-header list like
+        // "203.0.113.4, 10.0.0.4") must be rejected as a NORMAL provider
+        // bad-request — the core's IP canonicalization must never throw
+        // past the boundary as a 500.
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $controller = $this->controller(storage: $storage);
+
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '203.0.113.4, 10.0.0.4',
+        ]));
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame(['bad-request'], json_decode((string) $response->getContent(), true)['error-codes']);
+    }
+
+    public function testMalformedRemoteipIsRejectedBeforeIdempotencyClaim(): void
+    {
+        // Same rejection on the IDEMPOTENT path: the malformed IP is
+        // refused BEFORE any claim is made, so no entry may be created
+        // (or joined) under a malformed remoteip.
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $controller = $this->controller(idempotencyStore: $store, storage: $storage);
+        $uuid = 'c23e4567-e89b-42d3-a456-426614174000';
+
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '203.0.113.4, 10.0.0.4',
+            'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame(['bad-request'], json_decode((string) $response->getContent(), true)['error-codes']);
+        self::assertNull($store->stored(hash('sha256', self::SITEVERIFY_SECRET), $uuid), 'no idempotency entry may exist under a malformed remoteip');
+    }
+
+    public function testMappedV6RemoteipFingerprintIsTheSameIdentityAsPlainIpv4(): void
+    {
+        // The verifier deliberately normalizes IPv4-mapped IPv6
+        // (::ffff:192.0.2.1) to the SAME identity as the plain IPv4
+        // spelling (the core's Issuer::canonicalIpFamily()); the
+        // idempotency fingerprint must mirror that exactly, so the two
+        // spellings of one address are the SAME claim — a same-key retry
+        // under the mapped spelling returns the identical canonical bytes
+        // instead of CONFLICTING.
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage, 'login', '192.0.2.1');
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $controller = $this->controller(idempotencyStore: $store, storage: $storage);
+        $uuid = 'd23e4567-e89b-42d3-a456-426614174000';
+
+        $first = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '192.0.2.1', 'idempotency_key' => $uuid,
+        ]))->getContent();
+        self::assertSame(true, json_decode($first, true)['success'] ?? null);
+
+        $second = (string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '::ffff:192.0.2.1', 'idempotency_key' => $uuid,
+        ]))->getContent();
+        self::assertSame($first, $second, 'the mapped-v6 spelling is the SAME identity: identical canonical bytes, not a conflict');
+    }
+
+    // ── The complete finalize / takeover identity ──────────────────────
+
+    public function testFinalizeWithWrongResponseHashIsANoOp(): void
+    {
+        // finalize must authorize BOTH the owner token AND the response
+        // hash bound in the record: a finalize with the correct owner but
+        // a WRONG hash is a no-op and the entry stays pending.
+        $store = new ArraySiteVerifyIdempotencyStore();
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $uuid = 'e23e4567-e89b-42d3-a456-426614174000';
+        $hash = 'response-hash';
+        $fingerprint = 'ip:127.0.0.1';
+
+        [$claim, $owner] = $store->claim($backendId, $uuid, $hash, 300, $fingerprint);
+        self::assertSame(IdempotencyClaim::Claimed, $claim);
+        self::assertNotNull($owner);
+
+        $store->finalize($backendId, $uuid, 'wrong-hash', $owner, ['success' => true]);
+        self::assertNull($store->stored($backendId, $uuid), 'a wrong-hash finalize must not complete the entry');
+
+        $store->finalize($backendId, $uuid, $hash, $owner, ['success' => true]);
+        self::assertSame(['success' => true], $store->stored($backendId, $uuid));
+    }
+
+    public function testTakeoverWithWrongRemoteipFingerprintIsRefused(): void
+    {
+        // takeover must enforce the COMPLETE claim identity itself: the
+        // remoteip fingerprint is bound in the record, so a takeover with
+        // the correct response hash but a DIFFERENT fingerprint is
+        // refused even after the lease has expired.
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $uuid = 'f23e4567-e89b-42d3-a456-426614174000';
+        $hash = 'response-hash';
+
+        [$claim] = $store->claim($backendId, $uuid, $hash, 300, 'ip:127.0.0.1');
+        self::assertSame(IdempotencyClaim::Claimed, $claim);
+
+        // The lease expires, but the fingerprint still does not match.
+        $now += 4;
+        [$takeover] = $store->takeover($backendId, $uuid, $hash, 300, 'ip:203.0.113.9');
+        self::assertSame(IdempotencyClaim::StillPending, $takeover, 'a different remoteip fingerprint must never take over');
+
+        // The correct fingerprint takes over after the expired lease.
+        [$second] = $store->takeover($backendId, $uuid, $hash, 300, 'ip:127.0.0.1');
+        self::assertSame(IdempotencyClaim::TookOver, $second);
     }
 }
 

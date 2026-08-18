@@ -725,5 +725,76 @@ final class SiteVerifyConcurrencyTest extends TestCase
         self::assertSame(true, $ownerBody['success'] ?? null, 'the displaced owner must return the STORED authoritative success, not its local failure: '.$ownerLine);
         self::assertSame($takerBody, $ownerBody, "the displaced owner returns the taker's canonical result byte-for-byte");
     }
+
+    // ── The complete finalize / takeover identity (Redis-backed) ───────
+
+    public function testRedisFinalizeWithWrongResponseHashIsANoOp(): void
+    {
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        try {
+            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $probe->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399');
+        }
+        $store = new RedisSiteVerifyIdempotencyStore($probe);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $uuid = 'd1e2f3a4-5b6c-4d7e-8f90-a1b2c3d4e5f6';
+        $key = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $probe->del($key);
+        try {
+            [$claim, $owner] = $store->claim($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
+            self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed, $claim);
+            self::assertNotNull($owner);
+
+            // The correct owner with a WRONG response hash: atomic no-op,
+            // the entry stays pending.
+            $store->finalize($backendId, $uuid, 'hash-b', $owner, ['success' => true]);
+            self::assertNull($store->stored($backendId, $uuid), 'a wrong-hash finalize must not complete the entry');
+
+            // The correct owner WITH the correct hash completes the entry.
+            $store->finalize($backendId, $uuid, 'hash-a', $owner, ['success' => true]);
+            self::assertSame(['success' => true], $store->stored($backendId, $uuid));
+        } finally {
+            $probe->del($key);
+        }
+    }
+
+    public function testRedisTakeoverWithWrongRemoteipFingerprintIsRefused(): void
+    {
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        try {
+            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 1.0, 'read_write_timeout' => 1.0]);
+            $probe->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399');
+        }
+        // A 1-second lease makes the expiry instant in the test.
+        $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $uuid = 'e2f3a4b5-6c7d-4e8f-90a1-b2c3d4e5f6a7';
+        $key = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $probe->del($key);
+        try {
+            [$claim] = $store->claim($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
+            self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed, $claim);
+
+            // Wait out the 1s lease (redis TIME is the lease clock; the
+            // integer-second `>=` boundary keeps the lease held through
+            // the second after expiry).
+            usleep(2_500_000);
+            [$wrong] = $store->takeover($backendId, $uuid, 'hash-a', 300, 'ip:203.0.113.9');
+            self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::StillPending, $wrong, 'a different remoteip fingerprint must never take over');
+
+            [$right] = $store->takeover($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
+            self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::TookOver, $right);
+        } finally {
+            $probe->del($key);
+        }
+    }
 }
 

@@ -57,7 +57,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         return [IdempotencyClaim::PendingSame, null];
     }
 
-    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds): array
+    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array
     {
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
@@ -65,6 +65,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         if ($existing === null
             || $existing['state'] !== 'pending'
             || $existing['hash'] !== $responseHash
+            || ($existing['remoteip_fingerprint'] ?? null) !== $remoteipFingerprint
             || ($existing['lease_expires_at'] ?? 0) >= $now
         ) {
             return [IdempotencyClaim::StillPending, null];
@@ -79,7 +80,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
     {
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
-        if ($existing === null || $existing['owner'] !== $owner) {
+        if ($existing === null || $existing['owner'] !== $owner || $existing['hash'] !== $responseHash) {
             return;
         }
         $this->records[$key] = array_replace($existing, ['state' => 'complete', 'result' => $canonicalResponse]);

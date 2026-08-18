@@ -61,8 +61,9 @@ LUA;
 local key = KEYS[1]
 local owner = ARGV[1]
 local response_hash = ARGV[2]
-local lease_seconds = tonumber(ARGV[3])
-local ttl = tonumber(ARGV[4])
+local fingerprint = ARGV[3]
+local lease_seconds = tonumber(ARGV[4])
+local ttl = tonumber(ARGV[5])
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', key)
 if not existing then
@@ -73,6 +74,14 @@ if rec.state ~= 'pending' then
   return 'still_pending'
 end
 if rec.response_hash ~= response_hash then
+  return 'still_pending'
+end
+-- The remoteip fingerprint is bound in the record: a takeover with a
+-- DIFFERENT fingerprint is refused (defense-in-depth — the claim
+-- already enforces it, but the store enforces the complete identity
+-- itself). A legacy record without a fingerprint matches nothing
+-- (fail-closed), exactly like the claim.
+if rec.remoteip_fingerprint ~= fingerprint then
   return 'still_pending'
 end
 -- A legacy record without a lease field is treated as already expired.
@@ -108,14 +117,18 @@ LUA;
     private const FINALIZE_LUA = <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
-local result = ARGV[2]
-local ttl = tonumber(ARGV[3])
+local response_hash = ARGV[2]
+local result = ARGV[3]
+local ttl = tonumber(ARGV[4])
 local existing = redis.call('GET', key)
 if not existing then
   return 0
 end
 local rec = cjson.decode(existing)
-if rec.owner ~= owner then
+-- The finalize must authorize BOTH the current owner token AND the
+-- response hash bound in the record: a finalize with the right owner
+-- but the WRONG hash is an atomic no-op.
+if rec.owner ~= owner or rec.response_hash ~= response_hash then
   return 0
 end
 rec.state = 'complete'
@@ -146,10 +159,10 @@ LUA;
         return [$claim, $claim === IdempotencyClaim::Claimed ? $owner : null];
     }
 
-    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds): array
+    public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint): array
     {
         $owner = bin2hex(random_bytes(16));
-        $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $this->leaseSeconds, max(1, $ttlSeconds)]);
+        $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $remoteipFingerprint, $this->leaseSeconds, max(1, $ttlSeconds)]);
 
         $takeover = match ((string) $result) {
             'took_over' => IdempotencyClaim::TookOver,
@@ -162,7 +175,7 @@ LUA;
     public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
     {
         $payload = (string) json_encode($canonicalResponse, JSON_THROW_ON_ERROR);
-        $result = RedisEval::eval($this->redis, self::FINALIZE_LUA, $this->key($backendId, $idempotencyKey), [$owner, $payload, max(1, $this->retentionTtl($idempotencyKey))]);
+        $result = RedisEval::eval($this->redis, self::FINALIZE_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $payload, max(1, $this->retentionTtl($idempotencyKey))]);
         // The owning request's finalize is authoritative; a failed Lua
         // (lost key / foreign owner) is a no-op — the entry expires on TTL.
         unset($result);

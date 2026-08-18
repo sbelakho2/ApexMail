@@ -65,7 +65,7 @@ final class SiteVerifyController
      * bound without a stored result and without winning the atomic
      * takeover is answered with the retryable provider `internal-error`
      * error — it NEVER enters the verifier without holding the current
-     * owner token. The owner's lease (150s) comfortably exceeds the
+     * owner token. The owner's lease (60s) comfortably exceeds the
      * maximum supported verification window, so this bound is the
      * absolute tail.
      */
@@ -136,10 +136,15 @@ final class SiteVerifyController
      * The idempotency fingerprint of the request remoteip: 'no-ip' when
      * absent (or whitespace-only), otherwise 'ip:' + the canonicalized
      * address — IPv4/IPv6 are normalized via inet_pton/inet_ntop so
-     * equivalent spellings of one address collide; anything else keeps
-     * its raw trimmed form. The claim binds this fingerprint, so
-     * verification-affecting remoteip changes cannot reuse a stored
-     * outcome derived under another IP.
+     * equivalent spellings of one address collide, and IPv4-mapped IPv6
+     * (`::ffff:a.b.c.d`) is folded to its 4-byte IPv4 form to mirror the
+     * verifier's binding identity EXACTLY (the core's
+     * Issuer::canonicalIpFamily() applies the same normalization), so
+     * the two spellings of one address that are deliberately equivalent
+     * for verification binding also collide at the idempotency layer;
+     * anything else keeps its raw trimmed form. The claim binds this
+     * fingerprint, so verification-affecting remoteip changes cannot
+     * reuse a stored outcome derived under another IP.
      */
     private function remoteipFingerprint(?string $remoteIp): string
     {
@@ -148,7 +153,14 @@ final class SiteVerifyController
             return 'no-ip';
         }
         $binary = @inet_pton($trimmed);
-        $canonical = $binary !== false ? (string) inet_ntop($binary) : $trimmed;
+        $canonical = null;
+        if ($binary !== false) {
+            if (\strlen($binary) === 16 && str_starts_with($binary, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff")) {
+                $binary = substr($binary, 12);
+            }
+            $canonical = (string) inet_ntop($binary);
+        }
+        $canonical ??= $trimmed;
 
         return 'ip:'.$canonical;
     }
@@ -201,6 +213,22 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
         }
 
+        // The remoteip is validated EARLY — BEFORE any idempotency claim
+        // or verifier invocation: a malformed value (e.g. a forwarding-
+        // header list like "203.0.113.4, 10.0.0.4") must be rejected as a
+        // normal provider bad-request, never allowed to reach the core's
+        // IP canonicalization, which would throw past the boundary as a
+        // 500. Whitespace-only is treated as ABSENT (the provider 'no-ip'
+        // semantics); a NULL remoteip is unchanged.
+        if ($remoteIp !== null) {
+            $remoteIp = trim($remoteIp);
+            if ($remoteIp === '') {
+                $remoteIp = null;
+            } elseif (@inet_pton($remoteIp) === false) {
+                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
+        }
+
         // A UUID-shaped idempotency_key only — arbitrary short strings
         // are rejected BEFORE the verifier (bounded cardinality, no
         // attacker-controlled shapes).
@@ -250,6 +278,7 @@ final class SiteVerifyController
         $claim = IdempotencyClaim::Claimed;
         $claimOwner = null;
         $claimedAt = null;
+        $remoteipFingerprint = null;
         $idempotent = false;
         if ($idempotencyKey !== null) {
             $idempotent = true;
@@ -316,8 +345,11 @@ final class SiteVerifyController
                     return new JsonResponse(['success' => false, 'error-codes' => ['internal-error']], Response::HTTP_SERVICE_UNAVAILABLE);
                 }
                 // The lease gate is inside the store's Lua: before expiry
-                // this attempt is an atomic no-op (StillPending).
-                [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300);
+                // this attempt is an atomic no-op (StillPending). The
+                // remoteip fingerprint is bound in the record, so the
+                // takeover enforces the COMPLETE claim identity (the
+                // claim() pass already checked it — defense-in-depth).
+                [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $remoteipFingerprint);
                 if ($takeover === IdempotencyClaim::TookOver) {
                     // This request now OWNS the entry — it will verify
                     // below and finalize with the takeover owner token.
@@ -340,18 +372,27 @@ final class SiteVerifyController
         // secret above; it is REQUIRED whenever IP binding is enabled
         // (the default) — a bound challenge without it fails closed.
         // Owner protection is the lease window: the store's ownership
-        // lease (default 150s) comfortably exceeds the maximum supported
+        // lease (default 60s) comfortably exceeds the maximum supported
         // verification window plus a safety margin, so a live-but-slow
         // owner is never overtaken mid-verify — no process-global signal
         // state is touched.
-        $outcome = $this->verifier->verify(
-            $response,
-            $this->secretKey,
-            $expectedScope,
-            $remoteIp,
-            null,            // region expectation is application policy
-            false,           // telemetry is never authoritative here
-        );
+        try {
+            $outcome = $this->verifier->verify(
+                $response,
+                $this->secretKey,
+                $expectedScope,
+                $remoteIp,
+                null,            // region expectation is application policy
+                false,           // telemetry is never authoritative here
+            );
+        } catch (\InvalidArgumentException) {
+            // Defensive boundary: the remoteip was validated above, so
+            // the core's IP canonicalization cannot throw here — but a
+            // future core change must never reopen the 500 escape, so an
+            // unexpected InvalidArgumentException from the IP path maps
+            // to the provider bad-request JSON instead.
+            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+        }
         if ($claimOwner !== null && !$this->confirmOwnership($backendId, $idempotencyKey, $claimOwner)) {
             // Ownership was lost while verifying (the lease window expired
             // mid-verification): the local result is NOT authoritative.
