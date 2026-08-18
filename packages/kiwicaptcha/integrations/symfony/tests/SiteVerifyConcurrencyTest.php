@@ -405,7 +405,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
     /**
      * The lease WINDOW covers the verification window without any
      * process-global timer: the owner verifies with a consume() that
-     * sleeps 6s under the DEFAULT lease (150s), and a second request
+     * sleeps 6s under the DEFAULT lease (60s), and a second request
      * fired mid-verification must wait for the stored result
      * (PendingSame — the takeover gate inside the lease stays closed)
      * instead of taking over or verifying itself. Both responses are
@@ -427,7 +427,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
 
         // A storage whose consume() blocks 6s inside the verifier — a
-        // window far inside the DEFAULT 150s lease, during which the
+        // window far inside the DEFAULT 60s lease, during which the
         // takeover gate must stay closed.
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), new RedisStorage($probe));
         $challenge = $issuer->issue('login', '127.0.0.1');
@@ -488,7 +488,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
                     $sleepy,
                     null,
                     null,
-                    new RedisSiteVerifyIdempotencyStore($client), // DEFAULT 150s lease
+                    new RedisSiteVerifyIdempotencyStore($client), // DEFAULT 60s lease
                 );
                 $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                     'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
@@ -572,7 +572,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         self::assertSame(true, $ownerBody['success'] ?? null, 'the owner verifies successfully: '.$ownerLine);
         self::assertSame(true, $waiterBody['success'] ?? null, 'the waiter must receive the stored canonical success, not take over');
         self::assertSame($waiterBody, $ownerBody, 'both requests observe the identical canonical result');
-        self::assertSame(0, $counting->consumes, 'the waiter never entered the verifier — the 150s lease kept the takeover gate closed');
+        self::assertSame(0, $counting->consumes, 'the waiter never entered the verifier — the 60s lease kept the takeover gate closed');
 
         // Exactly ONE consumption (the owner's): the challenge record
         // stays in place, consumed, with the committed valid result.

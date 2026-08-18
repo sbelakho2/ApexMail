@@ -13,6 +13,7 @@ use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Storage\ArrayStorage;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
@@ -526,8 +527,11 @@ final class SiteVerifyTest extends TestCase
     public function testFinalizeByTheDisplacedOwnerIsRefusedAfterTakeover(): void
     {
         $now = 1_700_000_000;
+        // The clock ticks one second per store call: the stalled owner's
+        // lease expires while the waiter polls, so the atomic takeover
+        // wins deterministically within the waiter's bound.
         $clock = static function () use (&$now): int {
-            return $now;
+            return ++$now;
         };
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET);
@@ -621,8 +625,11 @@ final class SiteVerifyTest extends TestCase
         };
         $verifier = new Verifier($counting);
         $now = 1_700_000_000;
+        // The clock ticks one second per store call: the stalled owner's
+        // lease expires while the waiter polls, so the atomic takeover
+        // wins deterministically within the waiter's bound.
         $clock = static function () use (&$now): int {
-            return $now;
+            return ++$now;
         };
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET);
@@ -634,30 +641,43 @@ final class SiteVerifyTest extends TestCase
         [$claim] = $store->claim($backendId, $uuid, $hash, 300, $fingerprint);
         self::assertSame(IdempotencyClaim::Claimed, $claim);
 
-        // A waiter that never wins the takeover (the owner's lease is
-        // held) hits the hard bound: it receives the retryable provider
-        // error and the verifier is NEVER invoked for it.
-        $boundWaiter = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $counting, null, null, $store, null, 0.05);
-        $response = $boundWaiter->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
-            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
-        ]));
-        self::assertSame(503, $response->getStatusCode());
-        $body = json_decode((string) $response->getContent(), true);
-        self::assertSame(['internal-error'], $body['error-codes'] ?? null);
-        self::assertSame(0, $counting->consumes, 'a waiter that hits the bound must never enter the verifier');
-        self::assertNull($store->stored($backendId, $uuid), 'the claim entry stays pending for a later retry');
-
-        // Once the owner's lease expires, a waiter wins the atomic
-        // takeover, verifies and finalizes with the takeover owner token.
-        $now += 4;
-        $winner = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $counting, null, null, $store);
+        // A stalled owner (claims, never finalizes) is taken over
+        // atomically once its lease expires: the waiter's hard bound must
+        // exceed the lease (enforced at construction), so the waiter
+        // polls through the lease expiry, wins the takeover, verifies and
+        // finalizes with the takeover owner token.
+        $winner = new SiteVerifyController($verifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $counting, null, null, $store, null, 5.0);
         $won = $winner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         $wonBody = json_decode((string) $won->getContent(), true);
-        self::assertSame(true, $wonBody['success'] ?? null);
+        self::assertSame(true, $wonBody['success'] ?? null, 'waiter body: '.(string) $won->getContent());
         self::assertSame(1, $counting->consumes, 'the token was consumed exactly once, by the takeover winner');
         self::assertSame($wonBody, $store->stored($backendId, $uuid), 'the takeover winner finalizes its canonical response');
+    }
+
+    public function testWaiterBoundMustExceedTheOwnerLease(): void
+    {
+        // The lease-ordering invariant is enforced: a waiter bound that
+        // does not exceed the owner lease makes the crash-recovery
+        // takeover unreachable and is refused at construction.
+        $storage = new ArrayStorage();
+        $store = new ArraySiteVerifyIdempotencyStore(static fn (): int => 1_700_000_000, 60);
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('must exceed the owner lease');
+        new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 30.0);
+    }
+
+    public function testDefaultLeaseOrderingInvariant(): void
+    {
+        // The default ordering must satisfy: owner lease < waiter bound <
+        // challenge lifetime — otherwise the crash-recovery path is
+        // unreachable under defaults (a waiter would give up before the
+        // lease expires, or the retained consumed record would expire
+        // before a takeover).
+        self::assertLessThan(SiteVerifyController::IDEMPOTENCY_WAIT_SECS, SiteVerifyIdempotencyStore::LEASE_SECONDS, 'the waiter bound must exceed the owner lease');
+        self::assertLessThan(120, SiteVerifyController::IDEMPOTENCY_WAIT_SECS, 'the waiter bound must stay inside the default challenge lifetime');
+        self::assertGreaterThan(30, SiteVerifyIdempotencyStore::LEASE_SECONDS, 'the lease must exceed any supported verification window with margin');
     }
 
     public function testLeaseRenewalPreventsOvertake(): void

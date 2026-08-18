@@ -48,7 +48,7 @@ use Symfony\Component\HttpFoundation\Response;
  *    in the native path.
  *  - Verification idempotency ownership is protected by a LEASE WINDOW,
  *    not a process-global timer: the store's ownership lease (default
- *    150s) comfortably exceeds the maximum supported verification /
+ *    60s) exceeds the maximum supported verification /
  *    request execution window plus a safety margin, so a live owner is
  *    never overtaken mid-verify — no process-global signal state is
  *    touched. The claim additionally binds the canonicalized remoteip
@@ -69,7 +69,7 @@ final class SiteVerifyController
      * maximum supported verification window, so this bound is the
      * absolute tail.
      */
-    private const IDEMPOTENCY_WAIT_SECS = 90.0;
+    public const IDEMPOTENCY_WAIT_SECS = 90.0;
 
     /**
      * Hard ceiling for the whole verification request body: 16 KiB covers
@@ -103,6 +103,18 @@ final class SiteVerifyController
         /** Hard bound on the PENDING_SAME wait in seconds (see {@see self::IDEMPOTENCY_WAIT_SECS}). */
         private readonly float $idempotencyWaitSecs = self::IDEMPOTENCY_WAIT_SECS,
     ) {
+        // The lease-ordering invariant is ENFORCED at construction: the
+        // waiter bound must exceed the owner lease, otherwise the
+        // crash-recovery takeover is unreachable (a waiter would give up
+        // before the lease ever expires). The default ordering is
+        // lease (60) < waiter bound (90) < challenge lifetime (120).
+        if ($idempotencyStore !== null && $this->idempotencyWaitSecs <= $idempotencyStore->leaseSeconds()) {
+            throw new \LogicException(sprintf(
+                'KiwiCaptcha: the idempotency PENDING_SAME wait bound (%ss) must exceed the owner lease (%ss) — otherwise a crashed owner can never be taken over (the crash-recovery path is unreachable).',
+                $this->idempotencyWaitSecs,
+                $idempotencyStore->leaseSeconds(),
+            ));
+        }
     }
 
     /**

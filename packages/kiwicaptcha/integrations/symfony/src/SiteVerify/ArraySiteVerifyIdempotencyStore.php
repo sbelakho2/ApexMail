@@ -97,6 +97,11 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         return true;
     }
 
+    public function leaseSeconds(): int
+    {
+        return $this->leaseSeconds;
+    }
+
     public function stored(string $backendId, string $idempotencyKey): ?array
     {
         $existing = $this->records[$this->key($backendId, $idempotencyKey)] ?? null;

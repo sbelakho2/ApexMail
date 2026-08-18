@@ -40,14 +40,26 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 interface SiteVerifyIdempotencyStore
 {
     /**
-     * The default lease window in seconds (see {@see self::takeover()}):
-     * 150s inside the 300s token/idempotency window. Verification
-     * runtime is bounded by the Argon semaphore configuration, which
-     * documents the same lease-must-exceed-runtime requirement — this
-     * lease covers any supported verification window plus a large safety
-     * margin, so a slow-but-alive owner is never overtaken.
+     * The default lease window in seconds (see {@see self::takeover()}).
+     * The ordering invariant is strict and enforced by the Siteverify
+     * controller at construction:
+     *
+     *   max verification window  <  LEASE_SECONDS (60)
+     *                            <  the PENDING_SAME waiter bound (90)
+     *                            <  the default challenge lifetime (120)
+     *
+     * A lease that outlives the waiter bound would make the crash-
+     * recovery takeover unreachable (the waiter gives up first), and a
+     * lease that outlives the challenge lifetime would find the retained
+     * consumed record expired at takeover time. 60s exceeds any
+     * supported verification window (bounded by the Argon semaphore,
+     * which documents the same lease-must-exceed-runtime requirement)
+     * with margin, while keeping both orderings above.
      */
-    public const LEASE_SECONDS = 150;
+    public const LEASE_SECONDS = 60;
+
+    /** The configured lease window in seconds (default {@see self::LEASE_SECONDS}). */
+    public function leaseSeconds(): int;
 
     /**
      * Atomically claim (or join) the idempotency entry for this

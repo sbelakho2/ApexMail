@@ -175,6 +175,11 @@ LUA;
         return (string) $result === '1';
     }
 
+    public function leaseSeconds(): int
+    {
+        return $this->leaseSeconds;
+    }
+
     public function stored(string $backendId, string $idempotencyKey): ?array
     {
         $raw = $this->redis->get($this->key($backendId, $idempotencyKey));
