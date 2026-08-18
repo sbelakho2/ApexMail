@@ -172,7 +172,10 @@ fn redis_runtime_state_interop_with_php() {
         eprintln!("KC_REDIS_URL unset — redis interop test skipped");
         return;
     };
-    let php_autoload = concat!(env!("CARGO_MANIFEST_DIR"), "/../../kiwicaptcha-php/vendor/autoload.php");
+    let php_autoload = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../kiwicaptcha-php/vendor/autoload.php"
+    );
     if !std::path::Path::new(php_autoload).exists() {
         eprintln!("PHP core autoloader not found — interop test skipped");
         return;
@@ -199,11 +202,7 @@ fn redis_runtime_state_interop_with_php() {
     }
 
     let php_script = |body: &str| -> Result<String, String> {
-        let code = format!(
-            "require '{}'; {}",
-            php_autoload,
-            body
-        );
+        let code = format!("require '{}'; {}", php_autoload, body);
         let out = std::process::Command::new(&php_bin)
             .args(["-r", &code])
             .env("KC_INTEROP_REDIS", &url)
@@ -240,7 +239,10 @@ echo $ch->nonce;
         .consume(&nonce)
         .expect("Rust must consume the PHP-written record")
         .expect("Rust consume must find the PHP-written record");
-    assert!(consumed.first, "Rust must win the pending->consumed transition on a PHP-written record");
+    assert!(
+        consumed.first,
+        "Rust must win the pending->consumed transition on a PHP-written record"
+    );
 
     // 2. PHP consume+commit -> Rust replay reads the committed outcome.
     let php_consume_commit = r#"
@@ -251,21 +253,39 @@ $storage->consume(trim($nonce));
 $storage->commitResult(trim($nonce), true, null);
 echo 'ok';
 "#;
-    php_script_with_input(&php_bin, php_autoload, &url, &prefix, php_consume_commit, nonce.as_bytes()).expect("PHP consume+commit must succeed");
+    php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_consume_commit,
+        nonce.as_bytes(),
+    )
+    .expect("PHP consume+commit must succeed");
 
     // Rust replay reads the committed boolean result.
     let replayed = store
         .consume(&nonce)
         .expect("Rust replay consume must work")
         .expect("Rust replay must find the record");
-    assert!(!replayed.first, "Rust replay must observe the already-consumed state");
-    let result = replayed.stored_result.expect("Rust replay must read the PHP-committed result");
-    assert!(result.valid, "PHP-committed valid=true must deserialize as a Rust boolean");
+    assert!(
+        !replayed.first,
+        "Rust replay must observe the already-consumed state"
+    );
+    let result = replayed
+        .stored_result
+        .expect("Rust replay must read the PHP-committed result");
+    assert!(
+        result.valid,
+        "PHP-committed valid=true must deserialize as a Rust boolean"
+    );
 
     // 3. Rust issue/store -> PHP consume/verify reads the runtime envelope.
     let rust_record = issue_record_for_interop();
     let rust_nonce = rust_record.nonce.clone();
-    store.store(&rust_record).expect("Rust must issue + store a record");
+    store
+        .store(&rust_record)
+        .expect("Rust must issue + store a record");
     let php_consume = r#"
 $client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
 $storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
@@ -274,7 +294,15 @@ $consumed = $storage->consume(trim($nonce));
 if ($consumed === null || !$consumed->consumedNow) { fwrite(STDERR, 'PHP must consume the Rust-written record'); exit(4); }
 echo 'ok';
 "#;
-    php_script_with_input(&php_bin, php_autoload, &url, &prefix, php_consume, rust_nonce.as_bytes()).expect("PHP must consume the Rust-written record");
+    php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_consume,
+        rust_nonce.as_bytes(),
+    )
+    .expect("PHP must consume the Rust-written record");
 
     // 4. Rust consume+commit -> PHP replay reads the committed boolean.
     let php_replay = r#"
@@ -287,8 +315,18 @@ if ($consumed->consumedResult === null || !$consumed->consumedResult->valid) { f
 echo 'ok';
 "#;
     // Commit the Rust side first.
-    store.commit_result(&rust_nonce, true, None).expect("Rust must commit its result");
-    php_script_with_input(&php_bin, php_autoload, &url, &prefix, php_replay, rust_nonce.as_bytes()).expect("PHP replay must read the Rust-committed boolean");
+    store
+        .commit_result(&rust_nonce, true, None)
+        .expect("Rust must commit its result");
+    php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_replay,
+        rust_nonce.as_bytes(),
+    )
+    .expect("PHP replay must read the Rust-committed boolean");
 }
 
 fn php_script_with_input(
@@ -351,7 +389,15 @@ fn issue_record_for_interop() -> kiwicaptcha::challenge::ChallengeRecord {
         issuer: None,
         policy_version: 1,
     };
-    let issued = issue_challenge(&config, "login", "127.0.0.1", now, now * 1_000_000_000, 0, None)
-        .expect("issue");
+    let issued = issue_challenge(
+        &config,
+        "login",
+        "127.0.0.1",
+        now,
+        now * 1_000_000_000,
+        0,
+        None,
+    )
+    .expect("issue");
     issued.record
 }

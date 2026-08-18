@@ -279,8 +279,7 @@ fn valid_solution_verifies_and_wire_format_is_language_neutral() {
         canonical,
         "stored wire format must be the canonical ChallengeRecord JSON plus the runtime envelope"
     );
-    let decoded: ChallengeRecord =
-        serde_json::from_value(canonical.clone()).unwrap();
+    let decoded: ChallengeRecord = serde_json::from_value(canonical.clone()).unwrap();
     assert_eq!(decoded.nonce, issued.record.nonce);
     assert_eq!(decoded.protocol_version, 2);
 

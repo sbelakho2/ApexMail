@@ -900,11 +900,6 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         try {
             // The owner claims, verifies (committed success) and "dies"
             // WITHOUT finalizing.
-            if (getenv('KIWI_DEBUG')) {
-                fwrite(STDERR, 'DBG nonce='.$challenge->nonce.' solution='.$solution.' minDur='.$challenge->minDurationMs.' ttl='.$challenge->ttlSecs."\n");
-                $dbg = $storage->find($challenge->nonce);
-                fwrite(STDERR, 'DBG record='.($dbg !== null ? 'found expiresAt='.$dbg->expiresAt.' now='.time() : 'MISSING')."\n");
-            }
             $owner = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore);
             $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
@@ -937,7 +932,6 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame($ownerBody, $retryBody, 'the retry returns the IDENTICAL canonical success via reconstruction');
         } finally {
             $probe->del($idemKey);
-            $probe->del($recordKey);
         }
     }
 
