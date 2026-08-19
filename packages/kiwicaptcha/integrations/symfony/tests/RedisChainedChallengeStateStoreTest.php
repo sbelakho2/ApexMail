@@ -5,40 +5,60 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
+use BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
+use KiwiCaptcha\Risk\RiskAction;
 use PHPUnit\Framework\TestCase;
 
 /**
  * The Redis-backed chain state store's Lua state machine, exercised
  * against an in-memory Redis fake that emulates the EXACT command surface
- * the store uses (GET / SET with the EX option array / TTL / TIME /
+ * the store uses (GET / SET with the EX options array / TTL / TIME /
  * EVAL with the chain scripts interpreted by marker). Covers the
- * owner-scoped reservation lease (redis TIME), the terminal completed
- * transition (never a delete) and the owner-gated release — the
- * production concurrency path of the chained-challenge state machine.
+ * transaction-obligation create-or-get, the owner-scoped SHORT
+ * reservation lease (redis TIME + min(lease, remaining TTL)), the
+ * idempotent issued transition, the TERMINAL verified transition with
+ * the atomic obligation deletion, the nonce-pinned rearm and the
+ * owner-gated release — the production concurrency path of the
+ * chained-challenge state machine.
  */
 final class RedisChainedChallengeStateStoreTest extends TestCase
 {
+    private const SECRET = '0123456789abcdef0123456789abcdef';
+
+    private ?ChainRedisFake $fake = null;
+
     private function store(): RedisChainedChallengeStateStore
     {
-        return new RedisChainedChallengeStateStore(new ChainRedisFake(), 'kiwi-test');
+        $this->fake = new ChainRedisFake();
+
+        return new RedisChainedChallengeStateStore($this->fake, 'kiwi-test');
     }
 
-    private function issueTicket(RedisChainedChallengeStateStore $store): array
+    private function makeNonce(): string
     {
-        $service = new ChainedChallengeTicketService($store, '0123456789abcdef0123456789abcdef', 300);
-        $ticket = $service->issue(bin2hex(random_bytes(16)), 'login', 1, requiredAction: 'argon32');
-        self::assertIsString($ticket);
-
-        return [$ticket, $service->verify($ticket)['chainId']];
+        return base64_encode(random_bytes(32));
     }
 
-    public function testCreateReadAndOwnerScopedReservationLease(): void
+    /** @return array{0: ChainedChallengeTicketService, 1: \BelConsulting\KiwiCaptchaBundle\Risk\ChainRequirement} */
+    private function issueRequirement(RedisChainedChallengeStateStore $store): array
+    {
+        $service = new ChainedChallengeTicketService($store, self::SECRET, 300, 15, null, fn (): int => $this->fake->clockSecs());
+        $requirement = $service->requireStage2($this->makeNonce(), 'login', 'tx-binding', 1, RiskAction::Argon32, 1300);
+
+        return [$service, $requirement];
+    }
+
+    public function testCreateReadAndOwnerScopedShortLease(): void
     {
         $store = $this->store();
-        [$ticket, $chainId] = $this->issueTicket($store);
+        [$service, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
 
-        // The plain read sees the full server-held record in the
+        // The obligation index is created for the exact transaction anchor.
+        self::assertSame($chainId, $store->obligationChainId($service->obligationIdFor('login', 'tx-binding', 1)));
+
+        // The plain read sees the full server-held v2 record in the
         // AVAILABLE state.
         $state = $store->read($chainId);
         self::assertIsArray($state);
@@ -46,90 +66,161 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
         self::assertSame('argon32', $state['requiredAction']);
         self::assertSame(2, $state['chainDepth']);
         self::assertSame(1, $state['policyVersion']);
+        self::assertSame('tx-binding', $state['requestBinding']);
+        self::assertSame(64, \strlen((string) $state['obligationId']));
+        self::assertMatchesRegularExpression('/^[0-9a-f]{64}$/D', (string) $state['obligationId']);
         self::assertNull($state['owner']);
         self::assertNull($state['leaseUntil']);
         self::assertNull($state['stage2Nonce']);
 
-        // Owner-scoped reservation: available -> reserved(me) with a
-        // lease from the fake redis TIME + the record's remaining TTL.
-        self::assertSame('available', $store->reserve($chainId, 'owner-a', 300));
-        self::assertSame('retry', $store->reserve($chainId, 'owner-a', 300), 'reserve by the SAME owner is a retry');
-        self::assertSame('busy', $store->reserve($chainId, 'owner-b', 300), 'reserve by another owner with a live lease is busy');
+        // Owner-scoped reservation with the SHORT fixed lease: available ->
+        // reserved(me, now + min(15, remaining TTL)).
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        self::assertSame('retry', $store->reserve($chainId, 'owner-a', 15), 'reserve by the SAME owner is a retry');
+        self::assertSame('busy', $store->reserve($chainId, 'owner-b', 15), 'reserve by another owner with a live lease is busy');
         $reserved = $store->read($chainId);
         self::assertSame('reserved', $reserved['state']);
         self::assertSame('owner-a', $reserved['owner']);
-        self::assertNotNull($reserved['leaseUntil']);
-        self::assertGreaterThanOrEqual(1000, (int) $reserved['leaseUntil'], 'the lease is now + remaining TTL');
+        self::assertSame(1015, (int) $reserved['leaseUntil'], 'the lease is now (1000) + the SHORT lease (15), never the record TTL');
+    }
+
+    public function testExpiredLeaseIsTakenOverBeforeTheTicketExpiry(): void
+    {
+        $store = $this->store();
+        [, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
+
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        $this->fake->setTimeMs(1_016_000.0);
+        self::assertSame('taken_over', $store->reserve($chainId, 'owner-b', 15), 'an expired reservation is taken over by the next owner');
+        $state = $store->read($chainId);
+        self::assertSame('owner-b', $state['owner']);
+        self::assertSame(1031, (int) $state['leaseUntil']);
     }
 
     public function testOwnerGatedReleaseAndNonOwnerReleaseNoOp(): void
     {
         $store = $this->store();
-        [, $chainId] = $this->issueTicket($store);
+        [, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
 
-        self::assertSame('available', $store->reserve($chainId, 'owner-a', 300));
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
         $store->release($chainId, 'owner-b');
-        self::assertSame('busy', $store->reserve($chainId, 'owner-c', 300), 'a non-owner release is an atomic no-op — the reservation stays live');
+        self::assertSame('busy', $store->reserve($chainId, 'owner-c', 15), 'a non-owner release is an atomic no-op — the reservation stays live');
 
         $store->release($chainId, 'owner-a');
         $state = $store->read($chainId);
         self::assertSame('available', $state['state'], 'the owner\'s release returns the chain to available');
         self::assertNull($state['owner']);
         self::assertNull($state['leaseUntil']);
-        self::assertSame('available', $store->reserve($chainId, 'owner-b', 300), 'the released chain is reservable again');
+        self::assertSame('available', $store->reserve($chainId, 'owner-b', 15), 'the released chain is reservable again');
     }
 
-    public function testTerminalCompletionNeverDeletesAndNeverReMints(): void
+    public function testMarkIssuedIsIdempotentAndOwnerGated(): void
     {
         $store = $this->store();
-        [$ticket, $chainId] = $this->issueTicket($store);
+        [, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
+        $nonce = $this->makeNonce();
 
-        // A non-owner can never complete.
-        self::assertSame('available', $store->reserve($chainId, 'owner-a', 300));
-        self::assertNull($store->complete($chainId, 'owner-b', 'stage2-nonce'), 'a non-owner complete is an atomic no-op');
+        self::assertSame('not_owner', $store->markIssued($chainId, 'owner-other', $nonce), 'an unreserved chain cannot be issued by a stranger');
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        self::assertSame('issued_new', $store->markIssued($chainId, 'owner-a', $nonce));
+        self::assertSame('issued_same', $store->markIssued($chainId, 'owner-a', $nonce), 'same-nonce retry is idempotent (a lost reply is recoverable)');
+        self::assertSame('conflict', $store->markIssued($chainId, 'owner-a', $this->makeNonce()), 'a different nonce on an issued chain is a conflict');
+        $state = $store->read($chainId);
+        self::assertSame('issued', $state['state']);
+        self::assertSame($nonce, $state['stage2Nonce']);
+        self::assertNull($state['owner']);
+        self::assertNull($state['leaseUntil']);
+        self::assertSame('issued', $store->reserve($chainId, 'owner-b', 15), 'an issued chain is never re-reservable (no second mint)');
+    }
 
-        // The owner's complete is a TERMINAL state transition: the record
-        // KEEPS its TTL (never a delete) and carries the stage2Nonce.
-        $completed = $store->complete($chainId, 'owner-a', 'stage2-nonce');
-        self::assertIsArray($completed);
-        self::assertSame('completed', $completed['state']);
-        self::assertSame('stage2-nonce', $completed['stage2Nonce']);
-        $read = $store->read($chainId);
-        self::assertSame('completed', $read['state'], 'the completed record is still readable (the retry recovers from it)');
-        self::assertSame('stage2-nonce', $read['stage2Nonce']);
-        self::assertSame('completed', $store->reserve($chainId, 'owner-c', 300), 'a replayed ticket lands on the completed state');
-        self::assertNull($store->complete($chainId, 'owner-a', 'another-nonce'), 'a completed chain NEVER allows a second completion (no second mint)');
-        $store->release($chainId, 'owner-a');
-        self::assertSame('completed', $store->read($chainId)['state'], 'a release cannot undo the terminal completed state');
+    public function testMarkVerifiedIsTerminalAndDeletesTheObligation(): void
+    {
+        $store = $this->store();
+        [$service, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
+        $nonce = $this->makeNonce();
+        $obligationId = $service->obligationIdFor('login', 'tx-binding', 1);
+
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        self::assertSame('issued_new', $store->markIssued($chainId, 'owner-a', $nonce));
+        self::assertSame('verified_new', $store->markVerified($chainId, $nonce));
+        self::assertSame('verified_same', $store->markVerified($chainId, $nonce), 'markVerified is idempotent (a lost reply is confirmable)');
+        self::assertSame('conflict', $store->markVerified($chainId, $this->makeNonce()));
+        self::assertNull($store->obligationChainId($obligationId), 'the terminal transition deletes the obligation mapping');
+        $state = $store->read($chainId);
+        self::assertSame('verified', $state['state'], 'the terminal verified record is kept until its TTL');
+        self::assertSame($nonce, $state['stage2Nonce']);
+        self::assertSame('verified', $store->reserve($chainId, 'owner-b', 15), 'a verified chain is terminal');
+    }
+
+    public function testRearmIssuedIsPinnedToTheExpectedNonce(): void
+    {
+        $store = $this->store();
+        [, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
+        $nonce = $this->makeNonce();
+
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        self::assertSame('issued_new', $store->markIssued($chainId, 'owner-a', $nonce));
+        self::assertFalse($store->rearmIssued($chainId, $this->makeNonce()), 'rearm with a different nonce is an atomic no-op');
+        self::assertTrue($store->rearmIssued($chainId, $nonce), 'rearm with the exact expected nonce returns the chain to available');
+        $state = $store->read($chainId);
+        self::assertSame('available', $state['state']);
+        self::assertNull($state['stage2Nonce']);
     }
 
     public function testMissingChainAnswersMissing(): void
     {
         $store = $this->store();
-        self::assertSame('missing', $store->reserve('no-such-chain', 'owner-a', 300));
+        self::assertSame('missing', $store->reserve('no-such-chain', 'owner-a', 15));
         self::assertNull($store->read('no-such-chain'));
-        self::assertNull($store->complete('no-such-chain', 'owner-a', 'n'));
+        self::assertNull($store->obligationChainId(str_repeat('a', 64)));
+    }
+
+    public function testCorruptServerRecordFailsClosed(): void
+    {
+        $store = $this->store();
+        [, $requirement] = $this->issueRequirement($store);
+        $chainId = $requirement->chainId;
+        $record = $this->fake->strings['{kiwi:kiwi-test}:chain:'.$chainId];
+        $corrupt = json_decode($record, true, 8, JSON_THROW_ON_ERROR);
+        unset($corrupt['requiredAction']);
+        $this->fake->strings['{kiwi:kiwi-test}:chain:'.$chainId] = (string) json_encode($corrupt, JSON_THROW_ON_ERROR);
+
+        $this->expectException(MalformedChainedChallengeStateException::class);
+        $store->read($chainId);
     }
 }
 
 /**
  * In-memory stand-in for Predis\Client with exactly the command surface
  * the Redis chain state store uses: GET / SET (with the EX options-array
- * form) / TTL / TIME / EVAL. The EVAL interpreter runs the store's three
- * chain scripts by their marker comments with the SAME semantics as the
- * Lua (owner-scoped lease from TIME + remaining TTL, KEEPTTL preserved,
- * terminal completed transition). The clock advances through
+ * form) / TTL / TIME / EVAL. The EVAL interpreter runs the store's chain
+ * scripts by their marker comments with the SAME semantics as the Lua
+ * (obligation create-or-get with rank raising + stale-mapping repair, the
+ * owner-scoped SHORT lease from TIME + min(lease, remaining TTL) with
+ * KEEPTTL, the idempotent issued transition, the TERMINAL verified
+ * transition with the atomic obligation deletion, the nonce-pinned rearm
+ * and the owner-gated release). The clock advances through
  * {@see self::setTimeMs()} so the lease expiry is enforceable.
  */
 final class ChainRedisFake extends \Predis\Client
 {
-    /** @var array<string, string> plain strings (the chain records) */
+    /** @var array<string, string> plain strings (the chain/obligation records) */
     public array $strings = [];
 
     /** @var array<string, int> EXPIRE deadlines in ms */
     public array $expirations = [];
 
     private float $clockMs = 1_000_000.0;
+
+    public function clockSecs(): int
+    {
+        return (int) floor($this->clockMs / 1000);
+    }
 
     public function __construct()
     {
@@ -164,7 +255,7 @@ final class ChainRedisFake extends \Predis\Client
         }
         $this->strings[$key] = $value;
         if ($ttl !== null) {
-            $this->expirations[$key] = (int) ($ttl * 1000);
+            $this->expirations[$key] = (int) ($this->clockMs + $ttl * 1000);
         }
 
         return 'OK';
@@ -196,20 +287,86 @@ final class ChainRedisFake extends \Predis\Client
         $script = (string) $arguments[0];
         $numKeys = (int) $arguments[1];
         $keysAndArgs = \array_slice($arguments, 2);
-        $key = (string) $keysAndArgs[0];
+        $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $args = \array_slice($keysAndArgs, $numKeys);
 
-        if (str_contains($script, 'Chain reservation')) {
-            return $this->luaReserve($key, $args);
+        if (str_contains($script, 'Chain obligation create-or-get')) {
+            return $this->luaCreateOrGet($keys, $args);
         }
-        if (str_contains($script, 'Chain completion')) {
-            return $this->luaComplete($key, $args);
+        if (str_contains($script, 'Chain reservation')) {
+            return $this->luaReserve($keys[0], $args);
+        }
+        if (str_contains($script, 'Chain issuance')) {
+            return $this->luaMarkIssued($keys[0], $args);
+        }
+        if (str_contains($script, 'Chain verification')) {
+            return $this->luaMarkVerified($keys, $args);
+        }
+        if (str_contains($script, 'Chain rearm')) {
+            return $this->luaRearm($keys[0], $args);
         }
         if (str_contains($script, 'Chain release')) {
-            return $this->luaRelease($key, $args);
+            return $this->luaRelease($keys[0], $args);
+        }
+        if (str_contains($script, 'Chain completion')) {
+            return $this->luaComplete($keys[0], $args);
+        }
+        if (str_contains($script, 'Chain obligation compare-delete')) {
+            return $this->luaDeleteObligation($keys[0], $args);
         }
 
         throw new \LogicException('unexpected script');
+    }
+
+    private function luaCreateOrGet(array $keys, array $args): string
+    {
+        $obligationKey = $keys[1];
+        $chainKey = $keys[0];
+        $prefix = (string) $args[10];
+        $existing = $this->strings[$obligationKey] ?? null;
+        if ($existing !== null) {
+            $chainId = $existing;
+            $chained = $this->strings[$prefix.$chainId] ?? null;
+            if ($chained !== null) {
+                $rec = json_decode($chained, true, 8, JSON_THROW_ON_ERROR);
+                if (isset($rec['requiredRank']) && \is_int($rec['requiredRank'])) {
+                    $newRank = (int) $args[5];
+                    if ($newRank > $rec['requiredRank']) {
+                        $rec['requiredRank'] = $newRank;
+                        $rec['requiredAction'] = (string) $args[4];
+                        $this->strings[$prefix.$chainId] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+                    }
+
+                    return $chainId;
+                }
+            }
+            if (($this->strings[$obligationKey] ?? null) === $chainId) {
+                unset($this->strings[$obligationKey], $this->expirations[$obligationKey]);
+            }
+        }
+        $rec = [
+            'v' => 2,
+            'stage1Nonce' => (string) $args[2],
+            'scope' => (string) $args[3],
+            'obligationId' => (string) $args[0],
+            'requiredAction' => (string) $args[4],
+            'requiredRank' => (int) $args[5],
+            'policyVersion' => (int) $args[6],
+            'chainDepth' => 2,
+            'state' => 'available',
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => null,
+            'requestBinding' => (string) $args[7] !== '' ? (string) $args[7] : null,
+            'expiresAt' => (int) $args[8],
+        ];
+        $ttl = (int) $args[9];
+        $this->strings[$chainKey] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+        $this->expirations[$chainKey] = (int) ($this->clockMs + $ttl * 1000);
+        $this->strings[$obligationKey] = (string) $args[1];
+        $this->expirations[$obligationKey] = (int) ($this->clockMs + $ttl * 1000);
+
+        return (string) $args[1];
     }
 
     private function luaReserve(string $key, array $args): string
@@ -218,7 +375,17 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return 'missing';
         }
+        $ttl = $this->fakeTtl($key);
+        if ($ttl <= 0) {
+            return 'missing';
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($rec['state'] === 'issued') {
+            return 'issued';
+        }
+        if ($rec['state'] === 'verified') {
+            return 'verified';
+        }
         if ($rec['state'] === 'completed') {
             return 'completed';
         }
@@ -230,18 +397,111 @@ final class ChainRedisFake extends \Predis\Client
             if ((int) $rec['leaseUntil'] > $nowSecs) {
                 return 'busy';
             }
+            $lease = min((int) $args[1], $ttl);
+            $rec['state'] = 'reserved';
+            $rec['owner'] = (string) $args[0];
+            $rec['leaseUntil'] = $nowSecs + $lease;
+            $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+            return 'taken_over';
         }
-        $remaining = $this->fakeTtl($key);
-        if ($remaining < 1) {
-            $remaining = (int) $args[1];
-        }
+        $lease = min((int) $args[1], $ttl);
         $rec['state'] = 'reserved';
         $rec['owner'] = (string) $args[0];
-        $rec['leaseUntil'] = $nowSecs + $remaining;
-        // KEEPTTL: the record keeps its remaining lifetime.
+        $rec['leaseUntil'] = $nowSecs + $lease;
         $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
         return 'available';
+    }
+
+    private function luaMarkIssued(string $key, array $args): string
+    {
+        $existing = $this->strings[$key] ?? null;
+        if ($existing === null) {
+            return 'missing';
+        }
+        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($rec['state'] === 'reserved') {
+            if ($rec['owner'] !== $args[0]) {
+                return 'not_owner';
+            }
+            $rec['state'] = 'issued';
+            $rec['stage2Nonce'] = (string) $args[1];
+            $rec['owner'] = null;
+            $rec['leaseUntil'] = null;
+            $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+            return 'issued_new';
+        }
+        if ($rec['state'] === 'issued' || $rec['state'] === 'completed') {
+            return $rec['stage2Nonce'] === $args[1] ? 'issued_same' : 'conflict';
+        }
+        if ($rec['state'] === 'verified') {
+            return $rec['stage2Nonce'] === $args[1] ? 'verified_same' : 'conflict';
+        }
+
+        return 'not_owner';
+    }
+
+    private function luaMarkVerified(array $keys, array $args): string
+    {
+        $key = $keys[0];
+        $obligationKey = $keys[1];
+        $existing = $this->strings[$key] ?? null;
+        if ($existing === null) {
+            return 'missing';
+        }
+        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($rec['state'] === 'verified') {
+            return $rec['stage2Nonce'] === $args[0] ? 'verified_same' : 'conflict';
+        }
+        if (($rec['state'] !== 'issued' && $rec['state'] !== 'completed') || $rec['stage2Nonce'] !== $args[0]) {
+            return 'conflict';
+        }
+        $rec['state'] = 'verified';
+        $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+        if (($this->strings[$obligationKey] ?? null) === $args[1]) {
+            unset($this->strings[$obligationKey], $this->expirations[$obligationKey]);
+        }
+
+        return 'verified_new';
+    }
+
+    private function luaRearm(string $key, array $args): bool
+    {
+        $existing = $this->strings[$key] ?? null;
+        if ($existing === null) {
+            return false;
+        }
+        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($rec['state'] !== 'issued' || $rec['stage2Nonce'] !== $args[0]) {
+            return false;
+        }
+        $rec['state'] = 'available';
+        $rec['stage2Nonce'] = null;
+        $rec['owner'] = null;
+        $rec['leaseUntil'] = null;
+        $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+        return true;
+    }
+
+    private function luaRelease(string $key, array $args): mixed
+    {
+        $existing = $this->strings[$key] ?? null;
+        if ($existing === null) {
+            return false;
+        }
+        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($rec['state'] !== 'reserved' || $rec['owner'] !== $args[0]) {
+            return false;
+        }
+        $rec['state'] = 'available';
+        $rec['owner'] = null;
+        $rec['leaseUntil'] = null;
+        $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+
+        return true;
     }
 
     private function luaComplete(string $key, array $args): mixed
@@ -261,21 +521,14 @@ final class ChainRedisFake extends \Predis\Client
         return (string) json_encode($rec, JSON_THROW_ON_ERROR);
     }
 
-    private function luaRelease(string $key, array $args): mixed
+    private function luaDeleteObligation(string $key, array $args): mixed
     {
-        $existing = $this->strings[$key] ?? null;
-        if ($existing === null) {
-            return false;
-        }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
-        if ($rec['state'] !== 'reserved' || $rec['owner'] !== $args[0]) {
-            return false;
-        }
-        $rec['state'] = 'available';
-        $rec['owner'] = null;
-        $rec['leaseUntil'] = null;
-        $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
+        if (($this->strings[$key] ?? null) === $args[0]) {
+            unset($this->strings[$key], $this->expirations[$key]);
 
-        return true;
+            return 1;
+        }
+
+        return 0;
     }
 }

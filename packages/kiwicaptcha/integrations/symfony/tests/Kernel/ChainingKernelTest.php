@@ -49,6 +49,9 @@ final class ChainingKernelTest extends TestCase
         self::assertSame($service, $this->property($controller, 'chainTickets'), 'the controller carries the wired chain ticket service');
         self::assertSame('X-Tls-Class', $this->property($controller, 'trustedTlsHeader'), 'the configured TLS header reaches the controller');
         self::assertSame(1, $this->property($controller, 'policyVersion'));
+        $authority = $this->property($controller, 'bindingAuthority');
+        self::assertInstanceOf(ChainingBindingAuthority::class, $authority, 'the authoritative transaction-binding resolver reaches the controller');
+        self::assertSame($this->container()->get('fake_binding_authority'), $authority, 'the controller carries the SAME wired authority service');
 
         $validator = $this->container()->get(KiwiCaptchaValidator::class);
         self::assertSame($service, $this->property($validator, 'chainTickets'), 'the validator carries the wired chain ticket service');
@@ -56,5 +59,6 @@ final class ChainingKernelTest extends TestCase
         $resolver = $this->property($validator, 'riskResolver');
         self::assertNotNull($resolver, 'the validator carries the wired risk profile resolver (the stage-strength comparison)');
         self::assertSame($this->container()->get('kiwi_captcha.risk.resolver'), $resolver, 'the resolver is the SAME service the risk gateway maps actions with');
+        self::assertSame($authority, $this->property($validator, 'bindingAuthority'), 'the validator carries the SAME wired authority service');
     }
 }

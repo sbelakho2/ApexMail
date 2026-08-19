@@ -5,8 +5,15 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Validator\Constraints;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\AmbiguousForwardingException;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainRequirement;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionUnavailableException;
+use BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
@@ -14,13 +21,16 @@ use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore;
 use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\Config;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\Risk\RiskDecision;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
+use KiwiCaptcha\VerifyOutcome;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
@@ -158,6 +168,42 @@ final class KiwiCaptchaValidator extends ConstraintValidator
          * configured ladders (risk.chaining; null = chaining disabled).
          */
         private readonly ?RiskProfileResolver $riskResolver = null,
+        /**
+         * The durable post-solve disposition store: every valid
+         * verification — fresh derive and stored-result replay alike —
+         * resolves its final disposition (PASS | DENY | STEP_UP |
+         * CHAIN_REQUIRED) through ONE path and persists it per nonce
+         * BEFORE the application sees the outcome, so a replay of a valid
+         * proof reproduces the same disposition instead of bypassing the
+         * post-solve policy. The extension always wires a store (Redis,
+         * or the in-memory variant in test/dev); null = the disposition is
+         * computed and applied without persistence (manual construction).
+         */
+        private readonly ?PostSolveDispositionStore $dispositionStore = null,
+        /**
+         * The authoritative transaction-binding authority (nullable
+         * service id risk.request_binding_authority): chaining opens only
+         * when the AUTHORITATIVE binding of the transaction resolves
+         * non-null — a raw client-supplied binding without an authority is
+         * never sufficient. Null = chaining unavailable (a stronger PoW
+         * demand falls back to terminal StepUp, never a silent pass).
+         */
+        private readonly ?RequestBindingAuthorityInterface $bindingAuthority = null,
+        /**
+         * The retained margin beyond Config::MAX_TTL_SECS for the
+         * nonce-keyed disposition records (risk.redis.ttl_margin_secs): the
+         * disposition must survive at least as long as the consumed core
+         * result can be replayed (the consumed record's own retention is
+         * token lifetime + the same margin).
+         */
+        private readonly int $postSolveDispositionTtlMarginSecs = 0,
+        /**
+         * The chain lifetime (risk.chaining.ttl_secs): the absolute
+         * expiry the validator passes when it opens a stage-2 chain
+         * requirement (requireStage2) and when it re-signs the one-shot
+         * ticket for a persisted CHAIN_REQUIRED disposition.
+         */
+        private readonly int $chainTtlSecs = 300,
     ) {
     }
 
@@ -307,44 +353,51 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // ── AMBIGUOUS-CONSUME DETERMINISTIC RETRY ────────────────────────────
         // ConsumeIndeterminate means the consume transition MAY have happened
         // but its response was lost: the challenge may already be consumed —
-        // with (or without) a committed result. The validator resolves the
-        // outcome from the STORED record instead of re-deriving:
-        //   - consumed record + stored VALID result + request binding == the
-        //     STORED consumed binding -> the SAME success (jti + binding
-        //     exposed, NO second derivation, no repeated side effects);
-        //   - stored valid result + a DIFFERENT binding -> invalid_or_expired
-        //     (a challenge minted for one transaction is never redeemable
-        //     for another — the same rule applied to the retry);
-        //   - stored INVALID result -> invalid_or_expired (the original
-        //     derive failed);
+        // with (or without) a committed result. The validator NORMALIZES the
+        // outcome from the STORED record instead of re-deriving (NO side
+        // effects here — the normalized outcome flows through the SAME
+        // pipeline as any other verification):
+        //   - consumed record + stored VALID result -> a valid outcome with
+        //     the STORED consumed binding (the binding check below applies
+        //     the same rule to it: same binding -> same success, different
+        //     binding -> invalid_or_expired);
+        //   - stored INVALID result -> invalid(InsufficientWork) (the
+        //     original derive failed — collapsed to invalid_or_expired);
         //   - record still pending / consumed without a committed result /
         //     storage unavailable -> the outcome stays indeterminate
         //     (temporary_unavailable — retryable, never silently valid).
-        // The stored-result VALID outcome (a re-verify of a consumed record
-        // with a committed result — the core returns the SAME outcome
-        // without re-deriving) takes the identical retry path: the
-        // binding check below applies to it, and the stored-result flag
-        // suppresses the repeated side effects (risk feedback, post-solve,
-        // outstanding decrement — they already ran exactly once on the
-        // ORIGINAL verification).
-        $fromStoredResult = \method_exists($outcome, 'fromStoredResult') && $outcome->fromStoredResult();
-        if ($outcome->error === VerifyError::ConsumeIndeterminate) {
-            $resolved = $this->resolveAmbiguousConsume($value, $request, $constraint->scope);
-            if ($resolved === 'success') {
-                return;
-            }
-            if ($resolved === 'invalid') {
-                $this->logger?->info('KiwiCaptcha: ambiguous consume resolved to a refused outcome', [
+        // A stored-result outcome is a re-verify of a consumed record with a
+        // committed result: the core returns the SAME outcome without
+        // re-deriving. It answers ONLY "was the PoW cryptographically
+        // valid?" — it never answers "should the application accept this
+        // protected action?". The final disposition (PASS | DENY | STEP_UP
+        // | CHAIN_REQUIRED) is resolved and persisted for EVERY valid
+        // outcome below, stored-result retries included.
+        $outcome = $this->normalizeAmbiguousOutcome($outcome, $value, $request, $constraint->scope);
+
+        // ── FAILED VERIFICATION ─────────────────────────────────────────────
+        // The collapsed public code; the PRECISE core reason (WrongScope,
+        // Expired, BadSignature, ...) stays in the logs — never exposed to
+        // the client (no oracle for which check failed). ConsumeIndeterminate
+        // is NOT a token-level failure: it is a storage I/O ambiguity — the
+        // resolution tries the stored record first, and an UNRESOLVABLE
+        // indeterminate outcome maps to temporary_unavailable (retryable,
+        // like StorageUnavailable), never to invalid_or_expired — the client
+        // must not be told its token is burned when it may still redeem.
+        if (!$outcome->isOk()) {
+            $code = $this->publicCode($outcome->error);
+            if ($outcome->error !== null && $code !== KiwiCaptcha::INVALID_OR_EXPIRED_ERROR) {
+                $this->logger?->info('KiwiCaptcha: verification refused', [
+                    'reason' => $outcome->error->value,
+                    'detail' => $outcome->detail,
                     'scope' => $constraint->scope,
                 ]);
-                $this->context->buildViolation($constraint->message)
-                    ->setCode(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR)
-                    ->addViolation();
-
-                return;
             }
-            // Unresolvable: fall through — publicCode() maps the remaining
-            // indeterminate outcome to temporary_unavailable.
+            $this->context->buildViolation($constraint->message)
+                ->setCode($code)
+                ->addViolation();
+
+            return;
         }
 
         // TRANSACTION BINDING: after a VALID verification, the
@@ -359,7 +412,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // retry the outcome's requestBinding() IS the stored consumed
         // binding, so the SAME rule gives the stored-result contract: same
         // binding -> same success, different binding -> invalid_or_expired.
-        if ($outcome->isOk() && !$this->requestBindingMatches($outcome, $request)) {
+        if (!$this->requestBindingMatches($outcome, $request)) {
             $this->logger?->info('KiwiCaptcha: valid proof rejected — request binding mismatch', [
                 'scope' => $constraint->scope,
             ]);
@@ -370,184 +423,86 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             return;
         }
 
-        // POST-SOLVE feedback: feed the outcome into the adaptive risk
-        // engine (SolveSuccess / InvalidProof / MalformedToken / Expired /
-        // Replay), keyed on the continuity session when the client carries
-        // one. The scope string is never validated against the policy map
-        // here — unknown scopes are handled by the gateway (minimum mode
-        // observes under the synthetic scope id; baseline/reject modes skip
-        // the signal with a debug log, never an exception). An unavailable
-        // client IP is not a risk signal and must never break the form
-        // submit (RiskGateway skips it internally).
-        //
-        // NONCE -> DECISION CONSUMPTION: after a VALID verification the
-        // bounded solution token is decoded to its nonce and the short-lived
-        // nonce -> decision handle is CONSUMED (GETDEL, at most one winner).
-        // On scopes WITHOUT post_solve_check the ORIGINAL pre-issue decision
-        // id becomes the request's current decision id
-        // ({@see RiskGateway::setCurrentDecisionId()}), so the application
-        // can confirm this challenge's original decision. On post_solve_check
-        // scopes the superseded mapping is still consumed (cleanup — it can never be
-        // confirmed against a stale decision), and the fresh POST-SOLVE
-        // decision becomes the current confirmation target instead.
-        //
-        // POST-SOLVE CHECK: when the scope opts in (post_solve_check), a
-        // VALID solve additionally runs a fresh SolveSuccess assessment with
-        // the same context. A Deny there fails the validation with the
-        // distinct POST_SOLVE_REJECTED_ERROR (the security context changed
-        // while the client was solving); a StepUp fails it with
-        // POST_SOLVE_STEP_UP_REQUIRED (PoW alone is insufficient — the
-        // application routes the user to MFA/passkey/email confirmation).
-        // The gateway does NOT confirm its own post-solve decision:
-        // ConfirmedLegitimate / ConfirmedAbuse are application-only signals
-        // (they require a decision id), so a valid solve that passes the
-        // re-assessment is recorded as plain SolveSuccess feedback.
-        //
-        // A STORED-RESULT outcome (a retry) skips this block
-        // entirely: the post-solve assessment, the nonce->decision
-        // consumption and the outstanding decrement all ran EXACTLY ONCE on
-        // the original verification — a retry must return the same outcome
-        // deterministically, not re-score the same token.
-        if ($this->risk !== null && !$fromStoredResult) {
-            $session = $request !== null ? $this->continuityCookie?->read($request) : null;
-            $ip = (string) ($clientIp ?? '');
-            $postSolveScope = $outcome->isOk() && $this->risk->postSolveCheck($constraint->scope);
-            // Chaining (risk.chaining): a SUCCESSFUL first-stage proof
-            // opens the selective second stage — the reassessment runs for
-            // every valid solve, and when it demands an action the solved
-            // challenge does NOT already satisfy (the resolver's ACTUAL
-            // configured ladders), the validator issues a signed one-shot
-            // chain ticket (CHAIN_REQUIRED) instead of passing. StepUp is
-            // TERMINAL application-level step-up (never a chained PoW) and
-            // Deny rejects the submission; only a strictly-stronger
-            // non-StepUp/Deny post-solve action opens a chain. The chain
-            // ENDS at stage 2: a verified challenge whose metadata sidecar
-            // carries a server-stamped chainId (the stage-2 controller
-            // wrote it at issuance) never opens a third stage — no ticket
-            // is ever issued from a stage-2 verification.
-            try {
-                $chainEligible = $outcome->isOk() && $this->chainTickets !== null && !$this->verifiedChallengeCarriesChainMarker($value);
-            } catch (\Throwable) {
-                // The metadata sidecar could not be read (transient
-                // outage): the chain marker is treated as POSSIBLY present
-                // — no chain ticket is issued (a metadata-read failure
-                // must never open a third stage or a repeated-challenge
-                // loop). The verification itself still passes.
-                $chainEligible = false;
-            }
+        // RESOURCE ACCOUNTING: the PoW IS solved regardless of the later
+        // risk disposition — the source's outstanding challenge counter is
+        // decremented (best-effort, floored at 0) exactly once, BEFORE the
+        // final-disposition resolution. Skipped for a stored-result retry:
+        // the ORIGINAL verification already decremented it.
+        if (!$this->isStoredResult($outcome)) {
+            $this->outstanding?->solved((string) ($clientIp ?? ''));
+        }
 
-            // FORM-SUBMISSION HONEYPOT (post-verification): the expected
-            // decoy field name derives from the VERIFIED nonce
-            // ('decoy_' + substr(sha256(nonce), 0, 8) — the exact same
-            // derivation the challenge controller used when it emitted the
-            // field), and ONLY that exact field is inspected: any other
-            // decoy_XXXXXXXX field is ignored (a decoy name is
-            // server-issued and nonce-bound, so a mismatched name is not
-            // this challenge's decoy). A filled expected field records
-            // DecoyFieldSubmitted evidence AND feeds the post-solve
-            // assessment through the risk-v2 path (the honeypot signal
-            // actually moves the score). Evidence ONLY — never a gate and
-            // never affects the proof validity.
-            $honeypotHit = false;
-            $verifiedNonce = $this->verifiedNonceOf($value);
-            if ($outcome->isOk() && $request !== null && $verifiedNonce !== null) {
-                $honeypotHit = $this->formDecoyEvidence(
-                    $request,
-                    self::expectedDecoyField($verifiedNonce),
-                    $constraint->scope,
-                    $ip,
-                    $session,
-                );
-            }
+        // ── ONE FINAL-DISPOSITION PATH ──────────────────────────────────────
+        // The core's retained result must answer "was the PoW
+        // cryptographically valid?" — never "should the application accept
+        // this protected action?". EVERY valid verification (fresh derive
+        // and stored-result replay alike) resolves its durable, nonce-keyed
+        // final disposition — the post-solve risk reassessment, the
+        // honeypot evidence, the chained-challenge opening and the
+        // nonce->decision consumption all live behind this single path, and
+        // the disposition is PERSISTED before the application ever sees the
+        // outcome. A replay of a valid proof reproduces the same PASS |
+        // DENY | STEP_UP | CHAIN_REQUIRED instead of bypassing the
+        // post-solve policy. The resolution is fail-closed: an unavailable
+        // disposition store, a busy claim or a refused finalize surfaces as
+        // the retryable temporary_unavailable violation — never a silent
+        // pass.
+        try {
+            $disposition = $this->resolveFinalDisposition($value, $outcome, $request, $constraint, (string) ($clientIp ?? ''));
+        } catch (PostSolveDispositionUnavailableException $e) {
+            $this->logger?->info('KiwiCaptcha: post-solve disposition unavailable', [
+                'scope' => $constraint->scope,
+                'reason' => $e->getMessage(),
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR)
+                ->addViolation();
 
-            if ($outcome->isOk()) {
-                $originalDecisionId = $this->consumeDecisionForToken($value);
-                if (!$postSolveScope && $originalDecisionId !== null) {
-                    $this->risk->setCurrentDecisionId($originalDecisionId);
-                }
-            }
+            return;
+        }
 
-            $postSolve = null;
-            if ($postSolveScope || $chainEligible) {
+        switch ($disposition->kind) {
+            case PostSolveDispositionKind::Pass:
+                $this->finishSuccessfulApplicationVerification($value, $outcome, $request);
+
+                return;
+            case PostSolveDispositionKind::Deny:
+                // The security context changed while the client was
+                // solving: the fresh post-solve assessment rejects the
+                // submission with the distinct POST_SOLVE_REJECTED_ERROR.
+                $this->logger?->info('KiwiCaptcha: valid solve rejected by the post-solve assessment', [
+                    'scope' => $constraint->scope,
+                ]);
+                $this->context->buildViolation($constraint->message)
+                    ->setCode(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR)
+                    ->addViolation();
+
+                return;
+            case PostSolveDispositionKind::StepUp:
+                // StepUp is TERMINAL application-level step-up: it NEVER
+                // becomes a chain ticket (a ticket could later be spent on
+                // ordinary PoW instead of the application's step-up). The
+                // application routes the user to MFA/passkey/email
+                // confirmation.
+                $this->context->buildViolation($constraint->message)
+                    ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED)
+                    ->addViolation();
+
+                return;
+            case PostSolveDispositionKind::ChainRequired:
+                // CHAIN REQUIRED: the reassessment demanded a strictly
+                // stronger PoW stage. Re-sign the one-shot chain ticket
+                // from the PERSISTED chain id (the same chain for a fresh
+                // verification and a replay); the violation's
+                // {{ chain_ticket }} parameter carries it in the
+                // documented machine-readable format. A ticket that cannot
+                // be produced is fail-closed temporary_unavailable — a
+                // stronger stage was demanded but cannot be chained, never
+                // a silent downgrade to an unchained pass.
                 try {
-                    $postSolve = $honeypotHit
-                        ? $this->risk->postSolveDecisionV2(
-                            $constraint->scope,
-                            $ip,
-                            $session,
-                            null,
-                            null,
-                            $this->risk->clientContextV2(true, $session, null, null),
-                        )
-                        : $this->risk->postSolveDecision($constraint->scope, $ip, $session);
-                } catch (\InvalidArgumentException) {
-                    // No live risk signal for this context (e.g. an
-                    // unparseable or missing client IP): enforce the scope's
-                    // DEGRADED friction instead of silently skipping the
-                    // adaptive re-check — in BindingMode::None deployments a
-                    // valid PoW must not pass with zero adaptive friction.
-                    // This mirrors the fail-safe degraded rule on the
-                    // pre-issue path (degradedDecisionForScope applies the
-                    // policy's degraded action without touching the state
-                    // store).
-                    $postSolve = $this->risk->degradedDecisionForScope($this->risk->scopeId($constraint->scope));
-                }
-            }
-
-            if ($postSolve !== null) {
-                if ($postSolve->action === RiskAction::Deny) {
-                    $this->context->buildViolation($constraint->message)
-                        ->setCode(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR)
-                        ->addViolation();
-
-                    return;
-                }
-                if ($postSolve->action === RiskAction::StepUp) {
-                    // StepUp is TERMINAL application-level step-up: it
-                    // NEVER becomes a chain ticket (a ticket could later be
-                    // spent on ordinary PoW instead of the application's
-                    // step-up). The application routes the user to
-                    // MFA/passkey/email confirmation.
-                    $this->context->buildViolation($constraint->message)
-                        ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED)
-                        ->addViolation();
-
-                    return;
-                }
-                if ($chainEligible && !$this->recordSatisfiesRequiredAction($value, $postSolve->action)) {
-                    // CHAIN REQUIRED: the reassessment demands an action
-                    // the solved challenge does NOT already satisfy under
-                    // the ACTUAL configured ladders (a missing/unreadable
-                    // record is treated as NOT satisfied — the chain opens
-                    // with the required action, failing toward more
-                    // security). Issue the signed one-shot chain ticket
-                    // binding the REQUIRED action (the stage-2 issuance
-                    // enforces it as the floor) and the stage-1 request
-                    // binding (the chain cannot detach from its
-                    // transaction); the violation's {{ chain_ticket }}
-                    // parameter carries it in the documented
-                    // machine-readable format.
-                    $ticket = $this->chainTickets->issue(
-                        $this->verifiedNonceOf($value),
-                        $constraint->scope,
-                        $this->policyVersion,
-                        requiredAction: $postSolve->action->value,
-                        requestBinding: $this->verifiedRequestBindingOf($outcome),
-                    );
-                    if ($ticket !== null) {
-                        $this->context->buildViolation($constraint->message)
-                            ->setCode(self::CHAIN_REQUIRED_ERROR)
-                            ->setParameter('{{ chain_ticket }}', $ticket)
-                            ->addViolation();
-
-                        return;
-                    }
-                    // The chain state could not be persisted (backend
-                    // failure): a stronger stage was demanded but cannot be
-                    // chained — fail closed with the retryable
-                    // temporary_unavailable (never silently downgrade the
-                    // request to an unchained pass).
-                    $this->logger?->info('KiwiCaptcha: chained challenge state unavailable', [
+                    $ticket = $this->chainTickets?->ticketFor($disposition->chainId, $this->chainExpiresAt());
+                } catch (\Throwable $e) {
+                    $this->logger?->info('KiwiCaptcha: chained challenge ticket unavailable', [
                         'scope' => $constraint->scope,
                     ]);
                     $this->context->buildViolation($constraint->message)
@@ -556,89 +511,22 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
                     return;
                 }
-            }
+                if (!\is_string($ticket) || $ticket === '') {
+                    $this->logger?->info('KiwiCaptcha: chained challenge ticket unavailable', [
+                        'scope' => $constraint->scope,
+                    ]);
+                    $this->context->buildViolation($constraint->message)
+                        ->setCode(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR)
+                        ->addViolation();
 
-            if (!$postSolveScope && !$chainEligible) {
-                $this->risk->solveOutcome($constraint->scope, $ip, $session, $outcome->error);
-            }
-        }
-
-        // JTI + BINDING passthrough: a VALID verification
-        // exposes the canonical jti — the core's VerifyOutcome::nonce(), the
-        // challenge nonce of the CONSUMED record — and the record's signed
-        // transaction binding (VerifyOutcome::requestBinding()) to the
-        // application, both via {@see verifiedJti()} /
-        // {@see verifiedRequestBinding()} and the request attribute
-        // (VERIFIED_JTI_ATTRIBUTE; request-scoped and race-free for web
-        // flows). The application keys its business operation idempotency on
-        // (jti, action): a retry carrying the same jti must never create a
-        // second operation (see README).
-        if ($outcome->isOk()) {
-            $jti = null;
-            if (\method_exists($outcome, 'nonce')) {
-                $jti = $outcome->nonce();
-            }
-            if (!\is_string($jti) || $jti === '') {
-                // Compat fallback (cores predating VerifyOutcome::nonce()):
-                // the canonical jti is the consumed record's nonce, which
-                // equals the solution token's nonce (verification just
-                // succeeded against that record).
-                try {
-                    $jti = SolutionToken::decode($value)->nonce;
-                } catch (DecodeError) {
-                    $jti = null;
+                    return;
                 }
-            }
-            if (\is_string($jti) && $jti !== '') {
-                $this->lastVerifiedJti = $jti;
-                $request?->attributes->set(self::VERIFIED_JTI_ATTRIBUTE, $jti);
-            }
-            if (\method_exists($outcome, 'requestBinding')) {
-                $this->lastVerifiedRequestBinding = $outcome->requestBinding();
-            }
+                $this->context->buildViolation($constraint->message)
+                    ->setCode(self::CHAIN_REQUIRED_ERROR)
+                    ->setParameter('{{ chain_ticket }}', $ticket)
+                    ->addViolation();
 
-            // RESULT RECEIPT: a VALID verification can be
-            // exported as an Ed25519-signed receipt for third parties holding
-            // the PUBLIC key. The receipt is signed from the CONSUMED
-            // RECORD's own fields and carries the FULL replay-critical set —
-            // jti, tenant (scope), action (PoW algorithm), request_binding,
-            // issued_at / expires_at, issuer (the payload is public by
-            // construction — no secret material; the HMAC verification
-            // secret itself never leaves the server). Signature verification
-            // alone is NOT sufficient for single-use actions: the integrator
-            // must atomically record the jti (INSERT IF NOT EXISTS) and treat
-            // a pre-existing jti as a replay (README).
-            if ($this->receiptSigner !== null && $jti !== null) {
-                $this->signReceipt($this->findRecordByNonce($jti));
-            }
-
-            // Anti-stockpiling: the source's outstanding
-            // challenge counter is decremented (best-effort, floored at 0)
-            // when a challenge verifies successfully — a solved challenge is
-            // no longer outstanding. Never breaks the solve. Skipped for a
-            // stored-result retry: the ORIGINAL verification
-            // already decremented it.
-            if (!$fromStoredResult) {
-                $this->outstanding?->solved((string) ($clientIp ?? ''));
-            }
-        }
-
-        if (!$outcome->isOk()) {
-            $code = $this->publicCode($outcome->error);
-            // The collapsed public code; the PRECISE core reason
-            // (WrongScope, Expired, BadSignature, ...) stays in the logs —
-            // never exposed to the client (no oracle for which check
-            // failed).
-            if ($outcome->error !== null && $code !== KiwiCaptcha::INVALID_OR_EXPIRED_ERROR) {
-                $this->logger?->info('KiwiCaptcha: verification refused', [
-                    'reason' => $outcome->error->value,
-                    'detail' => $outcome->detail,
-                    'scope' => $constraint->scope,
-                ]);
-            }
-            $this->context->buildViolation($constraint->message)
-                ->setCode($code)
-                ->addViolation();
+                return;
         }
     }
 
@@ -684,63 +572,523 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * Ambiguous-consume resolution: decide the outcome of a
+     * Ambiguous-consume normalization: decide the outcome of a
      * ConsumeIndeterminate verification from the STORED consumed record
-     * instead of re-deriving.
+     * instead of re-deriving. Returns the normalized outcome with NO side
+     * effects — the normalized outcome flows through the SAME pipeline as
+     * any other verification (binding check, outstanding accounting, final
+     * disposition):
      *
-     * @return 'success'|'invalid'|'unresolved' — 'success' also exposes the
-     *         canonical jti + signed binding of the consumed record (the
-     *         SAME outcome the original verification produced)
+     *  - stored VALID result -> a VALID outcome carrying the consumed
+     *    record's nonce and STORED binding (marked as a stored result, so
+     *    the outstanding decrement never runs twice); the pipeline's
+     *    binding check applies the stored-result contract (same binding ->
+     *    same success, different binding -> invalid_or_expired);
+     *  - stored INVALID result -> invalid(InsufficientWork) (the original
+     *    derivation failed — collapsed to invalid_or_expired);
+     *  - storage unavailable / no record / still pending / consumed without
+     *    a committed result -> the ORIGINAL indeterminate outcome (the
+     *    caller's publicCode() maps ConsumeIndeterminate to
+     *    temporary_unavailable — retryable, never silently valid).
      */
-    private function resolveAmbiguousConsume(string $token, ?Request $request, ?string $scope): string
+    private function normalizeAmbiguousOutcome(VerifyOutcome $outcome, string $token, ?Request $request, ?string $scope): VerifyOutcome
     {
+        if ($outcome->error !== VerifyError::ConsumeIndeterminate) {
+            return $outcome;
+        }
+
         $record = $this->findConsumedRecord($token);
         if ($record === null) {
             // No storage wired, undecodable token, storage failure, record
             // absent, or record still PENDING (the first attempt never
             // consumed it — a retry will consume normally): the outcome
             // stays indeterminate.
-            return 'unresolved';
+            return $outcome;
         }
 
         $result = $this->consumedResultOf($record);
         if ($result === false) {
             // The original derivation FAILED — the stored result is the
             // authoritative outcome.
-            return 'invalid';
+            return VerifyOutcome::invalid(VerifyError::InsufficientWork);
         }
         if ($result !== true) {
             // Consumed but the result was never committed (the original
             // attempt died mid-proof): genuinely indeterminate.
-            return 'unresolved';
+            return $outcome;
         }
 
-        // Stored VALID result: deterministic retry. The request binding must
-        // equal the STORED consumed binding — a challenge bound to one
-        // transaction is never redeemable for another, retries included.
-        $storedBinding = $this->consumedBindingOf($record);
-        if ($storedBinding !== null) {
-            $requestBinding = $this->requestBindingFromRequest($request);
-            if ($requestBinding === null || !hash_equals($storedBinding, $requestBinding)) {
-                return 'invalid';
+        // Stored VALID result: deterministic retry. The pipeline's binding
+        // check enforces the stored-result contract: the normalized outcome
+        // carries the STORED consumed binding, so the request binding must
+        // equal it — a challenge bound to one transaction is never
+        // redeemable for another, retries included.
+        return VerifyOutcome::valid($record->nonce, $this->consumedBindingOf($record), true);
+    }
+
+    /**
+     * Whether the outcome came from the CORE's stored consumed result (a
+     * re-verify of a consumed record with a committed result) instead of a
+     * fresh derivation. Detects both the accessor method and the public
+     * property shapes across core versions.
+     */
+    private function isStoredResult(VerifyOutcome $outcome): bool
+    {
+        if (\method_exists($outcome, 'fromStoredResult')) {
+            return (bool) $outcome->fromStoredResult();
+        }
+
+        return (bool) ($outcome->fromStoredResult ?? false);
+    }
+
+    /**
+     * THE final-disposition resolution — the single path every valid
+     * verification (fresh derive and stored-result replay alike) flows
+     * through:
+     *
+     *  1. the canonical nonce is decoded and a fresh owner token drawn;
+     *  2. the nonce-keyed disposition record is CLAIMED:
+     *       - 'complete'   -> the persisted final disposition is returned
+     *         immediately (a replay of a valid proof reproduces the same
+     *         PASS | DENY | STEP_UP | CHAIN_REQUIRED — never a bypass);
+     *       - 'pending'    -> another owner's computation is live — the
+     *         temporary_unavailable violation (never a silent pass);
+     *       - 'claimed'/'taken_over' -> this owner runs the post-solve
+     *         assessment, persists the disposition and returns it;
+     *  3. the finalize MUST succeed before anything is returned — a store
+     *     failure is the temporary_unavailable violation, never a silent
+     *     pass.
+     *
+     * @throws PostSolveDispositionUnavailableException fail-closed: the
+     *                                                 disposition could not
+     *                                                 be resolved durably
+     */
+    private function resolveFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $ip): PostSolveDisposition
+    {
+        $nonce = $this->verifiedNonceOf($token);
+        if ($nonce === null || $nonce === '') {
+            // Unreachable on a valid outcome (defense in depth): the decoded
+            // nonce IS the verified proof's nonce. A token whose nonce
+            // cannot be pinned down cannot be durably dispositioned — fail
+            // closed.
+            throw new PostSolveDispositionUnavailableException('the verified solution token carries no nonce');
+        }
+        $session = $request !== null ? $this->continuityCookie?->read($request) : null;
+
+        if ($this->dispositionStore === null) {
+            // No store wired (manual construction / legacy seam): the
+            // disposition is computed and applied WITHOUT persistence. The
+            // extension always wires a store, so the durable path below is
+            // the production behavior.
+            return $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce);
+        }
+
+        $owner = bin2hex(random_bytes(16));
+        $ttl = Config::MAX_TTL_SECS + $this->postSolveDispositionTtlMarginSecs;
+        try {
+            $claim = $this->dispositionStore->claim($nonce, $owner, $ttl);
+        } catch (\Throwable $e) {
+            throw new PostSolveDispositionUnavailableException('the post-solve disposition store is unavailable', 0, $e);
+        }
+
+        if ($claim === 'complete') {
+            try {
+                $record = $this->dispositionStore->read($nonce);
+            } catch (\Throwable $e) {
+                throw new PostSolveDispositionUnavailableException('the post-solve disposition record is unreadable', 0, $e);
+            }
+            $disposition = $record?->disposition;
+            if ($disposition === null) {
+                // Complete without a usable disposition: corrupt state —
+                // never silently pass.
+                throw new PostSolveDispositionUnavailableException('the post-solve disposition record is corrupt');
+            }
+            // A replay reproduces the request-scoped decision id too, so the
+            // application can confirm the SAME decision handle.
+            if ($this->risk !== null && $disposition->decisionId !== null) {
+                $this->risk->setCurrentDecisionId($disposition->decisionId);
+            }
+
+            return $disposition;
+        }
+
+        if ($claim !== 'claimed' && $claim !== 'taken_over') {
+            // 'pending': another owner's claim is live (or the claim was
+            // re-entered with the same owner token). Retryable — never a
+            // silent pass.
+            throw new PostSolveDispositionUnavailableException('the post-solve disposition claim is held by another owner');
+        }
+
+        $disposition = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce);
+
+        try {
+            $finalized = $this->dispositionStore->finalize($nonce, $owner, $disposition);
+        } catch (\Throwable $e) {
+            throw new PostSolveDispositionUnavailableException('the post-solve disposition could not be persisted', 0, $e);
+        }
+        if (!$finalized) {
+            throw new PostSolveDispositionUnavailableException('the post-solve disposition finalize was refused');
+        }
+
+        return $disposition;
+    }
+
+    /**
+     * The post-solve assessment of a verified proof: the nonce->decision
+     * consumption, the form-submission honeypot evidence (recorded with its
+     * nonce-derived idempotency key — a crash-taken-over computation never
+     * double-books the signal), and the fresh reassessment whenever the
+     * scope opts in (post_solve_check), chaining is relevant, or the exact
+     * decoy was filled (a honeypot hit alone — even with post_solve_check
+     * false and chaining disabled — must trigger the fresh v2 assessment).
+     * The assessment ALWAYS carries the nonce-derived stable idempotency
+     * key 'postsolve:'.hash('sha256', $nonce), so a takeover re-assessment
+     * is dedupe-key-identical to the original.
+     */
+    private function assessFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $ip, ?string $session, string $nonce): PostSolveDisposition
+    {
+        $postSolveScope = $this->risk !== null && $this->risk->postSolveCheck($constraint->scope);
+
+        // Chaining (risk.chaining): a SUCCESSFUL first-stage proof
+        // opens the selective second stage — the reassessment runs for
+        // every valid solve, and when it demands an action the solved
+        // challenge does NOT already satisfy (the resolver's ACTUAL
+        // configured ladders), the final disposition is CHAIN_REQUIRED
+        // (stage 1) or terminal StepUp (stage 2 — the chain ends there).
+        // StepUp is TERMINAL application-level step-up (never a chained
+        // PoW) and Deny rejects the submission. The chain ENDS at stage 2:
+        // a verified challenge whose metadata sidecar carries a
+        // server-stamped chainId never opens a third stage.
+        $chainEligible = false;
+        if ($this->risk !== null && $this->chainTickets !== null) {
+            try {
+                $chainEligible = !$this->verifiedChallengeCarriesChainMarker($token);
+            } catch (\Throwable) {
+                // The metadata sidecar could not be read (transient
+                // outage): the chain marker is treated as POSSIBLY present
+                // — no chain ticket is issued (a metadata-read failure
+                // must never open a third stage or a repeated-challenge
+                // loop). The verification itself still passes.
+                $chainEligible = false;
             }
         }
 
-        // The SAME success: expose the canonical jti + signed binding (the
-        // application's (jti, action) idempotency key stays stable across
-        // the retry) — no re-derive, no repeated side effects. The receipt
-        // is re-signed for the retry from the SAME consumed record — the
-        // payload is byte-identical (record fields only, no per-request
-        // timestamp), so a retry's receipt matches the original exactly.
-        $this->lastVerifiedJti = $record->nonce;
-        $request?->attributes->set(self::VERIFIED_JTI_ATTRIBUTE, $record->nonce);
-        $binding = $this->consumedBindingOf($record);
-        if ($binding !== null) {
-            $this->lastVerifiedRequestBinding = $binding;
+        // FORM-SUBMISSION HONEYPOT (post-verification): the expected
+        // decoy field name derives from the VERIFIED nonce
+        // ('decoy_' + substr(sha256(nonce), 0, 8) — the exact same
+        // derivation the challenge controller used when it emitted the
+        // field), and ONLY that exact field is inspected: any other
+        // decoy_XXXXXXXX field is ignored (a decoy name is
+        // server-issued and nonce-bound, so a mismatched name is not
+        // this challenge's decoy). A filled expected field records
+        // DecoyFieldSubmitted evidence AND feeds the post-solve
+        // assessment through the risk-v2 path (the honeypot signal
+        // actually moves the score). Evidence ONLY — never a gate and
+        // never affects the proof validity.
+        $honeypotHit = false;
+        if ($this->risk !== null && $request !== null) {
+            $honeypotHit = $this->formDecoyEvidence($request, self::expectedDecoyField($nonce));
         }
-        $this->signReceipt($record);
 
-        return 'success';
+        // NONCE -> DECISION CONSUMPTION: the short-lived nonce ->
+        // decision handle is CONSUMED (GETDEL, at most one winner). On
+        // scopes WITHOUT post_solve_check the ORIGINAL pre-issue decision
+        // id becomes the request's current decision id
+        // ({@see RiskGateway::setCurrentDecisionId()}), so the application
+        // can confirm this challenge's original decision. On post_solve_check
+        // scopes the superseded mapping is still consumed (cleanup — it can
+        // never be confirmed against a stale decision), and the fresh
+        // POST-SOLVE decision becomes the current confirmation target
+        // instead.
+        $originalDecisionId = null;
+        if ($this->risk !== null) {
+            $originalDecisionId = $this->consumeDecisionForToken($token);
+            if (!$postSolveScope && $originalDecisionId !== null) {
+                $this->risk->setCurrentDecisionId($originalDecisionId);
+            }
+        }
+
+        // HONEYPOT EVIDENCE: recorded with its nonce-derived idempotency
+        // key — a crash-taken-over re-assessment (or a concurrent retry
+        // that wins the takeover) re-uses the SAME dedupe identity, so the
+        // signal is never double-booked. Evidence only — a recording
+        // failure never breaks the form submission.
+        if ($honeypotHit) {
+            try {
+                $this->risk?->honeypotEvidence(
+                    RiskEventKind::DecoyFieldSubmitted,
+                    $constraint->scope,
+                    $ip,
+                    $session,
+                    'honeypot:'.hash('sha256', $nonce),
+                );
+            } catch (\Throwable) {
+                // Evidence only.
+            }
+        }
+
+        $mustReassess = $postSolveScope || $chainEligible || $honeypotHit;
+        if (!$mustReassess) {
+            // POST-SOLVE FEEDBACK: feed the valid outcome into the
+            // adaptive risk engine as plain SolveSuccess feedback (the
+            // gateway does NOT confirm its own post-solve decision —
+            // ConfirmedLegitimate / ConfirmedAbuse are application-only
+            // signals). The scope string is never validated against the
+            // policy map here — unknown scopes are handled by the gateway.
+            if ($this->risk !== null) {
+                $this->risk->solveOutcome($constraint->scope, $ip, $session, $outcome->error);
+            }
+
+            return new PostSolveDisposition(PostSolveDispositionKind::Pass, $originalDecisionId);
+        }
+
+        // POST-SOLVE CHECK: a fresh SolveSuccess assessment with the same
+        // context, ALWAYS keyed by the nonce-derived stable idempotency
+        // key — a takeover re-assessment never double-books risk signals.
+        // An unavailable risk signal (e.g. an unparseable or missing
+        // client IP) enforces the scope's DEGRADED friction instead of
+        // silently skipping the adaptive re-check — in BindingMode::None
+        // deployments a valid PoW must not pass with zero adaptive
+        // friction (mirrors the fail-safe degraded rule on the pre-issue
+        // path).
+        $postSolveKey = 'postsolve:'.hash('sha256', $nonce);
+        try {
+            $postSolve = $honeypotHit
+                ? $this->risk->postSolveDecisionV2(
+                    $constraint->scope,
+                    $ip,
+                    $session,
+                    null,
+                    $postSolveKey,
+                    $this->risk->clientContextV2(true, $session, null, null),
+                )
+                : $this->risk->postSolveDecision($constraint->scope, $ip, $session, null, $postSolveKey);
+        } catch (\InvalidArgumentException) {
+            $postSolve = $this->risk->degradedDecisionForScope($this->risk->scopeId($constraint->scope));
+        }
+
+        return $this->mapPostSolveDecision($token, $outcome, $request, $constraint, $nonce, $postSolve);
+    }
+
+    /**
+     * Map the post-solve decision to the final disposition:
+     *
+     *  - Deny            -> Deny;
+     *  - StepUp          -> StepUp (TERMINAL — never a chained PoW);
+     *  - Allow (or the required PoW level is already satisfied by the
+     *    solved challenge) -> Pass;
+     *  - STRICTLY STRONGER PoW required:
+     *      stage 2 (the verified challenge IS the open requirement's
+     *      stage-2 challenge — the obligation is marked verified
+     *      idempotently) -> StepUp (the chain ends at stage 2, never a
+     *      third stage);
+     *      stage 1 + chaining available (chaining enabled AND the
+     *      authoritative transaction binding resolved non-null — a raw
+     *      client-supplied binding without an authority is NEVER
+     *      sufficient) -> requireStage2(...) -> ChainRequired;
+     *      otherwise -> StepUp — a stronger-PoW requirement must NEVER
+     *      silently disappear when chaining is unavailable.
+     *
+     * @throws PostSolveDispositionUnavailableException when a stage-2
+     *                                                 obligation cannot be
+     *                                                 cleared or the chain
+     *                                                 requirement cannot be
+     *                                                 opened (fail closed —
+     *                                                 never a silent pass
+     *                                                 while the obligation
+     *                                                 may be uncleared)
+     */
+    private function mapPostSolveDecision(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $nonce, ?RiskDecision $postSolve): PostSolveDisposition
+    {
+        if ($postSolve === null) {
+            // The scope is unknown and the engine declines to evaluate:
+            // nothing to enforce beyond the solved proof.
+            return new PostSolveDisposition(PostSolveDispositionKind::Pass);
+        }
+        $decisionId = $postSolve->decisionId;
+
+        // DEPTH-2 DETECTION: the verified challenge may BE the stage-2
+        // challenge of an open chain requirement (its nonce equals the
+        // requirement's stage2Nonce). Whenever the reassessment runs for
+        // such a challenge, the obligation is marked verified
+        // (idempotent — a failure is fail-closed temporary_unavailable:
+        // never a final PASS while the obligation may be uncleared).
+        $requirement = $this->openRequirementFor($constraint, $request);
+        $isStage2 = false;
+        if ($requirement !== null && $requirement->stage2Nonce !== null && hash_equals($requirement->stage2Nonce, $nonce)) {
+            $isStage2 = true;
+            try {
+                $verified = $this->chainTickets->markVerified($requirement->chainId, $nonce);
+            } catch (\Throwable $e) {
+                throw new PostSolveDispositionUnavailableException('the chain obligation could not be marked verified', 0, $e);
+            }
+            if (!\in_array($verified, [ChainVerifiedResult::VerifiedNew, ChainVerifiedResult::VerifiedSame], true)) {
+                throw new PostSolveDispositionUnavailableException(sprintf('the chain obligation was not cleared (%s)', $verified->value));
+            }
+        }
+
+        if ($postSolve->action === RiskAction::Deny) {
+            return new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId);
+        }
+        if ($postSolve->action === RiskAction::StepUp) {
+            // StepUp is TERMINAL application-level step-up: it NEVER
+            // becomes a chain ticket (a ticket could later be spent on
+            // ordinary PoW instead of the application's step-up).
+            return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
+        }
+        if ($postSolve->action === RiskAction::Allow || $this->recordSatisfiesRequiredAction($token, $postSolve->action)) {
+            // The required PoW level is already satisfied by the solved
+            // challenge under the ACTUAL configured ladders.
+            return new PostSolveDisposition(PostSolveDispositionKind::Pass, $decisionId);
+        }
+
+        // STRICTLY STRONGER PoW required.
+        if ($isStage2) {
+            // The chain ENDS at stage 2: a still-stronger requirement is
+            // terminal StepUp, never a third stage.
+            return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
+        }
+
+        // Stage-1 solved challenge: the chain opens ONLY when chaining is
+        // available — enabled AND the AUTHORITATIVE transaction binding of
+        // the request resolves non-null (a raw client-supplied binding
+        // without an authority is NEVER sufficient).
+        $authoritativeBinding = $this->authoritativeBinding($constraint, $request);
+        if ($this->chainTickets !== null && $authoritativeBinding !== null) {
+            try {
+                $chainRequirement = $this->chainTickets->requireStage2(
+                    $nonce,
+                    $constraint->scope,
+                    $authoritativeBinding,
+                    $this->policyVersion,
+                    $postSolve->action,
+                    $this->chainExpiresAt(),
+                );
+            } catch (\Throwable $e) {
+                throw new PostSolveDispositionUnavailableException('the chain requirement could not be opened', 0, $e);
+            }
+            $chainId = $chainRequirement->chainId;
+            if (!\is_string($chainId) || $chainId === '') {
+                throw new PostSolveDispositionUnavailableException('the chain requirement carries no chain id');
+            }
+
+            return new PostSolveDisposition(PostSolveDispositionKind::ChainRequired, $decisionId, $chainId);
+        }
+
+        // Chaining unavailable (disabled or no authoritative binding): the
+        // stronger-PoW requirement must NEVER silently disappear — it
+        // surfaces as terminal StepUp instead.
+        return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
+    }
+
+    /**
+     * The authoritative transaction binding of the request via the wired
+     * binding authority, or null when no authority is wired or it declines
+     * (chaining then never opens — a raw client-supplied binding without
+     * an authority is never sufficient).
+     */
+    private function authoritativeBinding(KiwiCaptcha $constraint, ?Request $request): ?string
+    {
+        if ($this->bindingAuthority === null || $request === null) {
+            return null;
+        }
+        try {
+            $binding = $this->bindingAuthority->resolve($request, $constraint->scope, $this->requestBindingFromRequest($request));
+        } catch (\Throwable) {
+            // An authority failure fails toward MORE security: no
+            // authoritative binding -> no chain -> terminal StepUp.
+            return null;
+        }
+
+        return \is_string($binding) && $binding !== '' ? $binding : null;
+    }
+
+    /**
+     * The OPEN chain requirement of this request's (scope, authoritative
+     * binding, policy epoch), or null when none exists / chaining or the
+     * authority is unavailable. Used for the stage-2 detection: a verified
+     * challenge whose nonce equals the requirement's stage2Nonce IS the
+     * stage-2 challenge — the chain ends there.
+     */
+    private function openRequirementFor(KiwiCaptcha $constraint, ?Request $request): ?ChainRequirement
+    {
+        if ($this->chainTickets === null) {
+            return null;
+        }
+        $binding = $this->authoritativeBinding($constraint, $request);
+        if ($binding === null) {
+            return null;
+        }
+        try {
+            return $this->chainTickets->findOpenRequirement($constraint->scope, $binding, $this->policyVersion);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * The absolute expiry of a chain ticket: now + the configured chain
+     * lifetime (risk.chaining.ttl_secs). The SAME value opens the stage-2
+     * requirement (requireStage2) and re-signs the ticket of a persisted
+     * CHAIN_REQUIRED disposition, so a replay reproduces the same ticket
+     * shape.
+     */
+    private function chainExpiresAt(): int
+    {
+        return time() + max(1, $this->chainTtlSecs);
+    }
+
+    /**
+     * JTI + BINDING passthrough for an ACCEPTED verification: exposes the
+     * canonical jti — the core's VerifyOutcome::nonce(), the challenge
+     * nonce of the CONSUMED record — and the record's signed transaction
+     * binding (VerifyOutcome::requestBinding()) to the application, both
+     * via {@see verifiedJti()} / {@see verifiedRequestBinding()} and the
+     * request attribute (VERIFIED_JTI_ATTRIBUTE; request-scoped and
+     * race-free for web flows). The application keys its business
+     * operation idempotency on (jti, action): a retry carrying the same
+     * jti must never create a second operation (see README). Also exports
+     * the Ed25519 result receipt when signing is configured.
+     */
+    private function finishSuccessfulApplicationVerification(string $value, VerifyOutcome $outcome, ?Request $request): void
+    {
+        $jti = null;
+        if (\method_exists($outcome, 'nonce')) {
+            $jti = $outcome->nonce();
+        }
+        if (!\is_string($jti) || $jti === '') {
+            // Compat fallback (cores predating VerifyOutcome::nonce()):
+            // the canonical jti is the consumed record's nonce, which
+            // equals the solution token's nonce (verification just
+            // succeeded against that record).
+            try {
+                $jti = SolutionToken::decode($value)->nonce;
+            } catch (DecodeError) {
+                $jti = null;
+            }
+        }
+        if (\is_string($jti) && $jti !== '') {
+            $this->lastVerifiedJti = $jti;
+            $request?->attributes->set(self::VERIFIED_JTI_ATTRIBUTE, $jti);
+        }
+        if (\method_exists($outcome, 'requestBinding')) {
+            $this->lastVerifiedRequestBinding = $outcome->requestBinding();
+        }
+
+        // RESULT RECEIPT: an ACCEPTED verification can be exported as an
+        // Ed25519-signed receipt for third parties holding the PUBLIC key.
+        // The receipt is signed from the CONSUMED RECORD's own fields and
+        // carries the FULL replay-critical set — jti, tenant (scope),
+        // action (PoW algorithm), request_binding, issued_at / expires_at,
+        // issuer (the payload is public by construction — no secret
+        // material; the HMAC verification secret itself never leaves the
+        // server). Signature verification alone is NOT sufficient for
+        // single-use actions: the integrator must atomically record the
+        // jti (INSERT IF NOT EXISTS) and treat a pre-existing jti as a
+        // replay (README).
+        if ($this->receiptSigner !== null && $jti !== null) {
+            $this->signReceipt($this->findRecordByNonce($jti));
+        }
     }
 
     /**
@@ -767,27 +1115,22 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * decoy field is compared against the EXACT expected name derived from
      * the VERIFIED nonce ({@see self::expectedDecoyField()} — the same
      * per-issuance derivation the challenge controller uses when it emits
-     * the field). A filled expected field feeds
-     * RiskEventKind::DecoyFieldSubmitted into the risk gateway as honeypot
-     * evidence AND reports the hit so the post-solve assessment runs the
-     * risk-v2 path (the honeypot signal actually moves the score). Any
-     * OTHER decoy_XXXXXXXX field is ignored — a decoy name is
-     * server-issued and nonce-bound, so a mismatched name is not this
-     * challenge's decoy. Evidence ONLY: never a gate and never affects the
-     * proof validity. Never throws — a broken gateway must never break the
-     * form.
+     * the field). Returns whether the exact decoy was filled: the caller
+     * then records the DecoyFieldSubmitted evidence (with the nonce-derived
+     * honeypot:<sha256(nonce)> idempotency key — a crash-taken-over
+     * computation never double-books the signal) and runs the post-solve
+     * assessment through the risk-v2 path (the honeypot signal actually
+     * moves the score). Any OTHER decoy_XXXXXXXX field is ignored — a
+     * decoy name is server-issued and nonce-bound, so a mismatched name is
+     * not this challenge's decoy. Evidence ONLY: never a gate and never
+     * affects the proof validity. Never throws — a broken gateway must
+     * never break the form.
      */
-    private function formDecoyEvidence(Request $request, string $expectedField, string $scope, string $ip, ?string $session): bool
+    private function formDecoyEvidence(Request $request, string $expectedField): bool
     {
         $value = $request->request->get($expectedField);
         if (!\is_string($value) || $value === '') {
             return false;
-        }
-        try {
-            $this->risk?->honeypotEvidence(RiskEventKind::DecoyFieldSubmitted, $scope, $ip, $session);
-        } catch (\Throwable) {
-            // Evidence only — a recording failure never breaks the form
-            // submission.
         }
 
         return true;

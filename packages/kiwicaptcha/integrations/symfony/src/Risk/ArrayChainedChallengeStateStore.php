@@ -4,28 +4,59 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
+use KiwiCaptcha\Risk\RiskAction;
+
 /**
  * In-memory chained-challenge state store for tests/dev (single-process
- * semantics), mirroring the Redis store's owner-scoped three-state machine
- * exactly: available -> reserved(owner, leaseUntil) -> completed(
- * stage2Nonce), with an owner-gated release undoing a reservation and an
- * owner-gated complete transitioning to the TERMINAL completed state (a
- * completed record is kept — never deleted — so a retry recovers the
- * issued challenge). A non-owner release/complete is an atomic no-op, and
- * an expired lease is taken over by the next reserving owner.
+ * semantics), mirroring the Redis store's transactional v2 machine EXACTLY:
+ * obligation-anchored create-or-get (a transaction can never be silently
+ * downgraded to stage 1), available -> reserved(owner, SHORT lease) ->
+ * issued(stage2Nonce) -> verified(stage2Nonce) with VERIFIED TERMINAL (the
+ * verified transition clears the obligation mapping only while it still
+ * points at this chain), the idempotent owner-gated issuance transition
+ * (never a delete — a retry recovers the issued challenge instead of
+ * re-minting), the nonce-pinned rearm (issued -> available for a FRESH
+ * stage-2 mint — never a stage-1), the owner-gated release (a non-owner
+ * release is an atomic no-op), and the DEPRECATED legacy complete()
+ * writing the historical 'completed' terminal state (semantically
+ * identical to issued).
  *
  * EXPLICIT CLOCK: the store runs on a caller-provided clock (unix
  * seconds, defaulting to microtime(true)) so the record TTL and the
  * reservation lease expiry are enforceable — tests advance the clock to
  * exercise the expired-lease takeover, mirroring redis TIME on the
  * production store.
+ *
+ * EVERY record is decoded ALL-OR-NOTHING against the strict v2 schema
+ * (the identical decode as the Redis store): a missing/malformed field or
+ * a state-invariant violation throws
+ * {@see MalformedChainedChallengeStateException} — NEVER a defaulted
+ * record (a corrupt requiredAction must never become '', policyVersion
+ * never 1, chainDepth never 2, state never available).
  */
-final class ArrayChainedChallengeStateStore implements ChainedChallengeStateStore
+final class ArrayChainedChallengeStateStore implements TransactionalChainedChallengeStateStore
 {
+    /** The Kiwi challenge nonce shape: base64 of 32 random bytes. */
+    private const NONCE_PATTERN = '/^[A-Za-z0-9+\/]{43}=$/D';
+
+    /** The canonical scope/identifier shape (the controller's charset). */
+    private const IDENTIFIER_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
+
+    /** The obligation id: HMAC-SHA256 of the transaction triple, hex. */
+    private const OBLIGATION_PATTERN = '/^[0-9a-f]{64}$/D';
+
+    /** The chainable PoW actions (Sha16..Argon64 — never StepUp/Deny). */
+    private const CHAINABLE_ACTIONS = ['sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64'];
+
+    private const STATES = ['available', 'reserved', 'issued', 'verified', 'completed'];
+
     /**
-     * @var array<string, array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, expiresAt: float}>
+     * @var array<string, array{v: int, stage1Nonce: string, scope: string, obligationId: string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: string, owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, requestBinding: ?string, expiresAt: float}>
      */
     private array $records = [];
+
+    /** @var array<string, string> obligationId => chainId */
+    private array $obligations = [];
 
     /**
      * @param \Closure|null $now test seam: returns the current unix
@@ -42,40 +73,145 @@ final class ArrayChainedChallengeStateStore implements ChainedChallengeStateStor
 
     public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
     {
+        // The deprecated legacy path is NOT transaction-anchored (it
+        // carries no obligation id): the record carries a DERIVED
+        // placeholder obligation id (never a real transaction mapping —
+        // hash of the random chain id, no obligation entry is written), so
+        // the strict v2 decode stays satisfied.
+        if ($requiredAction === null || !\in_array($requiredAction, self::CHAINABLE_ACTIONS, true)) {
+            throw new \InvalidArgumentException('a chainable requiredAction (Sha16..Argon64) is required to create a chain record');
+        }
+        $requestBinding = $requestBinding !== '' ? $requestBinding : null;
         $this->records[$chainId] = [
+            'v' => 2,
             'stage1Nonce' => $stage1Nonce,
             'scope' => $scope,
-            'requestBinding' => $requestBinding,
+            'obligationId' => hash('sha256', $chainId),
             'requiredAction' => $requiredAction,
+            'requiredRank' => RiskAction::from($requiredAction)->rank(),
             'policyVersion' => $policyVersion,
             'chainDepth' => 2,
             'state' => 'available',
             'owner' => null,
             'leaseUntil' => null,
             'stage2Nonce' => null,
-            'expiresAt' => $this->clock() + max(1, $ttlSecs),
+            'requestBinding' => $requestBinding,
+            'expiresAt' => (int) ($this->clock() + max(1, $ttlSecs)),
         ];
+    }
+
+    public function createWithObligation(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $ttlSecs): void
+    {
+        if (preg_match(self::OBLIGATION_PATTERN, $obligationId) !== 1) {
+            throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
+        }
+        if (!\in_array($requiredAction, self::CHAINABLE_ACTIONS, true)) {
+            throw new \InvalidArgumentException('a chainable requiredAction (Sha16..Argon64) is required to create a chain record');
+        }
+        $requestBinding = $requestBinding !== '' ? $requestBinding : null;
+        $this->records[$chainId] = [
+            'v' => 2,
+            'stage1Nonce' => $stage1Nonce,
+            'scope' => $scope,
+            'obligationId' => $obligationId,
+            'requiredAction' => $requiredAction,
+            'requiredRank' => RiskAction::from($requiredAction)->rank(),
+            'policyVersion' => $policyVersion,
+            'chainDepth' => 2,
+            'state' => 'available',
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => null,
+            'requestBinding' => $requestBinding,
+            'expiresAt' => (int) ($this->clock() + max(1, $ttlSecs)),
+        ];
+        $this->obligations[$obligationId] = $chainId;
+    }
+
+    public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
+    {
+        if (preg_match(self::OBLIGATION_PATTERN, $obligationId) !== 1) {
+            throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
+        }
+        $existing = $this->obligations[$obligationId] ?? null;
+        if ($existing !== null) {
+            $record = $this->records[$existing] ?? null;
+            if ($record !== null && $record['expiresAt'] > $this->clock()) {
+                // The obligation exists: return the existing chain id,
+                // RAISING the required rank/action when the new
+                // reassessment is stronger (never lower).
+                if ($requiredRank > $record['requiredRank']) {
+                    $this->records[$existing]['requiredRank'] = $requiredRank;
+                    $this->records[$existing]['requiredAction'] = $requiredAction;
+                }
+
+                return $existing;
+            }
+            // The obligation points at a missing/expired/corrupt chain:
+            // compare-delete the stale mapping and create fresh (the
+            // atomic retry of the Redis script).
+            if (($this->obligations[$obligationId] ?? null) === $existing) {
+                unset($this->obligations[$obligationId]);
+            }
+        }
+        $this->records[$chainId] = [
+            'v' => 2,
+            'stage1Nonce' => $stage1Nonce,
+            'scope' => $scope,
+            'obligationId' => $obligationId,
+            'requiredAction' => $requiredAction,
+            'requiredRank' => $requiredRank,
+            'policyVersion' => $policyVersion,
+            'chainDepth' => 2,
+            'state' => 'available',
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => null,
+            'requestBinding' => $requestBinding !== '' ? $requestBinding : null,
+            'expiresAt' => (int) $expiresAt,
+        ];
+        $this->obligations[$obligationId] = $chainId;
+
+        return $chainId;
+    }
+
+    public function obligationChainId(string $obligationId): ?string
+    {
+        $chainId = $this->obligations[$obligationId] ?? null;
+        if ($chainId === null) {
+            return null;
+        }
+        $record = $this->records[$chainId] ?? null;
+        if ($record === null || $record['expiresAt'] <= $this->clock()) {
+            unset($this->obligations[$obligationId]);
+
+            return null;
+        }
+
+        return $chainId;
     }
 
     public function read(string $chainId): ?array
     {
-        $record = $this->records[$chainId] ?? null;
-        if ($record === null || $record['expiresAt'] <= $this->clock()) {
-            unset($this->records[$chainId]);
-
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
             return null;
         }
 
         return self::wire($record);
     }
 
-    public function reserve(string $chainId, string $ownerToken, int $ttlSecs): string
+    public function reserve(string $chainId, string $ownerToken, int $leaseSecs): string
     {
-        $record = $this->records[$chainId] ?? null;
-        if ($record === null || $record['expiresAt'] <= $this->clock()) {
-            unset($this->records[$chainId]);
-
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
             return 'missing';
+        }
+        if ($record['state'] === 'issued') {
+            return 'issued';
+        }
+        if ($record['state'] === 'verified') {
+            return 'verified';
         }
         if ($record['state'] === 'completed') {
             return 'completed';
@@ -89,20 +225,22 @@ final class ArrayChainedChallengeStateStore implements ChainedChallengeStateStor
             }
             // Expired lease: takeover (the whole record expires with the
             // signed ticket anyway — the lease can never outlive it).
+            $this->records[$chainId]['owner'] = $ownerToken;
+            $this->records[$chainId]['leaseUntil'] = $this->leaseDeadline($record, $leaseSecs);
+
+            return 'taken_over';
         }
         $this->records[$chainId]['state'] = 'reserved';
         $this->records[$chainId]['owner'] = $ownerToken;
-        $this->records[$chainId]['leaseUntil'] = (int) ($this->clock() + max(1, $record['expiresAt'] - $this->clock()));
+        $this->records[$chainId]['leaseUntil'] = $this->leaseDeadline($record, $leaseSecs);
 
         return 'available';
     }
 
     public function release(string $chainId, string $ownerToken): void
     {
-        $record = $this->records[$chainId] ?? null;
-        if ($record === null || $record['expiresAt'] <= $this->clock()) {
-            unset($this->records[$chainId]);
-
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
             return;
         }
         if ($record['state'] !== 'reserved' || $record['owner'] !== $ownerToken) {
@@ -113,12 +251,84 @@ final class ArrayChainedChallengeStateStore implements ChainedChallengeStateStor
         $this->records[$chainId]['leaseUntil'] = null;
     }
 
+    public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): string
+    {
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'reserved') {
+            if ($record['owner'] !== $ownerToken) {
+                return 'not_owner';
+            }
+            $this->records[$chainId]['state'] = 'issued';
+            $this->records[$chainId]['stage2Nonce'] = $stage2Nonce;
+            $this->records[$chainId]['owner'] = null;
+            $this->records[$chainId]['leaseUntil'] = null;
+
+            return 'issued_new';
+        }
+        if ($record['state'] === 'issued' || $record['state'] === 'completed') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'issued_same' : 'conflict';
+        }
+        if ($record['state'] === 'verified') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'verified_same' : 'conflict';
+        }
+
+        return 'not_owner';
+    }
+
+    public function markVerified(string $chainId, string $stage2Nonce): string
+    {
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'verified') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'verified_same' : 'conflict';
+        }
+        if (($record['state'] !== 'issued' && $record['state'] !== 'completed') || $record['stage2Nonce'] !== $stage2Nonce) {
+            return 'conflict';
+        }
+        $this->records[$chainId]['state'] = 'verified';
+        // The VERIFIED transition clears the obligation mapping ONLY
+        // while it still points at this chain (a re-created chain of the
+        // same transaction must never be unlinked by a stale delete).
+        if (($this->obligations[(string) $record['obligationId']] ?? null) === $chainId) {
+            unset($this->obligations[(string) $record['obligationId']]);
+        }
+
+        return 'verified_new';
+    }
+
+    public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
+    {
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
+            return false;
+        }
+        if (($record['state'] !== 'issued' && $record['state'] !== 'completed') || $record['stage2Nonce'] !== $expectedStage2Nonce) {
+            return false;
+        }
+        $this->records[$chainId]['state'] = 'available';
+        $this->records[$chainId]['owner'] = null;
+        $this->records[$chainId]['leaseUntil'] = null;
+        $this->records[$chainId]['stage2Nonce'] = null;
+
+        return true;
+    }
+
+    public function deleteObligation(string $chainId, string $obligationId): void
+    {
+        if (($this->obligations[$obligationId] ?? null) === $chainId) {
+            unset($this->obligations[$obligationId]);
+        }
+    }
+
     public function complete(string $chainId, string $ownerToken, string $stage2Nonce): ?array
     {
-        $record = $this->records[$chainId] ?? null;
-        if ($record === null || $record['expiresAt'] <= $this->clock()) {
-            unset($this->records[$chainId]);
-
+        $record = $this->liveRecord($chainId);
+        if ($record === null) {
             return null;
         }
         if ($record['state'] !== 'reserved' || $record['owner'] !== $ownerToken) {
@@ -126,17 +336,145 @@ final class ArrayChainedChallengeStateStore implements ChainedChallengeStateStor
         }
         $this->records[$chainId]['state'] = 'completed';
         $this->records[$chainId]['stage2Nonce'] = $stage2Nonce;
+        $this->records[$chainId]['owner'] = null;
+        $this->records[$chainId]['leaseUntil'] = null;
 
         return self::wire($this->records[$chainId]);
     }
 
     /**
-     * The wire shape of a record: the server-held fields without the
-     * internal expiry bookkeeping.
+     * The LIVE record of a chain: absent -> null, CORRUPT -> the strict
+     * v2 decode throws (fail closed — a corrupt server record can never
+     * be transitioned into valid state), expired -> null (the record is
+     * cleaned up).
      *
-     * @param array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, expiresAt: float} $record
+     * @return array<string, mixed>|null
+     */
+    private function liveRecord(string $chainId): ?array
+    {
+        $record = $this->records[$chainId] ?? null;
+        if ($record === null) {
+            return null;
+        }
+        self::validateState($record);
+        if ($record['expiresAt'] <= $this->clock()) {
+            unset($this->records[$chainId]);
+
+            return null;
+        }
+
+        return $record;
+    }
+
+    /**
+     * The SHORT reservation lease deadline: min(reservation lease, the
+     * record's OWN remaining TTL) — the whole record expires with the
+     * signed ticket, so the lease can never outlive the chain.
      *
-     * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string}
+     * @param array<string, mixed> $record
+     */
+    private function leaseDeadline(array $record, int $leaseSecs): int
+    {
+        $remaining = (int) max(1, $record['expiresAt'] - $this->clock());
+        $lease = max(1, $leaseSecs);
+        if ($remaining < $lease) {
+            $lease = $remaining;
+        }
+
+        return (int) $this->clock() + $lease;
+    }
+
+    /**
+     * The strict v2 decode — ALL-OR-NOTHING, IDENTICAL to the Redis
+     * store's decode: a missing/malformed field or a state-invariant
+     * violation throws {@see MalformedChainedChallengeStateException}
+     * (NEVER defaults). Validates: schema version 2; the Kiwi base64
+     * nonce shape; the canonical scope shape; the exact
+     * 64-lowercase-hex obligation id; a chainable PoW action (Sha16..
+     * Argon64 — never StepUp/Deny); a bounded rank CONSISTENT with the
+     * action; a positive policy version; chain depth exactly 2; the exact
+     * state enum; owner/leaseUntil REQUIRED in reserved and NULL
+     * elsewhere; stage2Nonce REQUIRED in issued/verified/completed and
+     * NULL elsewhere; an integer expiry; a well-shaped nullable request
+     * binding.
+     *
+     * @param array<string, mixed> $rec
+     *
+     * @return array<string, mixed> the validated record
+     *
+     * @throws MalformedChainedChallengeStateException
+     */
+    private static function validateState(array $rec): array
+    {
+        if (($rec['v'] ?? null) !== 2) {
+            throw new MalformedChainedChallengeStateException('chain record schema version must be 2');
+        }
+        $stage1Nonce = $rec['stage1Nonce'] ?? null;
+        if (!\is_string($stage1Nonce) || preg_match(self::NONCE_PATTERN, $stage1Nonce) !== 1) {
+            throw new MalformedChainedChallengeStateException('chain record stage1Nonce must be a Kiwi base64 nonce');
+        }
+        $scope = $rec['scope'] ?? null;
+        if (!\is_string($scope) || preg_match(self::IDENTIFIER_PATTERN, $scope) !== 1) {
+            throw new MalformedChainedChallengeStateException('chain record scope must match the canonical identifier shape');
+        }
+        $obligationId = $rec['obligationId'] ?? null;
+        if (!\is_string($obligationId) || preg_match(self::OBLIGATION_PATTERN, $obligationId) !== 1) {
+            throw new MalformedChainedChallengeStateException('chain record obligationId must be 64 lowercase hex characters');
+        }
+        $requiredAction = $rec['requiredAction'] ?? null;
+        if (!\is_string($requiredAction) || !\in_array($requiredAction, self::CHAINABLE_ACTIONS, true)) {
+            throw new MalformedChainedChallengeStateException('chain record requiredAction must be a chainable PoW action (Sha16..Argon64)');
+        }
+        $requiredRank = $rec['requiredRank'] ?? null;
+        if (!\is_int($requiredRank) || $requiredRank !== RiskAction::from($requiredAction)->rank()) {
+            throw new MalformedChainedChallengeStateException('chain record requiredRank must be the rank of the required action');
+        }
+        $policyVersion = $rec['policyVersion'] ?? null;
+        if (!\is_int($policyVersion) || $policyVersion < 1) {
+            throw new MalformedChainedChallengeStateException('chain record policyVersion must be a positive integer');
+        }
+        if (($rec['chainDepth'] ?? null) !== 2) {
+            throw new MalformedChainedChallengeStateException('chain record chainDepth must be exactly 2');
+        }
+        $state = $rec['state'] ?? null;
+        if (!\is_string($state) || !\in_array($state, self::STATES, true)) {
+            throw new MalformedChainedChallengeStateException('chain record state must be one of available|reserved|issued|verified');
+        }
+        $owner = $rec['owner'] ?? null;
+        $leaseUntil = $rec['leaseUntil'] ?? null;
+        if ($state === 'reserved') {
+            if (!\is_string($owner) || $owner === '' || !\is_int($leaseUntil)) {
+                throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil are required in the reserved state');
+            }
+        } elseif ($owner !== null || $leaseUntil !== null) {
+            throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
+        }
+        $stage2Nonce = $rec['stage2Nonce'] ?? null;
+        if (($state === 'issued' || $state === 'verified' || $state === 'completed')) {
+            if (!\is_string($stage2Nonce) || $stage2Nonce === '') {
+                throw new MalformedChainedChallengeStateException('chain record stage2Nonce is required in the issued/verified states');
+            }
+        } elseif ($stage2Nonce !== null) {
+            throw new MalformedChainedChallengeStateException('chain record stage2Nonce must be null in the available/reserved states');
+        }
+        $requestBinding = $rec['requestBinding'] ?? null;
+        if ($requestBinding !== null && (!\is_string($requestBinding) || preg_match(self::IDENTIFIER_PATTERN, $requestBinding) !== 1)) {
+            throw new MalformedChainedChallengeStateException('chain record requestBinding must match the canonical identifier shape or be null');
+        }
+        if (!\is_int($rec['expiresAt'] ?? null)) {
+            throw new MalformedChainedChallengeStateException('chain record expiresAt must be an integer');
+        }
+
+        return $rec;
+    }
+
+    /**
+     * The wire shape of a strictly-decoded record: the server-held fields
+     * without the internal expiry bookkeeping.
+     *
+     * @param array<string, mixed> $record
+     *
+     * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, requiredRank: int, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'issued'|'verified'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, obligationId: string, expiresAt: int}
      */
     private static function wire(array $record): array
     {
@@ -145,12 +483,15 @@ final class ArrayChainedChallengeStateStore implements ChainedChallengeStateStor
             'scope' => $record['scope'],
             'requestBinding' => $record['requestBinding'],
             'requiredAction' => $record['requiredAction'],
+            'requiredRank' => $record['requiredRank'],
             'policyVersion' => $record['policyVersion'],
             'chainDepth' => $record['chainDepth'],
             'state' => $record['state'],
             'owner' => $record['owner'],
             'leaseUntil' => $record['leaseUntil'],
             'stage2Nonce' => $record['stage2Nonce'],
+            'obligationId' => $record['obligationId'],
+            'expiresAt' => (int) $record['expiresAt'],
         ];
     }
 }

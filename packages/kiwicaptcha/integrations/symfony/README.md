@@ -176,7 +176,7 @@ kiwi_captcha:
 
 ## Privacy modes
 
-`privacy_mode` (default **strict**) is the audit-driven privacy contract:
+`privacy_mode` (default **strict**) is the privacy contract:
 
 - **strict** — the extension *forces* the privacy-sensitive options
   regardless of what the operator wrote in the config file:
@@ -1054,6 +1054,26 @@ TWO BINDING MODES:
   `KiwiCaptchaValidator::verifiedRequestBinding()`
   (`VerifyOutcome::requestBinding()`).
 
+### Transaction bindings
+
+Non-skippable chaining requires a server-authoritative per-transaction
+binding resolved by the application through the
+`RequestBindingAuthorityInterface`: the binding signed into the challenge
+comes from the authority, never from the client. A raw client-supplied
+hidden form field alone is NOT a security-bound transaction identity — it
+proves nothing about a trusted backend decision. When the authority is
+configured, the controller never signs an untrusted client string: a
+client-supplied value is resolved against the authority's server-held
+transaction state, and only the resolved authoritative binding is signed.
+An open stage-2 obligation is stored server-side against the authoritative
+transaction binding. A challenge request for that transaction cannot
+restart at stage 1 by omitting or discarding the client ticket.
+
+- `risk.request_binding_authority` — the service id of the application's
+  `RequestBindingAuthorityInterface` implementation.
+- `risk.chaining.reservation_lease_secs` — the server-side reservation
+  lease for a chained transaction (default 15 s).
+
 ### Ambiguous-consume deterministic retry
 
 The storage's `consume()` is a consumed-state TRANSITION: records persist
@@ -1088,6 +1108,25 @@ The validator's resolution reads the consumed state from the STORED RECORD
 consumed-state core fields; the bundle probes them defensively, so cores predating
 the transition keep the legacy behavior: an ambiguous consume stays
 `temporary_unavailable` and a retry burns nothing).
+
+### Deterministic final disposition
+
+The verification result and the application-level outcome are two
+deterministic replay layers, both keyed by the challenge nonce:
+
+1. **Core `consumed_result`** — the deterministic result of the
+   cryptographic proof, committed to the consumed record by the verifier
+   and replayed as-is on a re-submission.
+2. **`PostSolveDispositionStore`** — the deterministic final result of the
+   risk/application policy (`PASS` | `DENY` | `STEP_UP` | `CHAIN_REQUIRED`),
+   stored nonce-keyed, so a replayed valid proof reproduces the same
+   application-level result; `DENY`, `STEP_UP` and `CHAIN_REQUIRED` can
+   never be replayed into a `PASS`. The store's lifetime covers the
+   retained core result horizon.
+
+Stage-2 issuance transitions the chain to issued; only successful
+verification of that exact stage-2 nonce transitions it to the terminal
+verified state.
 
 ### Argon2 admission wait-queue bound
 
@@ -1172,8 +1211,7 @@ behavior).
 
 ## Operational deployment guidance
 
-**Disable TLS 1.3 0-RTT (early data) for the verification surface (audit
-#61).** TLS 1.3 0-RTT replays the client's first flight: a captured
+**Disable TLS 1.3 0-RTT (early data) for the verification surface.** TLS 1.3 0-RTT replays the client's first flight: a captured
 challenge-verify request (the form POST carrying the solution token, and
 the Rust service's `/verify` + `/redeem` paths) can be replayed verbatim to
 the server. KiwiCaptcha's token is single-use — the FIRST 0-RTT replay wins
@@ -1770,8 +1808,8 @@ and only after the cheap validation checks. Two gate backends:
 - **Redis-backed admission (cross-worker) — tokenized leases.** When the
   bundle has a Redis client — the `redis_service` config option, or the
   configured storage itself when it is `KiwiCaptcha\Storage\RedisStorage`
-  (its client is reused) — the cap is enforced with the audit's
-  tokenized-lease design (`src/Security/RedisAdmissionSemaphore.php`): each
+  (its client is reused) — the cap is enforced with the tokenized-lease
+  design (`src/Security/RedisAdmissionSemaphore.php`): each
   `acquire()` mints a unique 16-byte lease token stored as a sorted-set
   member scored at its expiry (45 s), and `release()` removes EXACTLY that
   token. A stale release — releasing a lease that expired or was already

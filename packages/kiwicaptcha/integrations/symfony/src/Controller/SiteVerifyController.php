@@ -79,7 +79,16 @@ use Symfony\Component\HttpFoundation\Response;
  *    successful again through another idempotency UUID. The claim
  *    additionally binds the canonicalized remoteip fingerprint, so the
  *    same idempotency key with a changed remoteip CONFLICTS instead of
- *    reusing an outcome derived under another IP.
+ *    reusing an outcome derived under another IP. When the original
+ *    attempt consumed the token but lost its reply BEFORE the
+ *    derivation/commit (consumed_result stays null forever for the
+ *    ordinary verifier — ConsumeIndeterminate), the SAME identity proof
+ *    authorizes a narrowly scoped RESUME of the interrupted derivation
+ *    ({@see Verifier::resumeConsumedOperation()}) — the caller has shown
+ *    this exact logical operation won the atomic consume, so the
+ *    derivation can be re-run and committed; native replay security is
+ *    unaffected (the ordinary verify path still reports
+ *    ConsumeIndeterminate for a consumed-without-result token).
  */
 final class SiteVerifyController
 {
@@ -534,32 +543,58 @@ final class SiteVerifyController
         }
 
         // Crash recovery FIRST: this request now OWNS the claim (claim or
-        // takeover) — if the token was already consumed and a
-        // deterministic outcome was committed, reconstruct it directly.
-        // This works even when the signed challenge has expired in the
-        // meantime (a token submitted late in its lifetime): the retained
-        // outcome is the original logical result, not a fresh redemption.
-        // Reconstruction runs ONLY on the takeover path — the request has
-        // PROVEN the idempotency identity against the pre-existing entry
-        // (same backend + key + response hash + remote-IP fingerprint)
-        // AND the CONSUMED RECORD'S OWN operation identity equals this
-        // claim's fingerprint: the identity was written atomically with
-        // the pending→consumed transition, so it is provably the ACTUAL
-        // atomic consume winner's. A missing identity (a no-key first
-        // redemption, a storage without identity support, or a
-        // different-UUID claim's fingerprint) REFUSES reconstruction — a
-        // freshly claimed entry (an ordinary replay under a different or
-        // new key) must NOT reconstruct: the compatibility boundary keeps
-        // mapping a consumed token to timeout-or-duplicate via the
-        // verifier's own replay path.
+        // takeover) — if the token was already consumed, reconstruct the
+        // original deterministic outcome. This works even when the signed
+        // challenge has expired in the meantime (a token submitted late in
+        // its lifetime): the retained outcome is the original logical
+        // result, not a fresh redemption. Reconstruction runs ONLY on the
+        // takeover path — the request has PROVEN the idempotency identity
+        // against the pre-existing entry (same backend + key + response
+        // hash + remote-IP fingerprint) AND the CONSUMED RECORD'S OWN
+        // operation identity equals this claim's fingerprint: the identity
+        // was written atomically with the pending→consumed transition, so
+        // it is provably the ACTUAL atomic consume winner's. A missing
+        // identity (a no-key first redemption, a storage without identity
+        // support, or a different-UUID claim's fingerprint) REFUSES
+        // reconstruction — a freshly claimed entry (an ordinary replay
+        // under a different or new key) must NOT reconstruct: the
+        // compatibility boundary keeps mapping a consumed token to
+        // timeout-or-duplicate via the verifier's own replay path.
+        //
+        // Two sub-cases of the identity-proven takeover:
+        //  - COMMITTED-RESULT RECONSTRUCTION: the original attempt consumed
+        //    AND committed its deterministic outcome — the retained
+        //    consumed_result reproduces the original outcome without
+        //    re-deriving (ConsumedOutcomeRecovery).
+        //  - UNCOMMITTED-RESULT RESUME: the original attempt consumed (the
+        //    atomic transition landed and recorded this claim's identity)
+        //    but the response was lost BEFORE the derivation/commit —
+        //    consumed_result stays null forever for the ordinary verifier
+        //    (ConsumeIndeterminate). The resume path is authorized ONLY by
+        //    the exact operation-identity match just proven: the caller
+        //    has shown that THIS logical operation won the atomic consume,
+        //    so the derivation can be re-run and committed (the same
+        //    deterministic outcome the original attempt would have
+        //    committed).
         $reconstructed = null;
+        $resumeOutcome = null;
         if ($idempotent && $claim === IdempotencyClaim::TookOver) {
             try {
                 $consumed = $this->storage instanceof ConsumedStateReadableInterface
                     ? $this->storage->consumedState($token->nonce)
                     : null;
                 if ($consumed?->operationIdentity === $operationFingerprint) {
-                    $reconstructed = $this->recovery->recover($response);
+                    if ($consumed->consumedResult !== null) {
+                        $reconstructed = $this->recovery->recover($response);
+                    } else {
+                        $resumeOutcome = $this->verifier->resumeConsumedOperation(
+                            $response,
+                            $this->secretKey,
+                            $operationFingerprint,
+                            $expectedScope,
+                            $remoteIp,
+                        );
+                    }
                 }
             } catch (\Throwable) {
                 // A consumed-state/recovery-store outage on the takeover
@@ -575,6 +610,31 @@ final class SiteVerifyController
                 return $canonicalResponse;
             }
             $canonical = $this->canonicalizeResponse($canonicalResponse);
+            if ($claimOwner !== null) {
+                $failed = $this->finalizeSafely($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, $claimedAt);
+                if ($failed !== null) {
+                    return $failed;
+                }
+            }
+
+            return new JsonResponse($canonical);
+        }
+        if ($resumeOutcome !== null) {
+            // The resumed outcome maps through the SAME canonicalization
+            // as a fresh verification: success -> canonical success;
+            // InsufficientWork / other invalid -> the mapped provider
+            // error; StorageUnavailable / ConsumeIndeterminate -> the
+            // retryable 503 internal-error WITHOUT any finalize (the claim
+            // stays PENDING, so a later same-key retry can resume again
+            // once the backend recovers).
+            $canonicalResponse = $this->outcomeToCanonical($resumeOutcome);
+            if ($canonicalResponse instanceof JsonResponse) {
+                return $canonicalResponse;
+            }
+            $canonical = $this->canonicalizeResponse($canonicalResponse);
+            if (($canonical['error-codes'][0] ?? null) === 'internal-error') {
+                return $this->internalErrorResponse();
+            }
             if ($claimOwner !== null) {
                 $failed = $this->finalizeSafely($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, $claimedAt);
                 if ($failed !== null) {

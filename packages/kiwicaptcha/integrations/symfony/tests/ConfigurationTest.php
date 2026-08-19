@@ -333,6 +333,8 @@ final class ConfigurationTest extends TestCase
         self::assertFalse($processed['risk']['chaining']['enabled']);
         self::assertSame(300, $processed['risk']['chaining']['ttl_secs']);
         self::assertNull($processed['risk']['chaining']['hmac_secret']);
+        self::assertSame(15, $processed['risk']['chaining']['reservation_lease_secs'], 'the SHORT reservation lease defaults to 15s');
+        self::assertNull($processed['risk']['request_binding_authority'], 'no authority is wired by default');
         self::assertNull($processed['risk']['trusted_tls_header']);
     }
 
@@ -340,6 +342,7 @@ final class ConfigurationTest extends TestCase
     {
         $processed = $this->process([
             'risk' => [
+                'request_binding_authority' => 'app.binding_authority',
                 'chaining' => ['enabled' => true, 'ttl_secs' => 60, 'hmac_secret' => str_repeat('c', 32)],
             ],
         ]);
@@ -347,6 +350,8 @@ final class ConfigurationTest extends TestCase
         self::assertTrue($processed['risk']['chaining']['enabled']);
         self::assertSame(60, $processed['risk']['chaining']['ttl_secs']);
         self::assertSame(str_repeat('c', 32), $processed['risk']['chaining']['hmac_secret']);
+        self::assertSame(15, $processed['risk']['chaining']['reservation_lease_secs']);
+        self::assertSame('app.binding_authority', $processed['risk']['request_binding_authority'], 'a configured service id is accepted');
     }
 
     public function testChainingTtlBoundsAreEnforced(): void
@@ -355,6 +360,80 @@ final class ConfigurationTest extends TestCase
         $this->process(['risk' => ['chaining' => ['ttl_secs' => 29]]]);
 
         $this->process(['risk' => ['chaining' => ['ttl_secs' => 3601]]]);
+    }
+
+    public function testReservationLeaseSecsBoundsAreEnforced(): void
+    {
+        // The SHORT lease is bounded 5..60 AND strictly smaller than the
+        // chain lifetime (it is a SHORT claim, never the chain lifetime).
+        foreach ([4, 61] as $bad) {
+            try {
+                $this->process(['risk' => ['chaining' => ['reservation_lease_secs' => $bad]]]);
+                self::fail('a reservation lease outside 5..60 must be refused: '.$bad);
+            } catch (InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+
+        // A lease >= the chain TTL is refused (the compile-time
+        // cross-field validation).
+        try {
+            $this->process(['risk' => ['chaining' => ['reservation_lease_secs' => 30, 'ttl_secs' => 30]]]);
+            self::fail('a reservation lease equal to the chain lifetime must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('reservation_lease_secs', $e->getMessage());
+        }
+        try {
+            $this->process(['risk' => ['chaining' => ['reservation_lease_secs' => 60, 'ttl_secs' => 45]]]);
+            self::fail('a reservation lease larger than the chain lifetime must be refused');
+        } catch (InvalidConfigurationException) {
+            self::assertTrue(true);
+        }
+
+        // The boundary values are accepted when below the TTL.
+        $processed = $this->process(['risk' => ['chaining' => ['reservation_lease_secs' => 5, 'ttl_secs' => 300]]]);
+        self::assertSame(5, $processed['risk']['chaining']['reservation_lease_secs']);
+        $processed = $this->process(['risk' => ['chaining' => ['reservation_lease_secs' => 60, 'ttl_secs' => 300]]]);
+        self::assertSame(60, $processed['risk']['chaining']['reservation_lease_secs']);
+    }
+
+    public function testChainingEnabledRequiresRiskEnabledAndTheBindingAuthority(): void
+    {
+        // chaining.enabled=true requires risk.enabled=true AND a non-null
+        // risk.request_binding_authority — the chain is a server-side
+        // transaction obligation anchored on the AUTHORITATIVE binding;
+        // the refusal names both requirements at compile time.
+        try {
+            $this->process(['risk' => ['chaining' => ['enabled' => true]]]);
+            self::fail('chaining.enabled without the binding authority must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('risk.chaining.enabled requires risk.enabled=true AND a non-null risk.request_binding_authority', $e->getMessage());
+        }
+
+        try {
+            $this->process(['risk' => ['enabled' => false, 'request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true]]]);
+            self::fail('chaining.enabled with risk disabled must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('risk.chaining.enabled requires risk.enabled=true AND a non-null risk.request_binding_authority', $e->getMessage());
+        }
+
+        // The valid combination passes.
+        $processed = $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true]]]);
+        self::assertTrue($processed['risk']['chaining']['enabled']);
+    }
+
+    public function testRequestBindingAuthorityAcceptsAndValidatesServiceIds(): void
+    {
+        // The authority is nullable; a configured value is a non-empty
+        // service id.
+        try {
+            $this->process(['risk' => ['request_binding_authority' => '']]);
+            self::fail('an empty request_binding_authority must be refused');
+        } catch (InvalidConfigurationException) {
+            self::assertTrue(true);
+        }
+        $processed = $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority']]);
+        self::assertSame('app.binding_authority', $processed['risk']['request_binding_authority']);
     }
 
     public function testTrustedTlsHeaderAcceptsHeaderNames(): void
@@ -409,13 +488,13 @@ final class ConfigurationTest extends TestCase
         // the null fallback (master_secret -> secret_key) is unchanged.
         foreach (['short', '0123456789abcde'] as $weak) {
             try {
-                $this->process(['risk' => ['chaining' => ['enabled' => true, 'hmac_secret' => $weak]]]);
+                $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true, 'hmac_secret' => $weak]]]);
                 self::fail('a chaining hmac_secret under 16 bytes must be rejected: '.$weak);
             } catch (InvalidConfigurationException) {
                 self::assertTrue(true);
             }
         }
-        $processed = $this->process(['risk' => ['chaining' => ['enabled' => true, 'hmac_secret' => '0123456789abcdef']]])['risk']['chaining'];
+        $processed = $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true, 'hmac_secret' => '0123456789abcdef']]])['risk']['chaining'];
         self::assertSame('0123456789abcdef', $processed['hmac_secret'], 'a 16-byte chaining secret is accepted');
     }
 

@@ -102,6 +102,14 @@ namespace KiwiCaptcha;
  *      region, and issuer must still match — a rotation landing mid-
  *      derivation fails the re-check. Only then is the deterministic
  *      result committed (best-effort) and Valid returned.
+ *
+ * The cheap-phase checks (1-6 above) are shared with the NARROWLY
+ * AUTHORIZED consumed-operation resume path
+ * ({@see self::resumeConsumedOperation()}): a caller that has PROVEN the
+ * retained consumed record's exact operation identity belongs to this
+ * logical operation may resume and commit the interrupted derivation —
+ * ordinary replays of a consumed-without-result record still report
+ * ConsumeIndeterminate.
  */
 final class Verifier
 {
@@ -312,182 +320,26 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::RecordNotFound);
         }
 
-        if (!$this->validateRecord($peek)) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
-        }
-
-        // 1b. Protocol version gate: v1 (legacy, less comprehensively
-        //     signed) is only accepted during an explicit migration window —
-        //     v2 has been the issuance format longer than the maximum
-        //     challenge lifetime, so any surviving v1 record is stale or
-        //     foreign.
-        if ($peek->protocolVersion === 1 && !$this->acceptLegacyV1) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
-        }
-
-        // 2. Kid gate: a REVOKED kid is rejected with
-        //    UnknownKid IMMEDIATELY — before the signature check and before
-        //    the secret selection — so compromise revocation overrides the
-        //    normal rotation grace (a perfectly-signed challenge under a
-        //    revoked kid still fails). Cheap: a set membership test only.
-        if ($this->isRevokedKid($peek->kid)) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::UnknownKid);
-        }
-
-        // 2. Kid resolution: with a secretsByKid set, the
-        //    signature secret is selected per the record's kid — an unknown
-        //    kid, or one beyond the newest configured kid (the
-        //    rollback/forward guard — a future-keyed challenge must never
-        //    verify on an older node), fails with UnknownKid BEFORE any
-        //    signature work. An empty set keeps the legacy single-secret
-        //    path: the verify() $secretKey parameter is used for every
-        //    record (kid is then metadata only).
-        $signingSecret = $this->secretForKey($peek, $secretKey);
-        if ($signingSecret === null) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::UnknownKid);
-        }
-
-        // 2. Signature re-check: reconstruct the payload from the record and
-        //    compare against the signature embedded in the challenge string.
-        //    Protocol v1 uses the legacy canonical form; protocol v2 uses the
-        //    full-parameter canonical payload (kid included). The key is the
-        //    kid-selected secret (or the verify() secret in legacy mode).
-        if (!$this->verifyRecordSignature($peek, $signingSecret)) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::BadSignature);
-        }
-
-        // 2b. Absolute Argon2id process ceilings: the SIGNED
-        //     parameters are validated AFTER signature authentication and
-        //     BEFORE any allocation or computation. Out-of-range values are
-        //     authentic-but-unsupported — UnsupportedArgon2Params, not
-        //     MalformedRecord (the record really came from an issuer holding
-        //     the secret, it just violates the hard process limits).
-        if (!$this->argon2CeilingsOk($peek)) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::UnsupportedArgon2Params);
-        }
-
-        // 3. TTL. Both bounds use the verifier's clock: a challenge expired
-        //    before the check (now >= expires_at) OR claiming to have been
-        //    issued more than MAX_CLOCK_SKEW in the future (a
-        //    signed record cannot legitimately come from a host clock that
-        //    far ahead) is rejected.
-        $now = $this->now !== null ? (int) ($this->now)() : time();
-        if ($now >= $peek->expiresAt) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::Expired);
-        }
-        if ($peek->issuedAt > $now + self::MAX_CLOCK_SKEW) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::Expired);
-        }
-
-        // 4. Scope validation.
-        if ($expectedScope !== null && $peek->scope !== $expectedScope) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::WrongScope);
-        }
-
-        // 5. IP binding. The stored record is AUTHORITATIVE: an empty
-        //    binding tag means binding is disabled (BindingMode::None);
-        //    a NON-EMPTY tag means the challenge IS bound, so a missing
-        //    client IP fails closed (MissingClientIp) instead of silently
-        //    skipping the check — the caller must provide the IP it would
-        //    have passed to issuance. Protocol v2 records carry a nonce-bound
-        //    binding tag (recomputed here); v1 records carry the legacy
-        //    stable IP hash. Both are keyed by the KID-SELECTED secret
-        //    (K_ip_bind is derived from the same master secret
-        //    that signed the challenge).
-        if ($peek->bindingTag !== '') {
-            if ($clientIp === null) {
-                return VerifyOutcome::invalid(VerifyError::MissingClientIp);
-            }
-            $expectedTag = $peek->protocolVersion === 1
-                ? Issuer::hashIp($clientIp, $signingSecret)
-                : Issuer::bindingTag($peek->nonce, $clientIp, $signingSecret);
-            if (!hash_equals($expectedTag, $peek->bindingTag)) {
+        // 1-6. The cheap-phase security checks — structural validation,
+        // protocol version gate, kid gate + resolution, HMAC signature
+        // re-check, Argon2id process ceilings, TTL, scope, IP binding,
+        // region, policy epoch, issuer, server-measured minimum duration —
+        // run in the EXACT order of the original path inside one shared
+        // helper ({@see self::cheapPhaseCheck()}): the first failing check
+        // decides the outcome, and the delete policy is preserved exactly —
+        // every cheap failure deletes the PEEKED record except the
+        // missing-client-IP failure (a bound challenge without a client IP
+        // is rejected but the record is kept, so the caller can retry with
+        // the IP). The same helper revalidates the retained consumed record
+        // on the consumed-operation resume path
+        // ({@see self::resumeConsumedOperation()}).
+        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $nowNs);
+        if ($failure !== null) {
+            if ($failure !== VerifyError::MissingClientIp) {
                 $this->bestEffortDelete($token->nonce);
-
-                return VerifyOutcome::invalid(VerifyError::IpMismatch);
             }
-        }
 
-        // 5b. Region binding: a verifier configured
-        //     with an expected region rejects any record whose region does
-        //     not match EXACTLY — an unbound (NULL) record region fails
-        //     closed (a region-unbound record satisfies no region-bound
-        //     verifier); with no expected region, region is unenforced.
-        if ($this->region !== null && $peek->region !== $this->region) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::WrongRegion);
-        }
-
-        // 5c. Security-policy epoch: the policy that authorized
-        //     this challenge must still be in force — the verifier rejects
-        //     records issued under a different epoch (WrongPolicyVersion).
-        if ($this->expectedPolicyVersion !== null && ($peek->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
-        }
-
-        // 5d. Deployment issuer: a verifier configured with an
-        //     expected issuer rejects any record whose issuer does not match
-        //     EXACTLY — an unbound (NULL) record issuer fails closed, because
-        //     an unbound record is redeemable by every deployment and must
-        //     not satisfy an issuer-bound verifier.
-        if ($this->expectedIssuer !== null && $peek->issuer !== $this->expectedIssuer) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::WrongIssuer);
-        }
-
-        // 6. Minimum duration, measured on the SERVER: elapsed_us is the gap
-        //    between the record's high-resolution issuance timestamp (epoch
-        //    microseconds) and the verification receipt time. The
-        //    client-reported durationMs is forgeable, so it no longer drives
-        //    the TooFast check and there is no legacy fallback — a record
-        //    without issued_at_ns cannot be timed and is malformed.
-        if ($peek->issuedAtNs <= 0) {
-            $this->bestEffortDelete($token->nonce);
-
-            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
-        }
-        $floor = max(0, $peek->minDurationMs);
-        if ($floor > 0) {
-            $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
-            if ($receiptNs >= $peek->issuedAtNs) {
-                if ($receiptNs - $peek->issuedAtNs < $floor * 1_000) {
-                    $this->bestEffortDelete($token->nonce);
-
-                    return VerifyOutcome::invalid(VerifyError::TooFast);
-                }
-            } elseif ($peek->issuedAtNs - $receiptNs > self::SKEW_TOLERANCE_US) {
-                // Receipt before issuance by more than the skew bound is
-                // physically impossible — reject as TooFast. Within the
-                // bound the two hosts' clocks are unsynced, so the elapsed
-                // time cannot be measured reliably and the floor check is
-                // skipped for this verification — the proof-of-work check
-                // still applies, so no attacker advantage is gained.
-                $this->bestEffortDelete($token->nonce);
-
-                return VerifyOutcome::invalid(VerifyError::TooFast);
-            }
+            return VerifyOutcome::invalid($failure);
         }
 
         // 7. Telemetry scoring (opt-in). The telemetry is client-controlled,
@@ -664,6 +516,198 @@ final class Verifier
     }
 
     /**
+     * RESUME a consumed logical operation's derivation — the narrowly
+     * authorized crash-recovery path for the Siteverify takeover.
+     *
+     * STRONG CONTRACT — this is NOT an ordinary verification retry API
+     * and NOT a replay API: it may be called ONLY by a caller that has
+     * INDEPENDENTLY proven that the retained consumed record's exact
+     * operation identity belongs to this logical operation (the Siteverify
+     * takeover gate proves it by comparing the consumed record's OWN
+     * operation identity — written ATOMICALLY with the pending→consumed
+     * transition — against the claim fingerprint: same backend, same
+     * idempotency key, same response hash, same remote-IP fingerprint).
+     * The record must be CONSUMED (this logical operation won the atomic
+     * pending→consumed transition) and carry EXACTLY the given identity:
+     * any mismatch — a missing record, a not-yet-consumed record, a null
+     * identity (e.g. a no-key first redemption), a different identity (a
+     * different UUID, backend secret, response or remote-IP) — is refused
+     * with ConsumeIndeterminate. "Close enough" is NEVER sufficient: the
+     * same response hash, the same backend, or the same nonce without the
+     * exact fingerprint are all refused.
+     *
+     * When the retained record already carries a committed deterministic
+     * result, that result is returned unchanged (the ordinary
+     * committed-outcome semantics). Otherwise the derivation is RESUMED
+     * and committed: every immutable security property is revalidated
+     * EXACTLY like the ordinary verify path ({@see self::cheapPhaseCheck()}
+     * — record structural validity, protocol version gate, kid
+     * validity/revocation, HMAC signature, Argon2id process ceilings,
+     * expected scope, IP binding when enabled, region, policy epoch,
+     * issuer, token counter bounds), and Argon2id admission still applies
+     * to the resumed derivation — resource admission is NEVER bypassed.
+     * Two timing checks are deliberately EXEMPT: the signed expiry (the
+     * operation already won atomic consumption before the response was
+     * lost — this path exists precisely to recover past the signed
+     * lifetime inside the retained-state horizon) and the
+     * minimum-duration floor (it was passed before the consume). The
+     * commit is NOT best-effort: a failed commit reads the state back — a
+     * concurrent recovery's committed result is then returned (the
+     * winner's stored outcome), and only a genuinely missing result
+     * yields StorageUnavailable.
+     *
+     * Native replay security is UNAFFECTED: the ordinary
+     * {@see self::verify()} still returns ConsumeIndeterminate for a
+     * consumed record without a committed result, and the identity gate
+     * here can never be satisfied by a different logical operation.
+     *
+     * @param string      $rawToken          base64 solution token from the widget
+     * @param string      $secretKey         HMAC secret key
+     * @param string      $operationIdentity the logical-operation identity the
+     *                                       caller PROVED the retained consumed
+     *                                       record carries — its exact match is
+     *                                       the sole authorization to resume
+     * @param string|null $expectedScope     required challenge scope (null = any)
+     * @param string|null $clientIp          client IP for the optional IP binding
+     */
+    public function resumeConsumedOperation(
+        string $rawToken,
+        string $secretKey,
+        string $operationIdentity,
+        ?string $expectedScope = null,
+        ?string $clientIp = null,
+    ): VerifyOutcome {
+        try {
+            $token = SolutionToken::decode($rawToken);
+        } catch (DecodeError $e) {
+            return VerifyOutcome::malformedToken($e->getMessage());
+        }
+
+        // The retained consumed state must be readable (the bundle enforces
+        // the ConsumedStateReadableInterface contract at configuration time;
+        // a non-capable storage degrades to a typed, retryable result).
+        try {
+            if (!$this->storage instanceof ConsumedStateReadableInterface) {
+                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+            }
+            $consumed = $this->storage->consumedState($token->nonce);
+        } catch (\Throwable) {
+            return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+        }
+
+        // THE IDENTITY GATE: only a consumed record carrying EXACTLY this
+        // operation identity may have its derivation resumed — the identity
+        // was written atomically with the pending→consumed transition, so
+        // it is provably the ACTUAL atomic consume winner's. Anything else
+        // is ambiguous for this caller and refused as ConsumeIndeterminate
+        // (retryable; the caller should not have reached this path).
+        if (
+            $consumed === null
+            || $consumed->operationIdentity === null
+            || !hash_equals($consumed->operationIdentity, $operationIdentity)
+        ) {
+            return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
+        }
+
+        // Committed-result fast path: the deterministic outcome already
+        // stored by this logical operation (or a concurrent recovery of it)
+        // is returned unchanged — exactly the committed-outcome semantics
+        // of the ordinary verify path.
+        if ($consumed->consumedResult !== null) {
+            return $consumed->consumedResult->valid
+                ? VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true)
+                : VerifyOutcome::invalid(VerifyError::InsufficientWork);
+        }
+        $record = $consumed->record;
+
+        // Revalidate every immutable security property EXACTLY like the
+        // ordinary verify path (the shared cheap-phase helper; timing
+        // exempted per the contract above). The retained record is NOT
+        // deleted on a failure — it is the recovery evidence and must
+        // survive for a later retry (it is already consumed; deletion buys
+        // nothing).
+        $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false);
+        if ($failure !== null) {
+            return VerifyOutcome::invalid($failure);
+        }
+
+        // Argon2id admission still applies: the resumed derivation is as
+        // expensive as the original, so the gate bounds it exactly the
+        // same way — exhaustion rejects WITHOUT committing (the record
+        // stays consumed-without-result, and a later retry can resume
+        // again once capacity is available).
+        $lease = null;
+        if ($record->algorithm === PoWAlgorithm::Argon2id && $this->argonGate !== null) {
+            try {
+                $lease = $this->argonGate->acquire();
+            } catch (\Throwable) {
+                return VerifyOutcome::invalid(VerifyError::AdmissionUnavailable);
+            }
+            if ($lease === null) {
+                return VerifyOutcome::invalid(VerifyError::CapacityExceeded);
+            }
+        }
+
+        try {
+            $hash = $this->deriveHash($record, $token->counter);
+            if ($hash === null) {
+                // An Argon2id record whose parameters are within the
+                // ceilings but cannot be represented by the
+                // libsodium-backed verifier (p != 1) is
+                // authentic-but-unsupported. A SHA-256 null can only be a
+                // salt-decode failure (already shape-validated) —
+                // malformed.
+                return VerifyOutcome::invalid($record->algorithm === PoWAlgorithm::Argon2id
+                    ? VerifyError::UnsupportedArgon2Params
+                    : VerifyError::MalformedRecord);
+            }
+            $valid = self::leadingZeroBits($hash) >= $record->targetBits;
+
+            // Commit the resumed deterministic outcome — NOT best-effort:
+            // the resume must persist what it derived (a retry of the
+            // consumed record without a stored result would degrade to
+            // ConsumeIndeterminate forever). A failed commit reads the
+            // state back: a concurrent recovery may have won the commit —
+            // the winner's stored result is then authoritative (the same
+            // logical operation derives the same outcome either way).
+            $binding = $record->requestBinding;
+            try {
+                $committed = $this->storage->commitResult($record->nonce, $valid, $binding);
+            } catch (\Throwable) {
+                $committed = false;
+            }
+            if (!$committed) {
+                try {
+                    $after = $this->storage->consumedState($record->nonce);
+                } catch (\Throwable) {
+                    $after = null;
+                }
+                if ($after?->consumedResult !== null) {
+                    return $after->consumedResult->valid
+                        ? VerifyOutcome::valid($after->record->nonce, $after->consumedResult->binding, true)
+                        : VerifyOutcome::invalid(VerifyError::InsufficientWork);
+                }
+
+                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+            }
+
+            return $valid
+                ? VerifyOutcome::valid($record->nonce, $binding)
+                : VerifyOutcome::invalid(VerifyError::InsufficientWork);
+        } finally {
+            if ($lease !== null) {
+                try {
+                    $this->argonGate?->release($lease);
+                } catch (\Throwable) {
+                    // Best-effort: a failed release must NEVER override the
+                    // resumed verification result. A leaked lease is
+                    // recovered by its TTL.
+                }
+            }
+        }
+    }
+
+    /**
      * Structural validation of a stored record BEFORE any crypto or timing
      * work: scope shape, nonce/salt sizes, TTL ceiling, the prefix binding,
      * and the per-algorithm difficulty range. A record failing any check is
@@ -725,6 +769,228 @@ final class Verifier
         }
 
         return true;
+    }
+
+    /**
+     * The cheap-phase security checks shared by the ordinary verify path
+     * and the consumed-operation resume path, run in the EXACT order of
+     * the ordinary path — the first failing check decides the outcome:
+     *
+     *   1.  structural validation ({@see self::validateRecord()});
+     *   1b. protocol version gate (v1 only during an explicit migration
+     *       window);
+     *   2.  kid gate: a REVOKED kid fails IMMEDIATELY (UnknownKid) —
+     *       compromise revocation overrides the normal rotation grace;
+     *   2.  kid resolution: with a secretsByKid set, the signature secret
+     *       is selected per the record's kid — an unknown kid, or one
+     *       beyond the newest configured kid (the rollback/forward guard),
+     *       fails with UnknownKid BEFORE any signature work; an empty set
+     *       keeps the legacy single-secret path;
+     *   2.  HMAC signature re-check ({@see self::verifyRecordSignature()})
+     *       — BadSignature;
+     *   2b. absolute Argon2id process ceilings
+     *       ({@see self::argon2CeilingsOk()}) AFTER signature
+     *       authentication and BEFORE any allocation —
+     *       UnsupportedArgon2Params;
+     *   3.  TTL (only when $checkTiming): now >= expires_at, or an issuance
+     *       more than MAX_CLOCK_SKEW in the future, is Expired;
+     *   4.  scope: challenge scope matches the expected flow (WrongScope);
+     *   5.  IP binding: the stored record is AUTHORITATIVE — an empty
+     *       binding tag disables the check; a NON-EMPTY tag means the
+     *       challenge IS bound, so a missing client IP fails closed
+     *       (MissingClientIp) and a mismatched tag is IpMismatch. Both are
+     *       keyed by the KID-SELECTED secret (K_ip_bind is derived from
+     *       the same master secret that signed the challenge);
+     *   5b. region binding: a configured expected region rejects any record
+     *       whose region does not match EXACTLY — an unbound (NULL) region
+     *       fails closed (WrongRegion);
+     *   5c. security-policy epoch: a record issued under a different epoch
+     *       is WrongPolicyVersion;
+     *   5d. deployment issuer: a record issued by a different deployment —
+     *       including an unbound (NULL) issuer — is WrongIssuer;
+     *   6.  server-measured minimum duration (only when $checkTiming): a
+     *       record without issued_at_ns is malformed; a receipt before the
+     *       floor is TooFast (a receipt preceding issuance beyond
+     *       SKEW_TOLERANCE_US is physically impossible — TooFast; within
+     *       the bound the floor check is skipped, the PoW check still
+     *       applies).
+     *
+     * The timing group (TTL and the minimum-duration floor) is EXEMPT on
+     * the resume path ($checkTiming = false): the operation already won
+     * atomic consumption before the response was lost, so the signed
+     * expiry and the floor were both passed by the original attempt.
+     *
+     * Returns the first failing error, or null when every check passes.
+     * The CALLER owns the failure policy: the ordinary verify path deletes
+     * the peeked record on every failure except MissingClientIp (a bound
+     * challenge without a client IP is rejected but kept — the caller can
+     * retry with the IP); the resume path never deletes the retained
+     * consumed record (it is the recovery evidence).
+     *
+     * @param int|null $nowNs server receipt time in epoch MICROSECONDS
+     *                        (used by the minimum-duration check only)
+     */
+    private function cheapPhaseCheck(
+        ChallengeRecord $record,
+        string $secretKey,
+        ?string $expectedScope,
+        ?string $clientIp,
+        bool $checkTiming,
+        ?int $nowNs = null,
+    ): ?VerifyError {
+        // 1. Structural validation of the stored record.
+        if (!$this->validateRecord($record)) {
+            return VerifyError::MalformedRecord;
+        }
+
+        // 1b. Protocol version gate: v1 (legacy, less comprehensively
+        //     signed) is only accepted during an explicit migration window —
+        //     v2 has been the issuance format longer than the maximum
+        //     challenge lifetime, so any surviving v1 record is stale or
+        //     foreign.
+        if ($record->protocolVersion === 1 && !$this->acceptLegacyV1) {
+            return VerifyError::MalformedRecord;
+        }
+
+        // 2. Kid gate: a REVOKED kid is rejected with
+        //    UnknownKid IMMEDIATELY — before the signature check and before
+        //    the secret selection — so compromise revocation overrides the
+        //    normal rotation grace (a perfectly-signed challenge under a
+        //    revoked kid still fails). Cheap: a set membership test only.
+        if ($this->isRevokedKid($record->kid)) {
+            return VerifyError::UnknownKid;
+        }
+
+        // 2. Kid resolution: with a secretsByKid set, the
+        //    signature secret is selected per the record's kid — an unknown
+        //    kid, or one beyond the newest configured kid (the
+        //    rollback/forward guard — a future-keyed challenge must never
+        //    verify on an older node), fails with UnknownKid BEFORE any
+        //    signature work. An empty set keeps the legacy single-secret
+        //    path: the verify() $secretKey parameter is used for every
+        //    record (kid is then metadata only).
+        $signingSecret = $this->secretForKey($record, $secretKey);
+        if ($signingSecret === null) {
+            return VerifyError::UnknownKid;
+        }
+
+        // 2. Signature re-check: reconstruct the payload from the record and
+        //    compare against the signature embedded in the challenge string.
+        //    Protocol v1 uses the legacy canonical form; protocol v2 uses the
+        //    full-parameter canonical payload (kid included). The key is the
+        //    kid-selected secret (or the verify() secret in legacy mode).
+        if (!$this->verifyRecordSignature($record, $signingSecret)) {
+            return VerifyError::BadSignature;
+        }
+
+        // 2b. Absolute Argon2id process ceilings: the SIGNED
+        //     parameters are validated AFTER signature authentication and
+        //     BEFORE any allocation or computation. Out-of-range values are
+        //     authentic-but-unsupported — UnsupportedArgon2Params, not
+        //     MalformedRecord (the record really came from an issuer holding
+        //     the secret, it just violates the hard process limits).
+        if (!$this->argon2CeilingsOk($record)) {
+            return VerifyError::UnsupportedArgon2Params;
+        }
+
+        // 3. TTL. Both bounds use the verifier's clock: a challenge expired
+        //    before the check (now >= expires_at) OR claiming to have been
+        //    issued more than MAX_CLOCK_SKEW in the future (a
+        //    signed record cannot legitimately come from a host clock that
+        //    far ahead) is rejected.
+        if ($checkTiming) {
+            $now = $this->now !== null ? (int) ($this->now)() : time();
+            if ($now >= $record->expiresAt) {
+                return VerifyError::Expired;
+            }
+            if ($record->issuedAt > $now + self::MAX_CLOCK_SKEW) {
+                return VerifyError::Expired;
+            }
+        }
+
+        // 4. Scope validation.
+        if ($expectedScope !== null && $record->scope !== $expectedScope) {
+            return VerifyError::WrongScope;
+        }
+
+        // 5. IP binding. The stored record is AUTHORITATIVE: an empty
+        //    binding tag means binding is disabled (BindingMode::None);
+        //    a NON-EMPTY tag means the challenge IS bound, so a missing
+        //    client IP fails closed (MissingClientIp) instead of silently
+        //    skipping the check — the caller must provide the IP it would
+        //    have passed to issuance. Protocol v2 records carry a nonce-bound
+        //    binding tag (recomputed here); v1 records carry the legacy
+        //    stable IP hash. Both are keyed by the KID-SELECTED secret
+        //    (K_ip_bind is derived from the same master secret
+        //    that signed the challenge).
+        if ($record->bindingTag !== '') {
+            if ($clientIp === null) {
+                return VerifyError::MissingClientIp;
+            }
+            $expectedTag = $record->protocolVersion === 1
+                ? Issuer::hashIp($clientIp, $signingSecret)
+                : Issuer::bindingTag($record->nonce, $clientIp, $signingSecret);
+            if (!hash_equals($expectedTag, $record->bindingTag)) {
+                return VerifyError::IpMismatch;
+            }
+        }
+
+        // 5b. Region binding: a verifier configured
+        //     with an expected region rejects any record whose region does
+        //     not match EXACTLY — an unbound (NULL) record region fails
+        //     closed (a region-unbound record satisfies no region-bound
+        //     verifier); with no expected region, region is unenforced.
+        if ($this->region !== null && $record->region !== $this->region) {
+            return VerifyError::WrongRegion;
+        }
+
+        // 5c. Security-policy epoch: the policy that authorized
+        //     this challenge must still be in force — the verifier rejects
+        //     records issued under a different epoch (WrongPolicyVersion).
+        if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+            return VerifyError::WrongPolicyVersion;
+        }
+
+        // 5d. Deployment issuer: a verifier configured with an
+        //     expected issuer rejects any record whose issuer does not match
+        //     EXACTLY — an unbound (NULL) record issuer fails closed, because
+        //     an unbound record is redeemable by every deployment and must
+        //     not satisfy an issuer-bound verifier.
+        if ($this->expectedIssuer !== null && $record->issuer !== $this->expectedIssuer) {
+            return VerifyError::WrongIssuer;
+        }
+
+        // 6. Minimum duration, measured on the SERVER: elapsed_us is the gap
+        //    between the record's high-resolution issuance timestamp (epoch
+        //    microseconds) and the verification receipt time. The
+        //    client-reported durationMs is forgeable, so it no longer drives
+        //    the TooFast check and there is no legacy fallback — a record
+        //    without issued_at_ns cannot be timed and is malformed.
+        if ($checkTiming) {
+            if ($record->issuedAtNs <= 0) {
+                return VerifyError::MalformedRecord;
+            }
+            $floor = max(0, $record->minDurationMs);
+            if ($floor > 0) {
+                $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
+                if ($receiptNs >= $record->issuedAtNs) {
+                    if ($receiptNs - $record->issuedAtNs < $floor * 1_000) {
+                        return VerifyError::TooFast;
+                    }
+                } elseif ($record->issuedAtNs - $receiptNs > self::SKEW_TOLERANCE_US) {
+                    // Receipt before issuance by more than the skew bound is
+                    // physically impossible — reject as TooFast. Within the
+                    // bound the two hosts' clocks are unsynced, so the
+                    // elapsed time cannot be measured reliably and the floor
+                    // check is skipped for this verification — the
+                    // proof-of-work check still applies, so no attacker
+                    // advantage is gained.
+                    return VerifyError::TooFast;
+                }
+            }
+        }
+
+        return null;
     }
 
     /**

@@ -57,21 +57,47 @@ pub fn siteverify_response(
 
 /// Provider-style error codes (reCAPTCHA-compatible vocabulary); the
 /// precise core reason stays in the server logs.
+///
+/// EXHAUSTIVE by contract: every [`VerifyError`] variant is matched with no
+/// wildcard, so adding a variant FAILS the build until its provider
+/// semantics are decided here:
+/// - `Expired` — an already-validated token past its lifetime:
+///   `timeout-or-duplicate`;
+/// - retryable SERVER-side conditions (`StorageUnavailable`,
+///   `ConsumeIndeterminate`, `CapacityExceeded`, `AdmissionUnavailable`):
+///   `internal-error`. `ConsumeIndeterminate` is retryable in a mapper
+///   with no proven-duplicate context: the atomic consume's response was
+///   lost, so the token may still be redeemable — an idempotent caller
+///   retries, and a non-idempotent caller treats the token as unknown;
+/// - everything else — an invalid SOLUTION, challenge, or identity
+///   (`BadSignature`, `TooFast`, `IpMismatch`, `MissingClientIp`,
+///   `CounterTooLarge`, `WrongScope`, `WrongRegion`, `WrongIssuer`,
+///   `WrongPolicyVersion`, `UnknownKid`, `TooManyAttempts`,
+///   `InsufficientWork`, `MalformedRecord`, `BotDetected`,
+///   `MalformedToken`, `RecordNotFound`): `invalid-input-response`.
 fn map_error(reason: &VerifyError) -> String {
     match reason {
-        VerifyError::Expired | VerifyError::ConsumeIndeterminate => "timeout-or-duplicate".into(),
+        VerifyError::Expired => "timeout-or-duplicate".into(),
+        VerifyError::StorageUnavailable
+        | VerifyError::ConsumeIndeterminate
+        | VerifyError::CapacityExceeded
+        | VerifyError::AdmissionUnavailable => "internal-error".into(),
         VerifyError::BadSignature
-        | VerifyError::MalformedRecord
-        | VerifyError::MalformedToken
-        | VerifyError::RecordNotFound
-        | VerifyError::UnknownKid
-        | VerifyError::WrongScope
+        | VerifyError::TooFast
         | VerifyError::IpMismatch
         | VerifyError::MissingClientIp
+        | VerifyError::CounterTooLarge
+        | VerifyError::WrongScope
         | VerifyError::WrongRegion
         | VerifyError::WrongIssuer
-        | VerifyError::WrongPolicyVersion => "invalid-input-response".into(),
-        _ => "bad-request".into(),
+        | VerifyError::WrongPolicyVersion
+        | VerifyError::UnknownKid
+        | VerifyError::TooManyAttempts
+        | VerifyError::InsufficientWork
+        | VerifyError::MalformedRecord
+        | VerifyError::BotDetected
+        | VerifyError::MalformedToken
+        | VerifyError::RecordNotFound => "invalid-input-response".into(),
     }
 }
 
@@ -113,18 +139,52 @@ mod tests {
         assert_eq!(format_unix_ts(1_752_632_400), "2025-07-16T02:20:00Z");
     }
 
+    /// EVERY variant of the core VerifyError enum must map to its exact
+    /// provider string — the table below is the single source of truth and
+    /// `map_error` itself is exhaustive (no wildcard), so a new variant
+    /// fails compilation until its provider semantics are decided here AND
+    /// in the match.
     #[test]
-    fn maps_core_reasons_to_provider_codes() {
-        assert_eq!(map_error(&VerifyError::Expired), "timeout-or-duplicate");
+    fn maps_every_core_reason_to_its_exact_provider_code() {
+        let cases: &[(VerifyError, &str)] = &[
+            // Already-validated token past its lifetime.
+            (VerifyError::Expired, "timeout-or-duplicate"),
+            // Retryable server-side conditions (no proven-duplicate
+            // context in a mapper).
+            (VerifyError::StorageUnavailable, "internal-error"),
+            (VerifyError::ConsumeIndeterminate, "internal-error"),
+            (VerifyError::CapacityExceeded, "internal-error"),
+            (VerifyError::AdmissionUnavailable, "internal-error"),
+            // Invalid solution / challenge / identity.
+            (VerifyError::BadSignature, "invalid-input-response"),
+            (VerifyError::TooFast, "invalid-input-response"),
+            (VerifyError::IpMismatch, "invalid-input-response"),
+            (VerifyError::MissingClientIp, "invalid-input-response"),
+            (VerifyError::CounterTooLarge, "invalid-input-response"),
+            (VerifyError::WrongScope, "invalid-input-response"),
+            (VerifyError::WrongRegion, "invalid-input-response"),
+            (VerifyError::WrongIssuer, "invalid-input-response"),
+            (VerifyError::WrongPolicyVersion, "invalid-input-response"),
+            (VerifyError::UnknownKid, "invalid-input-response"),
+            (VerifyError::TooManyAttempts, "invalid-input-response"),
+            (VerifyError::InsufficientWork, "invalid-input-response"),
+            (VerifyError::MalformedRecord, "invalid-input-response"),
+            (VerifyError::BotDetected, "invalid-input-response"),
+            (VerifyError::MalformedToken, "invalid-input-response"),
+            (VerifyError::RecordNotFound, "invalid-input-response"),
+        ];
         assert_eq!(
-            map_error(&VerifyError::ConsumeIndeterminate),
-            "timeout-or-duplicate"
+            cases.len(),
+            21,
+            "the table must cover EVERY VerifyError variant"
         );
-        assert_eq!(
-            map_error(&VerifyError::WrongScope),
-            "invalid-input-response"
-        );
-        assert_eq!(map_error(&VerifyError::TooFast), "bad-request");
+        for (reason, expected) in cases {
+            assert_eq!(
+                map_error(reason),
+                *expected,
+                "variant {reason:?} must map to {expected:?}"
+            );
+        }
     }
 
     #[test]

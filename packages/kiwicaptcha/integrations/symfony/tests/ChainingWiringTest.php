@@ -15,20 +15,27 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
 use KiwiCaptcha\Risk\RiskV2Weights;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Reference;
 
 /**
  * The selective-chaining wiring contract at the definition level (extension
  * load, no container compile): risk.chaining wires the Redis-backed chain
- * state store (in-memory when no Redis client exists) + the ticket service,
- * and injects the service into BOTH the challenge controller (stage-2
- * gate) and the validator (CHAIN_REQUIRED issuance); risk.trusted_tls_header
- * flows into the controller.
+ * state store (in-memory when no Redis client exists) + the ticket service
+ * (with the chain TTL, the SHORT reservation lease and the deployment's
+ * authoritative transaction-binding resolver), and injects the service into
+ * BOTH the challenge controller (stage-2 gate) and the validator
+ * (CHAIN_REQUIRED issuance); risk.trusted_tls_header flows into the
+ * controller. chaining.enabled requires risk.enabled AND a non-null
+ * risk.request_binding_authority — the extension refuses the combination
+ * at compile time.
  */
 final class ChainingWiringTest extends TestCase
 {
     private const SECRET = '0123456789abcdef0123456789abcdef';
+
+    private const BINDING_AUTHORITY = 'fake_binding_authority';
 
     private function load(array $risk, bool $redis = true): ContainerBuilder
     {
@@ -110,7 +117,7 @@ final class ChainingWiringTest extends TestCase
 
     public function testChainingEnabledWiresRedisStoreAndTicketService(): void
     {
-        $container = $this->load(['chaining' => ['enabled' => true, 'ttl_secs' => 120]]);
+        $container = $this->load(['chaining' => ['enabled' => true, 'ttl_secs' => 120], 'request_binding_authority' => self::BINDING_AUTHORITY]);
 
         self::assertTrue($container->hasDefinition(RedisChainedChallengeStateStore::class));
         self::assertTrue($container->hasDefinition(ChainedChallengeTicketService::class));
@@ -118,6 +125,10 @@ final class ChainingWiringTest extends TestCase
         self::assertSame(ChainedChallengeTicketService::class, $service->getClass());
         self::assertSame(120, $service->getArgument(2), 'the chain ttl flows into the ticket service');
         self::assertSame(self::SECRET, $service->getArgument(1), 'the chain HMAC secret falls back to the captcha secret_key');
+        self::assertSame(15, $service->getArgument(3), 'the SHORT reservation lease defaults to 15s');
+        $authority = $service->getArgument('$bindingAuthority');
+        self::assertInstanceOf(Reference::class, $authority);
+        self::assertSame(self::BINDING_AUTHORITY, (string) $authority, 'the authoritative binding resolver flows into the ticket service');
     }
 
     public function testChainingWithoutRedisClientWiresTheArrayStore(): void
@@ -136,6 +147,7 @@ final class ChainingWiringTest extends TestCase
                 'enabled' => true,
                 'redis_service' => 'fake_redis',
                 'chaining' => ['enabled' => true],
+                'request_binding_authority' => self::BINDING_AUTHORITY,
             ],
         ]], $container);
         self::assertTrue($container->hasDefinition(RedisChainedChallengeStateStore::class));
@@ -152,12 +164,14 @@ final class ChainingWiringTest extends TestCase
         self::assertFalse($container->hasDefinition(RedisChainedChallengeStateStore::class));
         $controller = $container->getDefinition(ChallengeController::class);
         self::assertNull($controller->getArgument('$chainTickets'), 'chaining disabled injects null into the controller');
+        self::assertNull($controller->getArgument('$bindingAuthority'), 'without a configured authority the controller falls back to the legacy binding behavior');
     }
 
     public function testChainServiceAndTlsHeaderFlowIntoControllerAndValidator(): void
     {
         $container = $this->load([
             'chaining' => ['enabled' => true],
+            'request_binding_authority' => self::BINDING_AUTHORITY,
             'trusted_tls_header' => 'X-Tls-Class',
             'trusted_tls_proxies' => ['10.0.0.0/8', '192.168.1.5'],
         ]);
@@ -169,6 +183,9 @@ final class ChainingWiringTest extends TestCase
         self::assertSame('X-Tls-Class', $controller->getArgument('$trustedTlsHeader'));
         self::assertSame(['10.0.0.0/8', '192.168.1.5'], $controller->getArgument('$trustedTlsProxies'), 'risk.trusted_tls_proxies flows into the controller (the header is read only from a trusted direct peer)');
         self::assertSame(1, $controller->getArgument('$policyVersion'));
+        $authority = $controller->getArgument('$bindingAuthority');
+        self::assertInstanceOf(Reference::class, $authority);
+        self::assertSame(self::BINDING_AUTHORITY, (string) $authority, 'the authoritative binding resolver flows into the controller (a client-supplied string is never signed unexamined)');
 
         $validator = $container->getDefinition(KiwiCaptchaValidator::class);
         $validatorChain = $validator->getArgument('$chainTickets');
@@ -177,6 +194,31 @@ final class ChainingWiringTest extends TestCase
         $resolver = $validator->getArgument('$riskResolver');
         self::assertInstanceOf(Reference::class, $resolver);
         self::assertSame('kiwi_captcha.risk.resolver', (string) $resolver, 'the risk profile resolver (the authoritative stage-strength comparison) flows into the validator');
+    }
+
+    public function testChainingEnabledWithoutTheBindingAuthorityIsRefusedAtCompileTime(): void
+    {
+        // The chain is a SERVER-SIDE TRANSACTION OBLIGATION anchored on
+        // the AUTHORITATIVE binding — chaining without the authority is a
+        // configuration error, refused at compile time (the config tree),
+        // never silently degraded.
+        try {
+            $this->load(['chaining' => ['enabled' => true]]);
+            self::fail('chaining.enabled without a request_binding_authority must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('request_binding_authority', $e->getMessage(), 'the refusal names the required authority');
+            self::assertStringContainsString('risk.enabled=true', $e->getMessage(), 'the refusal names both requirements');
+        }
+    }
+
+    public function testReservationLeaseSecsFlowsIntoTheTicketService(): void
+    {
+        $container = $this->load([
+            'chaining' => ['enabled' => true, 'reservation_lease_secs' => 42],
+            'request_binding_authority' => self::BINDING_AUTHORITY,
+        ]);
+
+        self::assertSame(42, $container->getDefinition(ChainedChallengeTicketService::class)->getArgument(3), 'the configured SHORT reservation lease flows into the ticket service');
     }
 
     public function testNonMonotoneOrOutOfRangeArgonLadderIsRefusedAtCompileTime(): void
@@ -197,7 +239,7 @@ final class ChainingWiringTest extends TestCase
             try {
                 $this->load(['argon_escalation_target_bits' => $ladder]);
                 self::fail('a ladder violating 1 <= rung1 < rung2 < rung3 <= 10 must be refused: '.json_encode($ladder));
-            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+            } catch (InvalidConfigurationException) {
                 self::assertTrue(true);
             }
         }
@@ -206,7 +248,7 @@ final class ChainingWiringTest extends TestCase
         try {
             $this->load(['argon_escalation_target_bits' => [1, 5, 5]]);
             self::fail('a non-monotone ladder must be refused');
-        } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException $e) {
+        } catch (InvalidConfigurationException $e) {
             self::assertStringContainsString('1 <= rung1 < rung2 < rung3 <= 10', $e->getMessage(), 'the refusal names the ladder constraint');
         }
     }
@@ -236,7 +278,7 @@ final class ChainingWiringTest extends TestCase
 
     public function testChainingHmacSecretPrefersTheChainingSecret(): void
     {
-        $container = $this->load(['chaining' => ['enabled' => true, 'hmac_secret' => str_repeat('h', 32)]]);
+        $container = $this->load(['chaining' => ['enabled' => true, 'hmac_secret' => str_repeat('h', 32)], 'request_binding_authority' => self::BINDING_AUTHORITY]);
 
         self::assertSame(str_repeat('h', 32), $container->getDefinition(ChainedChallengeTicketService::class)->getArgument(1));
     }

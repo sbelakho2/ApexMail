@@ -35,6 +35,17 @@ use KiwiCaptcha\Risk\RiskKeys;
  * EXPIRE (identity-neutral, matching the risk engine's global-pressure
  * semantics).
  *
+ * ABORTED-BEFORE-HANDOFF ({@see abortedBeforeHandoff()}): when a challenge
+ * was ADMITTED but PROVEN never handed out (a mint/metadata/chain-state
+ * failure the controller can positively attribute), the PER-SOURCE slot is
+ * returned best-effort (floored at 0) so a crashed issuance does not
+ * silently consume the source's stockpile budget. The GLOBAL counter is
+ * left to expire naturally — deployment-wide pressure is never a literal
+ * count. An INDETERMINATE failure (the chain state cannot be read after a
+ * thrown issuance transition — the challenge may be the authoritative
+ * issued stage-2) must NOT call this: the slot belongs to the client until
+ * proven otherwise.
+ *
  * Failure behavior: a Redis error on issuance is NOT swallowed — the caller
  * (challenge controller) refuses issuance when the counter cannot be
  * consulted (fail closed: no challenge without a checked stockpile bound).
@@ -79,6 +90,24 @@ LUA;
 local v = tonumber(redis.call('GET', KEYS[1]) or '0')
 if v > 0 then redis.call('DECR', KEYS[1]) end
 return v - 1
+LUA;
+
+    /**
+     * Best-effort per-source decrement when an ADMITTED challenge was
+     * PROVEN not handed out (the controller's proven-not-handed-out
+     * failure paths — mint/metadata/chain-state failures):
+     *   KEYS[1] = the per-source counter
+     * Floored at 0 (a DECR can never drive the counter negative). The
+     * GLOBAL counter is left to expire naturally — deployment-wide
+     * pressure, not a literal count. Best-effort like solved(): a failed
+     * rollback never changes the response; the counter decays by EXPIRE
+     * otherwise.
+     */
+    private const ABORTED_SCRIPT = <<<'LUA'
+-- Outstanding challenge aborted before handoff: best-effort DECR floored at 0
+local v = tonumber(redis.call('GET', KEYS[1]) or '0')
+if v > 0 then redis.call('DECR', KEYS[1]) end
+return 1
 LUA;
 
     /**
@@ -161,6 +190,28 @@ LUA;
         } catch (\Throwable) {
             // Best-effort: an unavailable counter must never fail a valid
             // solve.
+        }
+    }
+
+    /**
+     * Best-effort per-source decrement when an ADMITTED challenge was
+     * PROVEN never handed out (the controller's proven-not-handed-out
+     * failure paths): the source slot is returned so a crashed issuance
+     * does not silently consume the source's stockpile budget. The
+     * GLOBAL counter is never decremented (deployment-wide pressure
+     * decays by EXPIRE). Never throws: a failed rollback must never
+     * change the issuance response. The caller MUST NOT call this for an
+     * INDETERMINATE failure (the chain state cannot be read after a
+     * thrown issuance transition — the challenge may be the
+     * authoritative issued stage-2).
+     */
+    public function abortedBeforeHandoff(string $clientIp): void
+    {
+        try {
+            $this->eval(self::ABORTED_SCRIPT, [$this->sourceKey($clientIp)], []);
+        } catch (\Throwable) {
+            // Best-effort: an unavailable counter must never change the
+            // response; the counter decays by its EXPIRE otherwise.
         }
     }
 

@@ -1829,6 +1829,754 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(['internal-error'], json_decode((string) $response->getContent(), true)['error-codes']);
     }
 
+    // ── The uncommitted-result resume (lost reply after the consume) ───
+
+    /**
+     * The DEFECT-shaped crash: the atomic consume EXECUTES (the
+     * pending→consumed transition lands and the operation identity is
+     * recorded ATOMICALLY with the state flip) but the REPLY is lost
+     * BEFORE the derivation/commit — consumed_result stays null forever
+     * for the ordinary verifier (ConsumeIndeterminate) and the original
+     * attempt answers the retryable 503 internal-error with the claim
+     * staying PENDING. The same-key retry (a FRESH controller with the
+     * WORKING storage) takes over the expired SHORT lease and the
+     * recovery gate proves the identity (same key + token + remoteip →
+     * the consumed record's OWN identity equals the retry's fingerprint):
+     * the derivation is RESUMED and committed — the ORIGINAL canonical
+     * success bytes.
+     */
+    public function testLostConsumeReplyThenSameKeyRetryResumesTheOriginalSuccess(): void
+    {
+        $storage = new ArrayStorage();
+        [$token, $nonce] = $this->issuedToken($storage);
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        // A SHORT configured store lease (3s) keeps the lease-expiry step
+        // instant; the waiter bound (5s) exceeds it (the construction
+        // invariant).
+        $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $uuid = '123e4567-e89b-42d3-a456-4266141740e1';
+
+        // The "lost reply" seam: consumeWithOperationIdentity() DELEGATES
+        // — the transition executes and the identity lands atomically with
+        // the state flip — and the response is then lost. Everything else
+        // delegates.
+        $lostReply = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+            {
+                // The transition EXECUTES (the identity lands atomically
+                // with the state flip) — and the response is then lost.
+                $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+
+                throw new \RuntimeException('consume reply lost after the transition');
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
+        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
+        self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
+        self::assertNull($store->stored($backendId, $uuid), 'the lost reply must NOT finalize the claim — the entry stays pending');
+        $consumed = $storage->consumedState($nonce);
+        self::assertNotNull($consumed, 'the transition executed — the token IS consumed');
+        self::assertSame(
+            $this->fingerprint($backendId, $uuid, $token, '127.0.0.1'),
+            $consumed->operationIdentity,
+            'the consumed record carries the operation identity of the ACTUAL atomic consume winner',
+        );
+        self::assertNull($consumed->consumedResult, 'the derivation never ran — consumed_result stays null forever for the ordinary verifier');
+
+        // The same-key retry with the WORKING storage: pending -> wait ->
+        // takeover (the 3s lease expired) -> the recovery gate matches the
+        // consumed record's OWN identity against the retry's fingerprint ->
+        // the uncommitted derivation is RESUMED and committed.
+        $now += 4;
+        $retry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $retryBody = json_decode((string) $retryResponse->getContent(), true);
+        self::assertSame(true, $retryBody['success'] ?? null, 'the identity-proven retry must RESUME the derivation and succeed: '.(string) $retryResponse->getContent());
+        self::assertSame([], $retryBody['error-codes'] ?? null);
+        $record = $storage->find($nonce);
+        self::assertNotNull($record);
+        $expectedCanonical = json_encode([
+            'action' => null,
+            'cdata' => null,
+            'challenge_ts' => gmdate('Y-m-d\TH:i:s\Z', $record->issuedAt),
+            'error-codes' => [],
+            'hostname' => $record->hostname,
+            'success' => true,
+        ], JsonResponse::DEFAULT_ENCODING_OPTIONS);
+        self::assertSame($expectedCanonical, (string) $retryResponse->getContent(), 'the retry receives the ORIGINAL canonical success bytes');
+        self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the resumed derivation must be committed');
+        self::assertSame(['success' => true], array_intersect_key($store->stored($backendId, $uuid) ?? [], ['success' => true]), 'the resumed outcome is finalized as COMPLETE_SAME');
+    }
+
+    /**
+     * The lost-reply flow with a WRONG counter: the resumed derivation
+     * deterministically fails (InsufficientWork), the canonical
+     * invalid-input-response failure is finalized, and a same-UUID retry
+     * returns the IDENTICAL stored failure — the same canonical-failure
+     * promise as an ordinary failed verification.
+     */
+    public function testLostConsumeReplyInvalidSolutionResumesDeterministicInsufficientWork(): void
+    {
+        $storage = new ArrayStorage();
+        [$token, $nonce] = $this->issuedToken($storage);
+        // The first counter whose hash fails the target is deterministic
+        // and differs from the valid solution.
+        $record = $storage->find($nonce);
+        self::assertNotNull($record);
+        $saltBytes = base64_decode($record->salt, true);
+        $wrong = 0;
+        while (Verifier::leadingZeroBits(hash('sha256', $record->prefix.$wrong.$saltBytes, true)) >= $record->targetBits) {
+            $wrong++;
+        }
+        $wrongToken = SolutionToken::create($nonce, $wrong, 5000, [])->encode();
+        self::assertNotSame($token, $wrongToken);
+
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $uuid = '123e4567-e89b-42d3-a456-4266141740e2';
+
+        $lostReply = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+            {
+                $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+
+                throw new \RuntimeException('consume reply lost after the transition');
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
+        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
+        self::assertNull($store->stored($backendId, $uuid), 'the claim stays pending');
+
+        // The same-key retry takes over and RESUMES: the derivation fails
+        // deterministically (wrong counter) — InsufficientWork maps to the
+        // provider invalid-input-response and the claim is FINALIZED with
+        // the canonical failure.
+        $now += 4;
+        $retry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $retryBody = json_decode((string) $retryResponse->getContent(), true);
+        self::assertSame(false, $retryBody['success'] ?? null, 'the resumed derivation must deterministically fail the wrong counter');
+        self::assertSame(['invalid-input-response'], $retryBody['error-codes'] ?? null, 'insufficient work maps to the invalid-response vocabulary');
+        self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the resumed invalid outcome must be committed');
+        self::assertSame(false, $storage->consumedState($nonce)->consumedResult->valid);
+        $stored = $store->stored($backendId, $uuid);
+        self::assertIsArray($stored, 'a failed resumed verification is ALSO finalized');
+        self::assertSame(['invalid-input-response'], $stored['error-codes'] ?? null);
+
+        // A same-UUID retry now returns the IDENTICAL stored canonical
+        // failure (CompleteSame) — never a re-derivation.
+        $again = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $againResponse = $again->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame($retryBody, json_decode((string) $againResponse->getContent(), true), 'a same-UUID retry reproduces the identical canonical failure');
+    }
+
+    /**
+     * A DIFFERENT UUID can never resume the winner's uncommitted
+     * derivation: the consumed record's OWN identity is A's fingerprint,
+     * never B's — the takeover gate refuses, the ordinary verify reports
+     * ConsumeIndeterminate, and B's retry answers the retryable 503
+     * internal-error WITHOUT finalizing (A's recovery evidence survives).
+     */
+    public function testLostConsumeReplyDifferentUuidCannotResume(): void
+    {
+        $storage = new ArrayStorage();
+        [$token, $nonce] = $this->issuedToken($storage);
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $uuidA = '123e4567-e89b-42d3-a456-4266141740e3';
+        $uuidB = '123e4567-e89b-42d3-a456-4266141740e4';
+
+        $lostReply = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+            {
+                $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+
+                throw new \RuntimeException('consume reply lost after the transition');
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
+        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
+        ]));
+        self::assertSame(503, $ownerResponse->getStatusCode());
+        $consumed = $storage->consumedState($nonce);
+        self::assertNotNull($consumed);
+        self::assertSame($this->fingerprint($backendId, $uuidA, $token, '127.0.0.1'), $consumed->operationIdentity);
+        self::assertNull($consumed->consumedResult);
+
+        // B claims a FRESH entry and attempts a fresh verification: the
+        // consumed-without-result record is ConsumeIndeterminate -> the
+        // retryable 503 (never a finalized duplicate). B's entry stays
+        // pending; its lease expires.
+        $bFirst = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $bFirstResponse = $bFirst->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
+        ]));
+        self::assertSame(503, $bFirstResponse->getStatusCode(), 'B cannot derive a consumed-without-result record — the retryable 503');
+        self::assertNull($store->stored($backendId, $uuidB), 'B\'s claim stays pending — nothing was finalized');
+        $now += 4;
+
+        // B's retry takes over B's own pending claim: the identity gate
+        // compares the record's identity (A's fingerprint) against B's —
+        // REFUSED, so the resume never runs; the ordinary verify remains
+        // ConsumeIndeterminate -> 503.
+        $bRetry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $bRetryResponse = $bRetry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
+        ]));
+        $bRetryBody = json_decode((string) $bRetryResponse->getContent(), true);
+        self::assertSame(503, $bRetryResponse->getStatusCode(), 'a different UUID must NEVER resume the winner\'s derivation');
+        self::assertSame(['internal-error'], $bRetryBody['error-codes'] ?? null);
+        self::assertNull($storage->consumedState($nonce)?->consumedResult, 'B\'s refused takeover must not commit anything — A\'s recovery evidence survives');
+
+        // A's own retry can STILL resume the original success.
+        $now += 4;
+        $aRetry = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $aRetryResponse = $aRetry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
+        ]));
+        self::assertSame(true, json_decode((string) $aRetryResponse->getContent(), true)['success'] ?? null, 'the winner\'s same-key retry still resumes after B\'s refused attempts');
+    }
+
+    /**
+     * A no-key first redemption whose consume reply is lost records NO
+     * operation identity; a later keyed replay can never resume — the
+     * identity gate sees null, the ordinary verify stays
+     * ConsumeIndeterminate (503, no finalize).
+     */
+    public function testLostConsumeReplyNoKeyFirstRedemptionCannotResume(): void
+    {
+        $storage = new ArrayStorage();
+        [$token, $nonce] = $this->issuedToken($storage);
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $uuidB = '123e4567-e89b-42d3-a456-4266141740e5';
+
+        $lostReply = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                // The no-key path uses the PLAIN consume: the transition
+                // executes without any identity — and the reply is lost.
+                $this->inner->consume($nonce);
+
+                throw new \RuntimeException('consume reply lost after the transition');
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
+        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1',
+        ]));
+        self::assertSame(503, $ownerResponse->getStatusCode(), 'the no-key lost consume reply maps to the retryable 503');
+        $consumed = $storage->consumedState($nonce);
+        self::assertNotNull($consumed);
+        self::assertNull($consumed->operationIdentity, 'the no-key redemption records NO operation identity');
+
+        // The keyed replay claims a fresh entry, cannot resume (null
+        // identity), and the ordinary verify stays ConsumeIndeterminate.
+        $keyed = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $keyedResponse = $keyed->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
+        ]));
+        self::assertSame(503, $keyedResponse->getStatusCode(), 'a keyed replay of a no-key redemption must NEVER resume');
+        self::assertNull($store->stored($backendId, $uuidB), 'the keyed replay must not finalize anything');
+    }
+
+    /**
+     * The resume's commit reply is lost AFTER the commit lands: the
+     * read-after-failed-commit resolves the stored result and the retry
+     * still receives the ORIGINAL canonical success bytes.
+     */
+    public function testLostConsumeReplyCommitReplyLostResolvesTheStoredResult(): void
+    {
+        $storage = new ArrayStorage();
+        [$token, $nonce] = $this->issuedToken($storage);
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $uuid = '123e4567-e89b-42d3-a456-4266141740e6';
+
+        // Seam A: the consume reply is lost AFTER the transition lands.
+        $lostConsume = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+            {
+                $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+
+                throw new \RuntimeException('consume reply lost after the transition');
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $owner = new SiteVerifyController(new Verifier($lostConsume), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostConsume, null, null, $store, null, 5.0);
+        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(503, $ownerResponse->getStatusCode());
+        self::assertNull($storage->consumedState($nonce)?->consumedResult, 'precondition: nothing committed yet');
+
+        // Seam B (used by the retry): the RESUME's commit reply is lost
+        // AFTER the commit lands — the read-after-failed-commit path.
+        $lostCommit = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                // The commit EXECUTES (the result lands) — and the reply
+                // is then lost.
+                $result = $this->inner->commitResult($nonce, $valid, $binding);
+
+                throw new \RuntimeException('commit reply lost after the commit');
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $now += 4;
+        $retry = new SiteVerifyController(new Verifier($lostCommit), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostCommit, null, null, $store, null, 5.0);
+        $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        $retryBody = json_decode((string) $retryResponse->getContent(), true);
+        self::assertSame(true, $retryBody['success'] ?? null, 'the read-after-failed-commit must resolve the winner\'s stored result: '.(string) $retryResponse->getContent());
+        self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the commit really landed');
+        $record = $storage->find($nonce);
+        self::assertNotNull($record);
+        $expectedCanonical = json_encode([
+            'action' => null,
+            'cdata' => null,
+            'challenge_ts' => gmdate('Y-m-d\TH:i:s\Z', $record->issuedAt),
+            'error-codes' => [],
+            'hostname' => $record->hostname,
+            'success' => true,
+        ], JsonResponse::DEFAULT_ENCODING_OPTIONS);
+        self::assertSame($expectedCanonical, (string) $retryResponse->getContent(), 'the retry receives the ORIGINAL canonical success bytes');
+    }
+
+    /**
+     * The lost-reply flow with a changed remoteip: the idempotency claim
+     * itself binds the remoteip fingerprint, so the same UUID under a
+     * different IP CONFLICTS at the claim layer (400 bad-request) before
+     * any recovery — the fingerprint includes the IP.
+     */
+    public function testLostConsumeReplyChangedRemoteipConflicts(): void
+    {
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
+        $uuid = '123e4567-e89b-42d3-a456-4266141740e7';
+
+        $lostReply = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
+            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+            {
+            }
+
+            public function store(\KiwiCaptcha\ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+            {
+                $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+
+                throw new \RuntimeException('consume reply lost after the transition');
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
+        $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(503, $ownerResponse->getStatusCode());
+
+        // Same UUID + changed remoteip: CONFLICT at the claim layer — the
+        // entry is bound to the ORIGINAL remoteip fingerprint.
+        $conflict = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $conflictResponse = $conflict->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
+        ]));
+        self::assertSame(400, $conflictResponse->getStatusCode(), 'a changed remoteip under the same UUID must CONFLICT');
+        self::assertSame(['bad-request'], json_decode((string) $conflictResponse->getContent(), true)['error-codes']);
+    }
+
+    /**
+     * The lost-reply Argon flow: the resumed derivation is Argon2id, so
+     * the Argon admission gate applies to the RESUME too — a saturated
+     * gate answers the retryable 503 internal-error WITHOUT committing,
+     * and the next same-key retry (capacity freed) takes over and resumes
+     * to the ORIGINAL success.
+     */
+    public function testLostConsumeReplyArgonResumeAdmissionUnavailableThenSucceeds(): void
+    {
+        \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate::resetForTests();
+        try {
+            $storage = new ArrayStorage();
+            $issuer = new Issuer(new Config(
+                secretKey: self::SECRET,
+                algorithm: PoWAlgorithm::Argon2id,
+                mKib: 64,
+                t: 3,
+                p: 1,
+                argon2TargetBits: 4,
+                ttlSecs: 120,
+            ), $storage);
+            $challenge = $issuer->issue('login', '127.0.0.1');
+            $saltBytes = base64_decode($challenge->salt, true);
+            $counter = 0;
+            do {
+                $hash = sodium_crypto_pwhash(32, $challenge->prefix.$counter, $saltBytes, 3, 64 * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13);
+                $counter++;
+            } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+            --$counter;
+            usleep(($challenge->minDurationMs + 10) * 1000);
+            $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+            $nonce = $challenge->nonce;
+
+            $now = 1_700_000_000;
+            $clock = static function () use (&$now): int {
+                return $now;
+            };
+            $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
+            $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+            $uuid = '123e4567-e89b-42d3-a456-4266141740e8';
+
+            $lostReply = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
+                public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+                {
+                }
+
+                public function store(\KiwiCaptcha\ChallengeRecord $record): void
+                {
+                    $this->inner->store($record);
+                }
+
+                public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+                {
+                    return $this->inner->find($nonce);
+                }
+
+                public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                {
+                    return $this->inner->consumedState($nonce);
+                }
+
+                public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+                {
+                    return $this->inner->consume($nonce);
+                }
+
+                public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?\KiwiCaptcha\ConsumedRecord
+                {
+                    $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+
+                    throw new \RuntimeException('consume reply lost after the transition');
+                }
+
+                public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+                {
+                    return $this->inner->commitResult($nonce, $valid, $binding);
+                }
+
+                public function delete(string $nonce): void
+                {
+                    $this->inner->delete($nonce);
+                }
+            };
+            $owner = new SiteVerifyController(new Verifier($lostReply), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostReply, null, null, $store, null, 5.0);
+            $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+            ]));
+            self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost Argon consume reply maps to the retryable 503');
+            self::assertNull($storage->consumedState($nonce)?->consumedResult, 'precondition: nothing committed yet');
+
+            // The retry resumes with a SATURATED admission gate: the
+            // resumed Argon derivation is refused (CapacityExceeded ->
+            // 503 internal-error) WITHOUT committing — the entry stays
+            // pending and the record stays resumable.
+            $now += 4;
+            $gate = new \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate(1);
+            $outsideLease = $gate->acquire(); // saturate the single slot from the outside
+            self::assertIsString($outsideLease);
+            $gated = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $gatedResponse = $gated->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+            ]));
+            self::assertSame(503, $gatedResponse->getStatusCode(), 'admission exhaustion during the resume must map to the retryable 503');
+            self::assertSame(['internal-error'], json_decode((string) $gatedResponse->getContent(), true)['error-codes']);
+            self::assertNull($storage->consumedState($nonce)?->consumedResult, 'admission rejection must NOT commit anything');
+            self::assertNull($store->stored($backendId, $uuid), 'the admission rejection must NOT finalize — the entry stays pending');
+
+            // Capacity freed: the next same-key retry resumes to the
+            // ORIGINAL success.
+            $now += 4;
+            $gate->release($outsideLease);
+            $retry = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
+            ]));
+            $retryBody = json_decode((string) $retryResponse->getContent(), true);
+            self::assertSame(true, $retryBody['success'] ?? null, 'with admission capacity available the resume must succeed: '.(string) $retryResponse->getContent());
+            self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the resumed Argon outcome must be committed');
+        } finally {
+            \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate::resetForTests();
+        }
+    }
+
     // ── The indeterminate-consume retry contract ───────────────────────
 
     /**

@@ -9,8 +9,10 @@ use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
@@ -477,6 +479,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $issuanceCounterRef = null;
         $outstandingRef = null;
         $chainServiceRef = null;
+        $bindingAuthorityRef = $riskConfig['request_binding_authority'] !== null
+            ? new Reference($riskConfig['request_binding_authority'])
+            : null;
         $riskResolverRef = null;
         $riskRedis = null;
         if ($riskConfig['enabled']) {
@@ -740,16 +745,36 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The chain ticket service signs the MINIMAL one-shot chain
             // ticket ({version, chainId, expiresAt} — the FULL server-held
             // state {stage1Nonce, scope, requestBinding, requiredAction,
-            // policyVersion, chainDepth} lives in the state store) with
-            // the chain HMAC secret (risk.chaining.hmac_secret, falling
-            // back to the risk master_secret and then the captcha
+            // requiredRank, policyVersion, chainDepth} lives in the state
+            // store) with the chain HMAC secret (risk.chaining.hmac_secret,
+            // falling back to the risk master_secret and then the captcha
             // secret_key — the same secret-generation defaults as the
-            // other risk secrets). The server-held chain state rides the
-            // risk namespace ({kiwi:<ns>}:chain:<chainId>, TTL = chain
-            // ttl): Redis-backed when a Redis client is available,
-            // in-memory otherwise (test/dev semantics — mirroring the
-            // idempotency store wiring).
+            // other risk secrets). The chain is a SERVER-SIDE TRANSACTION
+            // OBLIGATION: the server-held chain state rides the risk
+            // namespace ({kiwi:<ns>}:chain:<chainId> + its obligation
+            // mapping {kiwi:<ns>}:chain-obligation:<obligationId>, TTL =
+            // chain ttl, same hash tag), Redis-backed when a Redis client
+            // is available, in-memory otherwise (test/dev semantics —
+            // mirroring the idempotency store wiring). The service is
+            // wired with the SHORT reservation lease
+            // (risk.chaining.reservation_lease_secs) and the deployment's
+            // authoritative transaction-binding resolver
+            // (risk.request_binding_authority — REQUIRED for chaining:
+            // the chain anchor is the authoritative binding, never an
+            // unexamined client string).
             if ($riskConfig['chaining']['enabled']) {
+                // COMPILE-TIME refusal (defense in depth — the config tree
+                // refuses the same combinations): chaining requires the
+                // binding authority (a chain without an authoritative
+                // binding anchor cannot be a server-side transaction
+                // obligation), and the SHORT reservation lease must be
+                // strictly smaller than the chain lifetime.
+                if ($bindingAuthorityRef === null) {
+                    throw new \InvalidArgumentException('kiwi_captcha.risk.chaining.enabled requires risk.enabled=true AND a non-null risk.request_binding_authority (the authoritative transaction-binding resolver)');
+                }
+                if ($riskConfig['chaining']['reservation_lease_secs'] >= $riskConfig['chaining']['ttl_secs']) {
+                    throw new \InvalidArgumentException('kiwi_captcha.risk.chaining.reservation_lease_secs must be strictly smaller than risk.chaining.ttl_secs — the reservation lease is a SHORT claim, never the chain lifetime');
+                }
                 $chainStoreRedis = $riskRedis ?? $redisRef;
                 if ($chainStoreRedis !== null) {
                     $container->setDefinition(RedisChainedChallengeStateStore::class, new Definition(RedisChainedChallengeStateStore::class, [$chainStoreRedis, $namespace]));
@@ -762,7 +787,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $chainStoreRef,
                     $riskConfig['chaining']['hmac_secret'] ?? $riskConfig['master_secret'] ?? $config['secret_key'],
                     $riskConfig['chaining']['ttl_secs'],
-                ]))->setPublic(true));
+                    $riskConfig['chaining']['reservation_lease_secs'],
+                ]))
+                    ->setArgument('$bindingAuthority', $bindingAuthorityRef)
+                    ->setPublic(true));
                 $chainServiceRef = new Reference(ChainedChallengeTicketService::class);
             }
         }
@@ -930,6 +958,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // (risk.chaining; null = chaining disabled — a ticket-bearing
             // request is then refused, never downgraded).
             ->setArgument('$chainTickets', $chainServiceRef)
+            // The authoritative transaction-binding resolver
+            // (risk.request_binding_authority; null = the legacy
+            // static/attribute binding applies). When configured, the
+            // controller resolves the transaction binding ONLY through
+            // it — never an unexamined client string.
+            ->setArgument('$bindingAuthority', $bindingAuthorityRef)
             // The trusted-edge TLS classification header
             // (risk.trusted_tls_header; null = the feature is off).
             ->setArgument('$trustedTlsHeader', $trustedTlsHeader)
@@ -1031,6 +1065,41 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['risk']['request_binding'],
         ]))->addTag('form.type'));
 
+        // ── POST-SOLVE DISPOSITION STORE (final-disposition durability) ──
+        // The validator's ONE final-disposition path (PASS | DENY | STEP_UP
+        // | CHAIN_REQUIRED) is persisted PER NONCE, so a replay of a valid
+        // proof reproduces the same disposition — a stored core result can
+        // never bypass the post-solve policy (it only answers "was the PoW
+        // cryptographically valid?"). Redis-backed whenever a Redis client
+        // is available (the risk Redis first, falling back to the bundle
+        // client), in-memory otherwise (test/dev semantics — mirroring the
+        // chain state store wiring). The RECORD TTL =
+        // Config::MAX_TTL_SECS + risk.redis.ttl_margin_secs: the
+        // disposition survives at least as long as the consumed core result
+        // can be replayed (the consumed record's own retention is token
+        // lifetime + the same margin); the claim lease stays a short fixed
+        // bound inside the store.
+        $dispositionRedis = $riskRedis ?? $redisRef;
+        $dispositionTtlSecs = Config::MAX_TTL_SECS + $riskConfig['redis']['ttl_margin_secs'];
+        if ($dispositionRedis !== null) {
+            $container->setDefinition(RedisPostSolveDispositionStore::class, new Definition(RedisPostSolveDispositionStore::class, [
+                $dispositionRedis,
+                $namespace,
+                $dispositionTtlSecs,
+            ]));
+            $dispositionStoreRef = new Reference(RedisPostSolveDispositionStore::class);
+        } else {
+            $container->setDefinition(ArrayPostSolveDispositionStore::class, new Definition(ArrayPostSolveDispositionStore::class, [
+                null,
+                $dispositionTtlSecs,
+            ]));
+            $dispositionStoreRef = new Reference(ArrayPostSolveDispositionStore::class);
+        }
+        // The authoritative transaction-binding authority is wired by the
+        // chaining region above (risk.request_binding_authority; null when
+        // not configured — chaining then never opens and the validator
+        // receives null).
+
         // ── Validator (local verification, no external calls) ──
         // The logger receives the INTERNAL verification detail on failures —
         // the public violation code is collapsed
@@ -1075,6 +1144,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // reassessed action is not satisfied by the solved challenge
             // under the ACTUAL configured ladders).
             ->setArgument('$riskResolver', $riskResolverRef)
+            // POST-SOLVE DISPOSITION WIRING: the durable nonce-keyed
+            // final-disposition store (wired above — Redis when a Redis
+            // client is available, in-memory otherwise), the authoritative
+            // transaction-binding authority (nullable service id
+            // risk.request_binding_authority; null = chaining unavailable),
+            // the retained disposition margin (risk.redis.ttl_margin_secs —
+            // the record TTL is Config::MAX_TTL_SECS + margin) and the
+            // chain lifetime (risk.chaining.ttl_secs) for the stage-2
+            // requirement/ticket expiry.
+            ->setArgument('$dispositionStore', $dispositionStoreRef)
+            ->setArgument('$bindingAuthority', $bindingAuthorityRef)
+            ->setArgument('$postSolveDispositionTtlMarginSecs', $riskConfig['redis']['ttl_margin_secs'])
+            ->setArgument('$chainTtlSecs', $riskConfig['chaining']['ttl_secs'])
             ->addTag('validator.constraint_validator'));
 
         // ── Twig widget runtime + twig function (embeds the shared widget assets) ──
