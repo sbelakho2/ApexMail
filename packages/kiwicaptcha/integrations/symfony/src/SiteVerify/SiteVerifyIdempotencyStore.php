@@ -23,10 +23,12 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * consumed result as the original success and finalize the entry — this
  * does NOT make ordinary token replays successful (the key+hash pair must
  * match a pending claim for THIS pair). Recovery is additionally gated by
- * the NONCE-LEVEL redemption guard ({@see SiteVerifyRedemptionGuard}):
- * the takeover's response hash must be the nonce's ORIGINAL redemption —
- * a consumed token can never become successful again through a
- * different idempotency UUID.
+ * the consumed record's OWN operation identity ({@see
+ * \KiwiCaptcha\OperationIdentityAwareStorageInterface}): the identity was
+ * written atomically with the pending→consumed transition, so a takeover
+ * may reconstruct ONLY when the record's identity equals the claiming
+ * fingerprint — a consumed token can never become successful again
+ * through a different idempotency UUID or backend secret.
  *
  * Lease semantics: every claim and every successful takeover starts a
  * lease window (default 60 seconds, configurable per store constructor).

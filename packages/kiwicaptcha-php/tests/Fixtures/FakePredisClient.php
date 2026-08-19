@@ -113,7 +113,9 @@ final class FakePredisClient extends \Predis\Client
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $args = \array_slice($keysAndArgs, $numKeys);
 
-        // Consume transition: mark consumed, keep the record.
+        // Consume transition: mark consumed, keep the record. ARGV[1] is
+        // the JSON-escaped operation identity ('' = none) — it lands in
+        // the same write as the state flip, mirroring the real Lua splice.
         if (str_contains($script, 'consume transition')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
@@ -133,9 +135,14 @@ final class FakePredisClient extends \Predis\Client
                 return [$raw, 0, 1, $res !== null ? json_encode($res, JSON_UNESCAPED_SLASHES) : ''];
             }
             $obj['state'] = 'consumed';
+            if (($args[0] ?? '') !== '') {
+                $obj['operation_identity'] = json_decode((string) $args[0], true, flags: JSON_THROW_ON_ERROR);
+            }
             $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
-            return [$raw, 1, 0, ''];
+            // The winner receives the UPDATED bytes (the identity rides
+            // back on its own ConsumedRecord — mirroring the real Lua).
+            return [$this->store[$key], 1, 0, ''];
         }
 
         // Commit result: only on a consumed record without a

@@ -9,9 +9,10 @@ namespace KiwiCaptcha\Risk;
  *
  * These are a separate surface from the 13 risk-v1 contract fields: they
  * are derived from the risk-v2 context (honeypot evidence, session
- * client-context consistency) at assessment time and NEVER mutate the
- * risk-v1 state script or the v1 SignalVector. Both crates use the
- * identical field names and fixed-point semantics.
+ * client-context consistency, trusted-edge TLS consistency) at assessment
+ * time and NEVER mutate the risk-v1 state script or the v1 SignalVector.
+ * Both crates use the identical field names and fixed-point semantics
+ * (Rust mirror: honeypot, session_inconsistency, tls_inconsistency).
  */
 final class RiskV2Signals
 {
@@ -20,6 +21,8 @@ final class RiskV2Signals
         public readonly int $honeypot = 0,
         /** Session client-context inconsistency: 1000 when the session's first-seen client-context tag differs from the current request's tag, 0 when consistent or when no tag exists (first request / absent). */
         public readonly int $sessionInconsistency = 0,
+        /** Trusted-edge TLS inconsistency: 1000 when the session's first-seen TLS classification tag differs from the current request's tag, 0 when consistent or when no tag exists (first request / absent / unbounded value). */
+        public readonly int $tlsInconsistency = 0,
     ) {
         foreach (get_object_vars($this) as $value) {
             if ($value < 0 || $value > 1000) {
@@ -33,11 +36,11 @@ final class RiskV2Signals
     /** All-zero vector (no risk-v2 evidence). */
     public static function zero(): self
     {
-        return new self(0, 0);
+        return new self(0, 0, 0);
     }
 
     public function isZero(): bool
     {
-        return $this->honeypot === 0 && $this->sessionInconsistency === 0;
+        return $this->honeypot === 0 && $this->sessionInconsistency === 0 && $this->tlsInconsistency === 0;
     }
 }

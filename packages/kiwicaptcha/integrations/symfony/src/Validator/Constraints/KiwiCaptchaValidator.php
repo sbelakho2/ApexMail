@@ -14,6 +14,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
@@ -46,6 +47,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * rejected with the same invalid_or_expired outcome.
      */
     public const REQUEST_BINDING_ATTRIBUTE = '_kiwi_captcha_request_binding';
+
+    /**
+     * The token verified correctly, but the chained-challenge
+     * reassessment (risk.chaining) demands a STRONGER stage than the
+     * first-stage profile (e.g. an Argon action or StepUp). The violation
+     * carries the signed ONE-SHOT chain ticket in its parameters under
+     * `{{ chain_ticket }}` (a stable, documented machine-readable
+     * format): the application re-renders the widget with
+     * data-kiwi-chain-ticket=<ticket> and the next challenge request
+     * presents it for a stage-2 issuance. The ticket is valid for
+     * risk.chaining.ttl_secs and is consumed atomically at issuance.
+     */
+    public const CHAIN_REQUIRED_ERROR = 'kiwi.chain_required';
 
     /** @var string|null the canonical jti of the last valid verification */
     private ?string $lastVerifiedJti = null;
@@ -113,6 +127,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         private readonly ?ClientIpResolver $clientIpResolver = null,
         private readonly ?SecurityEpochMonitor $epochMonitor = null,
         private readonly ?ResultReceiptSigner $receiptSigner = null,
+        /**
+         * The chain ticket service issues the one-shot CHAIN_REQUIRED
+         * tickets after a valid verification whose post-solve
+         * reassessment demands a stronger stage (risk.chaining; null =
+         * chaining disabled).
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService $chainTickets = null,
+        /**
+         * The security-policy epoch (risk.policy_version) stamped into
+         * issued chain tickets — a chain ticket is bound to the epoch its
+         * stage-1 proof was verified under.
+         */
+        private readonly int $policyVersion = 1,
     ) {
     }
 
@@ -255,6 +282,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // the global cap).
         $request?->attributes->set(\BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate::SCOPE_ATTRIBUTE, $constraint->scope);
 
+        // FORM-SUBMISSION HONEYPOT: a form submission carrying a filled
+        // decoy_<8 hex> field (the widget-rendered server-issued honeypot)
+        // records DecoyFieldSubmitted evidence at SUBMISSION time — the
+        // correct lifecycle: the decoy was rendered AFTER issuance, so it
+        // can only be observed when the protected form carrying the solved
+        // token is submitted (a later challenge request would already have
+        // handed the bot the token). Evidence ONLY — never a gate and
+        // never affects the proof validity. Runs BEFORE the verification
+        // decision is finalized.
+        if ($this->risk !== null && $request !== null) {
+            $this->formDecoyEvidence($request, $constraint->scope, (string) ($clientIp ?? ''), $this->continuityCookie?->read($request));
+        }
+
         // CapacityExceeded (Argon2id admission saturated) surfaces as a
         // regular failed verification — fail closed as a captcha violation.
         $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry);
@@ -367,6 +407,12 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             $session = $request !== null ? $this->continuityCookie?->read($request) : null;
             $ip = (string) ($clientIp ?? '');
             $postSolveScope = $outcome->isOk() && $this->risk->postSolveCheck($constraint->scope);
+            // Chaining (risk.chaining): a SUCCESSFUL first-stage proof
+            // opens the selective second stage — the reassessment runs for
+            // every valid solve, and when it demands a stronger action than
+            // the first-stage profile, the validator issues a signed
+            // one-shot chain ticket (CHAIN_REQUIRED) instead of passing.
+            $chainEligible = $outcome->isOk() && $this->chainTickets !== null;
 
             if ($outcome->isOk()) {
                 $originalDecisionId = $this->consumeDecisionForToken($value);
@@ -375,7 +421,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 }
             }
 
-            if ($postSolveScope) {
+            $postSolve = null;
+            if ($postSolveScope || $chainEligible) {
                 try {
                     $postSolve = $this->risk->postSolveDecision($constraint->scope, $ip, $session);
                 } catch (\InvalidArgumentException) {
@@ -390,21 +437,61 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                     // store).
                     $postSolve = $this->risk->degradedDecisionForScope($this->risk->scopeId($constraint->scope));
                 }
-                if ($postSolve !== null && $postSolve->action === RiskAction::Deny) {
+            }
+
+            if ($postSolve !== null) {
+                if ($postSolve->action === RiskAction::Deny) {
                     $this->context->buildViolation($constraint->message)
                         ->setCode(KiwiCaptcha::POST_SOLVE_REJECTED_ERROR)
                         ->addViolation();
 
                     return;
                 }
-                if ($postSolve !== null && $postSolve->action === RiskAction::StepUp) {
+                if ($postSolve->action === RiskAction::StepUp && !$chainEligible) {
                     $this->context->buildViolation($constraint->message)
                         ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED)
                         ->addViolation();
 
                     return;
                 }
-            } else {
+                if ($chainEligible && $postSolve->action->rank() > $this->firstStageActionRank($value)) {
+                    // CHAIN REQUIRED: the reassessment demands a stronger
+                    // stage than the first-stage profile (an Argon action,
+                    // or StepUp — the stage-2 issuance may itself land on
+                    // the application step-up via the ordinary preIssue
+                    // path). Issue the signed one-shot chain ticket; the
+                    // violation's {{ chain_ticket }} parameter carries it
+                    // in the documented machine-readable format.
+                    $ticket = $this->chainTickets->issue(
+                        $this->verifiedNonceOf($value),
+                        $constraint->scope,
+                        $this->policyVersion,
+                    );
+                    if ($ticket !== null) {
+                        $this->context->buildViolation($constraint->message)
+                            ->setCode(self::CHAIN_REQUIRED_ERROR)
+                            ->setParameter('{{ chain_ticket }}', $ticket)
+                            ->addViolation();
+
+                        return;
+                    }
+                    // The chain state could not be persisted (backend
+                    // failure): a stronger stage was demanded but cannot be
+                    // chained — fail closed with the retryable
+                    // temporary_unavailable (never silently downgrade the
+                    // request to an unchained pass).
+                    $this->logger?->info('KiwiCaptcha: chained challenge state unavailable', [
+                        'scope' => $constraint->scope,
+                    ]);
+                    $this->context->buildViolation($constraint->message)
+                        ->setCode(KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR)
+                        ->addViolation();
+
+                    return;
+                }
+            }
+
+            if (!$postSolveScope && !$chainEligible) {
                 $this->risk->solveOutcome($constraint->scope, $ip, $session, $outcome->error);
             }
         }
@@ -606,6 +693,89 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             $this->lastReceiptPayload = $receipt['payload'];
             $this->lastReceiptSignature = $receipt['signature'];
         }
+    }
+
+    /**
+     * FORM-SUBMISSION HONEYPOT: a form submission carrying fields matching
+     * /^decoy_[0-9a-f]{8}$/D with a NON-EMPTY value (bounded at 256 bytes)
+     * feeds RiskEventKind::DecoyFieldSubmitted into the risk gateway as
+     * honeypot evidence — at form-submission time, the correct lifecycle
+     * for a honeypot rendered after issuance. Evidence ONLY: never a gate
+     * and never affects the proof validity. One evidence event per
+     * submission (the first filled decoy field wins). Never throws — a
+     * broken gateway must never break the form.
+     */
+    private function formDecoyEvidence(Request $request, string $scope, string $ip, ?string $session): bool
+    {
+        foreach ($request->request->all() as $name => $value) {
+            if (!\is_string($name) || preg_match('/^decoy_[0-9a-f]{8}$/D', $name) !== 1) {
+                continue;
+            }
+            if (!\is_string($value) || $value === '') {
+                continue;
+            }
+            if (\strlen($value) > 256) {
+                $value = substr($value, 0, 256);
+            }
+            try {
+                $this->risk?->honeypotEvidence(RiskEventKind::DecoyFieldSubmitted, $scope, $ip, $session);
+            } catch (\Throwable) {
+                // Evidence only — a recording failure never breaks the
+                // form submission.
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * The stage-1 challenge nonce behind a solution token (the verified
+     * proof's nonce), or null when the token cannot be decoded. The chain
+     * ticket signs this nonce so the stage-2 controller can prove the
+     * ticket holder really verified a stage-1 proof AND cannot re-run the
+     * same stage.
+     */
+    private function verifiedNonceOf(string $token): ?string
+    {
+        try {
+            return SolutionToken::decode($token)->nonce;
+        } catch (DecodeError) {
+            return null;
+        }
+    }
+
+    /**
+     * The risk-action CLASS of the first-stage proof (the challenge the
+     * client actually solved), derived from the CONSUMED record's
+     * algorithm + difficulty: sha256 at >= 20 bits is the Sha20 class,
+     * >= 18 Sha18, otherwise Sha16; Argon2id at >= 8 target bits is the
+     * Argon64 class, >= 4 Argon32, otherwise Argon16. A record that
+     * cannot be resolved falls back to the WEAKEST first-stage
+     * assumption (Sha16) — fail-safe: any escalation then opens the
+     * chain. Used to decide whether the reassessment demands a STRONGER
+     * stage than what the client already did.
+     */
+    private function firstStageActionRank(string $token): int
+    {
+        $record = $this->findConsumedRecord($token);
+        if ($record === null) {
+            return RiskAction::Sha16->rank();
+        }
+        if ($record->algorithm === \KiwiCaptcha\PoWAlgorithm::Argon2id) {
+            return match (true) {
+                $record->targetBits >= 8 => RiskAction::Argon64->rank(),
+                $record->targetBits >= 4 => RiskAction::Argon32->rank(),
+                default => RiskAction::Argon16->rank(),
+            };
+        }
+
+        return match (true) {
+            $record->targetBits >= 20 => RiskAction::Sha20->rank(),
+            $record->targetBits >= 18 => RiskAction::Sha18->rank(),
+            default => RiskAction::Sha16->rank(),
+        };
     }
 
     /**

@@ -17,6 +17,7 @@ use KiwiCaptcha\Risk\RiskObservation;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\RiskV2Context;
+use KiwiCaptcha\Risk\RiskV2Weights;
 use KiwiCaptcha\Risk\RiskWeights;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
@@ -82,9 +83,9 @@ final class RiskV2EngineTest extends TestCase
         );
     }
 
-    private function v2(bool $honeypotHit = false, ?string $tag = null): RiskV2Context
+    private function v2(bool $honeypotHit = false, ?string $tag = null, ?string $tlsTag = null): RiskV2Context
     {
-        return new RiskV2Context(honeypotHit: $honeypotHit, clientContextTag: $tag);
+        return new RiskV2Context(honeypotHit: $honeypotHit, clientContextTag: $tag, tlsTag: $tlsTag);
     }
 
     public function testHoneypotEvidenceRaisesTheScoreButNeverDeniesAlone(): void
@@ -153,6 +154,67 @@ final class RiskV2EngineTest extends TestCase
         self::assertSame($plain->score, $empty->score);
         self::assertSame($plain->action, $empty->action);
         self::assertSame($plain->band, $empty->band);
+    }
+
+    public function testConsistentTlsTagIsNeutral(): void
+    {
+        $store = $this->zeroStore();
+        $engine = $this->engine($store);
+        $session = str_repeat('2a', 16);
+
+        $first = $engine->assessPreIssueV2($this->context(sessionId: $session), $this->v2(tlsTag: 'tls13|http2'));
+        self::assertSame(100, $first->score, 'the first TLS tag-bearing request is neutral');
+
+        $again = $engine->assessPreIssueV2($this->context(sessionId: $session), $this->v2(tlsTag: 'tls13|http2'));
+        self::assertSame(100, $again->score, 'an unchanged TLS tag stays neutral');
+    }
+
+    public function testChangedTlsTagRaisesTheAggregate(): void
+    {
+        $engine = $this->engine($this->zeroStore());
+        $session = str_repeat('2b', 16);
+
+        $engine->assessPreIssueV2($this->context(sessionId: $session), $this->v2(tlsTag: 'tls13|http2'));
+        $changed = $engine->assessPreIssueV2($this->context(sessionId: $session), $this->v2(tlsTag: 'tls12|http1'));
+
+        self::assertSame(180, $changed->score, '100 + weighted(1000, tls 80)');
+    }
+
+    public function testAbsentTlsTagIsNeutral(): void
+    {
+        $engine = $this->engine($this->zeroStore());
+        $session = str_repeat('2c', 16);
+
+        $decision = $engine->assessPreIssueV2($this->context(sessionId: $session), $this->v2(tlsTag: 'tls13|http2'));
+        self::assertSame(100, $decision->score);
+
+        $noTag = $engine->assessPreIssueV2($this->context(sessionId: $session), $this->v2());
+        self::assertSame(100, $noTag->score, 'a session without a TLS tag stays neutral');
+    }
+
+    public function testOversizedTlsTagIsTreatedAsAbsent(): void
+    {
+        $engine = $this->engine($this->zeroStore());
+        $session = str_repeat('2d', 16);
+
+        $decision = $engine->assessPreIssueV2($this->context(sessionId: $session), $this->v2(tlsTag: str_repeat('x', 65)));
+        self::assertSame(100, $decision->score, 'a TLS tag over the 64-char bound is treated as absent');
+
+        $again = $engine->assessPreIssueV2($this->context(sessionId: $session), $this->v2(tlsTag: str_repeat('y', 65)));
+        self::assertSame(100, $again->score, 'an over-bound TLS tag must never raise the aggregate');
+    }
+
+    public function testV2WeightsOverrideTunesTheAdditiveFactors(): void
+    {
+        $engine = $this->engine($this->zeroStore());
+
+        // Null override: the DEFAULT weights apply (100 + 1000*200/1000 = 300).
+        $default = $engine->assessPreIssueV2($this->context(), $this->v2(honeypotHit: true), null, null);
+        self::assertSame(300, $default->score, 'a null weights override must produce the default score');
+
+        // Operator-tuned weights: honeypot weight 100 -> 100 + 1000*100/1000 = 200.
+        $tuned = $engine->assessPreIssueV2($this->context(), $this->v2(honeypotHit: true), null, new RiskV2Weights(honeypot: 100));
+        self::assertSame(200, $tuned->score, 'the v2 weights override must tune the additive factors');
     }
 
     public function testHoneypotEventRidesTheFeedbackPathAsANonConfirmationEvent(): void

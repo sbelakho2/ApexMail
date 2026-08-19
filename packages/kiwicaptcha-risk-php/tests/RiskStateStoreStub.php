@@ -27,6 +27,9 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface
     /** @var array<string, string> first-seen risk-v2 client-context tags keyed by session pseudonym */
     public array $contextTags = [];
 
+    /** @var array<string, string> first-seen risk-v2 trusted-edge TLS tags keyed by session pseudonym */
+    public array $tlsTags = [];
+
     public function registerOutcome(string $decisionId, int $scope, int $decisionHour, int $score): bool
     {
         $this->ledgerCalls[] = ['register', $decisionId, $scope, $decisionHour, $score];
@@ -52,5 +55,15 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface
     public function sessionFirstContextTag(string $sessionId, string $tag): ?string
     {
         return $this->contextTags[$sessionId] ??= $tag;
+    }
+
+    /**
+     * In-memory SET NX semantics for the trusted-edge TLS record: the
+     * FIRST tag a session pseudonym presents is recorded and returned
+     * forever.
+     */
+    public function sessionFirstTlsTag(string $sessionId, string $tag): ?string
+    {
+        return $this->tlsTags[$sessionId] ??= $tag;
     }
 }

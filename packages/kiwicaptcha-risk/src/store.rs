@@ -124,6 +124,32 @@ pub trait RiskStateStore {
     ) -> Result<Option<String>, RiskStoreError> {
         Ok(None)
     }
+
+    /// The risk-v2 session trusted-edge TLS record: records `tag` as the
+    /// session's FIRST-seen TLS classification tag (SET NX, first write
+    /// wins) and returns the recorded tag — the first coarse, server-
+    /// attested TLS classification (e.g. "tls13|http2", supplied ONLY by
+    /// trusted proxy/CDN infrastructure) the session ever presented, or
+    /// `Ok(None)` when the store has no record surface.
+    ///
+    /// The record is keyed by the session's HMAC pseudonym (never the raw
+    /// cookie value) and expires with the SAME TTL as the risk-v1 session
+    /// state. The engine derives the `tls_inconsistency` signal by
+    /// comparing the current request's tag against the returned first tag;
+    /// `Ok(None)` / `Err` degrade to "consistent" (neutral), never breaking
+    /// an assessment. Only the ephemeral classification is stored — never
+    /// a raw fingerprint database.
+    ///
+    /// The DEFAULT implementation reports no record surface — risk-v1
+    /// stores that do not implement the companion record stay on the v1
+    /// contract untouched.
+    fn session_first_tls_tag(
+        &self,
+        _session_id: &[u8; 16],
+        _tag: &str,
+    ) -> Result<Option<String>, RiskStoreError> {
+        Ok(None)
+    }
 }
 
 /// Convenience wrapper for recording events without building an

@@ -158,9 +158,9 @@ fn rust_issues_record_for_php() {
 
 /// Four-way real-Redis runtime-state interoperability: PHP and
 /// Rust must operate on the SAME Redis records with the SAME runtime
-/// envelope (state marker + consumed_result boolean). Runs only when a
-/// Redis URL is provided and the PHP core's autoloader is reachable from
-/// this crate.
+/// envelope (state marker + consumed_result + operation_identity). Runs
+/// only when a Redis URL is provided and the PHP core's autoloader is
+/// reachable from this crate.
 ///
 /// Directions covered:
 ///  - PHP issue/store -> Rust consume/verify (success + replay)
@@ -230,6 +230,7 @@ $ch = $issuer->issue('login', '127.0.0.1');
 $raw = $client->get(getenv('KC_INTEROP_PREFIX') . $ch->nonce);
 if (!str_contains($raw, '"state":"pending"')) { fwrite(STDERR, 'PHP-written record lacks the state marker'); exit(2); }
 if (!str_contains($raw, '"consumed_result":null')) { fwrite(STDERR, 'PHP-written record lacks consumed_result:null'); exit(3); }
+if (!str_contains($raw, '"operation_identity":null')) { fwrite(STDERR, 'PHP-written record lacks operation_identity:null'); exit(7); }
 echo $ch->nonce;
 "#;
     let nonce = php_script(php_issue).expect("PHP must issue + store a record");
@@ -329,6 +330,7 @@ echo 'ok';
     .expect("PHP replay must read the Rust-committed boolean");
 }
 
+#[cfg(feature = "redis")]
 fn php_script_with_input(
     php_bin: &str,
     autoload: &str,
@@ -364,6 +366,7 @@ fn php_script_with_input(
     Ok(stdout)
 }
 
+#[cfg(feature = "redis")]
 fn issue_record_for_interop() -> kiwicaptcha::challenge::ChallengeRecord {
     use kiwicaptcha::challenge::{issue_challenge, BindingMode, ChallengeConfig, PoWAlgorithm};
     let now = std::time::SystemTime::now()

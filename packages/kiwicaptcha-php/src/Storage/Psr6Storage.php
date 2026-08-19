@@ -7,6 +7,7 @@ namespace KiwiCaptcha\Storage;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ConsumedResult;
+use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
 use Psr\Cache\CacheItemPoolInterface;
 
@@ -15,7 +16,11 @@ use Psr\Cache\CacheItemPoolInterface;
  *
  * consume() is the one-shot TRANSITION: the record is marked
  * consumed and KEPT until its own expiration — replay protection is the
- * consumed marker, not absence.
+ * consumed marker, not absence. The runtime envelope carries the
+ * `operation_identity` marker (null | a bounded <= 128-byte
+ * logical-operation identity) exactly like the Redis backend; the
+ * identity-aware consume writes the identity in the SAME array write as
+ * the state flip.
  *
  * IMPORTANT LIMITATION: PSR-6 cannot express an atomic get-and-transition,
  * so `consume()` is NOT atomic under concurrency — two racing requests can
@@ -23,8 +28,11 @@ use Psr\Cache\CacheItemPoolInterface;
  * may win `consumedNow`. This is best-effort single-use; implementers of
  * {@see \KiwiCaptcha\AtomicStorageInterface} (e.g. {@see RedisStorage}, fused
  * Lua transition) guarantee that exactly one concurrent consumer wins.
+ * `consumedState()` therefore always returns null (a pool exposes no
+ * atomic read-only inspection), so consumed-outcome recovery is
+ * unavailable on this backend.
  */
-final class Psr6Storage implements StorageInterface
+final class Psr6Storage implements StorageInterface, OperationIdentityAwareStorageInterface
 {
     /**
      * PSR-6 reserves the characters `{}()/\@:` in cache keys, so the prefix
@@ -57,7 +65,7 @@ final class Psr6Storage implements StorageInterface
     public function store(ChallengeRecord $record): void
     {
         $item = $this->pool->getItem(self::key($record->nonce));
-        $item->set($record->toArray() + ['state' => 'pending', 'consumed_result' => null]);
+        $item->set($record->toArray() + ['state' => 'pending', 'consumed_result' => null, 'operation_identity' => null]);
         $item->expiresAfter(max(1, $record->expiresAt - time()));
         $this->pool->save($item);
     }
@@ -128,7 +136,45 @@ final class Psr6Storage implements StorageInterface
             return null;
         }
 
-        return new ConsumedRecord($record, !$consumed, $consumed, $result);
+        return new ConsumedRecord($record, !$consumed, $consumed, $result, self::parseIdentity($data['operation_identity'] ?? null));
+    }
+
+    public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
+    {
+        // Same read-then-transition as consume(); the identity (bounded —
+        // an over-long identity is IGNORED) lands in the SAME array write
+        // as the state flip.
+        $item = $this->pool->getItem(self::key($nonce));
+        if (!$item->isHit()) {
+            return null;
+        }
+        $data = $item->get();
+        if (!\is_array($data)) {
+            $this->pool->deleteItem(self::key($nonce));
+
+            return null;
+        }
+
+        $consumed = ($data['state'] ?? 'pending') === 'consumed';
+        if (!$consumed) {
+            $data['state'] = 'consumed';
+            if ($operationIdentity !== null && \strlen($operationIdentity) <= 128) {
+                $data['operation_identity'] = $operationIdentity;
+            }
+            $item->set($data);
+            $this->pool->save($item);
+        }
+        $result = self::parseResult($data['consumed_result'] ?? null);
+
+        try {
+            $record = ChallengeRecord::fromArray(self::stripRuntimeFields($data));
+        } catch (\Throwable) {
+            $this->pool->deleteItem(self::key($nonce));
+
+            return null;
+        }
+
+        return new ConsumedRecord($record, !$consumed, $consumed, $result, self::parseIdentity($data['operation_identity'] ?? null));
     }
 
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
@@ -165,9 +211,15 @@ final class Psr6Storage implements StorageInterface
      */
     private static function stripRuntimeFields(array $data): array
     {
-        unset($data['state'], $data['consumed_result']);
+        unset($data['state'], $data['consumed_result'], $data['operation_identity']);
 
         return $data;
+    }
+
+    /** @param mixed $raw */
+    private static function parseIdentity(mixed $raw): ?string
+    {
+        return \is_string($raw) ? $raw : null;
     }
 
     /** @param mixed $raw */

@@ -204,6 +204,33 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         }
     }
 
+    /**
+     * The risk-v2 session trusted-edge TLS record
+     * ({kiwi:<ns>}:risk:tls:<session-pseudonym>): SET NX with the session
+     * TTL (first write wins = the FIRST coarse, server-attested TLS
+     * classification the session ever presented), then return the recorded
+     * tag. Mirrors the session_first_context_tag machinery exactly (the
+     * Rust mirror names the record `session_first_tls_tag`): keyed by the
+     * session pseudonym only — the raw cookie value never appears in Redis
+     * — and shares the hash tag with the risk-v1 state keys, so it is
+     * Cluster safe.
+     */
+    public function sessionFirstTlsTag(string $sessionId, string $tag): ?string
+    {
+        $key = "{kiwi:{$this->namespace}}:risk:tls:{$sessionId}";
+        try {
+            $set = $this->client->set($key, $tag, 'EX', $this->sessionTtlSecs, 'NX');
+            if ($set === 'OK') {
+                return $tag;
+            }
+            $stored = $this->client->get($key);
+
+            return \is_string($stored) && $stored !== '' ? $stored : null;
+        } catch (\Predis\Exception\Exception $e) {
+            throw new RiskStoreException('Risk TLS-tag record failed: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
     public function observe(RiskObservation $observation): SignalVector
     {
         $ns = $this->namespace;

@@ -13,7 +13,7 @@ use rand::RngCore;
 pub const T0: u64 = 1_700_000_000_000;
 
 /// Default source/subnet epoch window used by the helpers.
-pub const EPOCH_SECS: i64 = 900;
+pub const RISK_EPOCH_SECS: i64 = 900;
 
 /// Deterministic LCG matching the 10k parity stream (verified first value
 /// 291): `x_{n+1} = (x_n * 6364136223846793005 + 1442695040888963407)
@@ -82,7 +82,7 @@ fn epoch_id(pattern: u8, marker: u8) -> String {
 /// pattern, at the T0 epoch window. Each epoch id is DISTINCT (the current
 /// epoch's pseudonym is never reused for the ±1 keys).
 pub fn epoch_ids(pattern: u8, now_ms: u64) -> (i64, String, String, String) {
-    let epoch = ((now_ms / 1000) / EPOCH_SECS as u64) as i64;
+    let epoch = ((now_ms / 1000) / RISK_EPOCH_SECS as u64) as i64;
     (
         epoch,
         epoch_id(pattern, 0x01),

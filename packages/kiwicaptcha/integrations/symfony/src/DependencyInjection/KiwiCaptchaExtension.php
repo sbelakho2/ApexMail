@@ -8,12 +8,13 @@ use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
+use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
-use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyRedemptionGuard;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyMetadataStore;
-use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyRedemptionGuard;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
@@ -56,6 +57,7 @@ use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ConsumedStateReadableInterface;
+use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -147,7 +149,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         //   accounting (the limiter constructor enforces the same rule)
         // - a min_duration_ms at or above the TTL leaves no acceptable
         //   submission time (TooFast before expiry, Expired after) — the
-        //   core Config validates the same relation.
+        //   core Config validates the same relation. The relation is
+        //   intrinsic to ISSUANCE (not to Siteverify), so it applies to
+        //   the GLOBAL TTL and to every per-sitekey ttl_secs regardless
+        //   of whether Siteverify is enabled.
         if ($config['rate_limit_rotation_secs'] > 0 && $config['rate_limit_rotation_secs'] < $config['rate_limit_window_secs']) {
             throw new \InvalidArgumentException(
                 'kiwi_captcha.rate_limit_rotation_secs must be 0 or >= rate_limit_window_secs — '.
@@ -160,49 +165,36 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 'a floor at or above the TTL leaves no acceptable submission time'
             );
         }
+        foreach ($config['risk']['sitekeys'] as $sitekey => $spec) {
+            if ($config['min_duration_ms'] !== null && $spec['ttl_secs'] !== null && $config['min_duration_ms'] >= $spec['ttl_secs'] * 1000) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha.min_duration_ms %d must be < sitekey %s ttl_secs %d * 1000 — a floor at or above the TTL leaves no acceptable submission time (TooFast before expiry, Expired after)',
+                    $config['min_duration_ms'],
+                    $sitekey,
+                    $spec['ttl_secs'],
+                ));
+            }
+        }
         // ── Siteverify crash-recovery ordering invariants ────────────────
         // The Siteverify idempotency store's crash recovery rests on the
         // strict ordering (SiteVerifyIdempotencyStore::LEASE_SECONDS):
         //
         //   max verification window  <  lease (60)  <  waiter bound (90)
-        //                            <  effective challenge TTL
+        //                            <= retained-state recovery retention
         //
-        // The controller enforces only waiter > lease; the effective token
-        // lifetime and the Argon admission lease complete the ordering and
-        // are validated HERE — a configuration that breaks the ordering
-        // makes crash recovery impossible (a PENDING_SAME waiter gives up
-        // before the owner lease can be taken over, or a lease-bounded
-        // verification outlasts the Siteverify lease and is displaced at
-        // takeover). The checks apply ONLY when Siteverify is enabled
-        // (risk.siteverify_secrets non-empty); without it the native
-        // behavior stays unrestricted.
+        // The controller enforces only waiter > lease; the Argon admission
+        // lease and the retained consumed-state retention margin complete
+        // the ordering and are validated HERE — a configuration that
+        // breaks it makes crash recovery impossible (a PENDING_SAME
+        // waiter gives up before the owner lease can be taken over, or a
+        // lease-bounded verification outlasts the Siteverify lease and is
+        // displaced at takeover). Signed token expiry is IRRELEVANT to
+        // the reconstruction: the retained consumed record — kept
+        // readable by risk.redis.ttl_margin_secs — reproduces the
+        // original outcome after the signed challenge has expired, so
+        // short-lived Siteverify profiles (e.g. 30s) are fully supported.
         if ($config['risk']['siteverify_secrets'] !== []) {
             $waiterBoundSecs = (int) SiteVerifyController::IDEMPOTENCY_WAIT_SECS;
-            if ($config['challenge_ttl_secs'] <= $waiterBoundSecs) {
-                throw new \LogicException(sprintf(
-                    'kiwi_captcha.challenge_ttl_secs %d must exceed the Siteverify PENDING_SAME waiter bound (%ds) for crash recovery to be possible — a PENDING_SAME waiter would give up before the owner lease can be taken over',
-                    $config['challenge_ttl_secs'],
-                    $waiterBoundSecs,
-                ));
-            }
-            foreach ($config['risk']['sitekeys'] as $sitekey => $spec) {
-                if ($config['min_duration_ms'] !== null && $spec['ttl_secs'] !== null && $config['min_duration_ms'] >= $spec['ttl_secs'] * 1000) {
-                    throw new \LogicException(sprintf(
-                        'kiwi_captcha.min_duration_ms %d must be < sitekey %s ttl_secs %d * 1000 — a floor at or above the TTL leaves no acceptable submission time (TooFast before expiry, Expired after)',
-                        $config['min_duration_ms'],
-                        $sitekey,
-                        $spec['ttl_secs'],
-                    ));
-                }
-                if ($spec['ttl_secs'] !== null && $spec['ttl_secs'] <= $waiterBoundSecs) {
-                    throw new \LogicException(sprintf(
-                        'kiwi_captcha.risk.sitekeys.%s.ttl_secs %d must exceed the Siteverify PENDING_SAME waiter bound (%ds) for crash recovery to be possible — a PENDING_SAME waiter would give up before the owner lease can be taken over',
-                        $sitekey,
-                        $spec['ttl_secs'],
-                        $waiterBoundSecs,
-                    ));
-                }
-            }
             if ($config['argon2_lease_ms'] >= SiteVerifyIdempotencyStore::LEASE_SECONDS * 1000) {
                 throw new \LogicException(sprintf(
                     'kiwi_captcha.argon2_lease_ms %d must be below the Siteverify ownership lease (%ds) or the Siteverify lease must be raised — a lease-bounded verification could otherwise outlast the Siteverify lease and be displaced at takeover',
@@ -249,6 +241,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     'kiwi_captcha.risk.result_receipt_signing_key must be a base64-encoded 32-byte Ed25519 seed'
                 );
             }
+        }
+        // The trusted TLS header name must be a plain HTTP header name
+        // (letters/digits/hyphens) — anything else is a broken config
+        // refused at compile time instead of a per-request lookup probe.
+        $trustedTlsHeader = $config['risk']['trusted_tls_header'];
+        if ($trustedTlsHeader !== null && preg_match('/^[A-Za-z0-9-]{1,64}$/D', $trustedTlsHeader) !== 1) {
+            throw new \InvalidArgumentException(
+                'kiwi_captcha.risk.trusted_tls_header must be a valid HTTP header name (1-64 characters of [A-Za-z0-9-])'
+            );
         }
 
         $container->setParameter('kiwi_captcha.secret_key', $config['secret_key']);
@@ -460,6 +461,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $riskCookieRef = null;
         $issuanceCounterRef = null;
         $outstandingRef = null;
+        $chainServiceRef = null;
         $riskRedis = null;
         if ($riskConfig['enabled']) {
             [$policyConfig, $scopeIds, $postSolveScopes, $unknownScopeId] = $this->buildRiskPolicy($riskConfig);
@@ -690,6 +692,34 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ]))->setPublic(true));
             $riskGatewayRef = new Reference(RiskGateway::class);
             $riskCookieRef = new Reference(ContinuityCookie::class);
+
+            // ── Selective chained challenges (risk.chaining) ────────────
+            // The chain ticket service signs one-shot chain tickets over
+            // {chainId, stage1Nonce, scope, policyVersion, issuedAt,
+            // expiresAt} with the chain HMAC secret (risk.chaining.hmac_secret,
+            // falling back to the risk master_secret and then the captcha
+            // secret_key — the same secret-generation defaults as the other
+            // risk secrets). The server-held chain state rides the risk
+            // namespace ({kiwi:<ns>}:chain:<chainId>, TTL = chain ttl):
+            // Redis-backed when a Redis client is available, in-memory
+            // otherwise (test/dev semantics — mirroring the idempotency
+            // store wiring).
+            if ($riskConfig['chaining']['enabled']) {
+                $chainStoreRedis = $riskRedis ?? $redisRef;
+                if ($chainStoreRedis !== null) {
+                    $container->setDefinition(RedisChainedChallengeStateStore::class, new Definition(RedisChainedChallengeStateStore::class, [$chainStoreRedis, $namespace]));
+                    $chainStoreRef = new Reference(RedisChainedChallengeStateStore::class);
+                } else {
+                    $container->setDefinition(ArrayChainedChallengeStateStore::class, new Definition(ArrayChainedChallengeStateStore::class, []));
+                    $chainStoreRef = new Reference(ArrayChainedChallengeStateStore::class);
+                }
+                $container->setDefinition(ChainedChallengeTicketService::class, (new Definition(ChainedChallengeTicketService::class, [
+                    $chainStoreRef,
+                    $riskConfig['chaining']['hmac_secret'] ?? $riskConfig['master_secret'] ?? $config['secret_key'],
+                    $riskConfig['chaining']['ttl_secs'],
+                ]))->setPublic(true));
+                $chainServiceRef = new Reference(ChainedChallengeTicketService::class);
+            }
         }
         // ── Trusted client-IP policy ──────────────────────────────────────
         // Wired UNCONDITIONALLY (not gated on risk.enabled): the canonical
@@ -774,32 +804,28 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         // Server-side provider-compatibility stores — the
-        // metadata sidecar (action/cData bound at challenge issuance), the
-        // atomic idempotency store (provider-style idempotency_key) and
-        // the NONCE-LEVEL redemption guard (which logical operation
-        // originally redeemed a token — the recovery gate for takeovers).
-        // Redis-backed whenever the challenge storage is RedisStorage (the
-        // same client), in-memory otherwise (test/dev semantics — the
-        // stores are only wired into the controllers; production
-        // deployments with Siteverify use the Redis variants).
+        // metadata sidecar (action/cData bound at challenge issuance) and
+        // the atomic idempotency store (provider-style idempotency_key).
+        // The logical-operation identity of a redemption lives IN the
+        // consumed runtime state itself (written atomically with the
+        // pending→consumed transition), so no separate redemption record
+        // is needed. Redis-backed whenever the challenge storage is
+        // RedisStorage (the same client), in-memory otherwise (test/dev
+        // semantics — the stores are only wired into the controllers;
+        // production deployments with Siteverify use the Redis variants).
         $metadataStoreRef = null;
         $idempotencyStoreRef = null;
-        $redemptionGuardRef = null;
         if ($redisRef !== null) {
             $redisNamespace = $riskConfig['redis']['namespace'] ?? 'kiwicaptcha';
             $container->setDefinition(RedisSiteVerifyMetadataStore::class, new Definition(RedisSiteVerifyMetadataStore::class, [$redisRef, $redisNamespace]));
             $container->setDefinition(RedisSiteVerifyIdempotencyStore::class, new Definition(RedisSiteVerifyIdempotencyStore::class, [$redisRef, $redisNamespace]));
-            $container->setDefinition(RedisSiteVerifyRedemptionGuard::class, new Definition(RedisSiteVerifyRedemptionGuard::class, [$redisRef, $redisNamespace]));
             $metadataStoreRef = new Reference(RedisSiteVerifyMetadataStore::class);
             $idempotencyStoreRef = new Reference(RedisSiteVerifyIdempotencyStore::class);
-            $redemptionGuardRef = new Reference(RedisSiteVerifyRedemptionGuard::class);
         } else {
             $container->setDefinition(ArraySiteVerifyMetadataStore::class, new Definition(ArraySiteVerifyMetadataStore::class, []));
             $container->setDefinition(ArraySiteVerifyIdempotencyStore::class, new Definition(ArraySiteVerifyIdempotencyStore::class, []));
-            $container->setDefinition(ArraySiteVerifyRedemptionGuard::class, new Definition(ArraySiteVerifyRedemptionGuard::class, []));
             $metadataStoreRef = new Reference(ArraySiteVerifyMetadataStore::class);
             $idempotencyStoreRef = new Reference(ArraySiteVerifyIdempotencyStore::class);
-            $redemptionGuardRef = new Reference(ArraySiteVerifyRedemptionGuard::class);
         }
 
         // The core binds issuance by the GLOBAL binding_mode only: the
@@ -855,6 +881,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // stockpiling admission run BEFORE the challenge state is
             // created (the quota checks all precede the storage write).
             ->setArgument('$challengeTtlSecs', $config['challenge_ttl_secs'])
+            // The one-shot chain-ticket gate for stage-2 issuance
+            // (risk.chaining; null = chaining disabled — a ticket-bearing
+            // request is then refused, never downgraded).
+            ->setArgument('$chainTickets', $chainServiceRef)
+            // The trusted-edge TLS classification header
+            // (risk.trusted_tls_header; null = the feature is off).
+            ->setArgument('$trustedTlsHeader', $trustedTlsHeader)
+            // The security-policy epoch a presented chain ticket must
+            // match (a chain from an older epoch is refused).
+            ->setArgument('$policyVersion', $config['risk']['policy_version'])
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Challenge route (configured prefix; see KiwiCaptchaRouteLoader) ──
@@ -889,12 +925,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             null, // idempotency wait bound (default)
             $config['risk']['policy_version'] ?? 1, // security-policy epoch in the idempotency identity
         ]))
-            // The NONCE-LEVEL redemption guard: which logical operation
-            // originally redeemed a (backend, nonce) pair (first write
-            // wins) — the recovery gate for takeovers, so a consumed
-            // token can never become successful again through a
-            // different idempotency UUID.
-            ->setArgument('$redemptionGuard', $riskConfig['siteverify_secrets'] !== [] ? $redemptionGuardRef : null)
+            // The logical-operation identity of the redemption rides IN
+            // the consumed runtime state (written atomically with the
+            // pending→consumed transition) — the recovery gate on the
+            // takeover path compares the consumed record's own identity
+            // against the claiming fingerprint, so a consumed token can
+            // never become successful again through a different
+            // idempotency UUID or backend secret.
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Migration compatibility loader ──
@@ -973,6 +1010,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The optional Ed25519 result-receipt signer for
             // exported verification results (null = disabled).
             ->setArgument('$receiptSigner', new Reference(ResultReceiptSigner::class))
+            // The chain ticket service issues the one-shot CHAIN_REQUIRED
+            // tickets after a valid verification whose reassessment
+            // demands a stronger stage (risk.chaining; null = disabled).
+            ->setArgument('$chainTickets', $chainServiceRef)
+            // The security-policy epoch stamped into issued chain tickets.
+            ->setArgument('$policyVersion', $config['risk']['policy_version'])
             ->addTag('validator.constraint_validator'));
 
         // ── Twig widget runtime + twig function (embeds the shared widget assets) ──
@@ -1069,10 +1112,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * When siteverify_secrets is configured, the storage must ALSO be
      * Siteverify recovery-capable (SiteVerifyRecoveryCapableStorageInterface
      * — the bundled core storages qualify through AtomicStorageInterface +
-     * ConsumedStateReadableInterface): Siteverify idempotency crash
-     * recovery reads the retained consumed state, and a custom atomic
-     * storage WITHOUT the consumed-state capability is REFUSED (the
-     * ConsumedOutcomeRecovery silent-null gap) — ordinary verification
+     * ConsumedStateReadableInterface + the identity-aware consume
+     * capability): Siteverify idempotency crash recovery reads the
+     * retained consumed state AND compares the consumed record's own
+     * operation identity against the claiming fingerprint — a custom
+     * atomic storage WITHOUT the identity-aware consume capability is
+     * REFUSED (the recovery gate would silently refuse everything, since
+     * no record could ever carry an identity) — ordinary verification
      * remains compatible with any StorageInterface.
      * Fails closed at container compile time (a LogicException names the
      * exact misconfiguration).
@@ -1102,9 +1148,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             }
         }
         $isAtomic = $class !== null && \is_string($class) && \is_a($class, AtomicStorageInterface::class, true);
+        $isIdentityAware = $class !== null && \is_string($class) && \is_a($class, OperationIdentityAwareStorageInterface::class, true);
         $isRecoveryCapable = $class !== null && \is_string($class) && (
             \is_a($class, SiteVerifyRecoveryCapableStorageInterface::class, true)
-            || (\is_a($class, AtomicStorageInterface::class, true) && \is_a($class, ConsumedStateReadableInterface::class, true))
+            || (\is_a($class, AtomicStorageInterface::class, true) && \is_a($class, ConsumedStateReadableInterface::class, true) && $isIdentityAware)
         );
         if ($siteverifyEnabled) {
             if (!$isAtomic) {
@@ -1115,7 +1162,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             }
             if (!$isRecoveryCapable) {
                 throw new \LogicException(sprintf(
-                    'KiwiCaptcha: siteverify_secrets requires a Siteverify recovery-capable storage backend — the class must implement KiwiCaptcha\ConsumedStateReadableInterface in addition to KiwiCaptcha\AtomicStorageInterface (or BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface; the bundled RedisStorage/ArrayStorage qualify). The resolved class %s does not implement KiwiCaptcha\ConsumedStateReadableInterface: Siteverify idempotency crash recovery reads the retained consumed state and is UNAVAILABLE without it (a crashed owner\'s committed outcome could never be reconstructed).',
+                    'KiwiCaptcha: siteverify_secrets requires a Siteverify recovery-capable storage backend — the class must implement KiwiCaptcha\OperationIdentityAwareStorageInterface (which requires KiwiCaptcha\ConsumedStateReadableInterface) in addition to KiwiCaptcha\AtomicStorageInterface (or BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface; the bundled RedisStorage/ArrayStorage qualify). The resolved class %s lacks the identity-aware consume capability: Siteverify idempotency crash recovery reads the retained consumed state AND compares the consumed record\'s own operation identity against the claiming fingerprint — the identity is written atomically with the pending→consumed transition, and without it the takeover path could never prove that a claim is the nonce\'s original logical operation (reconstruction would silently refuse everything).',
                     $class === null ? '(unresolvable)' : $class,
                 ));
             }

@@ -16,9 +16,9 @@
 //! from probabilistic evidence: evidence only ever moves the risk
 //! aggregate, and the verifier only ever validates cryptographic proof.
 //! The risk-v2 surfaces (honeypot/decoy evidence, session client-context
-//! consistency) are additive: they feed the same multi-factor scorer as
-//! bounded fixed-point factors, never a gate, and never weaken or bypass
-//! the risk-v1 state contract.
+//! consistency, trusted-edge TLS consistency) are additive: they feed the
+//! same multi-factor scorer as bounded fixed-point factors, never a gate,
+//! and never weaken or bypass the risk-v1 state contract.
 
 pub mod action;
 pub mod breaker;
@@ -57,6 +57,7 @@ use crate::metrics::Metrics;
 use crate::network::NetworkClassifier;
 use crate::policy::{RiskPolicy, RiskReason};
 use crate::score::score as compute_score;
+use crate::score::RiskV2Weights;
 use crate::signals::SignalVector;
 use crate::store::{Observed, RiskStateStore};
 
@@ -500,14 +501,17 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         idempotency_key: Option<String>,
     ) -> Result<RiskDecision, RiskError> {
-        self.assess_pre_issue_impl(ctx, None, idempotency_key)
+        self.assess_pre_issue_impl(ctx, None, idempotency_key, None)
     }
 
     /// Risk-v2 variant of [`RiskEngine::assess_pre_issue`]: the identical
     /// pipeline plus the additive risk-v2 evidence factors
-    /// (honeypot/decoy evidence, session client-context consistency) from
-    /// `v2`. The risk-v1 contract semantics are unchanged — with an empty
-    /// `v2` context the decision is byte-identical to the v1 path.
+    /// (honeypot/decoy evidence, session client-context consistency,
+    /// trusted-edge TLS consistency) from `v2`. The risk-v1 contract
+    /// semantics are unchanged — with an empty `v2` context the decision is
+    /// byte-identical to the v1 path. `v2_weights` is the operator-tunable
+    /// weights override for the additive risk-v2 factors; `None` uses the
+    /// DEFAULT weights (identical scores to today).
     ///
     /// # Errors
     ///
@@ -518,8 +522,9 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         v2: &RiskV2Context,
         idempotency_key: Option<String>,
+        v2_weights: Option<RiskV2Weights>,
     ) -> Result<RiskDecision, RiskError> {
-        self.assess_pre_issue_impl(ctx, Some(v2), idempotency_key)
+        self.assess_pre_issue_impl(ctx, Some(v2), idempotency_key, v2_weights)
     }
 
     fn assess_pre_issue_impl(
@@ -527,6 +532,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         v2: Option<&RiskV2Context>,
         idempotency_key: Option<String>,
+        v2_weights: Option<RiskV2Weights>,
     ) -> Result<RiskDecision, RiskError> {
         if !self.limiter.allow() {
             self.metrics.incr("denied:limiter");
@@ -544,7 +550,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             self.record_decision_metrics(ctx.scope, &decision);
             return Ok(self.finalize_decision(ctx.scope, decision));
         }
-        self.assess_inner(ctx, v2, idempotency_key)
+        self.assess_inner(ctx, v2, idempotency_key, v2_weights)
     }
 
     /// Deprecated alias of [`RiskEngine::assess_pre_issue`].
@@ -574,12 +580,15 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         idempotency_key: Option<String>,
     ) -> Result<RiskDecision, RiskError> {
-        self.assess_inner(ctx, None, idempotency_key)
+        self.assess_inner(ctx, None, idempotency_key, None)
     }
 
     /// Risk-v2 variant of [`RiskEngine::reassess`]: the identical pipeline
     /// plus the additive risk-v2 evidence factors from `v2` (honeypot
-    /// evidence, session client-context consistency).
+    /// evidence, session client-context consistency, trusted-edge TLS
+    /// consistency). `v2_weights` is the operator-tunable weights override
+    /// for the additive risk-v2 factors; `None` uses the DEFAULT weights
+    /// (identical scores to today).
     ///
     /// # Errors
     ///
@@ -590,8 +599,9 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         v2: &RiskV2Context,
         idempotency_key: Option<String>,
+        v2_weights: Option<RiskV2Weights>,
     ) -> Result<RiskDecision, RiskError> {
-        self.assess_inner(ctx, Some(v2), idempotency_key)
+        self.assess_inner(ctx, Some(v2), idempotency_key, v2_weights)
     }
 
     /// The shared assessment pipeline (no limiter); only
@@ -601,6 +611,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         v2: Option<&RiskV2Context>,
         idempotency_key: Option<String>,
+        v2_weights: Option<RiskV2Weights>,
     ) -> Result<RiskDecision, RiskError> {
         let now_ms = now_ms();
         let observation = self.build_observation(&ctx, now_ms, idempotency_key)?;
@@ -655,21 +666,21 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                     let bias = calibration.bias_for_scope(ctx.scope, now_ms as i64);
                     base = (base as i32 + bias).clamp(0, 1000) as u16;
                 }
-                // Risk-v2 evidence factors: honeypot/decoy evidence and the
-                // session client-context consistency, derived from the v2
-                // context (a session-first-tag record read that degrades to
+                // Risk-v2 evidence factors: honeypot/decoy evidence, the
+                // session client-context consistency and the trusted-edge
+                // TLS consistency, derived from the v2 context (a
+                // session-first-tag record read that degrades to
                 // "consistent" on any backend miss — probabilistic evidence
-                // never breaks an assessment).
+                // never breaks an assessment). The v2 weights are the
+                // operator override when given, else the DEFAULT weights
+                // (byte-identical scores to today).
                 let v2_signals = v2
                     .map(|v2ctx| self.derive_v2_signals(v2ctx, observation.session_id, ctx.event));
                 let score = match &v2_signals {
-                    Some(signals) => crate::score::score_v2(
-                        base,
-                        &vector,
-                        &self.policy.weights,
-                        signals,
-                        &crate::score::RiskV2Weights::default(),
-                    ),
+                    Some(signals) => {
+                        let w2 = v2_weights.unwrap_or_default();
+                        crate::score::score_v2(base, &vector, &self.policy.weights, signals, &w2)
+                    }
                     None => compute_score(base, &vector, &self.policy.weights),
                 };
                 let mut decision = self.policy.decide_with_hysteresis(
@@ -697,7 +708,12 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     /// - `session_inconsistency` = 1000 when the session's first-seen
     ///   client-context tag differs from the current tag; 0 when the tag is
     ///   absent (first request), the session is absent, or the record read
-    ///   fails (neutral degradation).
+    ///   fails (neutral degradation);
+    /// - `tls_inconsistency` = 1000 when the session's first-seen
+    ///   trusted-edge TLS classification tag differs from the current tag;
+    ///   0 when the tag is absent (first request), the session is absent,
+    ///   the tag exceeds the 64-char bound (treated as absent), or the
+    ///   record read fails (neutral degradation).
     fn derive_v2_signals(
         &self,
         v2: &RiskV2Context,
@@ -718,9 +734,19 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             }
             _ => 0,
         };
+        let tls_inconsistency = match (session_id, v2.tls_tag.as_deref()) {
+            (Some(session), Some(tag)) if !tag.is_empty() && tag.len() <= 64 => {
+                match self.store.session_first_tls_tag(&session, tag) {
+                    Ok(Some(first)) if first != tag => 1000,
+                    _ => 0,
+                }
+            }
+            _ => 0,
+        };
         crate::signals::RiskV2Signals {
             honeypot,
             session_inconsistency,
+            tls_inconsistency,
         }
     }
 
@@ -1484,6 +1510,7 @@ mod tests {
     #[derive(Default)]
     struct V2FirstTagStore {
         tags: Mutex<HashMap<[u8; 16], String>>,
+        tls_tags: Mutex<HashMap<[u8; 16], String>>,
         outcomes: OutcomeLedger,
     }
 
@@ -1535,13 +1562,26 @@ mod tests {
                     .clone(),
             ))
         }
+
+        fn session_first_tls_tag(
+            &self,
+            session_id: &[u8; 16],
+            tag: &str,
+        ) -> Result<Option<String>, RiskStoreError> {
+            let mut tags = self.tls_tags.lock().unwrap_or_else(|p| p.into_inner());
+            Ok(Some(
+                tags.entry(*session_id)
+                    .or_insert_with(|| tag.to_string())
+                    .clone(),
+            ))
+        }
     }
 
-    fn v2_context(honeypot_hit: bool, tag: Option<&str>) -> RiskV2Context {
+    fn v2_context(honeypot_hit: bool, tag: Option<&str>, tls_tag: Option<&str>) -> RiskV2Context {
         RiskV2Context {
             honeypot_hit,
             client_context_tag: tag.map(str::to_string),
-            client_context_consistent: false,
+            tls_tag: tls_tag.map(str::to_string),
         }
     }
 
@@ -1560,7 +1600,7 @@ mod tests {
         // selected, never a hard denial).
         let fresh = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
         let hit = fresh
-            .assess_pre_issue_v2(context(), &v2_context(true, None), None)
+            .assess_pre_issue_v2(context(), &v2_context(true, None, None), None, None)
             .unwrap();
         assert_eq!(hit.score, 300); // 100 + weighted(1000, honeypot 200)
         assert_eq!(hit.action, RiskAction::Sha18);
@@ -1573,7 +1613,7 @@ mod tests {
         // Through the SAME engine the decision escalates (Allow -> Sha16)
         // instead of staying flat: the honeypot evidence moved the profile.
         let escalated = engine
-            .assess_pre_issue_v2(context(), &v2_context(true, None), None)
+            .assess_pre_issue_v2(context(), &v2_context(true, None, None), None, None)
             .unwrap();
         assert_eq!(escalated.score, 300);
         assert_eq!(escalated.action, RiskAction::Sha16);
@@ -1598,7 +1638,7 @@ mod tests {
                 ..context()
             };
             let decision = engine
-                .assess_pre_issue_v2(ctx, &v2_context(false, None), None)
+                .assess_pre_issue_v2(ctx, &v2_context(false, None, None), None, None)
                 .unwrap();
             assert_eq!(
                 decision.score, 300,
@@ -1622,19 +1662,34 @@ mod tests {
         // First request: the tag is recorded as the first-seen tag and the
         // consistency signal is neutral (score 100).
         let first = engine
-            .assess_pre_issue_v2(with_session("ta"), &v2_context(false, Some("ta")), None)
+            .assess_pre_issue_v2(
+                with_session("ta"),
+                &v2_context(false, Some("ta"), None),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(first.score, 100, "first tag-bearing request is neutral");
 
         // Same tag again: still consistent, still neutral.
         let again = engine
-            .assess_pre_issue_v2(with_session("ta"), &v2_context(false, Some("ta")), None)
+            .assess_pre_issue_v2(
+                with_session("ta"),
+                &v2_context(false, Some("ta"), None),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(again.score, 100, "an unchanged tag stays neutral");
 
         // Changed tag: inconsistency raises the aggregate (100 + 120 = 220).
         let changed = engine
-            .assess_pre_issue_v2(with_session("tb"), &v2_context(false, Some("tb")), None)
+            .assess_pre_issue_v2(
+                with_session("tb"),
+                &v2_context(false, Some("tb"), None),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(changed.score, 220, "a changed tag must raise the aggregate");
     }
@@ -1647,7 +1702,7 @@ mod tests {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
         let plain = engine.assess_pre_issue(context(), None).unwrap();
         let empty = engine
-            .assess_pre_issue_v2(context(), &v2_context(false, None), None)
+            .assess_pre_issue_v2(context(), &v2_context(false, None, None), None, None)
             .unwrap();
         assert_eq!(empty.score, plain.score);
         assert_eq!(empty.action, plain.action);
@@ -1658,11 +1713,169 @@ mod tests {
                     session_id: Some(b"session-bytes"),
                     ..context()
                 },
-                &v2_context(false, None),
+                &v2_context(false, None, None),
+                None,
                 None,
             )
             .unwrap();
         assert_eq!(no_tag.score, 100, "a session without a tag stays neutral");
+    }
+
+    /// Trusted-edge TLS consistency: a CONSISTENT tag (the session's
+    /// first-seen TLS classification) is neutral; a CHANGED tag raises the
+    /// aggregate; an ABSENT tag (first request) is neutral.
+    #[test]
+    fn v2_tls_consistency() {
+        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let session: &[u8] = b"tls-session-bytes";
+        let with_session = |_tag: &str| RiskContext {
+            session_id: Some(session),
+            ..context()
+        };
+
+        // First request: the TLS tag is recorded as the first-seen tag and
+        // the consistency signal is neutral (score 100).
+        let first = engine
+            .assess_pre_issue_v2(
+                with_session("tls13|http2"),
+                &v2_context(false, None, Some("tls13|http2")),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(first.score, 100, "first TLS tag-bearing request is neutral");
+
+        // Same tag again: still consistent, still neutral.
+        let again = engine
+            .assess_pre_issue_v2(
+                with_session("tls13|http2"),
+                &v2_context(false, None, Some("tls13|http2")),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(again.score, 100, "an unchanged TLS tag stays neutral");
+
+        // Changed tag: TLS inconsistency raises the aggregate (100 + 80 = 180).
+        let changed = engine
+            .assess_pre_issue_v2(
+                with_session("tls12|http1"),
+                &v2_context(false, None, Some("tls12|http1")),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            changed.score, 180,
+            "a changed TLS tag must raise the aggregate"
+        );
+    }
+
+    /// An absent TLS tag, a session without any TLS tag, and a TLS tag
+    /// over the 64-char bound (treated as absent) carry NO inconsistency
+    /// signal (neutral).
+    #[test]
+    fn v2_absent_or_overbound_tls_tag_is_neutral() {
+        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let session: &[u8] = b"tls-absent-session";
+
+        let first = engine
+            .assess_pre_issue_v2(
+                RiskContext {
+                    session_id: Some(session),
+                    ..context()
+                },
+                &v2_context(false, None, Some("tls13|http2")),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(first.score, 100);
+
+        // Session without a TLS tag: neutral.
+        let no_tag = engine
+            .assess_pre_issue_v2(
+                RiskContext {
+                    session_id: Some(session),
+                    ..context()
+                },
+                &v2_context(false, None, None),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            no_tag.score, 100,
+            "a session without a TLS tag stays neutral"
+        );
+
+        // A TLS tag over the 64-char bound is treated as absent and must
+        // never raise the aggregate — and it must not be recorded either.
+        let overbound = "y".repeat(65);
+        let first_overbound = engine
+            .assess_pre_issue_v2(
+                RiskContext {
+                    session_id: Some(b"tls-overbound-session"),
+                    ..context()
+                },
+                &v2_context(false, None, Some(overbound.as_str())),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            first_overbound.score, 100,
+            "an over-bound TLS tag is treated as absent"
+        );
+        let changed_overbound = engine
+            .assess_pre_issue_v2(
+                RiskContext {
+                    session_id: Some(b"tls-overbound-session"),
+                    ..context()
+                },
+                &v2_context(false, None, Some("z".repeat(65).as_str())),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            changed_overbound.score, 100,
+            "an over-bound TLS tag must never raise the aggregate"
+        );
+    }
+
+    /// The v2 weights override tunes the additive factors: `None` uses the
+    /// DEFAULT weights (identical scores to today); an override changes
+    /// only the weighted contribution.
+    #[test]
+    fn v2_weights_override_tunes_the_additive_factors() {
+        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+
+        // Null override: the DEFAULT weights apply (100 + 1000*200/1000 = 300).
+        let default = engine
+            .assess_pre_issue_v2(context(), &v2_context(true, None, None), None, None)
+            .unwrap();
+        assert_eq!(
+            default.score, 300,
+            "a null weights override must produce the default score"
+        );
+
+        // Operator-tuned weights: honeypot weight 100 -> 100 + 1000*100/1000 = 200.
+        let tuned = engine
+            .assess_pre_issue_v2(
+                context(),
+                &v2_context(true, None, None),
+                None,
+                Some(RiskV2Weights {
+                    honeypot: 100,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            tuned.score, 200,
+            "the v2 weights override must tune the additive factors"
+        );
     }
 
     #[test]

@@ -17,7 +17,13 @@ namespace KiwiCaptcha;
  * - `consumedBefore` — the record was already consumed by an earlier call;
  * - `consumedResult` — the deterministic verification result stored by
  *                      {@see StorageInterface::commitResult()}, or null when
- *                      absent (a crash between consume and commit).
+ *                      absent (a crash between consume and commit);
+ * - `operationIdentity` — the logical-operation identity recorded WITH the
+ *                      pending→consumed transition by
+ *                      {@see OperationIdentityAwareStorageInterface::consumeWithOperationIdentity()},
+ *                      or null when the record carries none (a plain
+ *                      consume, an identity-less storage, or an over-long
+ *                      identity that was ignored).
  *
  * A verifier retrying an already-consumed record with a stored result
  * returns that stored outcome directly (Valid/InsufficientWork) WITHOUT
@@ -31,6 +37,7 @@ final class ConsumedRecord
         public readonly bool $consumedNow,
         public readonly bool $consumedBefore,
         public readonly ?ConsumedResult $consumedResult,
+        public readonly ?string $operationIdentity = null,
     ) {
     }
 }

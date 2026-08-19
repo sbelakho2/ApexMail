@@ -25,9 +25,11 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Risk-v2 bundle wiring: decoy-marked challenge requests feed honeypot
- * evidence into the risk gateway WITHOUT gating issuance, and the
- * session client-context tag drives the session-consistency signal through
- * the full stack (controller -> gateway -> engine -> store).
+ * evidence into the risk gateway WITHOUT gating issuance, the session
+ * client-context tag drives the session-consistency signal through the
+ * full stack (controller -> gateway -> engine -> store), and the trusted
+ * proxy-supplied TLS classification tag drives the TLS-consistency signal
+ * through the same stack.
  */
 final class RiskV2IntegrationTest extends TestCase
 {
@@ -166,6 +168,68 @@ final class RiskV2IntegrationTest extends TestCase
         self::assertNotNull($honeypotOnly, 'a honeypot hit alone still carries the v2 context');
         self::assertTrue($honeypotOnly->honeypotHit);
         self::assertNull($honeypotOnly->clientContextTag);
+        self::assertNull($honeypotOnly->tlsTag);
+    }
+
+    public function testTrustedTlsTagConsistencyThroughTheGateway(): void
+    {
+        $stack = $this->stack();
+        $session = str_repeat('3a', 16);
+        $descriptor = 'vp=1,t=0,l=en,z=1';
+
+        // The gateway accepts the coarse, server-attested TLS classification
+        // tag from trusted proxy infrastructure as the 4th argument.
+        $first = $stack['gateway']->clientContextV2(false, $session, $descriptor, 'tls13|http2');
+        self::assertNotNull($first);
+        self::assertSame('tls13|http2', $first->tlsTag, 'the trusted TLS tag must ride the v2 context');
+        self::assertNotNull($first->clientContextTag, 'the descriptor-derived tag is built as today');
+        $decision1 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $first);
+        self::assertSame(100, $decision1->score, 'the first TLS tag-bearing request is neutral');
+
+        // Same session, SAME TLS tag: neutral.
+        $again = $stack['gateway']->clientContextV2(false, $session, $descriptor, 'tls13|http2');
+        $decision2 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $again);
+        self::assertSame(100, $decision2->score, 'an unchanged TLS tag stays neutral');
+
+        // Same session, CHANGED TLS tag: the tls_inconsistency signal
+        // raises the aggregate (100 + 80 = 180).
+        $changed = $stack['gateway']->clientContextV2(false, $session, $descriptor, 'tls12|http1');
+        $decision3 = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $changed);
+        self::assertSame(180, $decision3->score, 'a changed trusted TLS tag must raise the aggregate');
+    }
+
+    public function testTlsTagWithoutSessionOrDescriptorIsNeutral(): void
+    {
+        $stack = $this->stack();
+
+        // A TLS tag alone (no session) still yields a v2 context, but the
+        // engine has no session record to compare against: neutral.
+        $onlyTls = $stack['gateway']->clientContextV2(false, null, null, 'tls13|http2');
+        self::assertNotNull($onlyTls, 'a trusted TLS tag alone is still risk-v2 evidence');
+        self::assertSame('tls13|http2', $onlyTls->tlsTag);
+        self::assertNull($onlyTls->clientContextTag);
+        $decision = $stack['gateway']->preIssue('login', '198.51.100.7', null, null, $onlyTls);
+        self::assertSame(100, $decision->score, 'a TLS tag without a session is neutral');
+
+        // An empty TLS tag is treated as absent: no v2 context at all.
+        self::assertNull($stack['gateway']->clientContextV2(false, null, null, ''), 'an empty TLS tag is no evidence');
+    }
+
+    public function testV2WeightsOverrideThroughTheGateway(): void
+    {
+        $stack = $this->stack();
+        $session = str_repeat('3b', 16);
+        $descriptor = 'vp=1,t=0,l=en,z=1';
+
+        // Null override: the DEFAULT weights apply (100 + 1000*200/1000 = 300).
+        $default = $stack['gateway']->clientContextV2(true, $session, $descriptor);
+        self::assertNotNull($default);
+        $decisionDefault = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $default, null);
+        self::assertSame(300, $decisionDefault->score, 'a null weights override must produce the default score');
+
+        // Operator-tuned weights: honeypot weight 100 -> 100 + 1000*100/1000 = 200.
+        $tuned = $stack['gateway']->preIssue('login', '198.51.100.7', $session, null, $default, new \KiwiCaptcha\Risk\RiskV2Weights(honeypot: 100));
+        self::assertSame(200, $tuned->score, 'the v2 weights override must reach the engine through the gateway');
     }
 
     public function testHoneypotEvidenceRejectsNonHoneypotKinds(): void

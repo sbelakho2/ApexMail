@@ -83,7 +83,7 @@ pub fn score(base: u16, s: &SignalVector, w: &RiskWeights) -> u16 {
     risk.clamp(0, 1000) as u16
 }
 
-/// The 2 ADDITIVE risk-v2 weight fields, same names/order as
+/// The 3 ADDITIVE risk-v2 weight fields, same names/order as
 /// [`crate::signals::RiskV2Signals`].
 ///
 /// The risk-v1 contract weights ([`RiskWeights`]) are untouched — these are
@@ -98,6 +98,10 @@ pub struct RiskV2Weights {
     /// 120: a changed context tag raises the aggregate, a consistent or
     /// absent tag is neutral).
     pub session_inconsistency: u16,
+    /// Weight of the trusted-edge TLS inconsistency signal (default 80: a
+    /// changed TLS classification tag raises the aggregate, a consistent or
+    /// absent tag is neutral).
+    pub tls: u16,
 }
 
 impl Default for RiskV2Weights {
@@ -105,13 +109,14 @@ impl Default for RiskV2Weights {
         RiskV2Weights {
             honeypot: 200,
             session_inconsistency: 120,
+            tls: 80,
         }
     }
 }
 
 /// Risk-v2 scoring: the risk-v1 score PLUS the weighted risk-v2 evidence
-/// factors (honeypot, session client-context inconsistency), clamped to
-/// 0..=1000.
+/// factors (honeypot, session client-context inconsistency, trusted-edge
+/// TLS inconsistency), clamped to 0..=1000.
 ///
 /// With zero risk-v2 signals this is EXACTLY [`score`] — the v1 contract
 /// semantics (the 13 signals and their weights) are unchanged; the v2
@@ -126,6 +131,7 @@ pub fn score_v2(
     let mut risk = score(base, s, w) as u32;
     risk += weighted(v2.honeypot, w2.honeypot);
     risk += weighted(v2.session_inconsistency, w2.session_inconsistency);
+    risk += weighted(v2.tls_inconsistency, w2.tls);
     risk.min(1000) as u16
 }
 
@@ -652,6 +658,64 @@ mod tests {
     /// exists yet, so no inconsistency signal is produced.
     #[test]
     fn absent_client_context_is_neutral() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let vector = SignalVector::zero();
+        assert_eq!(
+            score_v2(100, &vector, &w, &RiskV2Signals::zero(), &w2),
+            score(100, &vector, &w)
+        );
+    }
+
+    /// The DEFAULT risk-v2 weights match the cross-language contract
+    /// (byte-identical with the PHP mirror).
+    #[test]
+    fn default_v2_weights_match_the_cross_language_contract() {
+        let w2 = RiskV2Weights::default();
+        assert_eq!(w2.honeypot, 200);
+        assert_eq!(w2.session_inconsistency, 120);
+        assert_eq!(w2.tls, 80);
+    }
+
+    /// Consistent trusted-edge TLS classification is NEUTRAL: a zero
+    /// tls_inconsistency signal contributes nothing.
+    #[test]
+    fn consistent_tls_tag_is_neutral() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let vector = SignalVector::zero();
+        let plain = score(100, &vector, &w);
+        let with_v2 = score_v2(100, &vector, &w, &RiskV2Signals::zero(), &w2);
+        assert_eq!(
+            with_v2, plain,
+            "consistent/absent TLS classification must not change the score"
+        );
+    }
+
+    /// A CHANGED trusted-edge TLS tag raises the aggregate: 100 + 80 = 180.
+    #[test]
+    fn changed_tls_tag_raises_the_aggregate() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let before = score(100, &SignalVector::zero(), &w);
+        let after = score_v2(
+            100,
+            &SignalVector::zero(),
+            &w,
+            &RiskV2Signals {
+                tls_inconsistency: 1000,
+                ..Default::default()
+            },
+            &w2,
+        );
+        assert!(after > before, "TLS inconsistency must raise the aggregate");
+        assert_eq!(after, 180);
+    }
+
+    /// ABSENT trusted-edge TLS tag (first request) is NEUTRAL: no record
+    /// exists yet, so no inconsistency signal is produced.
+    #[test]
+    fn absent_tls_tag_is_neutral() {
         let w = RiskWeights::default();
         let w2 = RiskV2Weights::default();
         let vector = SignalVector::zero();

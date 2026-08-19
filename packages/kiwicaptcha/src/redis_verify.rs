@@ -12,7 +12,8 @@
 //!
 //! `consume()` is a Lua TRANSITION, not a GETDEL delete: the pending record is
 //! KEPT in the store with a storage-level runtime field `state =
-//! "consumed"` (plus the committed outcome `consumed_result`), so a
+//! "consumed"` (plus the committed outcome `consumed_result` and the
+//! logical-operation `operation_identity` marker), so a
 //! concurrent loser — or a later replay — observes the consumed record and
 //! returns the WINNER'S COMMITTED OUTCOME instead of RecordNotFound and
 //! instead of re-deriving. The winner derives exactly once and commits its
@@ -312,9 +313,10 @@ pub struct StoredConsumedResult {
 }
 
 /// A stored value decoded at the storage layer: the [`ChallengeRecord`]
-/// plus the optional committed outcome. The `state` field is
-/// stripped from the JSON by [`decode_stored`] (it must never leak into the
-/// strict record parse); the transition flag comes from the Lua reply.
+/// plus the optional committed outcome. The `state` / `operation_identity`
+/// fields are stripped from the JSON by [`decode_stored`] (they must never
+/// leak into the strict record parse); the transition flag comes from the
+/// Lua reply.
 struct StoredChallenge {
     record: ChallengeRecord,
     consumed_result: Option<StoredConsumedResult>,
@@ -330,11 +332,14 @@ struct StoredChallenge {
 pub const MAX_STORED_RECORD_JSON_BYTES: usize = 128 * 1024;
 
 /// Decode a stored value that MAY carry the storage-level runtime fields
-/// `state` / `consumed_result`. The runtime fields are stripped BEFORE the
-/// strict [`ChallengeRecord`] parse, so `deny_unknown_fields` stays
-/// effective: any other foreign key makes the whole value undecodable.
-/// Returns `None` on any parse failure — a corrupt key must never blow up
-/// the verify path (mirrors the PHP `RedisStorage::decode()`).
+/// `state` / `consumed_result` / `operation_identity`. The runtime fields
+/// are stripped BEFORE the strict [`ChallengeRecord`] parse, so
+/// `deny_unknown_fields` stays effective: any other foreign key makes the
+/// whole value undecodable. A NON-NULL `operation_identity` (a PHP-written
+/// record whose identity-aware consume spliced a value in) parses and is
+/// stripped like any other runtime field — the canonical record never sees
+/// it. Returns `None` on any parse failure — a corrupt key must never blow
+/// up the verify path (mirrors the PHP `RedisStorage::decode()`).
 fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     // Bound BEFORE the parse: the canonical record JSON is a
     // few hundred bytes — a value at 128 KiB+ is a corrupt/attacker-written
@@ -350,6 +355,7 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     let obj = value.as_object_mut()?;
     obj.remove("state");
     obj.remove("consumed_result");
+    obj.remove("operation_identity");
     let record: ChallengeRecord = serde_json::from_value(value).ok()?;
     Some(StoredChallenge {
         record,
@@ -603,8 +609,10 @@ impl RedisChallengeStore {
             ))
         })?;
         // Runtime envelope, byte-compatible with the PHP store: the
-        // `state` marker and the `consumed_result` field are spliced into
-        // the RAW JSON (never re-encoded — large integers must stay
+        // `state` marker, the `consumed_result` field and the
+        // `operation_identity` marker (null — the logical-operation
+        // identity a PHP identity-aware consume can splice in) are spliced
+        // into the RAW JSON (never re-encoded — large integers must stay
         // decimal), exactly as PHP writes them, so the atomic
         // pending->consumed transition works across the two
         // implementations. The canonical record fields are untouched.
@@ -616,7 +624,9 @@ impl RedisChallengeStore {
             )));
         }
         value.truncate(value.len() - 1);
-        value.push_str(",\"state\":\"pending\",\"consumed_result\":null}");
+        value.push_str(
+            ",\"state\":\"pending\",\"consumed_result\":null,\"operation_identity\":null}",
+        );
         let now_unix = now_epoch_micros() / 1_000_000;
         let ttl = (record.expires_at as i64)
             .saturating_sub(now_unix as i64)
@@ -670,10 +680,11 @@ impl RedisChallengeStore {
     ///   yet — the previous consumer crashed between transition and commit).
     /// - missing → `Ok(None)` (RecordNotFound).
     ///
-    /// The `state` / `consumed_result` JSON fields are STORAGE-LEVEL runtime
-    /// state only — the [`ChallengeRecord`] wire schema itself is unchanged,
-    /// and the record fields parse strictly (`deny_unknown_fields` still
-    /// applies to anything that is not `state`/`consumed_result`).
+    /// The `state` / `consumed_result` / `operation_identity` JSON fields
+    /// are STORAGE-LEVEL runtime state only — the [`ChallengeRecord`] wire
+    /// schema itself is unchanged, and the record fields parse strictly
+    /// (`deny_unknown_fields` still applies to anything that is not
+    /// `state`/`consumed_result`/`operation_identity`).
     ///
     /// An `Err` is an UNCERTAIN failure: the transition may or may not have
     /// executed on the server. The connection is poisoned and evicted; the

@@ -84,4 +84,25 @@ interface RiskStateStoreInterface
      * @throws RiskStoreException when the underlying state backend fails
      */
     public function sessionFirstContextTag(string $sessionId, string $tag): ?string;
+
+    /**
+     * The risk-v2 session trusted-edge TLS record: records $tag as the
+     * session's FIRST-seen TLS classification tag (SET NX, first write
+     * wins) and returns the recorded tag — the first coarse, server-
+     * attested TLS classification (e.g. "tls13|http2", supplied ONLY by
+     * trusted proxy/CDN infrastructure) the session ever presented, or
+     * null when the store has no record surface.
+     *
+     * The record is keyed by the session's HMAC pseudonym (never the raw
+     * cookie value) and expires with the SAME TTL as the risk-v1 session
+     * state. The engine derives the tls_inconsistency signal by comparing
+     * the current request's tag against the returned first tag; null /
+     * backend failure degrade to "consistent" (neutral), never breaking an
+     * assessment. Only the ephemeral classification is stored — never a
+     * raw fingerprint database. The Rust mirror names the record
+     * `session_first_tls_tag`.
+     *
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function sessionFirstTlsTag(string $sessionId, string $tag): ?string;
 }

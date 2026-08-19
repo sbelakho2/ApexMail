@@ -27,11 +27,13 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
  * by the emergency caps); record_feedback() is the FEEDBACK path (no
  * limiter, no decision — a plain EventReceipt). record() is a deprecated
  * alias of record_feedback, assess() a deprecated alias of assessPreIssue.
- * The risk-v2 variants (assessPreIssueV2/reassessV2) run the identical
- * pipeline plus the additive risk-v2 evidence factors (honeypot/decoy
- * evidence, session client-context consistency) — probabilistic evidence
- * only, never a security gate, never a change to the risk-v1 state
- * contract.
+     * The risk-v2 variants (assessPreIssueV2/reassessV2) run the identical
+     * pipeline plus the additive risk-v2 evidence factors (honeypot/decoy
+     * evidence, session client-context consistency, trusted-edge TLS
+     * consistency) — probabilistic evidence only, never a security gate,
+     * never a change to the risk-v1 state contract. The v2 entry points
+     * accept an optional operator-tunable RiskV2Weights override; null
+     * uses the DEFAULT weights (byte-identical scores to today).
  *
  * Every entry point NORMALIZES the caller-supplied idempotency key before
  * it is used as the Redis dedupe suffix: HMAC-SHA256 keyed by the
@@ -124,19 +126,23 @@ final class AdaptiveRiskEngine
     /**
      * Risk-v2 variant of assessPreIssue(): the identical pipeline plus the
      * additive risk-v2 evidence factors (honeypot/decoy evidence, session
-     * client-context consistency) from $v2. The risk-v1 contract semantics
-     * are unchanged — with an empty $v2 context the decision is identical
-     * to the v1 path.
+     * client-context consistency, trusted-edge TLS consistency) from $v2.
+     * The risk-v1 contract semantics are unchanged — with an empty $v2
+     * context the decision is identical to the v1 path.
      *
      * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
      *                                    as in assessPreIssue
+     * @param RiskV2Weights|null $v2Weights operator-tunable weights for the
+     *                                      additive risk-v2 factors; null
+     *                                      uses the DEFAULT weights
+     *                                      (identical scores to today)
      */
-    public function assessPreIssueV2(RiskContext $c, RiskV2Context $v2, ?string $idempotencyKey = null): RiskDecision
+    public function assessPreIssueV2(RiskContext $c, RiskV2Context $v2, ?string $idempotencyKey = null, ?RiskV2Weights $v2Weights = null): RiskDecision
     {
-        return $this->assessPreIssueInternal($c, $idempotencyKey, $v2);
+        return $this->assessPreIssueInternal($c, $idempotencyKey, $v2, $v2Weights);
     }
 
-    private function assessPreIssueInternal(RiskContext $c, ?string $idempotencyKey, ?RiskV2Context $v2): RiskDecision
+    private function assessPreIssueInternal(RiskContext $c, ?string $idempotencyKey, ?RiskV2Context $v2, ?RiskV2Weights $v2Weights = null): RiskDecision
     {
         $nowMs = (int) floor(microtime(true) * 1000);
 
@@ -156,7 +162,7 @@ final class AdaptiveRiskEngine
             return $decision;
         }
 
-        return $this->runPipeline($c, $nowMs, $idempotencyKey, $v2);
+        return $this->runPipeline($c, $nowMs, $idempotencyKey, $v2, $v2Weights);
     }
 
     /**
@@ -179,14 +185,18 @@ final class AdaptiveRiskEngine
     /**
      * Risk-v2 variant of reassess(): the identical pipeline plus the
      * additive risk-v2 evidence factors from $v2 (honeypot evidence,
-     * session client-context consistency).
+     * session client-context consistency, trusted-edge TLS consistency).
      *
      * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
      *                                    as in reassess
+     * @param RiskV2Weights|null $v2Weights operator-tunable weights for the
+     *                                      additive risk-v2 factors; null
+     *                                      uses the DEFAULT weights
+     *                                      (identical scores to today)
      */
-    public function reassessV2(RiskContext $c, RiskV2Context $v2, ?string $idempotencyKey = null): RiskDecision
+    public function reassessV2(RiskContext $c, RiskV2Context $v2, ?string $idempotencyKey = null, ?RiskV2Weights $v2Weights = null): RiskDecision
     {
-        return $this->runPipeline($c, (int) floor(microtime(true) * 1000), $idempotencyKey, $v2);
+        return $this->runPipeline($c, (int) floor(microtime(true) * 1000), $idempotencyKey, $v2, $v2Weights);
     }
 
     /**
@@ -194,7 +204,7 @@ final class AdaptiveRiskEngine
      * and reassess()/reassessV2(): build the observation -> circuit breaker
      * -> store -> scorer -> policy.
      */
-    private function runPipeline(RiskContext $c, int $nowMs, ?string $idempotencyKey, ?RiskV2Context $v2 = null): RiskDecision
+    private function runPipeline(RiskContext $c, int $nowMs, ?string $idempotencyKey, ?RiskV2Context $v2 = null, ?RiskV2Weights $v2Weights = null): RiskDecision
     {
         $observation = $this->buildObservation($c, $nowMs, $idempotencyKey);
 
@@ -241,14 +251,16 @@ final class AdaptiveRiskEngine
             }
             $base = max(0, min(1000, $base + $bias));
         }
-        // Risk-v2 evidence factors: honeypot/decoy evidence and the session
-        // client-context consistency, derived from the v2 context (a
-        // session-first-tag record read that degrades to "consistent" on
-        // any backend miss — probabilistic evidence never breaks an
-        // assessment).
+        // Risk-v2 evidence factors: honeypot/decoy evidence, the session
+        // client-context consistency and the trusted-edge TLS consistency,
+        // derived from the v2 context (a session-first-tag record read that
+        // degrades to "consistent" on any backend miss — probabilistic
+        // evidence never breaks an assessment). The v2 weights are the
+        // operator override when given, else the DEFAULT weights (byte-
+        // identical scores to today).
         $v2Signals = $v2 !== null ? $this->buildV2Signals($v2, $c, $observation) : null;
         $score = $v2Signals !== null
-            ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, new RiskV2Weights())
+            ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, $v2Weights ?? new RiskV2Weights())
             : $this->scorer->score($base, $vector, $this->policy->weights);
         $decision = $this->policy->decide(
             scope: $c->scope,
@@ -547,7 +559,12 @@ final class AdaptiveRiskEngine
      * - sessionInconsistency = 1000 when the session's first-seen
      *   client-context tag differs from the current tag; 0 when the tag is
      *   absent (first request), the session is absent, or the record read
-     *   fails (neutral degradation).
+     *   fails (neutral degradation);
+     * - tlsInconsistency = 1000 when the session's first-seen trusted-edge
+     *   TLS classification tag differs from the current tag; 0 when the tag
+     *   is absent (first request), the session is absent, the tag exceeds
+     *   the 64-char bound (treated as absent), or the record read fails
+     *   (neutral degradation).
      */
     private function buildV2Signals(RiskV2Context $v2, RiskContext $c, RiskObservation $observation): RiskV2Signals
     {
@@ -565,8 +582,22 @@ final class AdaptiveRiskEngine
                 // assessment.
             }
         }
+        $tlsInconsistent = 0;
+        $tlsTag = $v2->tlsTag;
+        if ($tlsTag !== null && $tlsTag !== '' && strlen($tlsTag) <= 64 && $observation->sessionId !== null) {
+            try {
+                $firstTls = $this->store->sessionFirstTlsTag($observation->sessionId, $tlsTag);
+                if ($firstTls !== null && $firstTls !== $tlsTag) {
+                    $tlsInconsistent = 1000;
+                }
+            } catch (\Throwable) {
+                // Best-effort record: a failed read degrades to consistent
+                // (neutral) — probabilistic evidence never breaks an
+                // assessment.
+            }
+        }
 
-        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent);
+        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent);
     }
 
     private function buildObservation(RiskContext $c, int $nowMs, ?string $idempotencyKey = null, ?RiskEventKind $event = null): RiskObservation

@@ -8,6 +8,7 @@ use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ConsumedResult;
+use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 
 /**
  * Redis-backed storage with TRUE atomic one-shot semantics.
@@ -28,25 +29,32 @@ use KiwiCaptcha\ConsumedResult;
  *
  * Records are stored as JSON: the canonical `ChallengeRecord::WIRE_KEYS` schema
  * (LANGUAGE-NEUTRAL — a Rust service using the same Redis instance can read
- * them, and vice versa) WRAPPED with the two runtime fields `state`
- * ("pending"|"consumed") and `consumed_result` (null | {valid, binding}).
- * The runtime fields are storage-layer additions AFTER the canonical parse:
- * `decode()` strips them before {@see ChallengeRecord::fromArray()} so the
- * strict serde-mirror parser never sees them (deny_unknown_fields parity
- * with the Rust reader, which strips them the same way). The record's TTL is
- * the key expiration; the consume transition preserves it.
+ * them, and vice versa) WRAPPED with the three runtime fields `state`
+ * ("pending"|"consumed"), `consumed_result` (null | {valid, binding}) and
+ * `operation_identity` (null | a bounded <= 128-byte logical-operation
+ * identity recorded atomically with the pending→consumed transition via
+ * {@see OperationIdentityAwareStorageInterface}). The runtime fields are
+ * storage-layer additions AFTER the canonical parse: `decode()` strips them
+ * before {@see ChallengeRecord::fromArray()} so the strict serde-mirror
+ * parser never sees them (deny_unknown_fields parity with the Rust reader,
+ * which strips them the same way). The record's TTL is the key expiration;
+ * the consume transition preserves it.
  *
  * Implements {@see \KiwiCaptcha\AtomicStorageInterface}: the fused
  * read-transition makes consume() strict single-use under concurrency.
  */
-final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface
+final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface
 {
     /**
      * Atomic consume transition: GET the record; if present and not yet
-     * consumed, flip `state` to "consumed" (preserving the key TTL). Returns
-     * nil for a missing record, else {json, consumed_now, consumed_before,
-     * consumed_result_json} — the result is the committed JSON (""
-     * when absent).
+     * consumed, flip `state` to "consumed" (preserving the key TTL). When
+     * ARGV[1] is a non-empty JSON-escaped identity, the
+     * `"operation_identity":null` marker is spliced to the identity IN THE
+     * SAME script — the identity lands atomically with the state flip, so
+     * the stored identity is provably the ACTUAL atomic consume winner's.
+     * Returns nil for a missing record, else {json, consumed_now,
+     * consumed_before, consumed_result_json} — the result is the committed
+     * JSON ("" when absent).
      */
     private const CONSUME_SCRIPT = <<<'LUA'
 -- kiwicaptcha consume transition
@@ -55,7 +63,12 @@ final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 -- rewrites large integers (issued_at_ns ~ 1.7e15) in scientific notation
 -- and breaks both strict parsers. The state field is spliced into the
 -- RAW stored JSON string (store() always writes the exact
--- `"state":"pending"` marker).
+-- `"state":"pending"` marker), and the logical-operation identity is
+-- spliced into the `"operation_identity":null` marker in the SAME
+-- script when a non-empty identity argument is given (an old record
+-- without the marker — or a null identity — leaves it untouched). The
+-- transition winner receives the UPDATED bytes, so the recorded
+-- identity rides back on its own ConsumedRecord.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return nil
@@ -71,8 +84,15 @@ else
   if n ~= 1 then
     return nil
   end
+  if ARGV[1] ~= '' then
+    local withIdentity, m = string.gsub(updated, '"operation_identity":null', '"operation_identity":' .. ARGV[1], 1)
+    if m == 1 then
+      updated = withIdentity
+    end
+  end
   redis.call("SET", KEYS[1], updated, "EX", ttl)
   consumedNow = 1
+  v = updated
 end
 local s, e = string.find(v, '"consumed_result":%s*{', 1)
 if s and e then
@@ -160,7 +180,7 @@ LUA;
     {
         $key = $this->prefix.$record->nonce;
         $value = json_encode(
-            $record->toArray() + ['state' => 'pending', 'consumed_result' => null],
+            $record->toArray() + ['state' => 'pending', 'consumed_result' => null, 'operation_identity' => null],
             JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
         );
         $ttl = max(1, $record->expiresAt - time() + $this->ttlMarginSecs);
@@ -189,7 +209,7 @@ LUA;
     public function consume(string $nonce): ?ConsumedRecord
     {
         $key = $this->prefix.$nonce;
-        $raw = $this->evalScript(self::CONSUME_SCRIPT, [$key], 1);
+        $raw = $this->evalScript(self::CONSUME_SCRIPT, [$key, ''], 1);
         if ($raw === false || $raw === null || !\is_array($raw)) {
             return null;
         }
@@ -226,7 +246,57 @@ LUA;
             }
         }
 
-        return new ConsumedRecord($record, (bool) $consumedNow, (bool) $consumedBefore, $result);
+        return new ConsumedRecord($record, (bool) $consumedNow, (bool) $consumedBefore, $result, $this->decodeIdentity((string) $json));
+    }
+
+    public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
+    {
+        $key = $this->prefix.$nonce;
+        // The identity is bounded (never store unbounded blobs): an
+        // over-long identity is IGNORED — the transition still records no
+        // identity (the runtime marker stays null).
+        $identityArg = '';
+        if ($operationIdentity !== null && \strlen($operationIdentity) <= 128) {
+            $identityArg = json_encode($operationIdentity, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        }
+        $raw = $this->evalScript(self::CONSUME_SCRIPT, [$key, $identityArg], 1);
+        if ($raw === false || $raw === null || !\is_array($raw)) {
+            return null;
+        }
+
+        // Durability barrier: the pending→consumed
+        // transition must reach the configured replica count before the
+        // caller is allowed to treat the record as consumed. WAIT N proves
+        // that at least N replicas acknowledged the write; it does NOT
+        // constrain which replicas a future failover manager promotes —
+        // replay-safe promotion additionally requires the threshold to
+        // cover every eligible failover target or promotion gating.
+        if ($this->waitReplicas > 0) {
+            $this->waitAndVerify('the pending→consumed transition');
+        }
+
+        // Lua tables are 1-indexed; normalize before destructuring.
+        $parts = array_values($raw);
+        if (\count($parts) < 4) {
+            return null;
+        }
+        [$json, $consumedNow, $consumedBefore, $resultBinding] = $parts;
+        $record = $this->decode((string) $json);
+        if ($record === null) {
+            return null;
+        }
+        $result = null;
+        if ((string) $resultBinding !== 'null' && (string) $resultBinding !== '') {
+            $obj = json_decode((string) $resultBinding, true);
+            if (\is_array($obj)) {
+                $result = new ConsumedResult(
+                    (int) ($obj['valid'] ?? 0) === 1,
+                    \is_string($obj['binding'] ?? null) ? $obj['binding'] : null,
+                );
+            }
+        }
+
+        return new ConsumedRecord($record, (bool) $consumedNow, (bool) $consumedBefore, $result, $this->decodeIdentity((string) $json));
     }
 
     public function consumedState(string $nonce): ?ConsumedRecord
@@ -244,7 +314,7 @@ LUA;
             $result = $this->decodeResult($m[1]);
         }
 
-        return new ConsumedRecord($record, false, true, $result);
+        return new ConsumedRecord($record, false, true, $result, $this->decodeIdentity($raw));
     }
 
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
@@ -327,8 +397,9 @@ LUA;
 
     /**
      * Decode a stored JSON value back into a record, stripping the storage
-     * runtime fields (`state`, `consumed_result`) BEFORE the strict
-     * serde-mirror parse — the canonical record schema never sees them.
+     * runtime fields (`state`, `consumed_result`, `operation_identity`)
+     * BEFORE the strict serde-mirror parse — the canonical record schema
+     * never sees them.
      *
      * @return ChallengeRecord|null null when the value is absent, not valid
      *                              JSON, not an object, or does not map to a
@@ -345,13 +416,32 @@ LUA;
         if (!\is_array($data)) {
             return null;
         }
-        unset($data['state'], $data['consumed_result']);
+        unset($data['state'], $data['consumed_result'], $data['operation_identity']);
 
         try {
             return ChallengeRecord::fromArray($data);
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    /**
+     * The logical-operation identity recorded on a stored value, or null
+     * when the record carries none (a plain consume, an identity-less
+     * record, or a non-string marker from an older/foreign writer).
+     */
+    private function decodeIdentity(string $raw): ?string
+    {
+        try {
+            $data = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
+        if (!\is_array($data) || !\is_string($data['operation_identity'] ?? null)) {
+            return null;
+        }
+
+        return $data['operation_identity'];
     }
 
     private function decodeResult(string $raw): ?ConsumedResult

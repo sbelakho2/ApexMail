@@ -189,22 +189,23 @@ final class RedisStorageTest extends TestCase
         // The stored JSON is the shared language-neutral schema — the 22
         // canonical ChallengeRecord keys (identical to the Rust serde keys,
         // including attempts_used (Rust: #[serde(default)]) so a PHP-written
-        // record is complete for a Rust reader) WRAPPED with the two storage
-        // runtime fields: `state` ("pending") and
-        // `consumed_result` (null). Protocol v2 emits binding_tag ONLY —
-        // never the legacy ip_hash key alongside it: the Rust reader uses
-        // #[serde(alias = "ip_hash")] and serde rejects a struct carrying
-        // both the field and its alias as a duplicate field, making a
-        // dual-key record unreadable by Rust (caught by the live
-        // cross-language round trip). The canonical key set is
-        // `ChallengeRecord::WIRE_KEYS` — that list is the source of truth
-        // for the stored wire schema.
+        // record is complete for a Rust reader) WRAPPED with the three
+        // storage runtime fields: `state` ("pending"),
+        // `consumed_result` (null) and `operation_identity` (null).
+        // Protocol v2 emits binding_tag ONLY — never the legacy ip_hash key
+        // alongside it: the Rust reader uses #[serde(alias = "ip_hash")] and
+        // serde rejects a struct carrying both the field and its alias as a
+        // duplicate field, making a dual-key record unreadable by Rust
+        // (caught by the live cross-language round trip). The canonical key
+        // set is `ChallengeRecord::WIRE_KEYS` — that list is the source of
+        // truth for the stored wire schema.
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
             'issuer', 'kid', 'hostname', 'state', 'consumed_result',
+            'operation_identity',
         ], array_keys($data));
         self::assertSame('redis-nonce-1', $data['nonce']);
         self::assertSame('sha256', $data['algorithm']);
@@ -225,6 +226,7 @@ final class RedisStorageTest extends TestCase
         self::assertSame(1, $data['kid'], 'the default signing key id is 1');
         self::assertSame('pending', $data['state'], 'stored records start in the pending state');
         self::assertNull($data['consumed_result'], 'a pending record has no consumed_result');
+        self::assertNull($data['operation_identity'], 'a pending record carries the null operation_identity marker');
     }
 
     public function testReadsRecordsWrittenWithoutAttemptsUsed(): void
@@ -662,6 +664,95 @@ final class RedisStorageTest extends TestCase
         }
 
         self::assertTrue(true);
+    }
+
+    public function testConsumeWithOperationIdentityRecordsTheIdentityInTheSameAtomicWrite(): void
+    {
+        // The identity lands IN THE SAME write as the pending→consumed
+        // flip (the Lua splice), so the stored identity is provably the
+        // ACTUAL atomic consume winner's — read back via consumedState().
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+        $identity = 'op-'.hash('sha256', 'backend|uuid|response');
+
+        $consumed = $storage->consumeWithOperationIdentity('redis-nonce-1', $identity);
+
+        self::assertNotNull($consumed);
+        self::assertTrue($consumed->consumedNow, 'the identity-bearing consume wins the transition');
+        self::assertSame($identity, $consumed->operationIdentity, 'the winner exposes the identity it recorded');
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame('consumed', $data['state'], 'the transition must persist state=consumed in the stored JSON');
+        self::assertSame($identity, $data['operation_identity'], 'the identity must be spliced into the stored JSON with the state flip');
+
+        $state = $storage->consumedState('redis-nonce-1');
+        self::assertNotNull($state);
+        self::assertSame($identity, $state->operationIdentity, 'the consumed-state read exposes the recorded identity');
+    }
+
+    public function testConsumeWithOperationIdentityIgnoresOversizedIdentities(): void
+    {
+        // The identity is bounded (never store unbounded blobs): an
+        // over-long identity is ignored — the marker stays null and the
+        // transition itself is unchanged.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+
+        $consumed = $storage->consumeWithOperationIdentity('redis-nonce-1', str_repeat('x', 129));
+
+        self::assertNotNull($consumed);
+        self::assertTrue($consumed->consumedNow);
+        self::assertNull($consumed->operationIdentity, 'an over-long identity must be ignored');
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertNull($data['operation_identity'], 'an over-long identity must never be stored');
+    }
+
+    public function testPlainConsumeKeepsTheIdentityMarkerNull(): void
+    {
+        // The identity-less consume path stays byte-identical to the
+        // plain consume: the marker is always written at store() and
+        // stays null.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+
+        $consumed = $storage->consume('redis-nonce-1');
+
+        self::assertNotNull($consumed);
+        self::assertTrue($consumed->consumedNow);
+        self::assertNull($consumed->operationIdentity);
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertNull($data['operation_identity'], 'a plain consume records no identity');
+    }
+
+    public function testVerifierForwardsTheOperationIdentityToTheConsumeTransition(): void
+    {
+        // The verifier's optional identity parameter drives the
+        // identity-bearing atomic consume; a native call (no identity)
+        // stays on the plain path.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $issuer = new Issuer(new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        $token = \KiwiCaptcha\SolutionToken::create($challenge->nonce, $counter - 1, 5000, [])->encode();
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $identity = 'op-'.hash('sha256', 'backend|uuid|response');
+
+        $outcome = (new Verifier($storage))->verify($token, Vectors::SECRET, 'login', '198.51.100.7', null, false, $identity);
+
+        self::assertTrue($outcome->isOk(), 'the identity-bearing verify must succeed (got '.$outcome->code().')');
+        $data = json_decode((string) $client->store['kiwicaptcha:'.$challenge->nonce], true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame($identity, $data['operation_identity'], 'the verifier must forward the identity into the atomic consume');
+        $state = $storage->consumedState($challenge->nonce);
+        self::assertNotNull($state);
+        self::assertSame($identity, $state->operationIdentity);
     }
 
 }

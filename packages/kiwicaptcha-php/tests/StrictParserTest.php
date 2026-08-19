@@ -339,11 +339,12 @@ final class StrictParserTest extends TestCase
 
     public function testRuntimeStorageFieldsAreNotWireKeys(): void
     {
-        // `state` and `consumed_result` are storage-layer runtime
-        // fields wrapped around the canonical JSON — they are NOT part of
-        // the canonical record schema and must be rejected by the strict
-        // serde-mirror parser exactly like any other unknown key.
-        foreach (['state', 'consumed_result'] as $key) {
+        // `state`, `consumed_result` and `operation_identity` are
+        // storage-layer runtime fields wrapped around the canonical JSON —
+        // they are NOT part of the canonical record schema and must be
+        // rejected by the strict serde-mirror parser exactly like any other
+        // unknown key.
+        foreach (['state', 'consumed_result', 'operation_identity'] as $key) {
             try {
                 ChallengeRecord::fromArray(self::base() + [$key => 'x']);
                 self::fail("'$key' is a storage runtime field and must NOT parse into the record");

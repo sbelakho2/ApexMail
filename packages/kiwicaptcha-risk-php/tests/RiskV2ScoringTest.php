@@ -36,6 +36,7 @@ final class RiskV2ScoringTest extends TestCase
         self::assertSame([
             'honeypot' => 200,
             'session_inconsistency' => 120,
+            'tls' => 80,
         ], (new RiskV2Weights())->toArray());
     }
 
@@ -121,6 +122,42 @@ final class RiskV2ScoringTest extends TestCase
     }
 
     public function testAbsentClientContextIsNeutral(): void
+    {
+        $vector = SignalVector::zero();
+        self::assertSame(
+            $this->v1Score($vector),
+            $this->scorer()->scoreV2(self::BASE, $vector, new RiskWeights(), RiskV2Signals::zero(), new RiskV2Weights())
+        );
+    }
+
+    public function testConsistentTlsTagIsNeutral(): void
+    {
+        $vector = SignalVector::zero();
+        $withV2 = $this->scorer()->scoreV2(
+            self::BASE,
+            $vector,
+            new RiskWeights(),
+            new RiskV2Signals(tlsInconsistency: 0),
+            new RiskV2Weights(),
+        );
+        self::assertSame($this->v1Score($vector), $withV2, 'a consistent TLS tag must not change the score');
+    }
+
+    public function testChangedTlsTagRaisesTheAggregate(): void
+    {
+        $clean = SignalVector::zero();
+        $after = $this->scorer()->scoreV2(
+            self::BASE,
+            $clean,
+            new RiskWeights(),
+            new RiskV2Signals(tlsInconsistency: 1000),
+            new RiskV2Weights(),
+        );
+        self::assertGreaterThan($this->v1Score($clean), $after);
+        self::assertSame(180, $after, '100 + 1000*80/1000');
+    }
+
+    public function testAbsentTlsTagIsNeutral(): void
     {
         $vector = SignalVector::zero();
         self::assertSame(

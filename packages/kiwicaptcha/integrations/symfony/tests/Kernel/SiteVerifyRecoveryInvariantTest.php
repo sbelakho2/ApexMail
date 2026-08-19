@@ -16,20 +16,23 @@ use Symfony\Component\DependencyInjection\Definition;
  * compile time WHEN risk.siteverify_secrets is configured):
  *
  *   max verification window < Siteverify lease (60s) < waiter bound (90s)
- *                            < effective challenge TTL
+ *                            <= retained-state recovery retention
  *
- * The controller constructor enforces only waiter > lease; the effective
- * token lifetime (global challenge_ttl_secs and every per-sitekey
- * ttl_secs), the min_duration_ms floor and the Argon admission lease
- * (argon2_lease_ms) complete the ordering. A configuration that breaks it
- * makes crash recovery impossible — refused at compile time. Siteverify
- * idempotency ALSO requires a recovery-capable storage
- * (SiteVerifyRecoveryCapableStorageInterface — the bundled
- * AtomicStorageInterface + ConsumedStateReadableInterface combination):
- * custom atomic storages without the consumed-state capability are
- * refused, because the takeover path could never reconstruct a crashed
- * owner's committed outcome. Without siteverify_secrets the native
- * behavior stays unrestricted.
+ * The controller constructor enforces only waiter > lease; the Argon
+ * admission lease (argon2_lease_ms) and the retained consumed-state
+ * retention margin (risk.redis.ttl_margin_secs) complete the ordering. A
+ * configuration that breaks it makes crash recovery impossible — refused
+ * at compile time. Signed token expiry is IRRELEVANT to the
+ * reconstruction, so short-lived Siteverify profiles (e.g. 30s TTLs) are
+ * fully supported. Siteverify idempotency ALSO requires a recovery-capable
+ * storage (SiteVerifyRecoveryCapableStorageInterface — the bundled
+ * AtomicStorageInterface + ConsumedStateReadableInterface +
+ * OperationIdentityAwareStorageInterface combination): custom atomic
+ * storages without the identity-aware consume capability are refused,
+ * because the takeover path could never prove that a claim is the nonce's
+ * original logical operation (reconstruction would silently refuse
+ * everything). Without siteverify_secrets the native behavior stays
+ * unrestricted.
  */
 final class SiteVerifyRecoveryInvariantTest extends TestCase
 {
@@ -46,25 +49,47 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         return $container;
     }
 
-    public function testSiteverifyEnabledWithShortGlobalTtlIsRefused(): void
+    public function testSiteverifyEnabledWithShortGlobalTtlIsAccepted(): void
     {
-        $this->expectException(\LogicException::class);
-        $this->expectExceptionMessage('waiter bound');
-        $this->load([
+        // Signed token expiry is irrelevant to the retained-state
+        // reconstruction — a short-lived Siteverify profile (30s) is
+        // fully supported as long as the retention margin outlives the
+        // takeover/retry horizon.
+        $container = $this->load([
             'challenge_ttl_secs' => 30,
             'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]);
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.config'));
     }
 
-    public function testSiteverifyEnabledWithShortSitekeyTtlIsRefused(): void
+    public function testSiteverifyEnabledWithShortSitekeyTtlIsAccepted(): void
     {
-        $this->expectException(\LogicException::class);
-        $this->expectExceptionMessage('waiter bound');
-        $this->load([
+        $container = $this->load([
             'risk' => [
                 'redis' => ['ttl_margin_secs' => 90],
+                'enabled' => false,
                 'sitekeys' => ['sitekey-k' => ['ttl_secs' => 30]],
                 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login'],
+            ],
+        ]);
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.config'));
+    }
+
+    public function testNativeConfigWithPerSitekeyMinDurationAboveTtlIsRefused(): void
+    {
+        // The per-sitekey min_duration_ms < ttl_secs * 1000 relation is
+        // intrinsic to ISSUANCE — it is validated even when Siteverify is
+        // DISABLED.
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('min_duration_ms');
+        $this->load([
+            'privacy_mode' => 'standard',
+            'challenge_ttl_secs' => 120,
+            'min_duration_ms' => 60000,
+            'risk' => [
+                'sitekeys' => ['sitekey-k' => ['ttl_secs' => 30]],
             ],
         ]);
     }
@@ -134,6 +159,28 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         ]], $container);
     }
 
+    public function testSiteverifyEnabledWithAtomicConsumedStateStorageMissingIdentityCapabilityIsRefused(): void
+    {
+        // A custom storage that is ATOMIC + consumed-state readable but
+        // WITHOUT the identity-aware consume capability is REFUSED for
+        // Siteverify idempotency: the takeover path compares the consumed
+        // record's OWN operation identity against the claiming
+        // fingerprint, and a storage that cannot record the identity
+        // could never prove that a claim is the nonce's original logical
+        // operation (reconstruction would silently refuse everything).
+        // The refusal names the missing capability.
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('OperationIdentityAwareStorageInterface');
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setDefinition('my.identityless.storage', new Definition($this->atomicWithConsumedStateWithoutIdentityClass(), []));
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => str_repeat('a', 32),
+            'storage' => 'my.identityless.storage',
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+        ]], $container);
+    }
+
     public function testSiteverifyEnabledWithRecoveryCapableCustomStorageIsAccepted(): void
     {
         // A custom storage implementing the bundle's
@@ -180,6 +227,40 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         });
     }
 
+    /** A custom ATOMIC + consumed-state readable storage WITHOUT the identity-aware consume. */
+    private function atomicWithConsumedStateWithoutIdentityClass(): string
+    {
+        return get_class(new class implements \KiwiCaptcha\AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface {
+            public function store(ChallengeRecord $record): void
+            {
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return null;
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                return null;
+            }
+
+            public function consume(string $nonce): ?ConsumedRecord
+            {
+                return null;
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return true;
+            }
+
+            public function delete(string $nonce): void
+            {
+            }
+        });
+    }
+
     /** A custom storage implementing the bundle's recovery-capable contract. */
     private function recoveryCapableClass(): string
     {
@@ -199,6 +280,11 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
             }
 
             public function consume(string $nonce): ?ConsumedRecord
+            {
+                return null;
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
             {
                 return null;
             }

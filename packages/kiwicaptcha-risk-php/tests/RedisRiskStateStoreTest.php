@@ -666,4 +666,38 @@ final class RedisRiskStateStoreTest extends TestCase
         // A DIFFERENT session has its own record.
         self::assertSame('zz', $store->sessionFirstContextTag(str_repeat('2b', 16), 'zz'));
     }
+
+    /**
+     * The risk-v2 session trusted-edge TLS record: SET NX first-write-wins
+     * with the SESSION TTL — the first coarse TLS classification a session
+     * presents is recorded and returned forever, a later different tag
+     * still yields the FIRST one (the engine derives the tls_inconsistency
+     * signal from that). Mirrors the session_first_context_tag machinery
+     * exactly under its own key.
+     */
+    public function testSessionFirstTlsTagRecordsTheFirstTagWithTheSessionTtl(): void
+    {
+        $store = $this->store();
+        $sessionId = str_repeat('7c', 16);
+
+        // First TLS tag-bearing request: the tag is recorded and returned.
+        self::assertSame('tls13|http2', $store->sessionFirstTlsTag($sessionId, 'tls13|http2'));
+
+        // Same tag again: the recorded first tag is returned unchanged.
+        self::assertSame('tls13|http2', $store->sessionFirstTlsTag($sessionId, 'tls13|http2'));
+
+        // A DIFFERENT tag: the FIRST tag wins (the tls_inconsistency signal
+        // derives from this comparison).
+        self::assertSame('tls13|http2', $store->sessionFirstTlsTag($sessionId, 'tls12|http1'), 'the first-seen TLS tag must win');
+
+        // The record carries the session TTL (1800 s), like the risk-v1
+        // session state hash.
+        $key = "{kiwi:{$store->namespace()}}:risk:tls:{$sessionId}";
+        $ttl = (int) $this->client->ttl($key);
+        self::assertGreaterThan(0, $ttl, 'the record must expire with the session TTL');
+        self::assertLessThanOrEqual(1800, $ttl);
+
+        // A DIFFERENT session has its own record.
+        self::assertSame('tls13|h3', $store->sessionFirstTlsTag(str_repeat('8d', 16), 'tls13|h3'));
+    }
 }

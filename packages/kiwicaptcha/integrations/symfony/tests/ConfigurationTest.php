@@ -326,6 +326,44 @@ final class ConfigurationTest extends TestCase
         self::assertSame('eu-central-1', $this->process(['risk' => ['region' => 'eu-central-1']])['risk']['region']);
     }
 
+    public function testChainingDefaultsAreOffWithBoundedTtl(): void
+    {
+        $processed = $this->process();
+
+        self::assertFalse($processed['risk']['chaining']['enabled']);
+        self::assertSame(300, $processed['risk']['chaining']['ttl_secs']);
+        self::assertNull($processed['risk']['chaining']['hmac_secret']);
+        self::assertNull($processed['risk']['trusted_tls_header']);
+    }
+
+    public function testChainingAcceptsEnabledConfigWithBounds(): void
+    {
+        $processed = $this->process([
+            'risk' => [
+                'chaining' => ['enabled' => true, 'ttl_secs' => 60, 'hmac_secret' => str_repeat('c', 32)],
+            ],
+        ]);
+
+        self::assertTrue($processed['risk']['chaining']['enabled']);
+        self::assertSame(60, $processed['risk']['chaining']['ttl_secs']);
+        self::assertSame(str_repeat('c', 32), $processed['risk']['chaining']['hmac_secret']);
+    }
+
+    public function testChainingTtlBoundsAreEnforced(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['risk' => ['chaining' => ['ttl_secs' => 29]]]);
+
+        $this->process(['risk' => ['chaining' => ['ttl_secs' => 3601]]]);
+    }
+
+    public function testTrustedTlsHeaderAcceptsHeaderNames(): void
+    {
+        $processed = $this->process(['risk' => ['trusted_tls_header' => 'X-Tls-Class']]);
+
+        self::assertSame('X-Tls-Class', $processed['risk']['trusted_tls_header']);
+    }
+
     public function testRiskAllowedScopesNode(): void
     {
         // allowed_scopes defaults to [] (accept any scope)

@@ -270,6 +270,16 @@ final class Verifier
      *                                     Telemetry is client-controlled, so
      *                                     enforcement is opt-in defense-in-depth
      *                                     only.
+     * @param string|null $operationIdentity the logical-operation identity
+     *                                     to record WITH the pending→consumed
+     *                                     transition (see
+     *                                     {@see OperationIdentityAwareStorageInterface::consumeWithOperationIdentity()}).
+     *                                     Null (the default — every native
+     *                                     caller) records no identity and is
+     *                                     byte-identical to the plain consume.
+     *                                     A storage without the identity
+     *                                     capability verifies normally but
+     *                                     records no identity.
      *
      * One-shot model: cheap-check failures delete the peeked record; the
      * proof phase consumes it before the hash is re-derived. A failed
@@ -283,6 +293,7 @@ final class Verifier
         ?string $clientIp = null,
         ?int $nowNs = null,
         bool $enforceTelemetry = false,
+        ?string $operationIdentity = null,
     ): VerifyOutcome {
         try {
             $token = SolutionToken::decode($rawToken);
@@ -512,8 +523,14 @@ final class Verifier
         try {
             // 9. Consume (one-shot transition) and re-derive the
             //    proof. The record is marked consumed and KEPT until its TTL.
+            //    An identity-bearing consume records the logical-operation
+            //    identity ATOMICALLY with the state flip (a storage without
+            //    the identity capability verifies normally but records no
+            //    identity).
             try {
-                $consumed = $this->storage->consume($token->nonce);
+                $consumed = $operationIdentity !== null && $this->storage instanceof OperationIdentityAwareStorageInterface
+                    ? $this->storage->consumeWithOperationIdentity($token->nonce, $operationIdentity)
+                    : $this->storage->consume($token->nonce);
             } catch (\Throwable) {
                 // A lost transition response is intrinsically ambiguous: the
                 // challenge may or may not have been consumed. Report the

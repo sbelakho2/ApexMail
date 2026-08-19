@@ -17,6 +17,7 @@ use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskReason;
 use KiwiCaptcha\Risk\RiskV2Context;
+use KiwiCaptcha\Risk\RiskV2Weights;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\VerifyError;
 use Psr\Log\LoggerInterface;
@@ -245,8 +246,11 @@ final class RiskGateway
      *
      * The optional risk-v2 context ({@see clientContextV2()}) feeds the
      * additive evidence factors (honeypot/decoy evidence, session
-     * client-context consistency) into the assessment — probabilistic
-     * evidence only, NEVER a security gate.
+     * client-context consistency, trusted-edge TLS consistency) into the
+     * assessment — probabilistic evidence only, NEVER a security gate.
+     * The optional risk-v2 weights override ({@see RiskV2Weights}) tunes
+     * those additive factors; null uses the contract DEFAULT weights
+     * (identical scores to today).
      *
      * @throws UnknownScopeException   when the scope is unknown in 'reject'/'baseline' mode
      * @throws \InvalidArgumentException when the client IP is not a valid
@@ -254,7 +258,7 @@ final class RiskGateway
      *                                   this as "no risk signal" and applies
      *                                   the degraded decision)
      */
-    public function preIssue(string $scope, string $ip, ?string $session, ?string $idempotencyKey = null, ?RiskV2Context $v2 = null): RiskDecision
+    public function preIssue(string $scope, string $ip, ?string $session, ?string $idempotencyKey = null, ?RiskV2Context $v2 = null, ?RiskV2Weights $v2Weights = null): RiskDecision
     {
         $context = new RiskContext(
             scope: $this->scopeId($scope),
@@ -268,7 +272,7 @@ final class RiskGateway
             resources: $this->resources(),
         );
         $decision = $v2 !== null
-            ? $this->engine->assessPreIssueV2($context, $v2, $idempotencyKey)
+            ? $this->engine->assessPreIssueV2($context, $v2, $idempotencyKey, $v2Weights)
             : $this->engine->assessPreIssue($context, $idempotencyKey);
         $this->setCurrentDecisionId($decision->decisionId);
         $this->logDecision($scope, $decision);
@@ -321,9 +325,11 @@ final class RiskGateway
      * The risk-v2 client-context tag for the current request: a bounded,
      * ephemeral base36 tag derived from the coarse capability descriptor
      * ({@see ClientContextTag::derive()}), keyed to the deployment
-     * namespace, a short epoch and the continuity session — never a stable
-     * device identifier. Null when there is no session or no descriptor
-     * (no consistency signal is derived).
+     * namespace and the continuity session — never a stable device
+     * identifier. The tag is STABLE for the session's whole lifetime (no
+     * hourly re-key), so the session's first tag stays the comparison
+     * baseline. Null when there is no session or no descriptor (no
+     * consistency signal is derived).
      */
     public function clientContextTag(?string $session, ?string $descriptor): ?string
     {
@@ -331,24 +337,29 @@ final class RiskGateway
             return null;
         }
 
-        return ClientContextTag::derive($this->contextNamespace(), time(), $session, $descriptor);
+        return ClientContextTag::derive($this->contextNamespace(), $session, $descriptor);
     }
 
     /**
      * The risk-v2 context for one request: honeypot evidence plus the
-     * ephemeral client-context tag. Returns null when the request carries
-     * NO risk-v2 evidence at all (the assessment then stays on the pure
-     * risk-v1 path).
+     * ephemeral client-context tag and the trusted-edge TLS classification
+     * tag (coarse, server-attested by trusted proxy/CDN infrastructure —
+     * the engine only ever stores the ephemeral classification as the
+     * session's first-seen record, never a raw fingerprint database).
+     * Returns null when the request carries NO risk-v2 evidence at all
+     * (the assessment then stays on the pure risk-v1 path).
      */
-    public function clientContextV2(bool $honeypotHit, ?string $session, ?string $descriptor): ?RiskV2Context
+    public function clientContextV2(bool $honeypotHit, ?string $session, ?string $descriptor, ?string $tlsTag = null): ?RiskV2Context
     {
-        if (!$honeypotHit && ($session === null || $descriptor === null || $descriptor === '')) {
+        $tag = $this->clientContextTag($session, $descriptor);
+        if (!$honeypotHit && $tag === null && ($tlsTag === null || $tlsTag === '')) {
             return null;
         }
 
         return new RiskV2Context(
             honeypotHit: $honeypotHit,
-            clientContextTag: $this->clientContextTag($session, $descriptor),
+            clientContextTag: $tag,
+            tlsTag: $tlsTag,
         );
     }
 

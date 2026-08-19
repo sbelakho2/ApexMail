@@ -93,4 +93,18 @@ final class FakeRiskStateStore implements RiskStateStoreInterface
     {
         return $this->contextTags[$sessionId] ??= $tag;
     }
+
+    /**
+     * In-memory SET NX semantics: the FIRST risk-v2 trusted-edge TLS tag a
+     * session pseudonym presents is recorded and returned forever (the
+     * engine derives the tls_inconsistency signal from the comparison).
+     *
+     * @var array<string, string>
+     */
+    public array $tlsTags = [];
+
+    public function sessionFirstTlsTag(string $sessionId, string $tag): ?string
+    {
+        return $this->tlsTags[$sessionId] ??= $tag;
+    }
 }

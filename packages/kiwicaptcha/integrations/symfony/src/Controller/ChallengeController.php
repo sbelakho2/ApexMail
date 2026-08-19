@@ -161,7 +161,7 @@ final class ChallengeController
     private const IDENTIFIER_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
 
     /** The ONLY JSON fields the challenge POST accepts. */
-    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey', 'decoy_field', 'honeypot', 'client_context'];
+    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey', 'decoy_field', 'honeypot', 'client_context', 'chain_ticket'];
 
     /** Turnstile-compatible shapes, per Cloudflare's docs. */
     private const ACTION_PATTERN = '/^[a-z0-9_-]{1,32}$/i';
@@ -178,6 +178,24 @@ final class ChallengeController
     private const DECOY_FIELD_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/D';
     private const CLIENT_CONTEXT_PATTERN = '/^[a-z0-9+_,=:-]{1,64}$/D';
     private const MAX_HONEYPOT_VALUE_BYTES = 256;
+
+    /**
+     * The one-shot chain ticket presented by a stage-2 challenge request
+     * (risk.chaining): base64url(payload) "." base64url(HMAC-SHA256),
+     * bounded to the accepted shape. The ticket's signature, expiry,
+     * policy epoch and server-held chain state are validated by the
+     * ChainedChallengeTicketService; a ticket-bearing request is NEVER
+     * downgraded to an unchained issuance.
+     */
+    private const CHAIN_TICKET_PATTERN = '/^[A-Za-z0-9._:-]{1,256}$/D';
+
+    /**
+     * The bounded trusted-edge TLS classification tag the configured
+     * header may carry (risk.trusted_tls_header). A malformed value is
+     * IGNORED (the request is assessed without a TLS tag), never
+     * rejected — the tag is probabilistic evidence, not a gate.
+     */
+    private const TRUSTED_TLS_TAG_PATTERN = '/^[a-z0-9_+:-]{1,32}$/i';
 
     /**
      * The server-issued decoy field name in the challenge response: a
@@ -239,6 +257,22 @@ final class ChallengeController
         private readonly array $sitekeyPolicy = [],
         /** Lazily-built TTL-variant issuers (per-sitekey override), keyed by TTL. */
         private array $ttlOverrideIssuers = [],
+        /**
+         * One-shot chain-ticket service for stage-2 issuance
+         * (risk.chaining; null = chaining disabled — a ticket-bearing
+         * request is then refused, never downgraded).
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService $chainTickets = null,
+        /**
+         * Trusted-edge TLS classification header (risk.trusted_tls_header;
+         * null = the feature is off).
+         */
+        private readonly ?string $trustedTlsHeader = null,
+        /**
+         * The security-policy epoch a presented chain ticket must match
+         * (risk.policy_version).
+         */
+        private readonly int $policyVersion = 1,
     ) {
     }
 
@@ -522,6 +556,7 @@ final class ChallengeController
             || (array_key_exists('decoy_field', $payload) && $payload['decoy_field'] !== null && !\is_string($payload['decoy_field']))
             || (array_key_exists('honeypot', $payload) && $payload['honeypot'] !== null && !\is_string($payload['honeypot']))
             || (array_key_exists('client_context', $payload) && $payload['client_context'] !== null && !\is_string($payload['client_context']))
+            || (array_key_exists('chain_ticket', $payload) && $payload['chain_ticket'] !== null && !\is_string($payload['chain_ticket']))
         ) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request fields must be strings.']],
@@ -538,6 +573,7 @@ final class ChallengeController
         $decoyField = isset($payload['decoy_field']) && $payload['decoy_field'] !== '' ? (string) $payload['decoy_field'] : null;
         $honeypotValue = isset($payload['honeypot']) && $payload['honeypot'] !== '' ? (string) $payload['honeypot'] : null;
         $clientContext = isset($payload['client_context']) && $payload['client_context'] !== '' ? (string) $payload['client_context'] : null;
+        $chainTicket = isset($payload['chain_ticket']) && $payload['chain_ticket'] !== '' ? (string) $payload['chain_ticket'] : null;
         if ($decoyField !== null && preg_match(self::DECOY_FIELD_PATTERN, $decoyField) !== 1) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The decoy_field must be 1-64 characters of [A-Za-z0-9_-].']],
@@ -553,6 +589,12 @@ final class ChallengeController
         if ($clientContext !== null && preg_match(self::CLIENT_CONTEXT_PATTERN, $clientContext) !== 1) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The client_context must be 1-64 characters of [a-z0-9+_:-].']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        if ($chainTicket !== null && preg_match(self::CHAIN_TICKET_PATTERN, $chainTicket) !== 1) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain_ticket must be 1-256 characters of [A-Za-z0-9._:-].']],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
@@ -754,10 +796,30 @@ final class ChallengeController
                 $mintedCookie = $riskSession !== null;
             }
 
-            // Risk-v2 evidence: honeypot/decoy markers and the coarse
-            // client-context descriptor ride the assessment as
-            // probabilistic evidence — NEVER a security gate.
-            $v2 = $this->risk->clientContextV2($honeypotHit, $riskSession, $clientContext);
+            // TRUSTED-EDGE TLS TAG: when risk.trusted_tls_header is
+            // configured, ONLY that header is read and its value is
+            // validated against the bounded pattern (a malformed value —
+            // including a DUPLICATE header, which is parser ambiguity — is
+            // IGNORED: the request is assessed without a TLS tag, never
+            // rejected). The input is trusted ONLY from an explicitly
+            // trusted reverse proxy/CDN that strips client-supplied values;
+            // only the coarse classification is stored.
+            $tlsTag = null;
+            if ($this->trustedTlsHeader !== null) {
+                $rawTls = $request->headers->get($this->trustedTlsHeader);
+                if (\is_string($rawTls) && $rawTls !== ''
+                    && \count($request->headers->all($this->trustedTlsHeader)) === 1
+                    && preg_match(self::TRUSTED_TLS_TAG_PATTERN, $rawTls) === 1
+                ) {
+                    $tlsTag = $rawTls;
+                }
+            }
+
+            // Risk-v2 evidence: honeypot/decoy markers, the coarse
+            // client-context descriptor and the trusted-edge TLS
+            // classification ride the assessment as probabilistic evidence —
+            // NEVER a security gate.
+            $v2 = $this->risk->clientContextV2($honeypotHit, $riskSession, $clientContext, $tlsTag);
 
             try {
                 $decision = $this->risk->preIssue($scope, $clientIp, $riskSession, null, $v2);
@@ -928,6 +990,76 @@ final class ChallengeController
             }
         }
 
+        // CHAIN-TICKET GATE (stage-2 issuance, risk.chaining): a
+        // ticket-bearing request is validated + CONSUMED here — after every
+        // admission check that can still refuse (rate limit, risk denial,
+        // scope cap, outstanding counters) so a refused request does not
+        // burn the ticket — and immediately before the challenge is
+        // minted. The consume is ATOMIC one-shot: signature + expiry +
+        // policy epoch + scope are verified, the server-held chain state
+        // is consumed (a replayed ticket lands here and is refused), and
+        // the issuance then runs the ORDINARY risk preIssue path (the
+        // reassessment already happened at verify time; the profile
+        // selection is unchanged). When chaining is DISABLED a
+        // ticket-bearing request is refused with the malformed-metadata
+        // style — NEVER silently downgraded to an unchained issuance.
+        $chainPayload = null;
+        if ($chainTicket !== null) {
+            if ($this->chainTickets === null) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'INVALID_METADATA', 'message' => 'Chain tickets are not accepted on this deployment.']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+            try {
+                $chainPayload = $this->chainTickets->consume($chainTicket);
+            } catch (\Throwable $e) {
+                // The chain state backend is unavailable: the one-shot
+                // consume cannot be confirmed, so a stage-2 issuance
+                // cannot be authorized — fail closed (the detail goes to
+                // the server log only).
+                error_log(sprintf('kiwicaptcha: chain ticket consume failed: %s', $e->getMessage()));
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+            if ($chainPayload === null) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket is invalid, expired or already consumed.']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+            if ((string) $chainPayload['scope'] !== $scope) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket does not match this scope.']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+            if ((int) $chainPayload['policyVersion'] !== $this->policyVersion) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket is from a different security-policy epoch.']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+        }
+
         try {
             // The record carries server-owned issuance metadata
             // (Siteverify `hostname`); never signed, never sent. The value
@@ -949,6 +1081,28 @@ final class ChallengeController
             $challenge = $profile !== null
                 ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
                 : $issuer->issue($scope, $clientIp, $requestBinding, $hostname);
+            // CHAIN STAGE BINDING: the ticket holder must never re-run the
+            // SAME stage — the newly minted challenge nonce must DIFFER
+            // from the chain's verified stage-1 nonce. The nonces are
+            // server-minted random values, so a collision is astronomically
+            // unlikely; this is the fail-closed invariant check. The
+            // minted record is discarded and the request refused like any
+            // other invalid ticket.
+            if ($chainPayload !== null && $challenge->nonce === (string) $chainPayload['stage1Nonce']) {
+                try {
+                    $this->storage?->delete($challenge->nonce);
+                } catch (\Throwable) {
+                    // Best-effort discard; the record expires on its own TTL.
+                }
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket cannot re-run the same challenge stage.']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
         } catch (\InvalidArgumentException $e) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
@@ -1095,32 +1249,10 @@ final class ChallengeController
      */
     private function buildTtlVariantIssuer(int $ttlSecs): Issuer
     {
-        if ($this->storage === null) {
-            throw new \LogicException(
-                'risk.sitekeys.<sitekey>.ttl_secs requires the challenge storage to be wired to the controller (the extension always wires it).'
-            );
-        }
-        $config = $this->issuer->config();
-        $reflection = new \ReflectionObject($this->issuer);
-        $now = $reflection->getProperty('now')->getValue($this->issuer);
-        $region = $reflection->getProperty('region')->getValue($this->issuer);
-
-        return new Issuer(new Config(
-            secretKey: $config->secretKey,
-            algorithm: $config->algorithm,
-            mKib: $config->mKib,
-            t: $config->t,
-            p: $config->p,
-            targetBits: $config->targetBits,
-            argon2TargetBits: $config->argon2TargetBits,
-            ttlSecs: $ttlSecs,
-            minDurationMs: $config->minDurationMs,
-            solverMaxHashes: $config->solverMaxHashes,
-            bindingMode: $config->bindingMode,
-            policyVersion: $config->policyVersion,
-            issuer: $config->issuer,
-            kid: $config->kid,
-        ), $this->storage, $now, $region);
+        // The public Issuer::withTtl() API clones the config with only
+        // ttlSecs replaced and carries the storage, clock and region
+        // directly — no reflection into private state.
+        return $this->issuer->withTtl($ttlSecs);
     }
 
     /**

@@ -50,23 +50,27 @@ impl<'a> RiskContext<'a> {
 ///   ([`RiskEventKind::is_honeypot`] kinds, or a decoy marker observed by
 ///   the caller). The engine maps it to the bounded `honeypot` signal.
 /// - `client_context_tag`: the ephemeral coarse capability tag of the
-///   current request (bounded, keyed to deployment + short epoch + session —
-///   never a stable device identifier). The engine compares it against the
-///   tag recorded for this session's FIRST tag-bearing request.
-/// - `client_context_consistent`: COMPUTED by the engine from the session's
-///   first-seen tag record (the risk-v2 session record, same TTL as the
-///   risk-v1 session state); callers pass the default and the derivation
-///   overwrites it.
+///   current request (bounded, keyed to deployment + session — never a
+///   stable device identifier, stable for the session's whole lifetime).
+///   The engine compares it against the tag recorded for this session's
+///   FIRST tag-bearing request.
+/// - `tls_tag`: the COARSE, server-attested TLS classification tag
+///   supplied by trusted reverse-proxy/CDN infrastructure (e.g.
+///   "tls13|http2") — never a raw fingerprint database. The engine records
+///   only the ephemeral classification as the session's first-seen tag and
+///   compares the current request's tag against it; values over 64 chars
+///   are treated as absent by the consuming engine (bounded). The PHP
+///   mirror names the field `tlsTag`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RiskV2Context {
     pub honeypot_hit: bool,
     pub client_context_tag: Option<String>,
-    pub client_context_consistent: bool,
+    pub tls_tag: Option<String>,
 }
 
 impl RiskV2Context {
     /// True when the context carries NO risk-v2 evidence at all.
     pub fn is_empty(&self) -> bool {
-        !self.honeypot_hit && self.client_context_tag.is_none()
+        !self.honeypot_hit && self.client_context_tag.is_none() && self.tls_tag.is_none()
     }
 }

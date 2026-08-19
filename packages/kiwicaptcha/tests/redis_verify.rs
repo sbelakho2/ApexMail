@@ -262,18 +262,17 @@ fn valid_solution_verifies_and_wire_format_is_language_neutral() {
         .unwrap();
     let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
     // The stored JSON carries the shared runtime envelope (state marker +
-    // consumed_result) on top of the canonical record — exactly like the
-    // PHP store's format; the canonical fields must equal the record's
-    // serialization once the runtime fields are stripped.
+    // consumed_result + operation_identity) on top of the canonical record
+    // — exactly like the PHP store's format; the canonical fields must
+    // equal the record's serialization once the runtime fields are
+    // stripped.
     let mut canonical: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    canonical
-        .as_object_mut()
-        .expect("stored JSON must be an object")
-        .remove("state");
-    canonical
-        .as_object_mut()
-        .expect("stored JSON must be an object")
-        .remove("consumed_result");
+    for field in ["state", "consumed_result", "operation_identity"] {
+        canonical
+            .as_object_mut()
+            .expect("stored JSON must be an object")
+            .remove(field);
+    }
     assert_eq!(
         serde_json::to_value(&issued.record).unwrap(),
         canonical,
@@ -299,6 +298,79 @@ fn valid_solution_verifies_and_wire_format_is_language_neutral() {
         ),
         VerifyOutcome::Valid { .. }
     ));
+}
+
+#[test]
+fn php_written_record_with_non_null_operation_identity_parses_and_strips() {
+    // A PHP-written record whose identity-aware consume spliced
+    // `"operation_identity":"<hex>"` into the runtime envelope must parse
+    // and strip cleanly: the canonical record never sees the runtime
+    // field, find() and consume() both work, and the identity survives
+    // untouched in the stored value.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("php-opid");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+
+    let mut value = serde_json::to_string(&issued.record).unwrap();
+    value.truncate(value.len() - 1);
+    // The envelope EXACTLY as the PHP identity-aware consume writes it
+    // (hex identity — the bounded Siteverify fingerprint shape).
+    value.push_str(
+        ",\"state\":\"consumed\",\"consumed_result\":{\"valid\":true,\"binding\":null},\
+         \"operation_identity\":\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"}",
+    );
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&value)
+        .query(&mut conn)
+        .unwrap();
+
+    let store = store_for(&url, &prefix);
+    // The strict parse strips the runtime fields (including the NON-NULL
+    // operation_identity) — the canonical record comes back intact.
+    let found = store
+        .find(&issued.record.nonce)
+        .expect("find must not fail on a PHP-style record")
+        .expect("the PHP-style record must be found");
+    assert_eq!(found.nonce, issued.record.nonce);
+    assert_eq!(found.issued_at_ns, issued.record.issued_at_ns);
+
+    // The consume observes the already-consumed state (no transition) and
+    // the stored committed result rides back.
+    let consumed = store
+        .consume(&issued.record.nonce)
+        .expect("consume must not fail on a PHP-style record")
+        .expect("the PHP-style record must be found");
+    assert!(
+        !consumed.first,
+        "the PHP-written record is already consumed"
+    );
+    let stored = consumed
+        .stored_result
+        .expect("the PHP-committed result must ride back");
+    assert!(stored.valid);
+
+    // The identity marker is preserved byte-exactly in the stored value
+    // (the Rust reader only ever strips it, never rewrites it).
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    assert!(
+        raw.contains("\"operation_identity\":\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\""),
+        "the stored PHP-written identity must survive untouched"
+    );
 }
 
 #[test]

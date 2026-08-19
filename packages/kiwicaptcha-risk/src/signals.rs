@@ -55,9 +55,11 @@ impl SignalVector {
 ///
 /// These are a separate surface from the 13 risk-v1 contract fields: they
 /// are derived from the risk-v2 context (honeypot evidence, session
-/// client-context consistency) at assessment time and NEVER mutate the
-/// risk-v1 state script or the v1 [`SignalVector`]. Both crates use the
-/// identical field names and fixed-point semantics.
+/// client-context consistency, trusted-edge TLS consistency) at assessment
+/// time and NEVER mutate the risk-v1 state script or the v1
+/// [`SignalVector`]. Both crates use the identical field names and
+/// fixed-point semantics (PHP mirror: honeypot, sessionInconsistency,
+/// tlsInconsistency).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RiskV2Signals {
     /// Honeypot/decoy evidence: `1000` when ANY honeypot event kind fired or
@@ -67,6 +69,11 @@ pub struct RiskV2Signals {
     /// first-seen client-context tag differs from the current request's tag,
     /// `0` when consistent or when no tag exists (first request / absent).
     pub session_inconsistency: u16,
+    /// Trusted-edge TLS inconsistency: `1000` when the session's first-seen
+    /// TLS classification tag differs from the current request's tag, `0`
+    /// when consistent or when no tag exists (first request / absent /
+    /// over-bound value).
+    pub tls_inconsistency: u16,
 }
 
 impl RiskV2Signals {

@@ -782,6 +782,58 @@
     return url.href;
   }
 
+  // ── Coarse client-context descriptor (risk-v2 evidence) ─────────────
+  // Built ONCE per page load from coarse navigator/window signals and sent
+  // with every challenge request as the `client_context` field (the server
+  // accepts /^[a-z0-9+_,=:-]{1,64}$/D). Deliberately COARSE: viewport
+  // class, touch capability, language family and a timezone-offset class —
+  // no canvas/audio/font-list/GPU fingerprinting, no stable IDs, nothing
+  // that identifies a device across sessions. A missing capability
+  // contributes nothing; when nothing is available the field is omitted
+  // entirely.
+  var kiwiClientContext = null;
+  function kiwiBuildClientContext() {
+    if (kiwiClientContext !== null) return kiwiClientContext;
+    var parts = [];
+    var viewport = 0;
+    if (typeof window !== "undefined" && window.innerWidth) viewport = window.innerWidth;
+    parts.push(viewport < 600 ? "v1" : (viewport < 1200 ? "v2" : "v3"));
+    var coarsePointer = false;
+    try {
+      var pm = window.matchMedia ? window.matchMedia("(pointer: coarse)") : null;
+      coarsePointer = !!(pm && pm.matches);
+    } catch (e) {}
+    parts.push("t" + (coarsePointer ? "1" : "0"));
+    if (navigator && typeof navigator.language === "string" && navigator.language) {
+      var family = navigator.language.trim().toLowerCase().split(/[_-]/)[0] || "";
+      if (family.length > 3) family = family.slice(0, 3);
+      if (/^[a-z]{2,3}$/.test(family)) parts.push("l" + family);
+    }
+    try {
+      if (typeof Date !== "undefined" && typeof Date.prototype.getTimezoneOffset === "function") {
+        var offsetHours = Math.round(-new Date().getTimezoneOffset() / 60);
+        parts.push(offsetHours < -8 ? "z0" : (offsetHours < -2 ? "z1" : (offsetHours <= 2 ? "z2" : (offsetHours <= 8 ? "z3" : "z4"))));
+      }
+    } catch (e) {}
+    if (parts.length === 0) { kiwiClientContext = null; return null; }
+    kiwiClientContext = parts.join(",");
+    return kiwiClientContext;
+  }
+
+  // Truncate a string to the server's BYTE bound (e.g. the 256-byte
+  // honeypot value ceiling): code units are truncated with a binary search
+  // over the UTF-8 byte length, so a multi-byte filler can never exceed
+  // the server's bound and 422 the challenge request.
+  function kiwiBoundBytes(s, maxBytes) {
+    if (encoder.encode(s).length <= maxBytes) return s;
+    var lo = 0, hi = s.length;
+    while (lo < hi) {
+      var mid = (lo + hi + 1) >> 1;
+      if (encoder.encode(s.slice(0, mid)).length <= maxBytes) lo = mid; else hi = mid - 1;
+    }
+    return s.slice(0, lo);
+  }
+
   // ── Accessibility helpers ──────────────────────────────────────────
   // The dedicated role="status" announcer (data-kiwi-status) is the ONLY
   // aria-live traffic: the changing widget itself carries no aria-live and
@@ -1229,6 +1281,46 @@
       }
       input.value = value || "";
     }
+    // Server-issued decoy (honeypot) field: after a successful challenge
+    // response, the server may name a decoy field (bounded
+    // [A-Za-z0-9_-]{1,64} — validated before trusting; a malformed name is
+    // ignored). The driver renders a hidden text input with that name next
+    // to the token input, INSIDE the same form/host, so the protected form
+    // submission carries it. The driver NEVER auto-fills it: a human never
+    // types into it — a bot's filler is exactly the evidence. The rendered
+    // name is tracked on the widget element and cleared when the widget
+    // resets, so a re-solve never echoes a stale decoy.
+    function kiwiRenderDecoy(data) {
+      var decoyName = data && typeof data.decoy_field === "string" ? data.decoy_field : null;
+      if (decoyName === null || !/^[A-Za-z0-9_-]{1,64}$/.test(decoyName)) return;
+      if (!tokenEl) return;
+      var host = tokenEl.parentNode;
+      if (!host) return;
+      // A re-issued challenge carries a NEW per-issuance decoy name:
+      // the previous rendered input (if any) is removed so the form never
+      // accumulates stale honeypot fields.
+      var previous = W.dataset.kiwiDecoyName || null;
+      if (previous && previous !== decoyName) {
+        var oldInput = host.querySelector('input[name="' + previous + '"]');
+        if (oldInput && oldInput.parentNode) oldInput.parentNode.removeChild(oldInput);
+      }
+      W.dataset.kiwiDecoyName = decoyName;
+      var input = host.querySelector('input[name="' + decoyName + '"]');
+      if (!input) {
+        input = document.createElement("input");
+        input.type = "text";
+        input.name = decoyName;
+        input.value = "";
+        input.setAttribute("autocomplete", "off");
+        input.setAttribute("tabindex", "-1");
+        input.setAttribute("aria-hidden", "true");
+        input.style.display = "none";
+        host.insertBefore(input, tokenEl.nextSibling);
+      }
+    }
+    function kiwiClearDecoy() {
+      kiwiClearDecoyFor(W);
+    }
     function resetToIdle() {
       clearInterval(countdownTimer);
       var rc = kiwiWidgets[widgetId];
@@ -1329,6 +1421,9 @@
     function reset() {
       kiwiCancelGeneration(widgetId);
       resetToIdle();
+      // The widget reset clears the rendered decoy (tracked name + input):
+      // a re-solve must not echo a stale server-issued honeypot name.
+      kiwiClearDecoy();
       delete W.dataset.kiwiStarted;
     }
     kiwiResetHooks.push({ el: W, reset: reset });
@@ -1350,8 +1445,9 @@
       });
     }
     // destroy() teardown: idle the runtime state (countdown, telemetry,
-    // blob URL, token) exactly like resetToIdle does.
-    kiwiCleanups.set(W, function () { resetToIdle(); });
+    // blob URL, token) exactly like resetToIdle does, and remove the
+    // rendered decoy input.
+    kiwiCleanups.set(W, function () { resetToIdle(); kiwiClearDecoy(); });
 
     async function run() {
       // Every continuation is generation-guarded — a reset that lands
@@ -1376,6 +1472,38 @@
         var reqBody = { scope: scope };
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
         if (requestBinding) reqBody.request_binding = requestBinding;
+        // CHAIN TICKET: when the widget container carries a server-issued
+        // chain ticket (data-kiwi-chain-ticket, or options.chainTicket), the
+        // challenge request presents it so the server can validate + consume
+        // the stage-2 gate (bounded [A-Za-z0-9._:-]{1,256}; a malformed value
+        // is never sent). The ticket is CLEARED after the solve — a consumed
+        // ticket is one-shot and a re-solve must not re-present it.
+        var chainTicket = (options && typeof options.chainTicket === "string" && options.chainTicket)
+          || (container.getAttribute ? container.getAttribute("data-kiwi-chain-ticket") : null)
+          || (W.getAttribute ? W.getAttribute("data-kiwi-chain-ticket") : null);
+        if (typeof chainTicket === "string" && /^[A-Za-z0-9._:-]{1,256}$/.test(chainTicket)) {
+          reqBody.chain_ticket = chainTicket;
+        }
+        // RISK-V2 CLIENT CONTEXT: the coarse capability descriptor built
+        // once per page load (see kiwiBuildClientContext) rides every
+        // challenge request — probabilistic evidence, never a gate.
+        var clientContext = kiwiBuildClientContext();
+        if (clientContext) reqBody.client_context = clientContext;
+        // RISK-V2 DECOY MARKERS: when a server-issued decoy (honeypot)
+        // input rendered by this widget (see kiwiRenderDecoy) is still in
+        // the form and FILLED, the decoy field name + a bounded value ride
+        // the challenge request as honeypot evidence — NEVER a gate, and
+        // the value is truncated to the server's 256-byte bound. An empty
+        // decoy contributes nothing.
+        var renderedDecoy = W.dataset.kiwiDecoyName || null;
+        if (renderedDecoy && tokenEl) {
+          var decoyHost = tokenEl.parentNode;
+          var decoyInput = decoyHost ? decoyHost.querySelector('input[name="' + renderedDecoy + '"]') : null;
+          if (decoyInput && decoyInput.parentNode && typeof decoyInput.value === "string" && decoyInput.value !== "") {
+            reqBody.decoy_field = renderedDecoy;
+            reqBody.honeypot = kiwiBoundBytes(decoyInput.value, 256);
+          }
+        }
         // Provider-compatible challenge metadata is declared by the WIDGET
         // at issuance (data-action / data-cdata on the container, or
         // params.action/cData) — the server validates the provider shapes
@@ -1426,6 +1554,11 @@
         // for or more.
         if (algorithm === "argon2id" && (data.algorithm || "sha256") !== "argon2id") throw new Error("Challenge downgraded");
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        // RISK-V2 DECOY FIELD: the server-issued decoy (honeypot) name in
+        // the issuance response is rendered as a hidden form input next to
+        // the token input (never auto-filled) so the protected form
+        // submission carries it.
+        kiwiRenderDecoy(data);
         if (data.ttlSecs) startCountdown(data.ttlSecs);
         setStatus(kiwiT("statusVerifying"), kiwiT("badgeWorking"), "solving");
         announce(kiwiT("checking"));
@@ -1455,6 +1588,12 @@
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
         tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()));
         setBinding(requestBinding || "");
+        // CHAIN TICKET LIFECYCLE: the solve completed — the presented chain
+        // ticket was consumed by the server at issuance, so the attribute /
+        // option is cleared and a re-solve never re-presents it.
+        if (container && container.removeAttribute) container.removeAttribute("data-kiwi-chain-ticket");
+        if (W && W.removeAttribute) W.removeAttribute("data-kiwi-chain-ticket");
+        if (options && typeof options === "object") options.chainTicket = null;
         retryCount = 0;
         setStatus(kiwiT("label"), kiwiT("badgeSuccess"), "done"); setHint(kiwiT("hintVerified")); setProgress(100); clearInterval(countdownTimer); if (countdownEl) countdownEl.textContent = "";
         announce(kiwiT("statusVerified"));
@@ -1489,6 +1628,21 @@
   var kiwiResetHooks = [];
 
   // ── Per-widget lifecycle bookkeeping ────────────────────────────────
+  // The rendered server-issued decoy (honeypot) input is tracked by NAME on
+  // the widget element (shared across re-inits — an expiry-triggered
+  // re-solve must still see a filled decoy as evidence), and cleared by the
+  // shared helper below on every reset path (BFCache restore, the public
+  // reset API, destroy teardown).
+  function kiwiClearDecoyFor(W) {
+    if (!W || !W.dataset) return;
+    var decoyName = W.dataset.kiwiDecoyName || null;
+    delete W.dataset.kiwiDecoyName;
+    if (!decoyName) return;
+    var t = W.querySelector ? W.querySelector("[data-kiwi-token]") : null;
+    var host = t ? t.parentNode : null;
+    var input = host ? host.querySelector('input[name="' + decoyName + '"]') : null;
+    if (input && input.parentNode) input.parentNode.removeChild(input);
+  }
   // destroy(element|selector) needs to reverse EVERYTHING initWidget
   // attached: listeners (registered in a per-element registry so they can
   // be removed by reference), the countdown/telemetry/blob-URL runtime
@@ -1603,6 +1757,9 @@
     kiwiCancelGeneration(id);
     var W = r.W;
     if (W) {
+      // The reset clears the rendered decoy (tracked name + input): a
+      // re-solve must not echo a stale server-issued honeypot name.
+      kiwiClearDecoyFor(W);
       var t = W.querySelector("[data-kiwi-token]");
       if (t) t.value = "";
       if (r.options && r.options.responseField) {
