@@ -51,6 +51,31 @@ impl SignalVector {
     }
 }
 
+/// The ADDITIVE risk-v2 signal fields (each 0..1000), in a fixed order.
+///
+/// These are a separate surface from the 13 risk-v1 contract fields: they
+/// are derived from the risk-v2 context (honeypot evidence, session
+/// client-context consistency) at assessment time and NEVER mutate the
+/// risk-v1 state script or the v1 [`SignalVector`]. Both crates use the
+/// identical field names and fixed-point semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RiskV2Signals {
+    /// Honeypot/decoy evidence: `1000` when ANY honeypot event kind fired or
+    /// the context reported a honeypot hit, `0` otherwise.
+    pub honeypot: u16,
+    /// Session client-context inconsistency: `1000` when the session's
+    /// first-seen client-context tag differs from the current request's tag,
+    /// `0` when consistent or when no tag exists (first request / absent).
+    pub session_inconsistency: u16,
+}
+
+impl RiskV2Signals {
+    /// All-zero vector (no risk-v2 evidence).
+    pub fn zero() -> RiskV2Signals {
+        RiskV2Signals::default()
+    }
+}
+
 /// Fixed-point normalization `floor(value * 1000 / saturation)`, clamped to
 /// 1000. Mirrors the Lua `normalize`; a non-positive saturation yields 0.
 pub fn normalize(value: u32, saturation: u32) -> u16 {

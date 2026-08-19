@@ -14,7 +14,8 @@ use Symfony\Component\HttpFoundation\Request;
  * across requests. The link material must be a fresh random nonce — never an
  * IP-derived or device-derived identifier — so this service mints exactly
  * that: a 16-byte random value (hex, 32 chars) stored in a first-party,
- * HttpOnly, SameSite=Lax cookie. The engine only ever stores the keyed
+ * HttpOnly, SameSite=Strict cookie (the constructor's default; the operator
+ * may relax it). The engine only ever stores the keyed
  * pseudonym of the value (HMAC-SHA256 with the derived session key), never
  * the value itself.
  *

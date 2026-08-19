@@ -101,6 +101,29 @@ pub trait RiskStateStore {
     fn last_cooldown_until_ms(&self) -> u64 {
         0
     }
+
+    /// The risk-v2 session client-context record: records `tag` as the
+    /// session's FIRST-seen client-context tag (SET NX, first write wins)
+    /// and returns the recorded tag — `Ok(Some(first))` when a record
+    /// exists, `Ok(None)` when the store has no record surface.
+    ///
+    /// The record is keyed by the session's HMAC pseudonym (never the raw
+    /// cookie value) and expires with the SAME TTL as the risk-v1 session
+    /// state. The engine derives the `session_consistency` signal by
+    /// comparing the current request's tag against the returned first tag;
+    /// `Ok(None)` / `Err` degrade to "consistent" (neutral), never breaking
+    /// an assessment.
+    ///
+    /// The DEFAULT implementation reports no record surface — risk-v1
+    /// stores that do not implement the companion record stay on the v1
+    /// contract untouched.
+    fn session_first_context_tag(
+        &self,
+        _session_id: &[u8; 16],
+        _tag: &str,
+    ) -> Result<Option<String>, RiskStoreError> {
+        Ok(None)
+    }
 }
 
 /// Convenience wrapper for recording events without building an

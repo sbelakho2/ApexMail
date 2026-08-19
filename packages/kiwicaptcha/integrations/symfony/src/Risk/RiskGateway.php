@@ -16,6 +16,7 @@ use KiwiCaptcha\Risk\RiskDecision;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskReason;
+use KiwiCaptcha\Risk\RiskV2Context;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\VerifyError;
 use Psr\Log\LoggerInterface;
@@ -242,28 +243,33 @@ final class RiskGateway
      * observation + decision). The decision id is recorded on the
      * request-local decision context ({@see setCurrentDecisionId()}).
      *
+     * The optional risk-v2 context ({@see clientContextV2()}) feeds the
+     * additive evidence factors (honeypot/decoy evidence, session
+     * client-context consistency) into the assessment — probabilistic
+     * evidence only, NEVER a security gate.
+     *
      * @throws UnknownScopeException   when the scope is unknown in 'reject'/'baseline' mode
      * @throws \InvalidArgumentException when the client IP is not a valid
      *                                   IPv4/IPv6 address (the caller treats
      *                                   this as "no risk signal" and applies
      *                                   the degraded decision)
      */
-    public function preIssue(string $scope, string $ip, ?string $session, ?string $idempotencyKey = null): RiskDecision
+    public function preIssue(string $scope, string $ip, ?string $session, ?string $idempotencyKey = null, ?RiskV2Context $v2 = null): RiskDecision
     {
-        $decision = $this->engine->assessPreIssue(
-            new RiskContext(
-                scope: $this->scopeId($scope),
-                sourceIp: $ip,
-                // The engine derives the keyed session pseudonym itself
-                // (buildObservation) — pass the raw cookie value.
-                sessionId: $session,
-                principalId: $this->resolvePrincipal($scope),
-                event: RiskEventKind::PreIssue,
-                networkFlags: $this->classifier->classify($ip),
-                resources: $this->resources(),
-            ),
-            $idempotencyKey,
+        $context = new RiskContext(
+            scope: $this->scopeId($scope),
+            sourceIp: $ip,
+            // The engine derives the keyed session pseudonym itself
+            // (buildObservation) — pass the raw cookie value.
+            sessionId: $session,
+            principalId: $this->resolvePrincipal($scope),
+            event: RiskEventKind::PreIssue,
+            networkFlags: $this->classifier->classify($ip),
+            resources: $this->resources(),
         );
+        $decision = $v2 !== null
+            ? $this->engine->assessPreIssueV2($context, $v2, $idempotencyKey)
+            : $this->engine->assessPreIssue($context, $idempotencyKey);
         $this->setCurrentDecisionId($decision->decisionId);
         $this->logDecision($scope, $decision);
 
@@ -309,6 +315,65 @@ final class RiskGateway
         $this->logDecision($scope, $decision);
 
         return $decision;
+    }
+
+    /**
+     * The risk-v2 client-context tag for the current request: a bounded,
+     * ephemeral base36 tag derived from the coarse capability descriptor
+     * ({@see ClientContextTag::derive()}), keyed to the deployment
+     * namespace, a short epoch and the continuity session — never a stable
+     * device identifier. Null when there is no session or no descriptor
+     * (no consistency signal is derived).
+     */
+    public function clientContextTag(?string $session, ?string $descriptor): ?string
+    {
+        if ($session === null || $descriptor === null || $descriptor === '') {
+            return null;
+        }
+
+        return ClientContextTag::derive($this->contextNamespace(), time(), $session, $descriptor);
+    }
+
+    /**
+     * The risk-v2 context for one request: honeypot evidence plus the
+     * ephemeral client-context tag. Returns null when the request carries
+     * NO risk-v2 evidence at all (the assessment then stays on the pure
+     * risk-v1 path).
+     */
+    public function clientContextV2(bool $honeypotHit, ?string $session, ?string $descriptor): ?RiskV2Context
+    {
+        if (!$honeypotHit && ($session === null || $descriptor === null || $descriptor === '')) {
+            return null;
+        }
+
+        return new RiskV2Context(
+            honeypotHit: $honeypotHit,
+            clientContextTag: $this->clientContextTag($session, $descriptor),
+        );
+    }
+
+    /**
+     * Risk-v2 honeypot/decoy evidence feedback: records one of the three
+     * honeypot event kinds ({@see RiskEventKind::isHoneypot()}) through the
+     * engine's feedback path — the event rides the same observation
+     * pipeline as every other evidence signal (dedupe receipt; the state
+     * script treats it as a no-op, the honeypot signal itself is scored
+     * from the risk-v2 context of the assessment). NEVER a security gate:
+     * this only books probabilistic evidence.
+     *
+     * @throws \InvalidArgumentException when $kind is not one of the three
+     *                                   honeypot/decoy event kinds
+     */
+    public function honeypotEvidence(RiskEventKind $kind, string $scope, string $ip, ?string $session = null, ?string $idempotencyKey = null, ?string $decisionId = null): ?EventReceipt
+    {
+        if (!$kind->isHoneypot()) {
+            throw new \InvalidArgumentException(sprintf(
+                'honeypotEvidence accepts honeypot event kinds only (got %s)',
+                $kind->name,
+            ));
+        }
+
+        return $this->recordFeedback($kind, $scope, $ip, $session, $idempotencyKey, $decisionId);
     }
 
     /** Post-issue signal: the challenge was actually minted (issue-debt). */
@@ -678,6 +743,21 @@ final class RiskGateway
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
         );
+    }
+
+    /**
+     * The deployment namespace inside the risk state hash tag
+     * ({kiwi:<ns>}:...), derived from the wired decision-key prefix
+     * (`{kiwi:<ns>}:decision:`); falls back to `kiwi`. The namespace keys
+     * the risk-v2 client-context tag derivation to the deployment.
+     */
+    private function contextNamespace(): string
+    {
+        if (preg_match('/^\{kiwi:([^{}:]+)\}:decision:$/D', $this->decisionKeyPrefix, $m) === 1) {
+            return $m[1];
+        }
+
+        return 'kiwi';
     }
 
     /**

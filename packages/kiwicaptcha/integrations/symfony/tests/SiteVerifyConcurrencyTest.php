@@ -825,8 +825,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
      * 5-second-TTL token, lets the owner verify (committed success) and
      * "die" before the Siteverify finalize, waits past the signed expiry —
      * the record must STILL be readable — and proves the same-UUID retry
-     * takes over and returns the IDENTICAL canonical success via the
-     * consumed-state reconstruction.
+     * takes over (the FIXED owner lease is the store's configured SHORT
+     * lease: 3s, with the waiter bound above it) and returns the
+     * IDENTICAL canonical success via the consumed-state reconstruction.
      */
     public function testLateExpiryCrashRecoveryOnRealRedis(): void
     {
@@ -854,13 +855,20 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $uuid = 'f5a6b7c8-9d0e-4f1a-b234-5c6d7e8f90a1';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
         $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
-        $probe->del($idemKey);
+        $guardKey = '{kiwicaptcha}:siteverify-redemption:'.$backendId.':'.$challenge->nonce;
+        $probe->del([$idemKey, $guardKey]);
 
         // The "crash" seam: finalize() is a no-op for the owner, exactly
         // like a process dying between the core commit and the Siteverify
         // finalize (mirrors the ArrayStorage late-token test); everything
         // else delegates to the real Redis store.
-        $idempotencyStore = new RedisSiteVerifyIdempotencyStore($probe);
+        // A SHORT fixed store lease (3s) makes the takeover quick; the
+        // waiter bound (5s) exceeds it (the construction invariant).
+        $idempotencyStore = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 3);
+        // The NONCE-LEVEL redemption guard is SHARED across the owner
+        // and the retry: the retry is the SAME logical operation (same
+        // key + hash), so it is recovery-eligible.
+        $guard = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyRedemptionGuard($probe);
         $crashingStore = new class($idempotencyStore) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore {
             public function __construct(private readonly \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $inner)
             {
@@ -900,7 +908,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         try {
             // The owner claims, verifies (committed success) and "dies"
             // WITHOUT finalizing.
-            $owner = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore);
+            $owner = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore, null, 5.0, redemptionGuard: $guard);
             $ownerResponse = $owner->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -908,8 +916,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame(true, $ownerBody['success'] ?? null, 'the owner verifies the token and commits its success: '.(string) $ownerResponse->getContent());
             self::assertNull($crashingStore->stored($backendId, $uuid), 'the owner crashed before the Siteverify finalize');
 
-            // Wait past the signed expiry (ttl 5s) and the owner's derived
-            // lease (~1s from its claim-time remaining validity).
+            // Wait past the signed expiry (ttl 5s) and the fixed 3s lease.
             sleep(7);
 
             // The retained consumed-state record must STILL exist: the
@@ -923,7 +930,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             // The same-UUID retry takes over the expired lease and returns
             // the IDENTICAL canonical success via reconstruction — a fresh
             // verification would now answer Expired (timeout-or-duplicate).
-            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore);
+            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore, null, 5.0, redemptionGuard: $guard);
             $retryResponse = $retry->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -931,13 +938,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame(true, $retryBody['success'] ?? null, 'the retry must reconstruct the ORIGINAL committed success after the signed expiry: '.(string) $retryResponse->getContent());
             self::assertSame($ownerBody, $retryBody, 'the retry returns the IDENTICAL canonical success via reconstruction');
         } finally {
-            $probe->del($idemKey);
+            $probe->del([$idemKey, $guardKey]);
         }
     }
 
     /**
-     * A Redis outage on the pre-claim storage peek (an idempotent request
-     * whose per-token lease derivation must read the challenge record) must
+     * A Redis outage on the idempotency CLAIM (a raw store operation) must
      * degrade to the retryable provider error (503 internal-error), never
      * escape as a 500. The storage is pointed at a CLOSED port with a short
      * connection timeout, so the failure is fast and deterministic; when
@@ -958,7 +964,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // The token is issued against an in-memory storage (the token is
         // self-contained and decodes with the secret key alone); the
         // Siteverify storage is then a Redis client pointed at the CLOSED
-        // port, so the idempotent peek hits the outage deterministically.
+        // port, so the idempotency claim hits the outage deterministically.
         $array = new ArrayStorage();
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $array);
         $challenge = $issuer->issue('login', '127.0.0.1');
@@ -984,8 +990,86 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             'remoteip' => '127.0.0.1',
             'idempotency_key' => '6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d',
         ]));
-        self::assertSame(503, $response->getStatusCode(), 'a Redis outage on the idempotent peek must map to 503, never a 500');
+        self::assertSame(503, $response->getStatusCode(), 'a Redis outage on the idempotency claim must map to 503, never a 500');
         self::assertSame(['internal-error'], json_decode((string) $response->getContent(), true)['error-codes']);
+    }
+
+    /**
+     * THE decisive regression on REAL Redis (mirror of the Array-store
+     * decisive test): a used token must NEVER become successful again
+     * through a different idempotency UUID. UUID A redeems the token; a
+     * replay under UUID B is timeout-or-duplicate and its claim is
+     * FINALIZED as CompleteSame; after B's owner lease expires (a SHORT
+     * 3s configured lease + a real sleep), the retry with B must STILL
+     * be timeout-or-duplicate — the stored duplicate is returned
+     * immediately and the entry can never be reconstructed as a success.
+     */
+    public function testRealRedisDifferentUuidForAConsumedTokenCanNeverBecomeSuccessfulAgain(): void
+    {
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        try {
+            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399 — start one for the redemption-guard regression test');
+        }
+
+        $storage = new RedisStorage($probe);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $solution = $this->solveSolution($challenge);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+        $uuidA = 'b8c9d0e1-2f3a-4b5c-8d9e-0f1a2b3c4d5e';
+        $uuidB = 'c9d0e1f2-3a4b-4c5d-9e0f-1a2b3c4d5e6f';
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $idemKeyA = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
+        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $guardKey = '{kiwicaptcha}:siteverify-redemption:'.$backendId.':'.$challenge->nonce;
+        $probe->del([$idemKeyA, $idemKeyB, $guardKey]);
+
+        try {
+            // A SHORT fixed store lease (3s) with a waiter bound above it
+            // (5s — the construction invariant) keeps the lease-expiry
+            // step fast; the NONCE-LEVEL redemption guard runs on the
+            // SAME real Redis (first-write-wins via SET NX).
+            $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 3);
+            $guard = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyRedemptionGuard($probe);
+            $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0, redemptionGuard: $guard);
+
+            // 1. The ORIGINAL logical operation: UUID A redeems the token.
+            $first = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
+            ]))->getContent(), true);
+            self::assertSame(true, $first['success'] ?? null);
+            self::assertSame(hash('sha256', $token), $guard->originalHash($backendId, $challenge->nonce), 'the guard must record A\'s hash as the ORIGINAL redemption (first write wins)');
+
+            // 2. UUID B is a DIFFERENT logical operation: timeout-or-
+            // duplicate, AND its claim is FINALIZED as CompleteSame.
+            $second = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
+            ]))->getContent(), true);
+            self::assertSame(false, $second['success'] ?? null);
+            self::assertSame(['timeout-or-duplicate'], $second['error-codes'] ?? null);
+            $storedB = $store->stored($backendId, $uuidB);
+            self::assertIsArray($storedB, 'the duplicate-detecting claim must be finalized as CompleteSame');
+            self::assertSame(['timeout-or-duplicate'], $storedB['error-codes'] ?? null);
+
+            // 3. B's owner lease expires (the defect window: a pending
+            // entry could otherwise be taken over and reconstructed).
+            sleep(4);
+
+            // 4. The retry with UUID B must STILL be timeout-or-duplicate.
+            $retry = json_decode((string) $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
+            ]))->getContent(), true);
+            self::assertSame(false, $retry['success'] ?? null, 'a consumed token must NEVER become successful again through a different idempotency UUID');
+            self::assertSame(['timeout-or-duplicate'], $retry['error-codes'] ?? null);
+        } finally {
+            $probe->del([$idemKeyA, $idemKeyB, $guardKey]);
+        }
     }
 }
 

@@ -24,6 +24,9 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface
     /** @var list<array{0: string, 1: string, 2?: int|bool, 3?: int}> ledger calls */
     public array $ledgerCalls = [];
 
+    /** @var array<string, string> first-seen risk-v2 client-context tags keyed by session pseudonym */
+    public array $contextTags = [];
+
     public function registerOutcome(string $decisionId, int $scope, int $decisionHour, int $score): bool
     {
         $this->ledgerCalls[] = ['register', $decisionId, $scope, $decisionHour, $score];
@@ -40,5 +43,14 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface
     {
         $this->ledgerCalls[] = ['correct', $decisionId, $legitimate];
         return true;
+    }
+
+    /**
+     * In-memory SET NX semantics: the FIRST tag a session pseudonym
+     * presents is recorded and returned forever.
+     */
+    public function sessionFirstContextTag(string $sessionId, string $tag): ?string
+    {
+        return $this->contextTags[$sessionId] ??= $tag;
     }
 }

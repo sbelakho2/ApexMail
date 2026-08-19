@@ -3,6 +3,12 @@
 //! Values 1..17 are authoritative and MUST NOT be renumbered: they are the
 //! event identifiers passed into the canonical state script (`risk.lua`) and
 //! must be byte-identical across the PHP and Rust implementations.
+//!
+//! Values 18..20 are the ADDITIVE risk-v2 surface: honeypot/decoy evidence
+//! kinds. They ride the same observation path (idempotency domain separation,
+//! dedupe receipt) but the state script treats them as no-ops (like
+//! `RiskDenied`) — the honeypot signal itself is scored from the risk-v2
+//! context, never from accumulated state.
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -12,7 +18,8 @@ use crate::RiskError;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// The fixed risk event kinds of the risk-v1 contract.
+/// The fixed risk event kinds of the risk-v1 contract (1..17) plus the
+/// additive risk-v2 honeypot/decoy kinds (18..20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
@@ -34,11 +41,17 @@ pub enum RiskEventKind {
     SourceRateLimitHit = 15,
     GlobalCapacityHit = 16,
     RiskDenied = 17,
+    /// Risk-v2: a server-issued honeypot trap was filled by the client.
+    HoneypotTriggered = 18,
+    /// Risk-v2: a decoy (honeypot) endpoint was touched.
+    DecoyEndpointTouched = 19,
+    /// Risk-v2: a server-issued decoy form field was submitted.
+    DecoyFieldSubmitted = 20,
 }
 
 impl RiskEventKind {
-    /// All seventeen kinds, in contract value order.
-    pub const ALL: [RiskEventKind; 17] = [
+    /// All twenty kinds, in contract value order (17 risk-v1 + 3 risk-v2).
+    pub const ALL: [RiskEventKind; 20] = [
         RiskEventKind::PreIssue,
         RiskEventKind::ChallengeIssued,
         RiskEventKind::SolveSuccess,
@@ -56,14 +69,17 @@ impl RiskEventKind {
         RiskEventKind::SourceRateLimitHit,
         RiskEventKind::GlobalCapacityHit,
         RiskEventKind::RiskDenied,
+        RiskEventKind::HoneypotTriggered,
+        RiskEventKind::DecoyEndpointTouched,
+        RiskEventKind::DecoyFieldSubmitted,
     ];
 
-    /// The contract integer value (1..17), as passed to the Lua script.
+    /// The contract integer value (1..20), as passed to the Lua script.
     pub fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Inverse of [`RiskEventKind::as_u8`]; `None` for values outside 1..17.
+    /// Inverse of [`RiskEventKind::as_u8`]; `None` for values outside 1..20.
     pub fn from_u8(value: u8) -> Option<RiskEventKind> {
         match value {
             1 => Some(RiskEventKind::PreIssue),
@@ -83,8 +99,24 @@ impl RiskEventKind {
             15 => Some(RiskEventKind::SourceRateLimitHit),
             16 => Some(RiskEventKind::GlobalCapacityHit),
             17 => Some(RiskEventKind::RiskDenied),
+            18 => Some(RiskEventKind::HoneypotTriggered),
+            19 => Some(RiskEventKind::DecoyEndpointTouched),
+            20 => Some(RiskEventKind::DecoyFieldSubmitted),
             _ => None,
         }
+    }
+
+    /// True for the three risk-v2 honeypot/decoy evidence kinds.
+    ///
+    /// The honeypot signal in the risk-v2 context is derived from ANY of
+    /// these kinds (probabilistic evidence — never a security gate).
+    pub fn is_honeypot(self) -> bool {
+        matches!(
+            self,
+            RiskEventKind::HoneypotTriggered
+                | RiskEventKind::DecoyEndpointTouched
+                | RiskEventKind::DecoyFieldSubmitted
+        )
     }
 }
 
@@ -227,6 +259,10 @@ mod tests {
             (15, "source_rate_limit_hit"),
             (16, "global_capacity_hit"),
             (17, "risk_denied"),
+            // Risk-v2 honeypot/decoy kinds (additive surface).
+            (18, "honeypot_triggered"),
+            (19, "decoy_endpoint_touched"),
+            (20, "decoy_field_submitted"),
         ];
         for (i, (value, name)) in expected.iter().enumerate() {
             let kind = RiskEventKind::ALL[i];
@@ -235,8 +271,30 @@ mod tests {
             assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(name));
         }
         assert_eq!(RiskEventKind::from_u8(0), None);
-        assert_eq!(RiskEventKind::from_u8(18), None);
+        assert_eq!(RiskEventKind::from_u8(21), None);
         assert_eq!(RiskEventKind::from_u8(255), None);
+    }
+
+    #[test]
+    fn honeypot_kinds_are_detected() {
+        for kind in [
+            RiskEventKind::HoneypotTriggered,
+            RiskEventKind::DecoyEndpointTouched,
+            RiskEventKind::DecoyFieldSubmitted,
+        ] {
+            assert!(kind.is_honeypot(), "{kind:?} must be a honeypot kind");
+        }
+        for kind in [
+            RiskEventKind::PreIssue,
+            RiskEventKind::ReplayAttempt,
+            RiskEventKind::RiskDenied,
+        ] {
+            assert!(!kind.is_honeypot(), "{kind:?} must not be a honeypot kind");
+        }
+        // The v1 contract values are untouched: 17 kinds keep their exact
+        // values and the v2 kinds extend the range without renumbering.
+        assert_eq!(RiskEventKind::RiskDenied.as_u8(), 17);
+        assert_eq!(RiskEventKind::HoneypotTriggered.as_u8(), 18);
     }
 
     #[test]

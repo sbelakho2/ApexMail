@@ -634,4 +634,36 @@ final class RedisRiskStateStoreTest extends TestCase
             'even combined the attacker\'s score is bounded'
         );
     }
+
+    /**
+     * The risk-v2 session client-context record: SET NX first-write-wins
+     * with the SESSION TTL — the first tag a session presents is recorded
+     * and returned forever, a later different tag still yields the FIRST
+     * one (the engine derives the inconsistency signal from that).
+     */
+    public function testSessionFirstContextTagRecordsTheFirstTagWithTheSessionTtl(): void
+    {
+        $store = $this->store();
+        $sessionId = str_repeat('5a', 16);
+
+        // First tag-bearing request: the tag is recorded and returned.
+        self::assertSame('aa', $store->sessionFirstContextTag($sessionId, 'aa'));
+
+        // Same tag again: the recorded first tag is returned unchanged.
+        self::assertSame('aa', $store->sessionFirstContextTag($sessionId, 'aa'));
+
+        // A DIFFERENT tag: the FIRST tag wins (the inconsistency signal
+        // derives from this comparison).
+        self::assertSame('aa', $store->sessionFirstContextTag($sessionId, 'bb'), 'the first-seen tag must win');
+
+        // The record carries the session TTL (1800 s), like the risk-v1
+        // session state hash.
+        $key = "{kiwi:{$store->namespace()}}:risk:ctx:{$sessionId}";
+        $ttl = (int) $this->client->ttl($key);
+        self::assertGreaterThan(0, $ttl, 'the record must expire with the session TTL');
+        self::assertLessThanOrEqual(1800, $ttl);
+
+        // A DIFFERENT session has its own record.
+        self::assertSame('zz', $store->sessionFirstContextTag(str_repeat('2b', 16), 'zz'));
+    }
 }

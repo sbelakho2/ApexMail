@@ -529,6 +529,38 @@ impl RiskStateStore for RedisRiskStateStore {
     fn last_cooldown_until_ms(&self) -> u64 {
         self.last_cooldown_until_ms.load(Ordering::Relaxed)
     }
+
+    /// The risk-v2 session client-context record
+    /// (`{kiwi:<ns>}:risk:ctx:<session-pseudonym-hex>`): SET NX with the
+    /// session TTL (first write wins = the FIRST tag the session ever
+    /// presented), then return the recorded tag. The record is keyed by the
+    /// session pseudonym only — the raw cookie value never appears in
+    /// Redis — and shares the hash tag with the risk-v1 state keys, so it
+    /// is Cluster safe.
+    fn session_first_context_tag(
+        &self,
+        session_id: &[u8; 16],
+        tag: &str,
+    ) -> Result<Option<String>, RiskStoreError> {
+        let key = format!(
+            "{{kiwi:{}}}:risk:ctx:{}",
+            self.namespace,
+            hex::encode(session_id)
+        );
+        let mut conn_guard = self.pool.acquire(&self.client)?;
+        let conn = conn_guard
+            .as_mut()
+            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
+        use ::redis::Commands;
+        let created: bool = conn.set_nx(key.clone(), tag).map_err(map_redis_error)?;
+        if created {
+            let ttl: i64 = self.session_ttl_secs.try_into().unwrap_or(i64::MAX);
+            conn.expire::<_, ()>(key, ttl).map_err(map_redis_error)?;
+            return Ok(Some(tag.to_string()));
+        }
+        let stored: Option<String> = conn.get(key).map_err(map_redis_error)?;
+        Ok(stored)
+    }
 }
 
 #[cfg(test)]
@@ -739,6 +771,56 @@ mod tests {
             .unwrap();
         assert_eq!(observed.vector.network_risk, 600);
         assert_eq!(observed.vector.principal_credit, 0);
+    }
+
+    /// The risk-v2 session client-context record: SET NX first-write-wins
+    /// with the SESSION TTL — the first tag a session presents is recorded
+    /// and returned forever, a later different tag still yields the FIRST
+    /// one (the engine derives the inconsistency signal from that).
+    #[test]
+    fn session_first_context_tag_records_the_first_tag_with_the_session_ttl() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping Redis test: RISK_REDIS_URL not set");
+            return;
+        };
+        let store = store(60_000, "firsttag");
+        let session_id = [0x5au8; 16];
+
+        // First tag-bearing request: the tag is recorded and returned.
+        let first = store.session_first_context_tag(&session_id, "aa").unwrap();
+        assert_eq!(first.as_deref(), Some("aa"));
+
+        // Same tag again: the recorded first tag is returned unchanged.
+        let again = store.session_first_context_tag(&session_id, "aa").unwrap();
+        assert_eq!(again.as_deref(), Some("aa"));
+
+        // A DIFFERENT tag: the FIRST tag wins (the inconsistency signal
+        // derives from this comparison).
+        let changed = store.session_first_context_tag(&session_id, "bb").unwrap();
+        assert_eq!(
+            changed.as_deref(),
+            Some("aa"),
+            "the first-seen tag must win"
+        );
+
+        // The record carries the session TTL (1800 s), like the risk-v1
+        // session state hash.
+        let key = format!(
+            "{{kiwi:{}}}:risk:ctx:{}",
+            store.namespace(),
+            hex::encode(session_id)
+        );
+        let mut conn = client().get_connection().expect("connection");
+        let ttl: i64 = ::redis::Commands::ttl(&mut conn, key.as_str()).unwrap();
+        assert!(
+            (1..=1800).contains(&ttl),
+            "the record must expire with the session TTL (got {ttl})"
+        );
+
+        // A DIFFERENT session has its own record.
+        let other = [0x2bu8; 16];
+        let other_first = store.session_first_context_tag(&other, "zz").unwrap();
+        assert_eq!(other_first.as_deref(), Some("zz"));
     }
 
     #[test]

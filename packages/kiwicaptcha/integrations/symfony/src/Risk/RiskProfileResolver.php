@@ -32,10 +32,12 @@ use KiwiCaptcha\Risk\RiskAction;
  *    core's issueWithProfile accepts a profile directly regardless of the
  *    app default, so a SHA-configured deployment can still issue Argon
  *    work via the risk ladder.
- *  - step_up            -> the strongest profile of the configured family
- *    (sha20 / argon64). The bundle cannot perform application-level step-up
- *    (MFA etc.); the hardest challenge is its closest approximation, and
- *    applications may additionally react to the decision themselves.
+ *  - step_up            -> NEVER mapped to a challenge profile. StepUp is
+ *    a CONTROLLER-LEVEL application-defined step-up action (the controller
+ *    answers it with its own application step-up flow, e.g. MFA); the
+ *    resolver only issues challenges for the escalation actions above and
+ *    throws for StepUp so a caller can never silently downgrade it to a
+ *    challenge.
  *
  *  - allow              -> null: issue with the app's own configuration.
  *

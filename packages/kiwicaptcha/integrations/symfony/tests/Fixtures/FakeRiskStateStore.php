@@ -79,4 +79,18 @@ final class FakeRiskStateStore implements RiskStateStoreInterface
 
         return true;
     }
+
+    /**
+     * In-memory SET NX semantics: the FIRST risk-v2 client-context tag a
+     * session pseudonym presents is recorded and returned forever (the
+     * engine derives the session-consistency signal from the comparison).
+     *
+     * @var array<string, string>
+     */
+    public array $contextTags = [];
+
+    public function sessionFirstContextTag(string $sessionId, string $tag): ?string
+    {
+        return $this->contextTags[$sessionId] ??= $tag;
+    }
 }

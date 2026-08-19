@@ -67,4 +67,21 @@ interface RiskStateStoreInterface
      * @throws RiskStoreException when the underlying state backend fails
      */
     public function correctOutcome(string $decisionId, bool $legitimate): bool;
+
+    /**
+     * The risk-v2 session client-context record: records $tag as the
+     * session's FIRST-seen client-context tag (SET NX, first write wins)
+     * and returns the recorded tag — the first tag the session ever
+     * presented, or null when the store has no record surface.
+     *
+     * The record is keyed by the session's HMAC pseudonym (never the raw
+     * cookie value) and expires with the SAME TTL as the risk-v1 session
+     * state. The engine derives the session_consistency signal by
+     * comparing the current request's tag against the returned first tag;
+     * null / backend failure degrade to "consistent" (neutral), never
+     * breaking an assessment.
+     *
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function sessionFirstContextTag(string $sessionId, string $tag): ?string;
 }

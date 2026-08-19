@@ -48,4 +48,20 @@ final class RiskScorer
 
         return max(0, min(1000, $risk));
     }
+
+    /**
+     * Risk-v2 scoring: the risk-v1 score PLUS the weighted risk-v2 evidence
+     * factors (honeypot, session client-context inconsistency), clamped to
+     * 0..1000. With zero risk-v2 signals this is EXACTLY score() — the v1
+     * contract semantics (the 13 signals and their weights) are unchanged;
+     * the v2 factors are purely additive.
+     */
+    public function scoreV2(int $base, SignalVector $s, RiskWeights $w, RiskV2Signals $v2, RiskV2Weights $w2): int
+    {
+        $risk = $this->score($base, $s, $w);
+        $risk += self::weighted($v2->honeypot, $w2->honeypot);
+        $risk += self::weighted($v2->sessionInconsistency, $w2->sessionInconsistency);
+
+        return max(0, min(1000, $risk));
+    }
 }

@@ -164,8 +164,10 @@ LUA;
     {
         $owner = bin2hex(random_bytes(16));
         // The takeover Lua already receives the lease via ARGV[4]; pass
-        // the per-call override so a late token's derived short lease is
-        // maintained across the takeover (null = the configured lease).
+        // the per-call override so the FIXED configured lease is
+        // maintained across the takeover (null = the configured lease —
+        // the controller always passes null; the lease is never derived
+        // from a token's remaining validity).
         $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $remoteipFingerprint, $leaseSeconds ?? $this->leaseSeconds, max(1, $ttlSeconds)]);
 
         $takeover = match ((string) $result) {

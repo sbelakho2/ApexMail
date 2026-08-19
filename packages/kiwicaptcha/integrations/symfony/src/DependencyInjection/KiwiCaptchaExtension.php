@@ -10,9 +10,12 @@ use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyRedemptionGuard;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyMetadataStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyRedemptionGuard;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface;
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
@@ -52,6 +55,7 @@ use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\AtomicStorageInterface;
+use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
@@ -770,25 +774,32 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         // Server-side provider-compatibility stores — the
-        // metadata sidecar (action/cData bound at challenge issuance) and
-        // the atomic idempotency store (provider-style idempotency_key).
+        // metadata sidecar (action/cData bound at challenge issuance), the
+        // atomic idempotency store (provider-style idempotency_key) and
+        // the NONCE-LEVEL redemption guard (which logical operation
+        // originally redeemed a token — the recovery gate for takeovers).
         // Redis-backed whenever the challenge storage is RedisStorage (the
         // same client), in-memory otherwise (test/dev semantics — the
         // stores are only wired into the controllers; production
         // deployments with Siteverify use the Redis variants).
         $metadataStoreRef = null;
         $idempotencyStoreRef = null;
+        $redemptionGuardRef = null;
         if ($redisRef !== null) {
             $redisNamespace = $riskConfig['redis']['namespace'] ?? 'kiwicaptcha';
             $container->setDefinition(RedisSiteVerifyMetadataStore::class, new Definition(RedisSiteVerifyMetadataStore::class, [$redisRef, $redisNamespace]));
             $container->setDefinition(RedisSiteVerifyIdempotencyStore::class, new Definition(RedisSiteVerifyIdempotencyStore::class, [$redisRef, $redisNamespace]));
+            $container->setDefinition(RedisSiteVerifyRedemptionGuard::class, new Definition(RedisSiteVerifyRedemptionGuard::class, [$redisRef, $redisNamespace]));
             $metadataStoreRef = new Reference(RedisSiteVerifyMetadataStore::class);
             $idempotencyStoreRef = new Reference(RedisSiteVerifyIdempotencyStore::class);
+            $redemptionGuardRef = new Reference(RedisSiteVerifyRedemptionGuard::class);
         } else {
             $container->setDefinition(ArraySiteVerifyMetadataStore::class, new Definition(ArraySiteVerifyMetadataStore::class, []));
             $container->setDefinition(ArraySiteVerifyIdempotencyStore::class, new Definition(ArraySiteVerifyIdempotencyStore::class, []));
+            $container->setDefinition(ArraySiteVerifyRedemptionGuard::class, new Definition(ArraySiteVerifyRedemptionGuard::class, []));
             $metadataStoreRef = new Reference(ArraySiteVerifyMetadataStore::class);
             $idempotencyStoreRef = new Reference(ArraySiteVerifyIdempotencyStore::class);
+            $redemptionGuardRef = new Reference(ArraySiteVerifyRedemptionGuard::class);
         }
 
         // The core binds issuance by the GLOBAL binding_mode only: the
@@ -877,7 +888,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $riskConfig['siteverify_secrets'] !== [] ? $redisRef : null,
             null, // idempotency wait bound (default)
             $config['risk']['policy_version'] ?? 1, // security-policy epoch in the idempotency identity
-        ]))->addTag('controller.service_arguments')->setPublic(true));
+        ]))
+            // The NONCE-LEVEL redemption guard: which logical operation
+            // originally redeemed a (backend, nonce) pair (first write
+            // wins) — the recovery gate for takeovers, so a consumed
+            // token can never become successful again through a
+            // different idempotency UUID.
+            ->setArgument('$redemptionGuard', $riskConfig['siteverify_secrets'] !== [] ? $redemptionGuardRef : null)
+            ->addTag('controller.service_arguments')->setPublic(true));
 
         // ── Migration compatibility loader ──
         // GET {prefix}/api.js[?compat=...]: the canonical glue + driver as
@@ -1048,6 +1066,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      *    REQUIRED REGARDLESS of the override — the provider one-success
      *    contract cannot exist on a non-atomic backend, so the container
      *    refuses the combination.
+     * When siteverify_secrets is configured, the storage must ALSO be
+     * Siteverify recovery-capable (SiteVerifyRecoveryCapableStorageInterface
+     * — the bundled core storages qualify through AtomicStorageInterface +
+     * ConsumedStateReadableInterface): Siteverify idempotency crash
+     * recovery reads the retained consumed state, and a custom atomic
+     * storage WITHOUT the consumed-state capability is REFUSED (the
+     * ConsumedOutcomeRecovery silent-null gap) — ordinary verification
+     * remains compatible with any StorageInterface.
      * Fails closed at container compile time (a LogicException names the
      * exact misconfiguration).
      *
@@ -1076,14 +1102,28 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             }
         }
         $isAtomic = $class !== null && \is_string($class) && \is_a($class, AtomicStorageInterface::class, true);
-        if ($isAtomic) {
+        $isRecoveryCapable = $class !== null && \is_string($class) && (
+            \is_a($class, SiteVerifyRecoveryCapableStorageInterface::class, true)
+            || (\is_a($class, AtomicStorageInterface::class, true) && \is_a($class, ConsumedStateReadableInterface::class, true))
+        );
+        if ($siteverifyEnabled) {
+            if (!$isAtomic) {
+                throw new \LogicException(sprintf(
+                    'KiwiCaptcha: siteverify_secrets requires an ATOMIC storage backend (KiwiCaptcha\AtomicStorageInterface) — the provider one-success contract is impossible on a non-atomic backend. Configure "storage: kiwicaptcha.storage.redis" (RedisStorage) or any service implementing AtomicStorageInterface (resolved class %s).',
+                    $class === null ? '(unresolvable)' : $class,
+                ));
+            }
+            if (!$isRecoveryCapable) {
+                throw new \LogicException(sprintf(
+                    'KiwiCaptcha: siteverify_secrets requires a Siteverify recovery-capable storage backend — the class must implement KiwiCaptcha\ConsumedStateReadableInterface in addition to KiwiCaptcha\AtomicStorageInterface (or BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface; the bundled RedisStorage/ArrayStorage qualify). The resolved class %s does not implement KiwiCaptcha\ConsumedStateReadableInterface: Siteverify idempotency crash recovery reads the retained consumed state and is UNAVAILABLE without it (a crashed owner\'s committed outcome could never be reconstructed).',
+                    $class === null ? '(unresolvable)' : $class,
+                ));
+            }
+
             return;
         }
-        if ($siteverifyEnabled) {
-            throw new \LogicException(sprintf(
-                'KiwiCaptcha: siteverify_secrets requires an ATOMIC storage backend (KiwiCaptcha\AtomicStorageInterface) — the provider one-success contract is impossible on a non-atomic backend. Configure "storage: kiwicaptcha.storage.redis" (RedisStorage) or any service implementing AtomicStorageInterface (resolved class %s).',
-                $class === null ? '(unresolvable)' : $class,
-            ));
+        if ($isAtomic) {
+            return;
         }
         if ($allowBestEffort) {
             return;

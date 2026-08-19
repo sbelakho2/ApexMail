@@ -10,6 +10,12 @@ namespace KiwiCaptcha\Risk;
  * Values 1..17 are authoritative and MUST NOT be renumbered: they are the
  * event identifiers passed into the canonical state script (risk.lua) and
  * must be byte-identical across the PHP and Rust implementations.
+ *
+ * Values 18..20 are the ADDITIVE risk-v2 surface: honeypot/decoy evidence
+ * kinds. They ride the same observation path (idempotency domain separation,
+ * dedupe receipt) but the state script treats them as no-ops (like
+ * RiskDenied) — the honeypot signal itself is scored from the risk-v2
+ * context, never from accumulated state.
  */
 enum RiskEventKind: int
 {
@@ -30,4 +36,24 @@ enum RiskEventKind: int
     case SourceRateLimitHit = 15;
     case GlobalCapacityHit = 16;
     case RiskDenied = 17;
+    /** Risk-v2: a server-issued honeypot trap was filled by the client. */
+    case HoneypotTriggered = 18;
+    /** Risk-v2: a decoy (honeypot) endpoint was touched. */
+    case DecoyEndpointTouched = 19;
+    /** Risk-v2: a server-issued decoy form field was submitted. */
+    case DecoyFieldSubmitted = 20;
+
+    /**
+     * True for the three risk-v2 honeypot/decoy evidence kinds.
+     *
+     * The honeypot signal in the risk-v2 context is derived from ANY of
+     * these kinds (probabilistic evidence — never a security gate).
+     */
+    public function isHoneypot(): bool
+    {
+        return match ($this) {
+            self::HoneypotTriggered, self::DecoyEndpointTouched, self::DecoyFieldSubmitted => true,
+            default => false,
+        };
+    }
 }

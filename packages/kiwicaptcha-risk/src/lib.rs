@@ -6,6 +6,19 @@
 //! pseudonyms) → circuit breaker → state store (canonical Lua via EVALSHA)
 //! → scorer (with calibration bias) → policy → top contributor reasons.
 //! Backend failure degrades instead of failing the request.
+//!
+//! # Risk-v2 design note
+//!
+//! Detection produces probabilistic evidence; the risk engine scores that
+//! evidence; the score maps to a decision action — Allow, Sha16, Sha18,
+//! Sha20, Argon16, Argon32, Argon64, StepUp or Deny. The cryptographic
+//! verifier (the proof/result-token boundary) never decides proof validity
+//! from probabilistic evidence: evidence only ever moves the risk
+//! aggregate, and the verifier only ever validates cryptographic proof.
+//! The risk-v2 surfaces (honeypot/decoy evidence, session client-context
+//! consistency) are additive: they feed the same multi-factor scorer as
+//! bounded fixed-point factors, never a gate, and never weaken or bypass
+//! the risk-v1 state contract.
 
 pub mod action;
 pub mod breaker;
@@ -36,7 +49,7 @@ use thiserror::Error;
 
 use crate::action::RiskAction;
 use crate::calibration::CalibrationStore;
-use crate::context::RiskContext;
+use crate::context::{RiskContext, RiskV2Context};
 use crate::event::{normalize_idempotency_key, RiskEventKind, RiskObservation};
 use crate::identity::RiskIdentityFactory;
 use crate::keys::RiskKeys;
@@ -487,6 +500,34 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         idempotency_key: Option<String>,
     ) -> Result<RiskDecision, RiskError> {
+        self.assess_pre_issue_impl(ctx, None, idempotency_key)
+    }
+
+    /// Risk-v2 variant of [`RiskEngine::assess_pre_issue`]: the identical
+    /// pipeline plus the additive risk-v2 evidence factors
+    /// (honeypot/decoy evidence, session client-context consistency) from
+    /// `v2`. The risk-v1 contract semantics are unchanged — with an empty
+    /// `v2` context the decision is byte-identical to the v1 path.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
+    pub fn assess_pre_issue_v2(
+        &self,
+        ctx: RiskContext<'_>,
+        v2: &RiskV2Context,
+        idempotency_key: Option<String>,
+    ) -> Result<RiskDecision, RiskError> {
+        self.assess_pre_issue_impl(ctx, Some(v2), idempotency_key)
+    }
+
+    fn assess_pre_issue_impl(
+        &self,
+        ctx: RiskContext<'_>,
+        v2: Option<&RiskV2Context>,
+        idempotency_key: Option<String>,
+    ) -> Result<RiskDecision, RiskError> {
         if !self.limiter.allow() {
             self.metrics.incr("denied:limiter");
             let decision = RiskDecision {
@@ -503,7 +544,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
             self.record_decision_metrics(ctx.scope, &decision);
             return Ok(self.finalize_decision(ctx.scope, decision));
         }
-        self.assess_inner(ctx, idempotency_key)
+        self.assess_inner(ctx, v2, idempotency_key)
     }
 
     /// Deprecated alias of [`RiskEngine::assess_pre_issue`].
@@ -533,7 +574,24 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
         ctx: RiskContext<'_>,
         idempotency_key: Option<String>,
     ) -> Result<RiskDecision, RiskError> {
-        self.assess_inner(ctx, idempotency_key)
+        self.assess_inner(ctx, None, idempotency_key)
+    }
+
+    /// Risk-v2 variant of [`RiskEngine::reassess`]: the identical pipeline
+    /// plus the additive risk-v2 evidence factors from `v2` (honeypot
+    /// evidence, session client-context consistency).
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
+    /// 4096-byte contract limit.
+    pub fn reassess_v2(
+        &self,
+        ctx: RiskContext<'_>,
+        v2: &RiskV2Context,
+        idempotency_key: Option<String>,
+    ) -> Result<RiskDecision, RiskError> {
+        self.assess_inner(ctx, Some(v2), idempotency_key)
     }
 
     /// The shared assessment pipeline (no limiter); only
@@ -541,6 +599,7 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     fn assess_inner(
         &self,
         ctx: RiskContext<'_>,
+        v2: Option<&RiskV2Context>,
         idempotency_key: Option<String>,
     ) -> Result<RiskDecision, RiskError> {
         let now_ms = now_ms();
@@ -596,7 +655,23 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                     let bias = calibration.bias_for_scope(ctx.scope, now_ms as i64);
                     base = (base as i32 + bias).clamp(0, 1000) as u16;
                 }
-                let score = compute_score(base, &vector, &self.policy.weights);
+                // Risk-v2 evidence factors: honeypot/decoy evidence and the
+                // session client-context consistency, derived from the v2
+                // context (a session-first-tag record read that degrades to
+                // "consistent" on any backend miss — probabilistic evidence
+                // never breaks an assessment).
+                let v2_signals = v2
+                    .map(|v2ctx| self.derive_v2_signals(v2ctx, observation.session_id, ctx.event));
+                let score = match &v2_signals {
+                    Some(signals) => crate::score::score_v2(
+                        base,
+                        &vector,
+                        &self.policy.weights,
+                        signals,
+                        &crate::score::RiskV2Weights::default(),
+                    ),
+                    None => compute_score(base, &vector, &self.policy.weights),
+                };
                 let mut decision = self.policy.decide_with_hysteresis(
                     ctx.scope,
                     score,
@@ -611,6 +686,41 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
                 self.record_decision_metrics(ctx.scope, &decision);
                 Ok(self.finalize_decision(ctx.scope, decision))
             }
+        }
+    }
+
+    /// Derives the bounded risk-v2 signal vector from the v2 context:
+    ///
+    /// - `honeypot` = 1000 when the context reports a honeypot hit OR the
+    ///   current observation is one of the honeypot event kinds (ANY of the
+    ///   three derives the signal — probabilistic evidence, never a gate);
+    /// - `session_inconsistency` = 1000 when the session's first-seen
+    ///   client-context tag differs from the current tag; 0 when the tag is
+    ///   absent (first request), the session is absent, or the record read
+    ///   fails (neutral degradation).
+    fn derive_v2_signals(
+        &self,
+        v2: &RiskV2Context,
+        session_id: Option<[u8; 16]>,
+        event: RiskEventKind,
+    ) -> crate::signals::RiskV2Signals {
+        let honeypot = if v2.honeypot_hit || event.is_honeypot() {
+            1000
+        } else {
+            0
+        };
+        let session_inconsistency = match (session_id, v2.client_context_tag.as_deref()) {
+            (Some(session), Some(tag)) if !tag.is_empty() => {
+                match self.store.session_first_context_tag(&session, tag) {
+                    Ok(Some(first)) if first != tag => 1000,
+                    _ => 0,
+                }
+            }
+            _ => 0,
+        };
+        crate::signals::RiskV2Signals {
+            honeypot,
+            session_inconsistency,
         }
     }
 
@@ -1367,6 +1477,192 @@ mod tests {
         fn last_global_level(&self) -> u8 {
             0
         }
+    }
+
+    /// Store with the risk-v2 session first-tag record semantics (SET NX:
+    /// the first tag a session presents is recorded and returned forever).
+    #[derive(Default)]
+    struct V2FirstTagStore {
+        tags: Mutex<HashMap<[u8; 16], String>>,
+        outcomes: OutcomeLedger,
+    }
+
+    impl RiskStateStore for V2FirstTagStore {
+        fn observe(&self, _o: &RiskObservation) -> Result<Observed, RiskStoreError> {
+            Ok(Observed {
+                vector: SignalVector::zero(),
+                global_level: 0,
+                cooldown_until_ms: 0,
+                is_duplicate: false,
+            })
+        }
+
+        fn register_outcome(
+            &self,
+            decision_id: &str,
+            _scope: u32,
+            _decision_hour: i64,
+            _score: u32,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(self.outcomes.register(decision_id))
+        }
+
+        fn confirm_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<u8, RiskStoreError> {
+            Ok(self.outcomes.confirm(decision_id, legitimate))
+        }
+
+        fn correct_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(self.outcomes.correct(decision_id, legitimate))
+        }
+
+        fn session_first_context_tag(
+            &self,
+            session_id: &[u8; 16],
+            tag: &str,
+        ) -> Result<Option<String>, RiskStoreError> {
+            let mut tags = self.tags.lock().unwrap_or_else(|p| p.into_inner());
+            Ok(Some(
+                tags.entry(*session_id)
+                    .or_insert_with(|| tag.to_string())
+                    .clone(),
+            ))
+        }
+    }
+
+    fn v2_context(honeypot_hit: bool, tag: Option<&str>) -> RiskV2Context {
+        RiskV2Context {
+            honeypot_hit,
+            client_context_tag: tag.map(str::to_string),
+            client_context_consistent: false,
+        }
+    }
+
+    /// Risk-v2 honeypot evidence feeds the decision: a honeypot hit with an
+    /// otherwise-clean vector raises the score (100 -> 300, Sha18) without
+    /// hard-denying.
+    #[test]
+    fn v2_honeypot_evidence_raises_the_score_but_never_denies_alone() {
+        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let clean = engine.assess_pre_issue(context(), None).unwrap();
+        assert_eq!(clean.score, 100);
+        assert_eq!(clean.action, RiskAction::Allow);
+
+        // A fresh engine (no scope-action hysteresis memory): the plain
+        // band mapping applies — 300 maps to Sha18 (a stronger profile is
+        // selected, never a hard denial).
+        let fresh = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let hit = fresh
+            .assess_pre_issue_v2(context(), &v2_context(true, None), None)
+            .unwrap();
+        assert_eq!(hit.score, 300); // 100 + weighted(1000, honeypot 200)
+        assert_eq!(hit.action, RiskAction::Sha18);
+        assert_ne!(
+            hit.action,
+            RiskAction::Deny,
+            "a lone honeypot hit must never deny"
+        );
+
+        // Through the SAME engine the decision escalates (Allow -> Sha16)
+        // instead of staying flat: the honeypot evidence moved the profile.
+        let escalated = engine
+            .assess_pre_issue_v2(context(), &v2_context(true, None), None)
+            .unwrap();
+        assert_eq!(escalated.score, 300);
+        assert_eq!(escalated.action, RiskAction::Sha16);
+        assert!(
+            escalated.action.rank() > clean.action.rank(),
+            "honeypot evidence must select a stronger profile"
+        );
+    }
+
+    /// ANY of the three honeypot event kinds derives the honeypot signal,
+    /// even without an explicit context flag.
+    #[test]
+    fn v2_honeypot_event_kinds_derive_the_signal() {
+        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        for kind in [
+            RiskEventKind::HoneypotTriggered,
+            RiskEventKind::DecoyEndpointTouched,
+            RiskEventKind::DecoyFieldSubmitted,
+        ] {
+            let ctx = RiskContext {
+                event: kind,
+                ..context()
+            };
+            let decision = engine
+                .assess_pre_issue_v2(ctx, &v2_context(false, None), None)
+                .unwrap();
+            assert_eq!(
+                decision.score, 300,
+                "{kind:?} must derive the honeypot signal"
+            );
+        }
+    }
+
+    /// Session client-context consistency: a CONSISTENT tag (the session's
+    /// first-seen tag) is neutral; a CHANGED tag raises the aggregate; an
+    /// ABSENT tag (first request) is neutral.
+    #[test]
+    fn v2_session_client_context_consistency() {
+        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let session: &[u8] = b"session-bytes";
+        let with_session = |_tag: &str| RiskContext {
+            session_id: Some(session),
+            ..context()
+        };
+
+        // First request: the tag is recorded as the first-seen tag and the
+        // consistency signal is neutral (score 100).
+        let first = engine
+            .assess_pre_issue_v2(with_session("ta"), &v2_context(false, Some("ta")), None)
+            .unwrap();
+        assert_eq!(first.score, 100, "first tag-bearing request is neutral");
+
+        // Same tag again: still consistent, still neutral.
+        let again = engine
+            .assess_pre_issue_v2(with_session("ta"), &v2_context(false, Some("ta")), None)
+            .unwrap();
+        assert_eq!(again.score, 100, "an unchanged tag stays neutral");
+
+        // Changed tag: inconsistency raises the aggregate (100 + 120 = 220).
+        let changed = engine
+            .assess_pre_issue_v2(with_session("tb"), &v2_context(false, Some("tb")), None)
+            .unwrap();
+        assert_eq!(changed.score, 220, "a changed tag must raise the aggregate");
+    }
+
+    /// An absent session or absent tag carries NO inconsistency signal
+    /// (neutral), and the risk-v2 path is byte-identical to v1 with an
+    /// empty context.
+    #[test]
+    fn v2_absent_tag_and_empty_context_are_neutral() {
+        let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
+        let plain = engine.assess_pre_issue(context(), None).unwrap();
+        let empty = engine
+            .assess_pre_issue_v2(context(), &v2_context(false, None), None)
+            .unwrap();
+        assert_eq!(empty.score, plain.score);
+        assert_eq!(empty.action, plain.action);
+
+        let no_tag = engine
+            .assess_pre_issue_v2(
+                RiskContext {
+                    session_id: Some(b"session-bytes"),
+                    ..context()
+                },
+                &v2_context(false, None),
+                None,
+            )
+            .unwrap();
+        assert_eq!(no_tag.score, 100, "a session without a tag stays neutral");
     }
 
     #[test]

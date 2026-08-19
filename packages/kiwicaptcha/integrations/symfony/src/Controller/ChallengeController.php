@@ -18,6 +18,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\StorageInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -96,7 +97,11 @@ use Symfony\Component\HttpFoundation\Response;
  *     challenge is minted; the denial already scored the evidence, so no
  *     further rate-limit event is recorded; an escalated action raises
  *     the difficulty of the issued challenge, an unknown scope in
- *     'reject' mode returns 429 RISK_DENIED without issuing).
+ *     'reject' mode returns 429 RISK_DENIED without issuing). The risk-v2
+ *     evidence markers (decoy_field / honeypot / client_context) ride the
+ *     assessment as probabilistic evidence — the markers are NEVER a
+ *     security gate: a marked request is assessed like any other, and the
+ *     evidence only moves the risk aggregate.
  * 12. PER-SCOPE ISSUANCE CAP: when risk.max_challenges_per_scope_per_minute
  *     is set, the atomic fixed-window counter refuses 429 SCOPE_LIMITED
  *     beyond the cap. The quota keys on the SERVER-OWNED scope identity
@@ -156,11 +161,33 @@ final class ChallengeController
     private const IDENTIFIER_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
 
     /** The ONLY JSON fields the challenge POST accepts. */
-    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey'];
+    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey', 'decoy_field', 'honeypot', 'client_context'];
 
     /** Turnstile-compatible shapes, per Cloudflare's docs. */
     private const ACTION_PATTERN = '/^[a-z0-9_-]{1,32}$/i';
     private const CDATA_PATTERN = '/^[a-z0-9_-]{1,255}$/i';
+
+    /**
+     * The risk-v2 decoy markers: a server-issued decoy (honeypot) field
+     * name echoed back by the widget, and the coarse capability descriptor
+     * for the client-context tag. Both are bounded scalar strings — the
+     * decoy name is the loose identifier shape, the capability descriptor
+     * is the compact [a-z0-9+_:-] alphabet, and the honeypot VALUE is any
+     * non-empty string bounded at 256 bytes (a bot's filler, evidence only).
+     */
+    private const DECOY_FIELD_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/D';
+    private const CLIENT_CONTEXT_PATTERN = '/^[a-z0-9+_,=:-]{1,64}$/D';
+    private const MAX_HONEYPOT_VALUE_BYTES = 256;
+
+    /**
+     * The server-issued decoy field name in the challenge response: a
+     * bounded, per-issuance name derived from the challenge nonce, which
+     * the widget renders as a hidden honeypot field. A bot that fills it
+     * echoes the name back in a later challenge request (decoy_field /
+     * honeypot entries), which the risk-v2 surface records as honeypot
+     * evidence — never a security gate.
+     */
+    private const DECOY_FIELD_PREFIX = 'decoy_';
 
     /**
      * SECURITY-SINGULAR headers: each of these carries client identity or
@@ -492,12 +519,44 @@ final class ChallengeController
             || (array_key_exists('action', $payload) && !\is_string($payload['action']))
             || (array_key_exists('cdata', $payload) && !\is_string($payload['cdata']))
             || (array_key_exists('sitekey', $payload) && !\is_string($payload['sitekey']))
+            || (array_key_exists('decoy_field', $payload) && $payload['decoy_field'] !== null && !\is_string($payload['decoy_field']))
+            || (array_key_exists('honeypot', $payload) && $payload['honeypot'] !== null && !\is_string($payload['honeypot']))
+            || (array_key_exists('client_context', $payload) && $payload['client_context'] !== null && !\is_string($payload['client_context']))
         ) {
             return $this->privateJson(
                 ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request fields must be strings.']],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
+        // RISK-V2 DECOY MARKERS: the request may carry the server-issued
+        // decoy field name (decoy_field) and/or the filled honeypot value
+        // (honeypot) echoed back by the widget, plus the coarse capability
+        // descriptor (client_context) for the client-context tag. All are
+        // BOUNDED scalars — a malformed marker is refused like any other
+        // malformed field, and the markers themselves are probabilistic
+        // risk evidence (fed to the risk gateway), NEVER a security gate.
+        $decoyField = isset($payload['decoy_field']) && $payload['decoy_field'] !== '' ? (string) $payload['decoy_field'] : null;
+        $honeypotValue = isset($payload['honeypot']) && $payload['honeypot'] !== '' ? (string) $payload['honeypot'] : null;
+        $clientContext = isset($payload['client_context']) && $payload['client_context'] !== '' ? (string) $payload['client_context'] : null;
+        if ($decoyField !== null && preg_match(self::DECOY_FIELD_PATTERN, $decoyField) !== 1) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The decoy_field must be 1-64 characters of [A-Za-z0-9_-].']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        if ($honeypotValue !== null && \strlen($honeypotValue) > self::MAX_HONEYPOT_VALUE_BYTES) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The honeypot value must not exceed '.self::MAX_HONEYPOT_VALUE_BYTES.' bytes.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        if ($clientContext !== null && preg_match(self::CLIENT_CONTEXT_PATTERN, $clientContext) !== 1) {
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The client_context must be 1-64 characters of [a-z0-9+_:-].']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+        $honeypotHit = $decoyField !== null || $honeypotValue !== null;
         $scope = isset($payload['scope']) ? (string) $payload['scope'] : 'default';
 
         // Provider-compatible challenge metadata is validated
@@ -695,8 +754,13 @@ final class ChallengeController
                 $mintedCookie = $riskSession !== null;
             }
 
+            // Risk-v2 evidence: honeypot/decoy markers and the coarse
+            // client-context descriptor ride the assessment as
+            // probabilistic evidence — NEVER a security gate.
+            $v2 = $this->risk->clientContextV2($honeypotHit, $riskSession, $clientContext);
+
             try {
-                $decision = $this->risk->preIssue($scope, $clientIp, $riskSession);
+                $decision = $this->risk->preIssue($scope, $clientIp, $riskSession, null, $v2);
                 $riskAssessed = true;
             } catch (UnknownScopeException) {
                 if ($this->risk->unknownScopeMode() === 'reject') {
@@ -726,6 +790,23 @@ final class ChallengeController
             }
 
             if ($decision !== null) {
+                if ($honeypotHit) {
+                    // Feed the honeypot evidence event into the risk
+                    // gateway (mirroring the challengeIssued feedback path):
+                    // the decoy marker is booked as probabilistic risk
+                    // evidence. This NEVER gates issuance — the evidence
+                    // already rode the assessment above; this only records
+                    // the event kind for the risk state.
+                    $this->risk->honeypotEvidence(
+                        $decoyField !== null ? RiskEventKind::DecoyFieldSubmitted : RiskEventKind::HoneypotTriggered,
+                        $scope,
+                        $clientIp,
+                        $riskSession,
+                        null,
+                        $decision->decisionId,
+                    );
+                }
+
                 if ($decision->action === RiskAction::StepUp) {
                     // Step-up is application-defined (verified email link,
                     // passkey, existing session, TOTP...): KiwiCaptcha only
@@ -966,7 +1047,21 @@ final class ChallengeController
             $this->risk->attachDecisionForNonce($challenge->nonce, $decision->decisionId);
         }
 
-        return $this->privateJson($challenge->toArray(), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+        // RISK-V2 DECOY FIELD: when the adaptive risk engine is enabled,
+        // the issuance response carries the server-issued decoy (honeypot)
+        // field name so the widget can render a hidden honeypot field — a
+        // bot that fills it echoes the marker back in a later challenge
+        // request, which the risk-v2 surface feeds as honeypot evidence.
+        // The name is a bounded per-issuance value; the response shape is
+        // otherwise unchanged (no behavioral change to issuance).
+        $challengeData = $challenge->toArray();
+        if ($this->risk !== null) {
+            // Deterministic per issuance (the nonce is base64, so the name
+            // is derived via sha256 to stay in the [0-9a-f] alphabet).
+            $challengeData['decoy_field'] = self::DECOY_FIELD_PREFIX.substr(hash('sha256', $challenge->nonce), 0, 8);
+        }
+
+        return $this->privateJson($challengeData, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
     }
 
     /**

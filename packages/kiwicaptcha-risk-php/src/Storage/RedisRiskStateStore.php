@@ -179,6 +179,31 @@ final class RedisRiskStateStore implements RiskStateStoreInterface
         return ((int) $result) === 1;
     }
 
+    /**
+     * The risk-v2 session client-context record
+     * ({kiwi:<ns>}:risk:ctx:<session-pseudonym>): SET NX with the session
+     * TTL (first write wins = the FIRST tag the session ever presented),
+     * then return the recorded tag. The record is keyed by the session
+     * pseudonym only — the raw cookie value never appears in Redis — and
+     * shares the hash tag with the risk-v1 state keys, so it is Cluster
+     * safe.
+     */
+    public function sessionFirstContextTag(string $sessionId, string $tag): ?string
+    {
+        $key = "{kiwi:{$this->namespace}}:risk:ctx:{$sessionId}";
+        try {
+            $set = $this->client->set($key, $tag, 'EX', $this->sessionTtlSecs, 'NX');
+            if ($set === 'OK') {
+                return $tag;
+            }
+            $stored = $this->client->get($key);
+
+            return \is_string($stored) && $stored !== '' ? $stored : null;
+        } catch (\Predis\Exception\Exception $e) {
+            throw new RiskStoreException('Risk context-tag record failed: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
     public function observe(RiskObservation $observation): SignalVector
     {
         $ns = $this->namespace;

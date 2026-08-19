@@ -156,7 +156,7 @@ fn rust_issues_record_for_php() {
     println!("RUST_ISSUED {}", algo_name);
 }
 
-/// Four-way real-Redis runtime-state interoperability (round 39): PHP and
+/// Four-way real-Redis runtime-state interoperability: PHP and
 /// Rust must operate on the SAME Redis records with the SAME runtime
 /// envelope (state marker + consumed_result boolean). Runs only when a
 /// Redis URL is provided and the PHP core's autoloader is reachable from

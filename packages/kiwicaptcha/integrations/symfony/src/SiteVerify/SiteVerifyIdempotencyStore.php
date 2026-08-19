@@ -22,23 +22,28 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * with the same key + same response hash may interpret the stored
  * consumed result as the original success and finalize the entry — this
  * does NOT make ordinary token replays successful (the key+hash pair must
- * match a pending claim for THIS pair).
+ * match a pending claim for THIS pair). Recovery is additionally gated by
+ * the NONCE-LEVEL redemption guard ({@see SiteVerifyRedemptionGuard}):
+ * the takeover's response hash must be the nonce's ORIGINAL redemption —
+ * a consumed token can never become successful again through a
+ * different idempotency UUID.
  *
  * Lease semantics: every claim and every successful takeover starts a
  * lease window (default 60 seconds, configurable per store constructor).
- * A PENDING_SAME waiter whose owner's lease has expired may atomically
- * TAKEOVER the entry and become the owner — a crashed owner therefore
- * blocks the key for at most one lease window instead of the full TTL.
- * The lease exceeds the maximum supported verification / request
- * execution window plus a safety margin — the same lease-must-exceed-
- * runtime requirement the Argon semaphore configuration documents — and
- * the owner confirms its ownership AFTER the verification by an atomic
- * renewal ({@see self::renew()}). Safety therefore depends on the
- * verification never outlasting the lease: a verification that outlasts
- * the lease may be displaced, in which case the displaced owner's local
- * result is never authoritative — it returns the stored outcome of the
- * takeover winner instead. No process-global signal state is involved in
- * keeping an owner alive.
+ * The lease is FIXED — the controller never derives it from a token's
+ * remaining signed validity. A PENDING_SAME waiter whose owner's lease
+ * has expired may atomically TAKEOVER the entry and become the owner — a
+ * crashed owner therefore blocks the key for at most one lease window
+ * instead of the full TTL. The lease exceeds the maximum supported
+ * verification / request execution window plus a safety margin — the
+ * same lease-must-exceed-runtime requirement the Argon semaphore
+ * configuration documents — and the owner confirms its ownership AFTER
+ * the verification by an atomic renewal ({@see self::renew()}). Safety
+ * therefore depends on the verification never outlasting the lease: a
+ * verification that outlasts the lease may be displaced, in which case
+ * the displaced owner's local result is never authoritative — it returns
+ * the stored outcome of the takeover winner instead. No process-global
+ * signal state is involved in keeping an owner alive.
  */
 interface SiteVerifyIdempotencyStore
 {
@@ -76,7 +81,9 @@ interface SiteVerifyIdempotencyStore
      *
      * @return array{0: IdempotencyClaim, 1: ?string} the claim outcome and
      *         the OWNER token when this request claimed the entry (null
-     *         otherwise) — only the owner may finalize it
+     *         otherwise) — only the owner may finalize it. `leaseSeconds`
+     *         (null = the store's FIXED configured lease) sizes the owner
+     *         lease window; the controller always passes null.
      */
     public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array;
 
@@ -106,11 +113,13 @@ interface SiteVerifyIdempotencyStore
      *                               seconds, overriding the store's
      *                               configured lease (null = the store's
      *                               configured lease). The controller
-     *                               passes the per-token lease derived at
-     *                               claim time so a late token's short
-     *                               lease is maintained for the whole
-     *                               lifecycle instead of reverting to the
-     *                               store default on takeover.
+     *                               always passes null: the FIXED owner
+     *                               lease is the store's configured lease
+     *                               (default 60s — it exceeds any
+     *                               supported verification window), never
+     *                               a per-token derivation, and the
+     *                               takeover keeps it for the whole
+     *                               lifecycle.
      *
      * @return array{0: IdempotencyClaim, 1: ?string} TookOver + the NEW
      *         owner token the winner must finalize with, or StillPending +

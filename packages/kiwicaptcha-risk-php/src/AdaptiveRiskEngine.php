@@ -27,6 +27,11 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
  * by the emergency caps); record_feedback() is the FEEDBACK path (no
  * limiter, no decision — a plain EventReceipt). record() is a deprecated
  * alias of record_feedback, assess() a deprecated alias of assessPreIssue.
+ * The risk-v2 variants (assessPreIssueV2/reassessV2) run the identical
+ * pipeline plus the additive risk-v2 evidence factors (honeypot/decoy
+ * evidence, session client-context consistency) — probabilistic evidence
+ * only, never a security gate, never a change to the risk-v1 state
+ * contract.
  *
  * Every entry point NORMALIZES the caller-supplied idempotency key before
  * it is used as the Redis dedupe suffix: HMAC-SHA256 keyed by the
@@ -113,6 +118,26 @@ final class AdaptiveRiskEngine
      */
     public function assessPreIssue(RiskContext $c, ?string $idempotencyKey = null): RiskDecision
     {
+        return $this->assessPreIssueInternal($c, $idempotencyKey, null);
+    }
+
+    /**
+     * Risk-v2 variant of assessPreIssue(): the identical pipeline plus the
+     * additive risk-v2 evidence factors (honeypot/decoy evidence, session
+     * client-context consistency) from $v2. The risk-v1 contract semantics
+     * are unchanged — with an empty $v2 context the decision is identical
+     * to the v1 path.
+     *
+     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     *                                    as in assessPreIssue
+     */
+    public function assessPreIssueV2(RiskContext $c, RiskV2Context $v2, ?string $idempotencyKey = null): RiskDecision
+    {
+        return $this->assessPreIssueInternal($c, $idempotencyKey, $v2);
+    }
+
+    private function assessPreIssueInternal(RiskContext $c, ?string $idempotencyKey, ?RiskV2Context $v2): RiskDecision
+    {
         $nowMs = (int) floor(microtime(true) * 1000);
 
         if (!$this->limiter->allow()) {
@@ -131,7 +156,7 @@ final class AdaptiveRiskEngine
             return $decision;
         }
 
-        return $this->runPipeline($c, $nowMs, $idempotencyKey);
+        return $this->runPipeline($c, $nowMs, $idempotencyKey, $v2);
     }
 
     /**
@@ -148,14 +173,28 @@ final class AdaptiveRiskEngine
      */
     public function reassess(RiskContext $c, ?string $idempotencyKey = null): RiskDecision
     {
-        return $this->runPipeline($c, (int) floor(microtime(true) * 1000), $idempotencyKey);
+        return $this->runPipeline($c, (int) floor(microtime(true) * 1000), $idempotencyKey, null);
     }
 
     /**
-     * Shared assessment pipeline behind assessPreIssue() and reassess():
-     * build the observation -> circuit breaker -> store -> scorer -> policy.
+     * Risk-v2 variant of reassess(): the identical pipeline plus the
+     * additive risk-v2 evidence factors from $v2 (honeypot evidence,
+     * session client-context consistency).
+     *
+     * @param string|null $idempotencyKey caller-supplied event_id; NORMALIZED
+     *                                    as in reassess
      */
-    private function runPipeline(RiskContext $c, int $nowMs, ?string $idempotencyKey): RiskDecision
+    public function reassessV2(RiskContext $c, RiskV2Context $v2, ?string $idempotencyKey = null): RiskDecision
+    {
+        return $this->runPipeline($c, (int) floor(microtime(true) * 1000), $idempotencyKey, $v2);
+    }
+
+    /**
+     * Shared assessment pipeline behind assessPreIssue()/assessPreIssueV2()
+     * and reassess()/reassessV2(): build the observation -> circuit breaker
+     * -> store -> scorer -> policy.
+     */
+    private function runPipeline(RiskContext $c, int $nowMs, ?string $idempotencyKey, ?RiskV2Context $v2 = null): RiskDecision
     {
         $observation = $this->buildObservation($c, $nowMs, $idempotencyKey);
 
@@ -202,7 +241,15 @@ final class AdaptiveRiskEngine
             }
             $base = max(0, min(1000, $base + $bias));
         }
-        $score = $this->scorer->score($base, $vector, $this->policy->weights);
+        // Risk-v2 evidence factors: honeypot/decoy evidence and the session
+        // client-context consistency, derived from the v2 context (a
+        // session-first-tag record read that degrades to "consistent" on
+        // any backend miss — probabilistic evidence never breaks an
+        // assessment).
+        $v2Signals = $v2 !== null ? $this->buildV2Signals($v2, $c, $observation) : null;
+        $score = $v2Signals !== null
+            ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, new RiskV2Weights())
+            : $this->scorer->score($base, $vector, $this->policy->weights);
         $decision = $this->policy->decide(
             scope: $c->scope,
             score: $score,
@@ -489,6 +536,37 @@ final class AdaptiveRiskEngine
     public function riskDenied(RiskContext $c, ?string $idempotencyKey = null): EventReceipt
     {
         return $this->record_feedback(RiskEventKind::RiskDenied, $c, $idempotencyKey);
+    }
+
+    /**
+     * Derives the bounded risk-v2 signal vector from the v2 context:
+     *
+     * - honeypot = 1000 when the context reports a honeypot hit OR the
+     *   current observation is one of the honeypot event kinds (ANY of the
+     *   three derives the signal — probabilistic evidence, never a gate);
+     * - sessionInconsistency = 1000 when the session's first-seen
+     *   client-context tag differs from the current tag; 0 when the tag is
+     *   absent (first request), the session is absent, or the record read
+     *   fails (neutral degradation).
+     */
+    private function buildV2Signals(RiskV2Context $v2, RiskContext $c, RiskObservation $observation): RiskV2Signals
+    {
+        $honeypot = ($v2->honeypotHit || $c->event->isHoneypot()) ? 1000 : 0;
+        $inconsistent = 0;
+        if ($v2->clientContextTag !== null && $v2->clientContextTag !== '' && $observation->sessionId !== null) {
+            try {
+                $first = $this->store->sessionFirstContextTag($observation->sessionId, $v2->clientContextTag);
+                if ($first !== null && $first !== $v2->clientContextTag) {
+                    $inconsistent = 1000;
+                }
+            } catch (\Throwable) {
+                // Best-effort record: a failed read degrades to consistent
+                // (neutral) — probabilistic evidence never breaks an
+                // assessment.
+            }
+        }
+
+        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent);
     }
 
     private function buildObservation(RiskContext $c, int $nowMs, ?string $idempotencyKey = null, ?RiskEventKind $event = null): RiskObservation

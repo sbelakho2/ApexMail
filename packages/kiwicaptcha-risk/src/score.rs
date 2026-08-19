@@ -6,10 +6,10 @@
 //! `score(base, s, w) = base + Σ weighted(positive signals) - weighted(trust)
 //! - weighted(principal)`, clamped to [0, 1000] with saturating arithmetic.
 //!
-//! The SCORE is pure integer math (u16/u32/i32 — no float boundary, audit
-//! #109): NaN/Inf cannot enter, and the output is always a bounded u16 in
-//! 0..=1000. The only floats in the risk path live in the calibration
-//! boundary, which is guarded separately (calibration.lua + `bounded_bias`).
+//! The SCORE is pure integer math (u16/u32/i32): NaN/Inf cannot enter, and
+//! the output is always a bounded u16 in 0..=1000. The only floats in the
+//! risk path live in the calibration boundary, which is guarded separately
+//! (calibration.lua + `bounded_bias`).
 
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +83,52 @@ pub fn score(base: u16, s: &SignalVector, w: &RiskWeights) -> u16 {
     risk.clamp(0, 1000) as u16
 }
 
+/// The 2 ADDITIVE risk-v2 weight fields, same names/order as
+/// [`crate::signals::RiskV2Signals`].
+///
+/// The risk-v1 contract weights ([`RiskWeights`]) are untouched — these are
+/// a separate, additive surface with identical fixed-point semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RiskV2Weights {
+    /// Weight of the honeypot/decoy evidence signal (default 200: one hit
+    /// raises the aggregate meaningfully without hard-denying alone).
+    pub honeypot: u16,
+    /// Weight of the session client-context inconsistency signal (default
+    /// 120: a changed context tag raises the aggregate, a consistent or
+    /// absent tag is neutral).
+    pub session_inconsistency: u16,
+}
+
+impl Default for RiskV2Weights {
+    fn default() -> RiskV2Weights {
+        RiskV2Weights {
+            honeypot: 200,
+            session_inconsistency: 120,
+        }
+    }
+}
+
+/// Risk-v2 scoring: the risk-v1 score PLUS the weighted risk-v2 evidence
+/// factors (honeypot, session client-context inconsistency), clamped to
+/// 0..=1000.
+///
+/// With zero risk-v2 signals this is EXACTLY [`score`] — the v1 contract
+/// semantics (the 13 signals and their weights) are unchanged; the v2
+/// factors are purely additive.
+pub fn score_v2(
+    base: u16,
+    s: &SignalVector,
+    w: &RiskWeights,
+    v2: &crate::signals::RiskV2Signals,
+    w2: &RiskV2Weights,
+) -> u16 {
+    let mut risk = score(base, s, w) as u32;
+    risk += weighted(v2.honeypot, w2.honeypot);
+    risk += weighted(v2.session_inconsistency, w2.session_inconsistency);
+    risk.min(1000) as u16
+}
+
 /// The 11 positive signals in SignalVector order with their per-signal
 /// contributions `(v * w) / 1000` (integer); only strictly positive
 /// contributions are recorded. The `RiskReason` codes are in contract
@@ -135,6 +181,7 @@ pub fn top_contributor_reasons(s: &SignalVector, w: &RiskWeights) -> Vec<RiskRea
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signals::RiskV2Signals;
     use sha2::{Digest, Sha256};
 
     const FIXTURES_PATH: &str = concat!(
@@ -477,5 +524,157 @@ mod tests {
             score(100, &bad_only, &w),
             100 + weighted(1000, w.bad_proof) as u16
         );
+    }
+
+    // ── Risk-v2 evidence factors (additive surface) ──────────────────────
+
+    /// Honeypot evidence raises the aggregate: 100 + 1000*200/1000 = 300.
+    #[test]
+    fn honeypot_raises_the_aggregate() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let clean = SignalVector::zero();
+        let before = score(100, &clean, &w);
+        let after = score_v2(
+            100,
+            &clean,
+            &w,
+            &RiskV2Signals {
+                honeypot: 1000,
+                ..Default::default()
+            },
+            &w2,
+        );
+        assert!(after > before, "honeypot evidence must raise the aggregate");
+        assert_eq!(after, 300);
+    }
+
+    /// A honeypot hit with an otherwise-clean vector stays BELOW the Deny
+    /// band: it raises the aggregate (stronger profiles are selected) but
+    /// never hard-denies alone.
+    #[test]
+    fn honeypot_hit_with_clean_vector_stays_below_deny() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let after = score_v2(
+            100,
+            &SignalVector::zero(),
+            &w,
+            &RiskV2Signals {
+                honeypot: 1000,
+                ..Default::default()
+            },
+            &w2,
+        );
+        assert!(
+            after < 980,
+            "a lone honeypot hit must stay below the Deny band"
+        );
+        assert_eq!(after, 300);
+    }
+
+    /// Honeypot + elevated signals crosses Deny: the aggregate reaches the
+    /// cap (1000) and maps to Deny — the evidence only pushes an already
+    /// risky profile over the edge.
+    #[test]
+    fn honeypot_plus_elevated_signals_crosses_deny() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        // bad_proof 1000 (220) + issue_debt 1000 (150) + global_pressure
+        // 1000 (170) + source_fast 900 (171) = 711; base 100 -> 811 WITHOUT
+        // the honeypot factor (Argon32, no hard-deny thresholds hit).
+        let elevated = SignalVector {
+            bad_proof: 1000,
+            issue_debt: 1000,
+            global_pressure: 1000,
+            source_fast: 900,
+            ..Default::default()
+        };
+        let before = score(100, &elevated, &w);
+        assert!(
+            before < 980,
+            "elevated-but-honeypot-free must stay below Deny"
+        );
+        assert_eq!(before, 811);
+        let after = score_v2(
+            100,
+            &elevated,
+            &w,
+            &RiskV2Signals {
+                honeypot: 1000,
+                ..Default::default()
+            },
+            &w2,
+        );
+        assert!(after >= 980, "honeypot + elevated signals must cross Deny");
+        assert_eq!(after, 1000);
+    }
+
+    /// Consistent client context is NEUTRAL: a zero session-inconsistency
+    /// signal contributes nothing.
+    #[test]
+    fn consistent_client_context_is_neutral() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let vector = SignalVector::zero();
+        let plain = score(100, &vector, &w);
+        let with_v2 = score_v2(100, &vector, &w, &RiskV2Signals::zero(), &w2);
+        assert_eq!(
+            with_v2, plain,
+            "consistent/absent context must not change the score"
+        );
+    }
+
+    /// A CHANGED client-context tag raises the aggregate: 100 + 120 = 220.
+    #[test]
+    fn changed_client_context_raises_the_aggregate() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let before = score(100, &SignalVector::zero(), &w);
+        let after = score_v2(
+            100,
+            &SignalVector::zero(),
+            &w,
+            &RiskV2Signals {
+                session_inconsistency: 1000,
+                ..Default::default()
+            },
+            &w2,
+        );
+        assert!(
+            after > before,
+            "context inconsistency must raise the aggregate"
+        );
+        assert_eq!(after, 220);
+    }
+
+    /// ABSENT client-context tag (first request) is NEUTRAL: no record
+    /// exists yet, so no inconsistency signal is produced.
+    #[test]
+    fn absent_client_context_is_neutral() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let vector = SignalVector::zero();
+        assert_eq!(
+            score_v2(100, &vector, &w, &RiskV2Signals::zero(), &w2),
+            score(100, &vector, &w)
+        );
+    }
+
+    /// The risk-v2 factors are PURELY additive: with zero v2 signals the
+    /// v2 scoring is byte-identical to the v1 score on the 10k parity
+    /// stream.
+    #[test]
+    fn v2_zero_signals_match_v1_score_stream() {
+        let w = RiskWeights::default();
+        let w2 = RiskV2Weights::default();
+        let mut prng = SeededVector::new();
+        for _ in 0..1000 {
+            let vector = prng.vector();
+            assert_eq!(
+                score_v2(100, &vector, &w, &RiskV2Signals::zero(), &w2),
+                score(100, &vector, &w),
+            );
+        }
     }
 }
