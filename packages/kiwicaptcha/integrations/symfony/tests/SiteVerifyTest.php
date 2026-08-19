@@ -17,6 +17,7 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -1577,6 +1578,146 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]))->getContent(), true);
         self::assertSame(false, $retry['success'] ?? null, 'a same-scope backend secret can never reconstruct another backend\'s redemption');
         self::assertSame(['timeout-or-duplicate'], $retry['error-codes'] ?? null);
+    }
+
+    /**
+     * The deterministic Array-store + clock variant of the three-owner
+     * same-key recovery chain across TWO crash boundaries: A claims UUID K
+     * and crashes BEFORE verification (claim only); B retries K, takes
+     * over (no consumed state exists yet), performs the FIRST verification
+     * — the TookOver owner's fingerprint is recorded ATOMICALLY with the
+     * consume — and the finalize CRASHES (throwing seam): B's response is
+     * the retryable internal-error and the entry stays pending; C retries
+     * K, takes over, the recovery gate compares the record identity to
+     * C's fingerprint (same UUID K + same token + same remoteip →
+     * IDENTICAL) and reconstruction SUCCEEDS with the IDENTICAL canonical
+     * success bytes; D with a DIFFERENT UUID K2 on the same token must
+     * STILL be refused after its own takeover — the identity gate is not
+     * weakened.
+     */
+    public function testThreeOwnerSameKeyRecoveryChainAcrossTwoCrashBoundaries(): void
+    {
+        $storage = new ArrayStorage();
+        [$token, $nonce] = $this->issuedToken($storage);
+        $now = 1_700_000_000;
+        $clock = static function () use (&$now): int {
+            return $now;
+        };
+        // A SHORT configured store lease (3s) keeps the lease-expiry steps
+        // instant; the waiter bound (5s) exceeds it (the construction
+        // invariant).
+        $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0');
+        $uuidK = '123e4567-e89b-42d3-a456-4266141740c1';
+        $uuidK2 = '123e4567-e89b-42d3-a456-4266141740c2';
+
+        // A claims UUID K and crashes BEFORE verification (claim only):
+        // the entry is pending with no consumed state.
+        [$claimA] = $store->claim($backendId, $uuidK, hash('sha256', $token), 300, 'ip:127.0.0.1');
+        self::assertSame(IdempotencyClaim::Claimed, $claimA);
+        // A's lease expires (no verification ever ran).
+        $now += 4;
+
+        // B retries K: takes over (no consumed state exists yet), performs
+        // the FIRST verification — its fingerprint is recorded atomically
+        // with the consume — and the finalize CRASHES: B's response is the
+        // retryable internal-error and the entry stays pending.
+        $finalizeThrowing = new class($store) implements SiteVerifyIdempotencyStore {
+            public function __construct(private readonly SiteVerifyIdempotencyStore $inner)
+            {
+            }
+
+            public function leaseSeconds(): int
+            {
+                return $this->inner->leaseSeconds();
+            }
+
+            public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            {
+                return $this->inner->claim($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+            }
+
+            public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null): array
+            {
+                return $this->inner->takeover($backendId, $idempotencyKey, $responseHash, $ttlSeconds, $remoteipFingerprint, $leaseSeconds);
+            }
+
+            public function renew(string $backendId, string $idempotencyKey, string $owner): bool
+            {
+                return $this->inner->renew($backendId, $idempotencyKey, $owner);
+            }
+
+            public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): void
+            {
+                // The finalize crashes (process death between the core
+                // commit and the Siteverify finalize).
+                throw new \RuntimeException('finalize outage');
+            }
+
+            public function stored(string $backendId, string $idempotencyKey): ?array
+            {
+                return $this->inner->stored($backendId, $idempotencyKey);
+            }
+        };
+        $bController = $this->controller(idempotencyStore: $finalizeThrowing, storage: $storage, waitSecs: 5.0);
+        $bResponse = $bController->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidK,
+        ]));
+        self::assertSame(503, $bResponse->getStatusCode(), 'the takeover owner\'s crashed finalize must map to the retryable internal-error');
+        self::assertSame(['internal-error'], json_decode((string) $bResponse->getContent(), true)['error-codes']);
+        self::assertNull($store->stored($backendId, $uuidK), 'B crashed before the Siteverify finalize — the entry stays pending');
+        $consumed = $storage->consumedState($nonce);
+        self::assertNotNull($consumed, 'B consumed and committed the token');
+        self::assertNotNull($consumed->consumedResult, 'B committed its success');
+        self::assertSame(true, $consumed->consumedResult->valid);
+        self::assertSame(
+            $this->fingerprint($backendId, $uuidK, $token, '127.0.0.1'),
+            $consumed->operationIdentity,
+            'the TookOver owner that performs the FIRST verification records the identity atomically with the consume',
+        );
+
+        // B's lease expires while the entry is still pending.
+        $now += 4;
+
+        // C retries K: takes over, the consumed result exists and the
+        // recovery gate compares the record identity to C's fingerprint
+        // (same UUID K + same token + same remoteip → IDENTICAL):
+        // reconstruction SUCCEEDS with the IDENTICAL canonical success
+        // bytes.
+        $cController = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $cResponse = $cController->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidK,
+        ]));
+        $cBody = json_decode((string) $cResponse->getContent(), true);
+        self::assertSame(true, $cBody['success'] ?? null, 'C must reconstruct the ORIGINAL success after two crash boundaries: '.(string) $cResponse->getContent());
+        $record = $storage->find($nonce);
+        self::assertNotNull($record);
+        $expectedCanonical = json_encode([
+            'action' => null,
+            'cdata' => null,
+            'challenge_ts' => gmdate('Y-m-d\TH:i:s\Z', $record->issuedAt),
+            'error-codes' => [],
+            'hostname' => $record->hostname,
+            'success' => true,
+        ], JsonResponse::DEFAULT_ENCODING_OPTIONS);
+        self::assertSame($expectedCanonical, (string) $cResponse->getContent(), 'C receives the IDENTICAL canonical success bytes');
+
+        // D claims a DIFFERENT UUID K2 on the same token (claim only,
+        // crashes before verification); after the lease expiry D's retry
+        // takes over K2's pending claim — but the consumed record's
+        // identity is K's fingerprint, never D's: the identity gate
+        // REFUSES the reconstruction — timeout-or-duplicate. The gate is
+        // not weakened.
+        [$claimD] = $store->claim($backendId, $uuidK2, hash('sha256', $token), 300, 'ip:127.0.0.1');
+        self::assertSame(IdempotencyClaim::Claimed, $claimD);
+        $now += 4;
+        $dController = $this->controller(idempotencyStore: $store, storage: $storage, waitSecs: 5.0);
+        $dResponse = $dController->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidK2,
+        ]));
+        $dBody = json_decode((string) $dResponse->getContent(), true);
+        self::assertSame(false, $dBody['success'] ?? null, 'a DIFFERENT UUID must never reconstruct the same-key success');
+        self::assertSame(['timeout-or-duplicate'], $dBody['error-codes'] ?? null);
     }
 
     public function testCanonicalSuccessStorageOutageReturns503InternalError(): void

@@ -7,6 +7,8 @@ namespace KiwiCaptcha\Risk\Tests;
 use KiwiCaptcha\Risk\RiskObservation;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
+use KiwiCaptcha\Risk\Storage\SessionContextTagStoreInterface;
+use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
 
 /**
  * Shared store stub for the engine tests: the outcome-ledger methods are
@@ -15,8 +17,10 @@ use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
  * with or without calibration — is exercised against the ledger, never
  * against silent no-ops. Anonymous test classes extend it and override
  * observe() (and optionally the ledger behavior via the public hooks).
+ * The stub implements the OPTIONAL risk-v2 session-first-tag capability
+ * interfaces so the v2 engine tests keep exercising the record surface.
  */
-abstract class RiskStateStoreStub implements RiskStateStoreInterface
+abstract class RiskStateStoreStub implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface
 {
     /** Status returned by confirmOutcome(): 1 = first confirmation. */
     public int $confirmOutcomeStatus = 1;

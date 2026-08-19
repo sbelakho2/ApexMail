@@ -785,12 +785,16 @@
   // ── Coarse client-context descriptor (risk-v2 evidence) ─────────────
   // Built ONCE per page load from coarse navigator/window signals and sent
   // with every challenge request as the `client_context` field (the server
-  // accepts /^[a-z0-9+_,=:-]{1,64}$/D). Deliberately COARSE: viewport
-  // class, touch capability, language family and a timezone-offset class —
-  // no canvas/audio/font-list/GPU fingerprinting, no stable IDs, nothing
-  // that identifies a device across sessions. A missing capability
-  // contributes nothing; when nothing is available the field is omitted
-  // entirely.
+  // accepts /^[a-z0-9+_,=:-]{1,64}$/D) ONLY when the widget container or
+  // widget element carries the explicit opt-in attribute
+  // data-kiwi-risk-context="coarse" (the app renders it when the operator
+  // enables risk.client_context) — the default is off, so no
+  // device-capability or screen-size signal ever leaves the page without
+  // it. Deliberately COARSE: viewport class, touch capability, language
+  // family and a timezone-offset class — no canvas/audio/font-list/GPU
+  // fingerprinting, no stable IDs, nothing that identifies a device across
+  // sessions. A missing capability contributes nothing; when nothing is
+  // available the field is omitted entirely.
   var kiwiClientContext = null;
   function kiwiBuildClientContext() {
     if (kiwiClientContext !== null) return kiwiClientContext;
@@ -1485,10 +1489,20 @@
           reqBody.chain_ticket = chainTicket;
         }
         // RISK-V2 CLIENT CONTEXT: the coarse capability descriptor built
-        // once per page load (see kiwiBuildClientContext) rides every
-        // challenge request — probabilistic evidence, never a gate.
-        var clientContext = kiwiBuildClientContext();
-        if (clientContext) reqBody.client_context = clientContext;
+        // once per page load (see kiwiBuildClientContext) rides challenge
+        // requests ONLY when the widget container or widget element carries
+        // the explicit opt-in data-kiwi-risk-context="coarse" — read the
+        // same way as the telemetry attribute (widget first, container
+        // second). A missing attribute means the field is never sent:
+        // probabilistic evidence, never a gate, and never collected by
+        // default.
+        var riskContext = null;
+        if (W) riskContext = W.getAttribute("data-kiwi-risk-context") || riskContext;
+        if (container && container !== W) riskContext = container.getAttribute("data-kiwi-risk-context") || riskContext;
+        if (riskContext === "coarse") {
+          var clientContext = kiwiBuildClientContext();
+          if (clientContext) reqBody.client_context = clientContext;
+        }
         // RISK-V2 DECOY MARKERS: when a server-issued decoy (honeypot)
         // input rendered by this widget (see kiwiRenderDecoy) is still in
         // the form and FILLED, the decoy field name + a bounded value ride

@@ -232,6 +232,64 @@ final class RiskV2IntegrationTest extends TestCase
         self::assertSame(200, $tuned->score, 'the v2 weights override must reach the engine through the gateway');
     }
 
+    public function testConfiguredV2WeightsReachTheEngineThroughTheGateway(): void
+    {
+        // The gateway's CONSTRUCTOR weights are the operator-configured
+        // risk.v2.* values: a honeypot hit scores with the configured
+        // weight when no per-call override is given.
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), new ArrayStorage());
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway(
+            $engine,
+            $classifier,
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8),
+            ['login' => 1],
+            policy: $policy,
+            v2Weights: new \KiwiCaptcha\Risk\RiskV2Weights(honeypot: 100, sessionInconsistency: 60, tls: 30),
+        );
+
+        $v2 = $gateway->clientContextV2(true, null, null);
+        self::assertNotNull($v2);
+        $decision = $gateway->preIssue('login', '198.51.100.7', null, null, $v2);
+        self::assertSame(200, $decision->score, 'the configured honeypot weight (100) must score the hit (100 + 1000*100/1000)');
+    }
+
+    public function testPostSolveDecisionV2ScoresTheHoneypotHitHigherThanV1(): void
+    {
+        $stack = $this->stack();
+
+        // The v1 post-solve assessment with a clean context scores the
+        // base risk (100, allow).
+        $v1 = $stack['gateway']->postSolveDecision('login', '198.51.100.7');
+        self::assertNotNull($v1);
+        self::assertSame(100, $v1->score);
+
+        // The v2 post-solve assessment WITH the honeypot hit scores
+        // strictly higher (100 + 200 = 300) — the honeypot evidence now
+        // actually moves the post-solve score.
+        $honeypot = $stack['gateway']->clientContextV2(true, null, null);
+        self::assertNotNull($honeypot);
+        $v2 = $stack['gateway']->postSolveDecisionV2('login', '198.51.100.7', null, null, null, $honeypot);
+        self::assertNotNull($v2);
+        self::assertGreaterThan($v1->score, $v2->score, 'a filled exact decoy field must raise the post-solve score');
+        self::assertSame(300, $v2->score);
+
+        // A context WITHOUT the hit scores identically to the v1 path.
+        $empty = $stack['gateway']->postSolveDecisionV2('login', '198.51.100.7');
+        self::assertNotNull($empty);
+        self::assertSame($v1->score, $empty->score, 'postSolveDecisionV2 without evidence is the v1 score');
+    }
+
     public function testHoneypotEvidenceRejectsNonHoneypotKinds(): void
     {
         $stack = $this->stack();

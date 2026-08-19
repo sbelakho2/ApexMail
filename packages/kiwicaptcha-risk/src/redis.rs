@@ -27,7 +27,9 @@ use std::time::Duration;
 
 use crate::event::RiskObservation;
 use crate::signals::SignalVector;
-use crate::store::{Observed, RiskStateStore, RiskStoreError};
+use crate::store::{
+    Observed, RiskStateStore, RiskStoreError, SessionContextTagStore, SessionTlsTagStore,
+};
 use ::redis as redis_crate;
 
 /// The canonical risk-v1 state script, embedded verbatim from this
@@ -529,7 +531,11 @@ impl RiskStateStore for RedisRiskStateStore {
     fn last_cooldown_until_ms(&self) -> u64 {
         self.last_cooldown_until_ms.load(Ordering::Relaxed)
     }
+}
 
+/// The risk-v2 session client-context capability: records the FIRST tag a
+/// session ever presents (SET NX, first write wins) under the session TTL.
+impl SessionContextTagStore for RedisRiskStateStore {
     /// The risk-v2 session client-context record
     /// (`{kiwi:<ns>}:risk:ctx:<session-pseudonym-hex>`): SET NX with the
     /// session TTL (first write wins = the FIRST tag the session ever
@@ -561,7 +567,12 @@ impl RiskStateStore for RedisRiskStateStore {
         let stored: Option<String> = conn.get(key).map_err(map_redis_error)?;
         Ok(stored)
     }
+}
 
+/// The risk-v2 session trusted-edge TLS capability: records the FIRST
+/// coarse TLS classification a session ever presents (SET NX, first write
+/// wins) under the session TTL.
+impl SessionTlsTagStore for RedisRiskStateStore {
     /// The risk-v2 session trusted-edge TLS record
     /// (`{kiwi:<ns>}:risk:tls:<session-pseudonym-hex>`): SET NX with the
     /// session TTL (first write wins = the FIRST coarse, server-attested

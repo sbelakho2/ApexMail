@@ -8,6 +8,8 @@ use KiwiCaptcha\Risk\RiskObservation;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use KiwiCaptcha\Risk\Storage\RiskStoreException;
+use KiwiCaptcha\Risk\Storage\SessionContextTagStoreInterface;
+use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
 
 /**
  * In-memory risk state store for the adaptive-risk integration tests: returns
@@ -15,7 +17,7 @@ use KiwiCaptcha\Risk\Storage\RiskStoreException;
  * can drive decisions (allow/deny/escalation) and assert the engine's
  * PRE-ISSUE / POST-SOLVE event feed without Redis.
  */
-final class FakeRiskStateStore implements RiskStateStoreInterface
+final class FakeRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface
 {
     /** @var list<RiskObservation> */
     public array $observations = [];

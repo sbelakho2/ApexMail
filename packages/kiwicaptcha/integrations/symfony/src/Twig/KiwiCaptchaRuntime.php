@@ -17,7 +17,11 @@ use Twig\Environment;
  *
  * The telemetry mode (off/minimal/full) follows the bundle config (forced
  * 'off' under strict privacy mode) and is rendered as data-kiwi-telemetry on
- * the widget container; it stays overridable per render call.
+ * the widget container; it stays overridable per render call. The coarse
+ * risk-v2 client-context opt-in (risk.client_context) is rendered as
+ * data-kiwi-risk-context="coarse" on the widget container when enabled —
+ * the driver sends the coarse capability tag only under that attribute —
+ * and stays overridable per render call (default false).
  */
 final class KiwiCaptchaRuntime
 {
@@ -34,6 +38,7 @@ final class KiwiCaptchaRuntime
         private readonly string $telemetry = 'off',
         private readonly ?string $requestBinding = null,
         private readonly array $challengeOriginAllowlist = [],
+        private readonly bool $riskClientContext = false,
     ) {
         $assetDir ??= \dirname(__DIR__, 2).'/Resources/public';
         $this->css = $this->readAsset($assetDir, 'widget.css');
@@ -103,6 +108,12 @@ final class KiwiCaptchaRuntime
             'scope' => $context['scope'] ?? 'login',
             'nonce' => $context['nonce'] ?? null,
             'telemetry' => $context['telemetry'] ?? $this->telemetry,
+            // The coarse client-context opt-in rendered into
+            // data-kiwi-risk-context="coarse" (defaults to the configured
+            // risk.client_context; the app may pass a dynamic per-render
+            // override). Without the attribute the driver sends no
+            // client_context.
+            'risk_client_context' => $context['risk_client_context'] ?? $this->riskClientContext,
             // The transaction binding rendered into
             // data-kiwi-request-binding (defaults to the configured static
             // risk.request_binding; the app may pass a dynamic per-render

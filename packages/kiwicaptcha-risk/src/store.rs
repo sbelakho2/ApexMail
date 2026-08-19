@@ -101,7 +101,17 @@ pub trait RiskStateStore {
     fn last_cooldown_until_ms(&self) -> u64 {
         0
     }
+}
 
+/// OPTIONAL risk-v2 capability: records the session's FIRST-seen
+/// client-context tag and returns the recorded tag.
+///
+/// Kept OUT of the [`RiskStateStore`] trait so existing v1 implementations
+/// compile unchanged. The DEFAULT implementation reports no record surface
+/// (`Ok(None)`), so a store without the capability degrades the
+/// session-consistency signal to neutral (consistent) — exactly the
+/// backend-miss semantics.
+pub trait SessionContextTagStore {
     /// The risk-v2 session client-context record: records `tag` as the
     /// session's FIRST-seen client-context tag (SET NX, first write wins)
     /// and returns the recorded tag — `Ok(Some(first))` when a record
@@ -113,10 +123,6 @@ pub trait RiskStateStore {
     /// comparing the current request's tag against the returned first tag;
     /// `Ok(None)` / `Err` degrade to "consistent" (neutral), never breaking
     /// an assessment.
-    ///
-    /// The DEFAULT implementation reports no record surface — risk-v1
-    /// stores that do not implement the companion record stay on the v1
-    /// contract untouched.
     fn session_first_context_tag(
         &self,
         _session_id: &[u8; 16],
@@ -124,7 +130,17 @@ pub trait RiskStateStore {
     ) -> Result<Option<String>, RiskStoreError> {
         Ok(None)
     }
+}
 
+/// OPTIONAL risk-v2 capability: records the session's FIRST-seen
+/// trusted-edge TLS classification tag and returns the recorded tag.
+///
+/// Kept OUT of the [`RiskStateStore`] trait so existing v1 implementations
+/// compile unchanged. The DEFAULT implementation reports no record surface
+/// (`Ok(None)`), so a store without the capability degrades the
+/// tls-inconsistency signal to neutral (consistent) — exactly the
+/// backend-miss semantics.
+pub trait SessionTlsTagStore {
     /// The risk-v2 session trusted-edge TLS record: records `tag` as the
     /// session's FIRST-seen TLS classification tag (SET NX, first write
     /// wins) and returns the recorded tag — the first coarse, server-
@@ -139,10 +155,6 @@ pub trait RiskStateStore {
     /// `Ok(None)` / `Err` degrade to "consistent" (neutral), never breaking
     /// an assessment. Only the ephemeral classification is stored — never
     /// a raw fingerprint database.
-    ///
-    /// The DEFAULT implementation reports no record surface — risk-v1
-    /// stores that do not implement the companion record stay on the v1
-    /// contract untouched.
     fn session_first_tls_tag(
         &self,
         _session_id: &[u8; 16],

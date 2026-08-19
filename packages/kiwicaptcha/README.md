@@ -21,7 +21,7 @@ Browser behavioral telemetry is a **supplement, not the security boundary** — 
 - **Single-use with bounded verification cost** — verification consumes the challenge, and the verification path includes per-nonce attempt accounting (`max_attempts`) that bounds the server-side cost of wrong candidates (critical for memory-hard Argon2id verification). Per-nonce attempt caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle (`bel-consulting/kiwicaptcha-symfony`) ships both: `rate_limit` (per-IP issuance window, optionally Redis/PSR-6 backed) and `argon2_max_concurrent_verifications` (per-process semaphore). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. the consumed-state Lua transition in `RedisChallengeStore` — the record is KEPT with a storage-level `state` and the winner's committed outcome, so a concurrent loser returns the SAME outcome instead of re-deriving).
 Note on distributed deployments: the in-record `attempts_used` counter is a LOCAL bound — concurrent workers loading the same record each see `attempts_used = 0` and could each run one expensive verification before any update is persisted. To make attempt accounting a STRICT concurrency bound, reserve attempts atomically (e.g. a Redis Lua INCR, as the Symfony bundle's one-shot Redis model does) or rely on one-shot atomic challenge consumption.
 - **Premium UI** — modern, responsive widget with native dark mode and zero external dependencies (no external JS, no iframes, no third-party hosts). The emitted markup takes an optional CSP nonce: with a nonce, `<style nonce>` / `<script nonce>` are emitted; without one, the widget still works under CSP policies that allow `'unsafe-inline'` or where the application post-processes the HTML (or where the application post-processes the HTML).
-- **First-party behavioral telemetry, opt-in** — **no third-party tracking. No third-party requests. First-party behavioral signals never leave your application.** Telemetry is collected only in the mode the page opts into via `data-kiwi-telemetry` on the widget or container: `"off"` (default), `"minimal"` (`me`/`ke` interaction counts), or `"full"` (adds `wd` = webdriver flag and quantized event timings). Listeners are widget-local (never document-wide) and are removed when the solve finishes. **Privacy Strict** — the default mode — collects no behavioral or device telemetry and creates no stable client identifier. Telemetry is a **supplementary** signal: it is client-controlled and forgeable, so it is never treated as the security boundary.
+- **First-party behavioral telemetry, opt-in and off by default** — **no third-party tracking. No third-party requests. First-party behavioral signals never leave your application.** Telemetry is collected only in the mode the page opts into via `data-kiwi-telemetry` on the widget or container: `"off"` (default), `"minimal"` (`me`/`ke` interaction counts), or `"full"` (adds `wd` = webdriver flag and quantized event timings). Listeners are widget-local (never document-wide) and are removed when the solve finishes. **Privacy Strict** — the default mode — collects no behavioral or device telemetry and creates no stable client identifier. The coarse risk-v2 client context (a deliberately coarse capability tag: viewport class, pointer class, language family, timezone class — no canvas/audio/font/GPU signals, no stable identifiers) is additionally **opt-in**: the widget sends it only when the app renders `data-kiwi-risk-context="coarse"` on the widget container (operator `risk.client_context` in the Symfony bundle; refused under `privacy_mode: strict`), and without it no device-capability or screen-size signal is ever collected. Telemetry is a **supplementary** signal: it is client-controlled and forgeable, so it is never treated as the security boundary.
 - **Same-origin enforcement** — the widget resolves the challenge endpoint against the page origin and refuses cross-origin endpoints outright; the fetch uses `credentials: "same-origin"`, `cache: "no-store"`, and `referrerPolicy: "no-referrer"`.
 - **Bounded solving** — the solver (WASM and pure-JS fallback) caps its search at 5,000,000 hashes (`SOLVER_MAX_HASHES`), and solution tokens whose counter exceeds that bound are rejected at decode time.
 - **Auto-tuning difficulty** — SHA-256 target bits scale with solver load; Argon2id difficulty is static (each hash is expensive).
@@ -212,8 +212,28 @@ In `"minimal"` the payload is `{"v":2,"mode":"minimal","me":n,"ke":n}`; in
 `"full"` it adds `wd` (the `navigator.webdriver` flag) and `et` (up to 20
 event timings quantized to 250 ms buckets). `"off"` sends `{}`. Telemetry
 listeners are attached to the widget element only (never `document`) and are
-removed when the solve finishes or fails. Device-capability and screen-size
-signals are never collected in any mode.
+removed when the solve finishes or fails.
+
+#### Coarse client context (risk-v2, opt-in)
+
+The widget collects **no device-capability or screen-size signals** unless the
+operator enables `risk.client_context` (Symfony bundle; default `false`) AND
+the app renders the opt-in attribute on the widget container:
+
+```html
+<!-- Opt-in: the driver sends a deliberately coarse capability tag with
+     every challenge request (viewport class, pointer class, language
+     family, timezone class) -->
+<div class="kiwi-container" data-kiwi-endpoint="/api/kcaptcha/challenge"
+     data-kiwi-scope="login" data-kiwi-risk-context="coarse"> ... </div>
+```
+
+Without the attribute the field is never sent. The tag is deliberately
+COARSE: no canvas/audio/font-list/GPU signals, no stable identifiers — a
+missing capability contributes nothing. `privacy_mode: strict` refuses the
+opt-in (`risk.client_context: true` fails at container compile time), so
+strict deployments keep collecting no device-capability or screen-size
+signal under every configuration.
 
 ### 3. Verify the Solution
 
@@ -394,7 +414,10 @@ driver also refuses cross-origin challenge endpoints at runtime.
 2. **Telemetry is client-controlled and forgeable, and off by default.** Input
    events are reported by the browser script itself only in the mode the page
    opted into (`off`/`minimal`/`full`); a custom client can omit or fake them.
-   Treat telemetry as a supplementary signal, never the security boundary.
+   The coarse risk-v2 client context is likewise opt-in (the app must render
+   `data-kiwi-risk-context="coarse"`) and is sent only as probabilistic
+   evidence. Treat telemetry as a supplementary signal, never the security
+   boundary.
 3. **IP binding is best-effort.** The nonce-bound `binding_tag` is a relay
    mitigation, not a guarantee: IPs legitimately change behind NAT/proxies
    (and mobile carriers), so a strict binding would reject real users.

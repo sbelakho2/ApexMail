@@ -32,7 +32,7 @@ use Predis\Response\ServerException;
  * the platform — treat these as best-effort fail-fast values, not hard
  * deadlines.
  */
-final class RedisRiskStateStore implements RiskStateStoreInterface
+final class RedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface
 {
     public const DEFAULT_SATURATIONS = [
         'src_fast' => 8000,

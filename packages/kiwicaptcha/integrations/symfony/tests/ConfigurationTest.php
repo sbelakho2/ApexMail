@@ -364,6 +364,61 @@ final class ConfigurationTest extends TestCase
         self::assertSame('X-Tls-Class', $processed['risk']['trusted_tls_header']);
     }
 
+    public function testTrustedTlsProxiesDefaultsToEmptyAndAcceptsCidrs(): void
+    {
+        self::assertSame([], $this->process()['risk']['trusted_tls_proxies'], 'trusted_tls_proxies defaults to [] (the TLS header is never read)');
+
+        $proxies = $this->process(['risk' => ['trusted_tls_proxies' => ['10.0.0.0/8', '192.168.1.5']]])['risk']['trusted_tls_proxies'];
+        self::assertSame(['10.0.0.0/8', '192.168.1.5'], $proxies);
+    }
+
+    public function testRiskV2WeightsDefaultsAreTheContractDefaults(): void
+    {
+        $v2 = $this->process()['risk']['v2'];
+
+        self::assertSame(200, $v2['honeypot_weight'], 'honeypot_weight defaults to the risk-v2 contract default (200)');
+        self::assertSame(120, $v2['session_consistency_weight'], 'session_consistency_weight defaults to the risk-v2 contract default (120)');
+        self::assertSame(80, $v2['tls_weight'], 'tls_weight defaults to the risk-v2 contract default (80)');
+    }
+
+    public function testRiskV2WeightsAcceptBoundedOverrides(): void
+    {
+        $v2 = $this->process(['risk' => ['v2' => [
+            'honeypot_weight' => 300,
+            'session_consistency_weight' => 40,
+            'tls_weight' => 0,
+        ]]])['risk']['v2'];
+        self::assertSame(300, $v2['honeypot_weight']);
+        self::assertSame(40, $v2['session_consistency_weight']);
+        self::assertSame(0, $v2['tls_weight']);
+
+        // The 0..1000 fixed-point bounds are compile-time.
+        foreach ([-1, 1001] as $outOfRange) {
+            try {
+                $this->process(['risk' => ['v2' => ['honeypot_weight' => $outOfRange]]]);
+                self::fail('an out-of-range v2 weight must be rejected by the tree: '.$outOfRange);
+            } catch (InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
+    public function testChainingHmacSecretRequiresAtLeastSixteenBytesWhenConfigured(): void
+    {
+        // A configured secret below 16 bytes is refused at compile time;
+        // the null fallback (master_secret -> secret_key) is unchanged.
+        foreach (['short', '0123456789abcde'] as $weak) {
+            try {
+                $this->process(['risk' => ['chaining' => ['enabled' => true, 'hmac_secret' => $weak]]]);
+                self::fail('a chaining hmac_secret under 16 bytes must be rejected: '.$weak);
+            } catch (InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+        $processed = $this->process(['risk' => ['chaining' => ['enabled' => true, 'hmac_secret' => '0123456789abcdef']]])['risk']['chaining'];
+        self::assertSame('0123456789abcdef', $processed['hmac_secret'], 'a 16-byte chaining secret is accepted');
+    }
+
     public function testRiskAllowedScopesNode(): void
     {
         // allowed_scopes defaults to [] (accept any scope)

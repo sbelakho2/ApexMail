@@ -11,6 +11,8 @@ use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use KiwiCaptcha\Risk\Storage\RiskStoreException;
+use KiwiCaptcha\Risk\Storage\SessionContextTagStoreInterface;
+use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
 
 /**
  * Adaptive risk engine: assesses one request and returns a RiskDecision.
@@ -558,19 +560,26 @@ final class AdaptiveRiskEngine
      *   three derives the signal — probabilistic evidence, never a gate);
      * - sessionInconsistency = 1000 when the session's first-seen
      *   client-context tag differs from the current tag; 0 when the tag is
-     *   absent (first request), the session is absent, or the record read
-     *   fails (neutral degradation);
+     *   absent (first request), the session is absent, the record read
+     *   fails (neutral degradation), or the store lacks the OPTIONAL
+     *   SessionContextTagStoreInterface capability (a 1.x store without
+     *   the record surface degrades exactly like a backend miss);
      * - tlsInconsistency = 1000 when the session's first-seen trusted-edge
      *   TLS classification tag differs from the current tag; 0 when the tag
      *   is absent (first request), the session is absent, the tag exceeds
-     *   the 64-char bound (treated as absent), or the record read fails
-     *   (neutral degradation).
+     *   the 64-char bound (treated as absent), the record read fails
+     *   (neutral degradation), or the store lacks the OPTIONAL
+     *   SessionTlsTagStoreInterface capability.
      */
     private function buildV2Signals(RiskV2Context $v2, RiskContext $c, RiskObservation $observation): RiskV2Signals
     {
         $honeypot = ($v2->honeypotHit || $c->event->isHoneypot()) ? 1000 : 0;
         $inconsistent = 0;
-        if ($v2->clientContextTag !== null && $v2->clientContextTag !== '' && $observation->sessionId !== null) {
+        if (
+            $v2->clientContextTag !== null && $v2->clientContextTag !== ''
+            && $observation->sessionId !== null
+            && $this->store instanceof SessionContextTagStoreInterface
+        ) {
             try {
                 $first = $this->store->sessionFirstContextTag($observation->sessionId, $v2->clientContextTag);
                 if ($first !== null && $first !== $v2->clientContextTag) {
@@ -584,7 +593,11 @@ final class AdaptiveRiskEngine
         }
         $tlsInconsistent = 0;
         $tlsTag = $v2->tlsTag;
-        if ($tlsTag !== null && $tlsTag !== '' && strlen($tlsTag) <= 64 && $observation->sessionId !== null) {
+        if (
+            $tlsTag !== null && $tlsTag !== '' && strlen($tlsTag) <= 64
+            && $observation->sessionId !== null
+            && $this->store instanceof SessionTlsTagStoreInterface
+        ) {
             try {
                 $firstTls = $this->store->sessionFirstTlsTag($observation->sessionId, $tlsTag);
                 if ($firstTls !== null && $firstTls !== $tlsTag) {

@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\Risk\RiskV2Weights;
 use KiwiCaptcha\Risk\RiskWeights;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
@@ -319,6 +320,15 @@ final class Configuration implements ConfigurationInterface
                                 ->integerNode('principal_credit')->defaultValue(RiskWeights::DEFAULT_PRINCIPAL_CREDIT)->min(0)->max(1000)->end()
                             ->end()
                         ->end()
+                        ->arrayNode('v2')
+                            ->info('RISK-V2 ADDITIVE EVIDENCE WEIGHTS: the three fixed-point weight fields (0..1000) of the risk-v2 additive factors (honeypot/decoy evidence, session client-context consistency, trusted-edge TLS consistency), wired into the RiskGateway. The defaults ARE the contract defaults (identical to the risk-v2 package).')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->integerNode('honeypot_weight')->defaultValue(RiskV2Weights::DEFAULT_HONEYPOT)->min(0)->max(1000)->end()
+                                ->integerNode('session_consistency_weight')->defaultValue(RiskV2Weights::DEFAULT_SESSION_INCONSISTENCY)->min(0)->max(1000)->end()
+                                ->integerNode('tls_weight')->defaultValue(RiskV2Weights::DEFAULT_TLS)->min(0)->max(1000)->end()
+                            ->end()
+                        ->end()
                         ->integerNode('policy_version')
                             ->info("SECURITY-POLICY EPOCH stamped (signed) into every issued challenge record and enforced at verification: bumping it (origin/action-policy changes, emergency revocation, compromised tenant) immediately invalidates ALL outstanding challenges — the verifier rejects any record whose policy_version differs from the configured value with WrongPolicyVersion. Cosmetic configuration changes must NOT bump it. The risk-v1 policy CONTRACT version is internal to the risk package (RiskPolicy::CONTRACT_VERSION) and independent of this knob.")
                             ->defaultValue(1)
@@ -503,8 +513,12 @@ final class Configuration implements ConfigurationInterface
                                     ->max(3600)
                                 ->end()
                                 ->scalarNode('hmac_secret')
-                                    ->info('HMAC secret signing the chain tickets. MUST be a high-entropy secret (%env(KIWI_RISK_SECRET)% recommended). When null, the bundle derives it from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated chain secret is strongly recommended so a compromise of one never leaks the other.')
+                                    ->info('HMAC secret signing the chain tickets. MUST be a high-entropy secret of at least 16 bytes (%env(KIWI_RISK_SECRET)% recommended); a shorter configured secret is refused at compile time. When null, the bundle derives it from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated chain secret is strongly recommended so a compromise of one never leaks the other.')
                                     ->defaultNull()
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => \is_string($v) && \strlen($v) < 16)
+                                        ->thenInvalid('risk.chaining.hmac_secret must be a string of at least 16 bytes when configured')
+                                    ->end()
                                 ->end()
                             ->end()
                         ->end()
@@ -551,6 +565,15 @@ final class Configuration implements ConfigurationInterface
                         ->scalarNode('trusted_tls_header')
                             ->info('OPTIONAL name of a TLS-classification header set by TRUSTED reverse-proxy/CDN infrastructure (e.g. "X-Tls-Class" carrying a coarse value like "tls13-http2"). When configured, the challenge controller reads ONLY this header, validates the value against the bounded pattern /^[a-z0-9_+:-]{1,32}$/i (a malformed value is ignored), and passes it to the risk-v2 client-context as a COARSE, server-attested TLS classification tag — never a raw fingerprint. This input is trusted ONLY from an explicitly trusted reverse proxy/CDN that STRIPS client-supplied values — never enable it without that, or a client can forge the classification. Only the coarse classification is stored (as the session first-seen record); no raw fingerprints are ever stored. Null (default) = the feature is off.')
                             ->defaultNull()
+                        ->end()
+                        ->arrayNode('trusted_tls_proxies')
+                            ->info('CIDRs (or exact IPs) of the trusted edge proxies whose TLS-classification header (risk.trusted_tls_header) is honored. The header is read ONLY when the DIRECT peer of the request (REMOTE_ADDR — the immediate connection, checked with Symfony\'s IpUtils::checkIp) is inside this list; from every other peer the header is ignored (the request is assessed without a TLS tag). The direct peer must be the trusted proxy itself — the proxy must terminate the client connection and strip client-supplied header values. Empty (default) = the header is never read.')
+                            ->scalarPrototype()->end()
+                            ->defaultValue([])
+                        ->end()
+                        ->booleanNode('client_context')
+                            ->info('OPT-IN coarse client-context collection: when true, the rendered widget container carries data-kiwi-risk-context="coarse" and the widget sends a deliberately coarse capability tag (viewport class, pointer class, language family, timezone class — no canvas/audio/font/GPU signals, no stable identifiers) with every challenge request. Default false: the widget collects no device-capability or screen-size signal in any mode. Refused under privacy_mode "strict" — enabling it requires the operator to deliberately enable coarse client context (privacy_mode "standard" plus this explicit opt-in).')
+                            ->defaultFalse()
                         ->end()
                         ->integerNode('container_memory_mib')
                             ->info('Memory budget of the process container in MiB . When configured, /health/ready requires argon2_max_concurrent_verifications * max-adaptive-profile-memory (64 MiB — the risk profiles\' argon64 m_kib 65536 KiB) + 256 MiB headroom <= container_memory_mib; a violated invariant refuses startup (503 memory_budget_invariant). null (or a concurrency cap of 0 = unlimited) keeps the check skipped/documented — the invariant is only meaningful with a finite concurrency cap.')

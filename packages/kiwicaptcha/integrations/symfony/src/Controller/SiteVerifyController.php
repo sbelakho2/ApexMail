@@ -336,13 +336,15 @@ final class SiteVerifyController
         // hex fingerprint of (backend identity, idempotency key, response
         // hash, canonicalized remoteip fingerprint) computed BEFORE the
         // verify. The SAME value is (a) recorded as the operation identity
-        // in the verifier's atomic pending→consumed transition (Claimed
-        // path only — a non-idempotent request records nothing) and
-        // (b) compared against the consumed record's OWN stored identity
-        // on the takeover path: reconstruction is recovery-eligible ONLY
-        // when the record's identity equals THIS claim's fingerprint —
-        // the identity was written atomically with the state flip, so it
-        // is provably the ACTUAL atomic consume winner's.
+        // in the verifier's atomic pending→consumed transition by EVERY
+        // owner that performs a FRESH verification — the Claimed path and
+        // the TookOver path alike (a non-idempotent request records
+        // nothing) — and (b) compared against the consumed record's OWN
+        // stored identity on the takeover path: reconstruction is
+        // recovery-eligible ONLY when the record's identity equals THIS
+        // claim's fingerprint — the identity was written atomically with
+        // the state flip, so it is provably the ACTUAL atomic consume
+        // winner's.
         $operationFingerprint = hash('sha256', $backendId."\0".($idempotencyKey ?? "\0no-key")."\0".hash('sha256', $response)."\0".$this->remoteipFingerprint($remoteIp));
 
         // The token is decoded BEFORE the claim so a MALFORMED token is
@@ -425,9 +427,11 @@ final class SiteVerifyController
         // into the claim: the same UUID with a CHANGED remoteip is a
         // CONFLICT, never a join or a reuse. The LOGICAL-OPERATION
         // identity (the fingerprint above) is passed into the verifier's
-        // atomic consume on the Claimed path, so the retained consumed
-        // record carries the ACTUAL atomic consume winner's identity for
-        // its whole lifetime.
+        // atomic consume whenever THIS request owns the pending claim and
+        // performs a FRESH verification — the Claimed path AND the
+        // TookOver first-verification path alike — so the retained
+        // consumed record always carries the identity of the owner that
+        // performed the ACTUAL atomic consume, for its whole lifetime.
         $claim = IdempotencyClaim::Claimed;
         $claimOwner = null;
         $claimedAt = null;
@@ -592,11 +596,14 @@ final class SiteVerifyController
         // lease (default 60s) comfortably exceeds the maximum supported
         // verification window plus a safety margin, so a live-but-slow
         // owner is never overtaken mid-verify — no process-global signal
-        // state is touched. The operation identity is passed ONLY on the
-        // idempotent Claimed path — the identity-bearing atomic consume;
-        // a non-idempotent request passes null and records no identity,
-        // so a later keyed replay can never reconstruct (the record's
-        // identity is null).
+        // state is touched. The operation identity is passed on EVERY
+        // idempotent path that performs a FRESH verification — the
+        // Claimed path AND the TookOver first-verification path — so
+        // every owner records the identity atomically with the consume,
+        // and a later same-key takeover can always prove the original
+        // logical operation; a non-idempotent request passes null and
+        // records no identity, so a later keyed replay can never
+        // reconstruct (the record's identity is null).
         try {
             $outcome = $this->verifier->verify(
                 $response,
@@ -605,7 +612,7 @@ final class SiteVerifyController
                 $remoteIp,
                 null,            // region expectation is application policy
                 false,           // telemetry is never authoritative here
-                $idempotent && $claim === IdempotencyClaim::Claimed ? $operationFingerprint : null,
+                $idempotent && ($claim === IdempotencyClaim::Claimed || $claim === IdempotencyClaim::TookOver) ? $operationFingerprint : null,
             );
         } catch (\InvalidArgumentException) {
             // Defensive boundary: the remoteip was validated above, so
@@ -668,29 +675,6 @@ final class SiteVerifyController
         // structural backstop for the crash-between-detect-and-finalize
         // window.
         if ($outcome->isOk() && $outcome->fromStoredResult) {
-            // A same-key + same-hash retry whose claim is STILL pending
-            // reconstructs the ORIGINAL success from the retained consumed
-            // state (crash recovery — the key+hash pair was proven against
-            // the pending claim, so this is the SAME logical redemption).
-            // This path is only reachable while holding the current owner
-            // token (the takeover winner finalizes the reconstructed
-            // outcome).
-            if ($idempotent && $claim === IdempotencyClaim::PendingSame) {
-                $success = $this->canonicalSuccess($outcome);
-                if ($success instanceof JsonResponse) {
-                    return $success;
-                }
-                $canonical = $this->canonicalizeResponse($success);
-                if ($claimOwner !== null) {
-                    $failed = $this->finalizeSafely($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, $claimedAt);
-                    if ($failed !== null) {
-                        return $failed;
-                    }
-                }
-
-                return new JsonResponse($canonical);
-            }
-
             // The consumed token is a DETERMINISTIC duplicate for THIS
             // claim: finalize it with the canonical duplicate response so
             // the claim is COMPLETE_SAME and a same-UUID retry returns the

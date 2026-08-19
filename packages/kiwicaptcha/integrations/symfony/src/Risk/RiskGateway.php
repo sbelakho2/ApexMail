@@ -140,6 +140,13 @@ final class RiskGateway
         private readonly ?RiskPolicy $policy = null,
         private readonly ?CalibrationStore $calibration = null,
         private readonly ?ProcessEmergencyCap $emergencyCap = null,
+        /**
+         * The operator-configured risk-v2 additive weights
+         * (risk.v2.*, wired by the extension). Null keeps the contract
+         * DEFAULT weights (identical scores to today); a caller-explicit
+         * $v2Weights argument on preIssue/postSolveDecisionV2 always wins.
+         */
+        private readonly ?RiskV2Weights $v2Weights = null,
     ) {
         if (!\in_array($unknownScopeMode, ['reject', 'baseline', 'minimum'], true)) {
             throw new \InvalidArgumentException(sprintf('unknownScopeMode must be "reject", "baseline" or "minimum" (got "%s")', $unknownScopeMode));
@@ -249,8 +256,9 @@ final class RiskGateway
      * client-context consistency, trusted-edge TLS consistency) into the
      * assessment — probabilistic evidence only, NEVER a security gate.
      * The optional risk-v2 weights override ({@see RiskV2Weights}) tunes
-     * those additive factors; null uses the contract DEFAULT weights
-     * (identical scores to today).
+     * those additive factors; null uses the CONFIGURED weights
+     * (risk.v2.*; itself defaulting to the contract DEFAULT weights —
+     * identical scores to today).
      *
      * @throws UnknownScopeException   when the scope is unknown in 'reject'/'baseline' mode
      * @throws \InvalidArgumentException when the client IP is not a valid
@@ -272,7 +280,7 @@ final class RiskGateway
             resources: $this->resources(),
         );
         $decision = $v2 !== null
-            ? $this->engine->assessPreIssueV2($context, $v2, $idempotencyKey, $v2Weights)
+            ? $this->engine->assessPreIssueV2($context, $v2, $idempotencyKey, $v2Weights ?? $this->v2Weights)
             : $this->engine->assessPreIssue($context, $idempotencyKey);
         $this->setCurrentDecisionId($decision->decisionId);
         $this->logDecision($scope, $decision);
@@ -315,6 +323,47 @@ final class RiskGateway
             resources: $this->resources(),
         );
         $decision = $this->engine->reassess($context, $idempotencyKey);
+        $this->setCurrentDecisionId($decision->decisionId);
+        $this->logDecision($scope, $decision);
+
+        return $decision;
+    }
+
+    /**
+     * POST-SOLVE decision with the risk-v2 additive evidence: identical to
+     * {@see postSolveDecision()} (fresh SolveSuccess assessment WITHOUT
+     * consuming the emergency admission budget) but routed through the
+     * engine's reassessV2 with the given risk-v2 context (honeypot/decoy
+     * evidence, session client-context consistency, trusted-edge TLS
+     * consistency). The v2 weights are the caller-explicit override when
+     * given, else the CONFIGURED weights (risk.v2.*; themselves the
+     * contract defaults when unset — an empty context scores identically
+     * to the v1 path). The decision id is recorded on the request-local
+     * decision context ({@see setCurrentDecisionId()}).
+     *
+     * @return RiskDecision|null the post-solve decision, or null when the
+     *                           scope is unknown and the engine declines to
+     *                           evaluate (feedback paths must never crash on
+     *                           unknown scopes)
+     */
+    public function postSolveDecisionV2(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?RiskV2Context $v2 = null, ?RiskV2Weights $v2Weights = null): ?RiskDecision
+    {
+        $scopeId = $this->tryScopeId($scope);
+        if ($scopeId === null) {
+            return null;
+        }
+        $context = new RiskContext(
+            scope: $scopeId,
+            sourceIp: $ip,
+            sessionId: $session,
+            principalId: $principal ?? $this->resolvePrincipal($scope),
+            event: RiskEventKind::SolveSuccess,
+            networkFlags: $this->classifier->classify($ip),
+            resources: $this->resources(),
+        );
+        $decision = $v2 !== null
+            ? $this->engine->reassessV2($context, $v2, $idempotencyKey, $v2Weights ?? $this->v2Weights)
+            : $this->engine->reassess($context, $idempotencyKey);
         $this->setCurrentDecisionId($decision->decisionId);
         $this->logDecision($scope, $decision);
 
@@ -788,7 +837,24 @@ final class RiskGateway
      */
     public function decisionProfile(RiskDecision $decision): ?ChallengeProfile
     {
-        return $this->resolver->profileFor($decision->action);
+        return $this->profileForAction($decision->action);
+    }
+
+    /**
+     * The challenge profile a risk ACTION demands — the SAME mapping the
+     * pre-issue decisions flow through ({@see decisionProfile()} delegates
+     * here). The stage-2 chain controller uses it to enforce the ticket's
+     * signed required action: the effective action (the STRONGER of the
+     * required action and the current pre-issue action) flows through this
+     * mapping, so the issued profile is at least as strong as the chain
+     * promised.
+     *
+     * @throws \LogicException for StepUp (controller-level application
+     *                         step-up, never a challenge profile)
+     */
+    public function profileForAction(RiskAction $action): ?ChallengeProfile
+    {
+        return $this->resolver->profileFor($action);
     }
 
     /**

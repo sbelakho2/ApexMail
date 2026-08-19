@@ -47,6 +47,7 @@ use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Risk\RiskPolicy;
+use KiwiCaptcha\Risk\RiskV2Weights;
 use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
 use KiwiCaptcha\Risk\Calibration\AggregateCalibrator;
 use KiwiCaptcha\Risk\Metrics\RiskMetrics;
@@ -140,6 +141,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 'kiwi_captcha.enforce_telemetry cannot be true while telemetry is "off": '.
                 'an off widget sends empty telemetry and enforcement rejects it. '.
                 'Set telemetry to "minimal"/"full", or disable enforcement.'
+            );
+        }
+        // The coarse client-context opt-in is a DELIBERATE operator choice:
+        // privacy_mode "strict" refuses it at compile time — under strict the
+        // widget must collect no device-capability or screen-size signal.
+        // Enabling it requires the operator to deliberately enable coarse
+        // client context (privacy_mode "standard" plus risk.client_context
+        // true). The default (false) is off under every mode.
+        if ($config['privacy_mode'] === 'strict' && $config['risk']['client_context']) {
+            throw new \InvalidArgumentException(
+                'kiwi_captcha.risk.client_context cannot be true under privacy_mode "strict": '.
+                'strict mode refuses the coarse client-context opt-in — enabling it requires '.
+                'the operator to deliberately enable coarse client context '.
+                '(set privacy_mode to "standard" AND risk.client_context to true).'
             );
         }
 
@@ -672,7 +687,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // (RiskGateway::emergencyCapSaturated) — the process-local
                 // window checked BEFORE any Redis issuance limiter.
                 ->setArgument('$emergencyCap', new Reference('kiwi_captcha.risk.emergency_limiter'))
+                // The operator-tunable risk-v2 additive evidence weights
+                // (risk.v2.*; the values default to the contract
+                // defaults, so an unset config scores identically).
+                ->setArgument('$v2Weights', new Reference('kiwi_captcha.risk.v2_weights'))
                 ->setPublic(true));
+            $container->setDefinition('kiwi_captcha.risk.v2_weights', (new Definition(RiskV2Weights::class))
+                ->setArgument('$honeypot', $riskConfig['v2']['honeypot_weight'])
+                ->setArgument('$sessionInconsistency', $riskConfig['v2']['session_consistency_weight'])
+                ->setArgument('$tls', $riskConfig['v2']['tls_weight']));
             if ($container->has(PrincipalResolverInterface::class)) {
                 // An application-registered principal resolver is OPT-IN:
                 // when a service for the interface exists, the raw principal
@@ -888,6 +911,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The trusted-edge TLS classification header
             // (risk.trusted_tls_header; null = the feature is off).
             ->setArgument('$trustedTlsHeader', $trustedTlsHeader)
+            // The trusted-edge proxies whose TLS classification header is
+            // honored (risk.trusted_tls_proxies; the header is read only
+            // when the DIRECT peer is inside the list).
+            ->setArgument('$trustedTlsProxies', $riskConfig['trusted_tls_proxies'])
             // The security-policy epoch a presented chain ticket must
             // match (a chain from an older epoch is refused).
             ->setArgument('$policyVersion', $config['risk']['policy_version'])
@@ -1016,6 +1043,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$chainTickets', $chainServiceRef)
             // The security-policy epoch stamped into issued chain tickets.
             ->setArgument('$policyVersion', $config['risk']['policy_version'])
+            // The provider-metadata sidecar: the validator reads a
+            // verified challenge's stored cdata to detect the server-
+            // stamped chain marker (the chain ends at stage 2 — no third
+            // stage ticket).
+            ->setArgument('$metadataStore', $metadataStoreRef)
             ->addTag('validator.constraint_validator'));
 
         // ── Twig widget runtime + twig function (embeds the shared widget assets) ──
@@ -1030,6 +1062,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The widget page's frame-ancestors CSP helper —
             // the space-separated allowlisted origins.
             $config['risk']['challenge_origin_allowlist'],
+            // The coarse client-context opt-in: true renders
+            // data-kiwi-risk-context="coarse" on the widget container so
+            // the driver sends the coarse capability tag (refused under
+            // privacy_mode strict).
+            $config['risk']['client_context'],
         ]))->addTag('twig.runtime'));
         $container->setDefinition(TwigExtension::class, (new Definition(TwigExtension::class))
             ->addTag('twig.extension'));

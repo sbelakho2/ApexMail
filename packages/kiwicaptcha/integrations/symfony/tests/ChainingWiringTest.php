@@ -9,8 +9,10 @@ use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
+use KiwiCaptcha\Risk\RiskV2Weights;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Reference;
@@ -98,6 +100,7 @@ final class ChainingWiringTest extends TestCase
         $container = $this->load([
             'chaining' => ['enabled' => true],
             'trusted_tls_header' => 'X-Tls-Class',
+            'trusted_tls_proxies' => ['10.0.0.0/8', '192.168.1.5'],
         ]);
 
         $controller = $container->getDefinition(ChallengeController::class);
@@ -105,12 +108,36 @@ final class ChainingWiringTest extends TestCase
         self::assertInstanceOf(Reference::class, $chain);
         self::assertSame(ChainedChallengeTicketService::class, (string) $chain);
         self::assertSame('X-Tls-Class', $controller->getArgument('$trustedTlsHeader'));
+        self::assertSame(['10.0.0.0/8', '192.168.1.5'], $controller->getArgument('$trustedTlsProxies'), 'risk.trusted_tls_proxies flows into the controller (the header is read only from a trusted direct peer)');
         self::assertSame(1, $controller->getArgument('$policyVersion'));
 
         $validator = $container->getDefinition(KiwiCaptchaValidator::class);
         $validatorChain = $validator->getArgument('$chainTickets');
         self::assertInstanceOf(Reference::class, $validatorChain);
         self::assertSame(ChainedChallengeTicketService::class, (string) $validatorChain);
+    }
+
+    public function testRiskV2WeightsFlowIntoTheGateway(): void
+    {
+        $container = $this->load([
+            'v2' => [
+                'honeypot_weight' => 333,
+                'session_consistency_weight' => 222,
+                'tls_weight' => 111,
+            ],
+        ]);
+
+        $weights = $container->getDefinition('kiwi_captcha.risk.v2_weights');
+        self::assertNotNull($weights);
+        self::assertSame(RiskV2Weights::class, $weights->getClass());
+        self::assertSame(333, $weights->getArgument('$honeypot'));
+        self::assertSame(222, $weights->getArgument('$sessionInconsistency'));
+        self::assertSame(111, $weights->getArgument('$tls'));
+
+        $gateway = $container->getDefinition(RiskGateway::class);
+        $v2Weights = $gateway->getArgument('$v2Weights');
+        self::assertInstanceOf(Reference::class, $v2Weights);
+        self::assertSame('kiwi_captcha.risk.v2_weights', (string) $v2Weights, 'the configured risk-v2 weights are wired into the gateway');
     }
 
     public function testChainingHmacSecretPrefersTheChainingSecret(): void

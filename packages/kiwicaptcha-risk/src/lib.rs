@@ -59,7 +59,7 @@ use crate::policy::{RiskPolicy, RiskReason};
 use crate::score::score as compute_score;
 use crate::score::RiskV2Weights;
 use crate::signals::SignalVector;
-use crate::store::{Observed, RiskStateStore};
+use crate::store::{Observed, RiskStateStore, SessionContextTagStore, SessionTlsTagStore};
 
 /// Engine-level input error.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -373,7 +373,17 @@ impl ProcessEmergencyCap {
 /// classifier is passed by the caller for its observation pipeline; the
 /// keys feed the identity factory) — the engine itself uses the derived
 /// [`RiskIdentityFactory`].
-pub struct RiskEngine<S: RiskStateStore, N: NetworkClassifier> {
+///
+/// The store bounds include the OPTIONAL risk-v2 capability traits
+/// ([`SessionContextTagStore`] + [`SessionTlsTagStore`]): their DEFAULT
+/// methods report no record surface (`Ok(None)`), so a v1 store without
+/// the capabilities still satisfies the bounds and the engine degrades the
+/// session-first-tag signals to neutral (consistent) — exactly the
+/// backend-miss semantics.
+pub struct RiskEngine<
+    S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore,
+    N: NetworkClassifier,
+> {
     store: S,
     #[allow(dead_code)]
     classifier: N,
@@ -396,7 +406,9 @@ pub struct RiskEngine<S: RiskStateStore, N: NetworkClassifier> {
     hysteresis: crate::hysteresis::ScopeActionHysteresis,
 }
 
-impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
+impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: NetworkClassifier>
+    RiskEngine<S, N>
+{
     /// Builds an engine with the contract defaults (900 s epochs, 1800 s
     /// session TTL, 86400 s principal TTL, 60 s dedupe TTL, default
     /// saturations, 2-failure/1000 ms breaker, 10000 req/s process cap).
@@ -707,13 +719,16 @@ impl<S: RiskStateStore, N: NetworkClassifier> RiskEngine<S, N> {
     ///   three derives the signal — probabilistic evidence, never a gate);
     /// - `session_inconsistency` = 1000 when the session's first-seen
     ///   client-context tag differs from the current tag; 0 when the tag is
-    ///   absent (first request), the session is absent, or the record read
-    ///   fails (neutral degradation);
+    ///   absent (first request), the session is absent, the record read
+    ///   fails (neutral degradation), or the store lacks the OPTIONAL
+    ///   [`SessionContextTagStore`] capability (the default `Ok(None)`
+    ///   degrades exactly like a backend miss);
     /// - `tls_inconsistency` = 1000 when the session's first-seen
     ///   trusted-edge TLS classification tag differs from the current tag;
     ///   0 when the tag is absent (first request), the session is absent,
-    ///   the tag exceeds the 64-char bound (treated as absent), or the
-    ///   record read fails (neutral degradation).
+    ///   the tag exceeds the 64-char bound (treated as absent), the record
+    ///   read fails (neutral degradation), or the store lacks the OPTIONAL
+    ///   [`SessionTlsTagStore`] capability.
     fn derive_v2_signals(
         &self,
         v2: &RiskV2Context,
@@ -1408,6 +1423,12 @@ mod tests {
         }
     }
 
+    // The v1 test stores declare NO session-first-tag record surface: the
+    // DEFAULT capability methods report `Ok(None)` and the engine degrades
+    // the v2 consistency signals to neutral, exactly like a backend miss.
+    impl SessionContextTagStore for MockStore {}
+    impl SessionTlsTagStore for MockStore {}
+
     struct CapturingStore(pub Mutex<Vec<RiskObservation>>, OutcomeLedger);
 
     impl RiskStateStore for CapturingStore {
@@ -1447,6 +1468,9 @@ mod tests {
             Ok(self.1.correct(decision_id, legitimate))
         }
     }
+
+    impl SessionContextTagStore for CapturingStore {}
+    impl SessionTlsTagStore for CapturingStore {}
 
     /// Store alternating boundary scores (449/451) on every observe — the
     /// engine-level hysteresis wiring check.
@@ -1505,6 +1529,9 @@ mod tests {
         }
     }
 
+    impl SessionContextTagStore for OscillatingStore {}
+    impl SessionTlsTagStore for OscillatingStore {}
+
     /// Store with the risk-v2 session first-tag record semantics (SET NX:
     /// the first tag a session presents is recorded and returned forever).
     #[derive(Default)]
@@ -1549,7 +1576,9 @@ mod tests {
         ) -> Result<bool, RiskStoreError> {
             Ok(self.outcomes.correct(decision_id, legitimate))
         }
+    }
 
+    impl SessionContextTagStore for V2FirstTagStore {
         fn session_first_context_tag(
             &self,
             session_id: &[u8; 16],
@@ -1562,7 +1591,9 @@ mod tests {
                     .clone(),
             ))
         }
+    }
 
+    impl SessionTlsTagStore for V2FirstTagStore {
         fn session_first_tls_tag(
             &self,
             session_id: &[u8; 16],

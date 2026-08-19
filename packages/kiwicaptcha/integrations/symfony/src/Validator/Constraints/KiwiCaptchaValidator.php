@@ -11,6 +11,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\Risk\RiskAction;
@@ -140,6 +141,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator
          * stage-1 proof was verified under.
          */
         private readonly int $policyVersion = 1,
+        /**
+         * The server-side provider-metadata sidecar: the stage-2 chain
+         * controller stamps the issued challenge's cdata with the chain
+         * marker (ChallengeController::CHAIN_CDATA_PREFIX), and the
+         * validator refuses to open a THIRD stage when a verified
+         * challenge carries that marker — the chain ends at stage 2.
+         */
+        private readonly ?SiteVerifyMetadataStore $metadataStore = null,
     ) {
     }
 
@@ -282,19 +291,6 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // the global cap).
         $request?->attributes->set(\BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate::SCOPE_ATTRIBUTE, $constraint->scope);
 
-        // FORM-SUBMISSION HONEYPOT: a form submission carrying a filled
-        // decoy_<8 hex> field (the widget-rendered server-issued honeypot)
-        // records DecoyFieldSubmitted evidence at SUBMISSION time — the
-        // correct lifecycle: the decoy was rendered AFTER issuance, so it
-        // can only be observed when the protected form carrying the solved
-        // token is submitted (a later challenge request would already have
-        // handed the bot the token). Evidence ONLY — never a gate and
-        // never affects the proof validity. Runs BEFORE the verification
-        // decision is finalized.
-        if ($this->risk !== null && $request !== null) {
-            $this->formDecoyEvidence($request, $constraint->scope, (string) ($clientIp ?? ''), $this->continuityCookie?->read($request));
-        }
-
         // CapacityExceeded (Argon2id admission saturated) surfaces as a
         // regular failed verification — fail closed as a captcha violation.
         $outcome = $this->verifier->verify($value, $this->secretKey, $constraint->scope, $clientIp, null, $this->enforceTelemetry);
@@ -412,7 +408,36 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // every valid solve, and when it demands a stronger action than
             // the first-stage profile, the validator issues a signed
             // one-shot chain ticket (CHAIN_REQUIRED) instead of passing.
-            $chainEligible = $outcome->isOk() && $this->chainTickets !== null;
+            // The chain ENDS at stage 2: a verified challenge whose record
+            // carries the server-stamped chain marker in its cdata (the
+            // stage-2 controller stamped it at issuance) never opens a
+            // third stage — no ticket is ever issued from a stage-2
+            // verification.
+            $chainEligible = $outcome->isOk() && $this->chainTickets !== null && !$this->verifiedChallengeCarriesChainMarker($value);
+
+            // FORM-SUBMISSION HONEYPOT (post-verification): the expected
+            // decoy field name derives from the VERIFIED nonce
+            // ('decoy_' + substr(sha256(nonce), 0, 8) — the exact same
+            // derivation the challenge controller used when it emitted the
+            // field), and ONLY that exact field is inspected: any other
+            // decoy_XXXXXXXX field is ignored (a decoy name is
+            // server-issued and nonce-bound, so a mismatched name is not
+            // this challenge's decoy). A filled expected field records
+            // DecoyFieldSubmitted evidence AND feeds the post-solve
+            // assessment through the risk-v2 path (the honeypot signal
+            // actually moves the score). Evidence ONLY — never a gate and
+            // never affects the proof validity.
+            $honeypotHit = false;
+            $verifiedNonce = $this->verifiedNonceOf($value);
+            if ($outcome->isOk() && $request !== null && $verifiedNonce !== null) {
+                $honeypotHit = $this->formDecoyEvidence(
+                    $request,
+                    self::expectedDecoyField($verifiedNonce),
+                    $constraint->scope,
+                    $ip,
+                    $session,
+                );
+            }
 
             if ($outcome->isOk()) {
                 $originalDecisionId = $this->consumeDecisionForToken($value);
@@ -424,7 +449,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             $postSolve = null;
             if ($postSolveScope || $chainEligible) {
                 try {
-                    $postSolve = $this->risk->postSolveDecision($constraint->scope, $ip, $session);
+                    $postSolve = $honeypotHit
+                        ? $this->risk->postSolveDecisionV2(
+                            $constraint->scope,
+                            $ip,
+                            $session,
+                            null,
+                            null,
+                            $this->risk->clientContextV2(true, $session, null, null),
+                        )
+                        : $this->risk->postSolveDecision($constraint->scope, $ip, $session);
                 } catch (\InvalidArgumentException) {
                     // No live risk signal for this context (e.g. an
                     // unparseable or missing client IP): enforce the scope's
@@ -447,7 +481,12 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
                     return;
                 }
-                if ($postSolve->action === RiskAction::StepUp && !$chainEligible) {
+                if ($postSolve->action === RiskAction::StepUp) {
+                    // StepUp is TERMINAL application-level step-up: it
+                    // NEVER becomes a chain ticket (a ticket could later be
+                    // spent on ordinary PoW instead of the application's
+                    // step-up). The application routes the user to
+                    // MFA/passkey/email confirmation.
                     $this->context->buildViolation($constraint->message)
                         ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED)
                         ->addViolation();
@@ -456,16 +495,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 }
                 if ($chainEligible && $postSolve->action->rank() > $this->firstStageActionRank($value)) {
                     // CHAIN REQUIRED: the reassessment demands a stronger
-                    // stage than the first-stage profile (an Argon action,
-                    // or StepUp — the stage-2 issuance may itself land on
-                    // the application step-up via the ordinary preIssue
-                    // path). Issue the signed one-shot chain ticket; the
+                    // stage than the first-stage profile (an Argon action).
+                    // Issue the signed one-shot chain ticket binding the
+                    // REQUIRED action (the stage-2 issuance enforces it as
+                    // the floor) and the stage-1 request binding (the
+                    // chain cannot detach from its transaction); the
                     // violation's {{ chain_ticket }} parameter carries it
                     // in the documented machine-readable format.
                     $ticket = $this->chainTickets->issue(
                         $this->verifiedNonceOf($value),
                         $constraint->scope,
                         $this->policyVersion,
+                        requiredAction: $postSolve->action->value,
+                        requestBinding: $this->verifiedRequestBindingOf($outcome),
                     );
                     if ($ticket !== null) {
                         $this->context->buildViolation($constraint->message)
@@ -696,38 +738,91 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * FORM-SUBMISSION HONEYPOT: a form submission carrying fields matching
-     * /^decoy_[0-9a-f]{8}$/D with a NON-EMPTY value (bounded at 256 bytes)
-     * feeds RiskEventKind::DecoyFieldSubmitted into the risk gateway as
-     * honeypot evidence — at form-submission time, the correct lifecycle
-     * for a honeypot rendered after issuance. Evidence ONLY: never a gate
-     * and never affects the proof validity. One evidence event per
-     * submission (the first filled decoy field wins). Never throws — a
-     * broken gateway must never break the form.
+     * FORM-SUBMISSION HONEYPOT: after a VALID verification, the form's
+     * decoy field is compared against the EXACT expected name derived from
+     * the VERIFIED nonce ({@see self::expectedDecoyField()} — the same
+     * per-issuance derivation the challenge controller uses when it emits
+     * the field). A filled expected field feeds
+     * RiskEventKind::DecoyFieldSubmitted into the risk gateway as honeypot
+     * evidence AND reports the hit so the post-solve assessment runs the
+     * risk-v2 path (the honeypot signal actually moves the score). Any
+     * OTHER decoy_XXXXXXXX field is ignored — a decoy name is
+     * server-issued and nonce-bound, so a mismatched name is not this
+     * challenge's decoy. Evidence ONLY: never a gate and never affects the
+     * proof validity. Never throws — a broken gateway must never break the
+     * form.
      */
-    private function formDecoyEvidence(Request $request, string $scope, string $ip, ?string $session): bool
+    private function formDecoyEvidence(Request $request, string $expectedField, string $scope, string $ip, ?string $session): bool
     {
-        foreach ($request->request->all() as $name => $value) {
-            if (!\is_string($name) || preg_match('/^decoy_[0-9a-f]{8}$/D', $name) !== 1) {
-                continue;
-            }
-            if (!\is_string($value) || $value === '') {
-                continue;
-            }
-            if (\strlen($value) > 256) {
-                $value = substr($value, 0, 256);
-            }
-            try {
-                $this->risk?->honeypotEvidence(RiskEventKind::DecoyFieldSubmitted, $scope, $ip, $session);
-            } catch (\Throwable) {
-                // Evidence only — a recording failure never breaks the
-                // form submission.
-            }
-
-            return true;
+        $value = $request->request->get($expectedField);
+        if (!\is_string($value) || $value === '') {
+            return false;
+        }
+        if (\strlen($value) > 256) {
+            $value = substr($value, 0, 256);
+        }
+        try {
+            $this->risk?->honeypotEvidence(RiskEventKind::DecoyFieldSubmitted, $scope, $ip, $session);
+        } catch (\Throwable) {
+            // Evidence only — a recording failure never breaks the form
+            // submission.
         }
 
-        return false;
+        return true;
+    }
+
+    /**
+     * The expected decoy field name for a verified nonce: the EXACT same
+     * derivation the challenge controller emits at issuance
+     * (ChallengeController: 'decoy_' . substr(sha256(nonce), 0, 8)), so
+     * only the server-issued name for THIS challenge counts as honeypot
+     * evidence.
+     */
+    private static function expectedDecoyField(string $nonce): string
+    {
+        return 'decoy_'.substr(hash('sha256', $nonce), 0, 8);
+    }
+
+    /**
+     * The record's signed request binding of a VERIFIED outcome — the
+     * stage-1 binding a chain ticket signs (null when the stage-1
+     * challenge had none).
+     */
+    private function verifiedRequestBindingOf(\KiwiCaptcha\VerifyOutcome $outcome): ?string
+    {
+        return \method_exists($outcome, 'requestBinding') ? $outcome->requestBinding() : null;
+    }
+
+    /**
+     * Whether the verified challenge behind a token carries the chain
+     * marker in its server-held cdata — the stage-2 controller stamped
+     * the marker (ChallengeController::CHAIN_CDATA_PREFIX + chainId) into
+     * the metadata sidecar at the stage-2 issuance. A marked challenge is
+     * the END of its chain: no third-stage ticket can ever be issued from
+     * it. The check is best-effort (a metadata read failure means "not
+     * marked" — the marker is defense-in-depth on top of the one-shot
+     * consume).
+     */
+    private function verifiedChallengeCarriesChainMarker(string $token): bool
+    {
+        if ($this->metadataStore === null) {
+            return false;
+        }
+        try {
+            $nonce = SolutionToken::decode($token)->nonce;
+        } catch (DecodeError) {
+            return false;
+        }
+        try {
+            $metadata = $this->metadataStore->find($nonce);
+        } catch (\Throwable) {
+            return false;
+        }
+        if ($metadata === null || !\is_string($metadata->cdata) || $metadata->cdata === '') {
+            return false;
+        }
+
+        return str_starts_with($metadata->cdata, \BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController::CHAIN_CDATA_PREFIX);
     }
 
     /**
