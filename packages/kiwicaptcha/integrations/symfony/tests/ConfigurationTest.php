@@ -419,6 +419,52 @@ final class ConfigurationTest extends TestCase
         self::assertSame('0123456789abcdef', $processed['hmac_secret'], 'a 16-byte chaining secret is accepted');
     }
 
+    public function testArgonEscalationLadderDefaultsToTheMonotonicThreeRungLadder(): void
+    {
+        self::assertSame([1, 4, 8], $this->process()['risk']['argon_escalation_target_bits'], 'argon_escalation_target_bits defaults to [1, 4, 8]');
+
+        // Strictly increasing ladders inside the core ceiling are accepted.
+        self::assertSame([1, 5, 10], $this->process(['risk' => ['argon_escalation_target_bits' => [1, 5, 10]]])['risk']['argon_escalation_target_bits']);
+        self::assertSame([2, 4, 10], $this->process(['risk' => ['argon_escalation_target_bits' => [2, 4, 10]]])['risk']['argon_escalation_target_bits']);
+        self::assertSame([1, 2, Config::MAX_ARGON2_TARGET_BITS], $this->process(['risk' => ['argon_escalation_target_bits' => [1, 2, Config::MAX_ARGON2_TARGET_BITS]]])['risk']['argon_escalation_target_bits']);
+    }
+
+    public function testArgonEscalationLadderNonMonotoneIsRejected(): void
+    {
+        foreach ([[1, 5, 5], [5, 5, 10], [1, 4, 3], [10, 9, 8], [1, 4, 4]] as $ladder) {
+            try {
+                $this->process(['risk' => ['argon_escalation_target_bits' => $ladder]]);
+                self::fail('a non-monotone ladder must be refused at configuration time: '.json_encode($ladder));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('1 <= rung1 < rung2 < rung3 <= '.Config::MAX_ARGON2_TARGET_BITS, $e->getMessage(), 'the refusal names the ladder constraint');
+            }
+        }
+    }
+
+    public function testArgonEscalationLadderOutOfRangeIsRejected(): void
+    {
+        foreach ([[0, 4, 8], [1, 4, 11], [1, 4, Config::MAX_ARGON2_TARGET_BITS + 1]] as $ladder) {
+            try {
+                $this->process(['risk' => ['argon_escalation_target_bits' => $ladder]]);
+                self::fail('an out-of-range ladder must be refused at configuration time: '.json_encode($ladder));
+            } catch (InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
+    public function testArgonEscalationLadderWrongEntryCountIsRejected(): void
+    {
+        foreach ([[1, 4], [1, 4, 8, 10], []] as $ladder) {
+            try {
+                $this->process(['risk' => ['argon_escalation_target_bits' => $ladder]]);
+                self::fail('a ladder without EXACTLY 3 entries must be refused at configuration time: '.json_encode($ladder));
+            } catch (InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
     public function testRiskAllowedScopesNode(): void
     {
         // allowed_scopes defaults to [] (accept any scope)

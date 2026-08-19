@@ -6,71 +6,151 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 /**
  * In-memory chained-challenge state store for tests/dev (single-process
- * semantics), mirroring the Redis store's three-state machine exactly:
- * available -> reserved (idempotent for the same chain id) -> consumed
- * (one-shot GET+DEL equivalent), with release undoing a reservation. A
- * consumed chain id stays as a tombstone so a replayed ticket is refused
- * with the same 'consumed' outcome as the Redis store.
+ * semantics), mirroring the Redis store's owner-scoped three-state machine
+ * exactly: available -> reserved(owner, leaseUntil) -> completed(
+ * stage2Nonce), with an owner-gated release undoing a reservation and an
+ * owner-gated complete transitioning to the TERMINAL completed state (a
+ * completed record is kept — never deleted — so a retry recovers the
+ * issued challenge). A non-owner release/complete is an atomic no-op, and
+ * an expired lease is taken over by the next reserving owner.
  *
- * Clock-less: TTL expiry is not enforced here — the ticket service's
- * signed expiresAt is the authoritative expiry check, and the Redis
- * store's EXPIRE mirrors it for the production key.
+ * EXPLICIT CLOCK: the store runs on a caller-provided clock (unix
+ * seconds, defaulting to microtime(true)) so the record TTL and the
+ * reservation lease expiry are enforceable — tests advance the clock to
+ * exercise the expired-lease takeover, mirroring redis TIME on the
+ * production store.
  */
 final class ArrayChainedChallengeStateStore implements ChainedChallengeStateStore
 {
     /**
-     * @var array<string, array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: ?string, state: 'available'|'reserved'|'consumed'}>
+     * @var array<string, array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, expiresAt: float}>
      */
     private array $records = [];
 
-    public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null): void
+    /**
+     * @param \Closure|null $now test seam: returns the current unix
+     *                           seconds (defaults to microtime(true))
+     */
+    public function __construct(private readonly ?\Closure $now = null)
+    {
+    }
+
+    private function clock(): float
+    {
+        return ($this->now) ? (float) ($this->now)() : microtime(true);
+    }
+
+    public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
     {
         $this->records[$chainId] = [
             'stage1Nonce' => $stage1Nonce,
             'scope' => $scope,
             'requestBinding' => $requestBinding,
             'requiredAction' => $requiredAction,
+            'policyVersion' => $policyVersion,
+            'chainDepth' => 2,
             'state' => 'available',
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => null,
+            'expiresAt' => $this->clock() + max(1, $ttlSecs),
         ];
     }
 
-    public function reserve(string $chainId, int $ttlSecs): string
+    public function read(string $chainId): ?array
     {
         $record = $this->records[$chainId] ?? null;
-        if ($record === null) {
+        if ($record === null || $record['expiresAt'] <= $this->clock()) {
+            unset($this->records[$chainId]);
+
+            return null;
+        }
+
+        return self::wire($record);
+    }
+
+    public function reserve(string $chainId, string $ownerToken, int $ttlSecs): string
+    {
+        $record = $this->records[$chainId] ?? null;
+        if ($record === null || $record['expiresAt'] <= $this->clock()) {
+            unset($this->records[$chainId]);
+
             return 'missing';
         }
-        if ($record['state'] === 'consumed') {
-            return 'consumed';
+        if ($record['state'] === 'completed') {
+            return 'completed';
         }
         if ($record['state'] === 'reserved') {
-            return 'reserved';
+            if ($record['owner'] === $ownerToken) {
+                return 'retry';
+            }
+            if ($record['leaseUntil'] > $this->clock()) {
+                return 'busy';
+            }
+            // Expired lease: takeover (the whole record expires with the
+            // signed ticket anyway — the lease can never outlive it).
         }
         $this->records[$chainId]['state'] = 'reserved';
+        $this->records[$chainId]['owner'] = $ownerToken;
+        $this->records[$chainId]['leaseUntil'] = (int) ($this->clock() + max(1, $record['expiresAt'] - $this->clock()));
 
         return 'available';
     }
 
-    public function consume(string $chainId): ?array
+    public function release(string $chainId, string $ownerToken): void
     {
         $record = $this->records[$chainId] ?? null;
-        if ($record === null || $record['state'] === 'consumed') {
-            // At most ONE consumer ever wins (a consumed tombstone is
-            // never consumed twice — mirroring the Redis GET+DEL).
-            return null;
+        if ($record === null || $record['expiresAt'] <= $this->clock()) {
+            unset($this->records[$chainId]);
+
+            return;
         }
-        // Tombstone: a replayed ticket lands on the 'consumed' outcome.
-        $this->records[$chainId]['state'] = 'consumed';
-
-        return $record;
-    }
-
-    public function release(string $chainId): void
-    {
-        $record = $this->records[$chainId] ?? null;
-        if ($record === null || $record['state'] !== 'reserved') {
+        if ($record['state'] !== 'reserved' || $record['owner'] !== $ownerToken) {
             return;
         }
         $this->records[$chainId]['state'] = 'available';
+        $this->records[$chainId]['owner'] = null;
+        $this->records[$chainId]['leaseUntil'] = null;
+    }
+
+    public function complete(string $chainId, string $ownerToken, string $stage2Nonce): ?array
+    {
+        $record = $this->records[$chainId] ?? null;
+        if ($record === null || $record['expiresAt'] <= $this->clock()) {
+            unset($this->records[$chainId]);
+
+            return null;
+        }
+        if ($record['state'] !== 'reserved' || $record['owner'] !== $ownerToken) {
+            return null;
+        }
+        $this->records[$chainId]['state'] = 'completed';
+        $this->records[$chainId]['stage2Nonce'] = $stage2Nonce;
+
+        return self::wire($this->records[$chainId]);
+    }
+
+    /**
+     * The wire shape of a record: the server-held fields without the
+     * internal expiry bookkeeping.
+     *
+     * @param array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string, expiresAt: float} $record
+     *
+     * @return array{stage1Nonce: string, scope: string, requestBinding: ?string, requiredAction: string, policyVersion: int, chainDepth: int, state: 'available'|'reserved'|'completed', owner: ?string, leaseUntil: ?int, stage2Nonce: ?string}
+     */
+    private static function wire(array $record): array
+    {
+        return [
+            'stage1Nonce' => $record['stage1Nonce'],
+            'scope' => $record['scope'],
+            'requestBinding' => $record['requestBinding'],
+            'requiredAction' => $record['requiredAction'],
+            'policyVersion' => $record['policyVersion'],
+            'chainDepth' => $record['chainDepth'],
+            'state' => $record['state'],
+            'owner' => $record['owner'],
+            'leaseUntil' => $record['leaseUntil'],
+            'stage2Nonce' => $record['stage2Nonce'],
+        ];
     }
 }

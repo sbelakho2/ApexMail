@@ -174,6 +174,41 @@ final class ChainingWiringTest extends TestCase
         $validatorChain = $validator->getArgument('$chainTickets');
         self::assertInstanceOf(Reference::class, $validatorChain);
         self::assertSame(ChainedChallengeTicketService::class, (string) $validatorChain);
+        $resolver = $validator->getArgument('$riskResolver');
+        self::assertInstanceOf(Reference::class, $resolver);
+        self::assertSame('kiwi_captcha.risk.resolver', (string) $resolver, 'the risk profile resolver (the authoritative stage-strength comparison) flows into the validator');
+    }
+
+    public function testNonMonotoneOrOutOfRangeArgonLadderIsRefusedAtCompileTime(): void
+    {
+        // The argon escalation ladder must satisfy
+        // 1 <= rung1 < rung2 < rung3 <= Config::MAX_ARGON2_TARGET_BITS:
+        // a non-monotone or out-of-range ladder is refused when the
+        // config tree processes the extension load — never silently
+        // accepted.
+        foreach ([
+            [1, 5, 5],
+            [5, 5, 10],
+            [1, 4, 11],
+            [0, 4, 8],
+            [1, 4],
+            [1, 4, 8, 10],
+        ] as $ladder) {
+            try {
+                $this->load(['argon_escalation_target_bits' => $ladder]);
+                self::fail('a ladder violating 1 <= rung1 < rung2 < rung3 <= 10 must be refused: '.json_encode($ladder));
+            } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
+                self::assertTrue(true);
+            }
+        }
+
+        // The monotonicity refusal names the ladder constraint.
+        try {
+            $this->load(['argon_escalation_target_bits' => [1, 5, 5]]);
+            self::fail('a non-monotone ladder must be refused');
+        } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException $e) {
+            self::assertStringContainsString('1 <= rung1 < rung2 < rung3 <= 10', $e->getMessage(), 'the refusal names the ladder constraint');
+        }
     }
 
     public function testRiskV2WeightsFlowIntoTheGateway(): void

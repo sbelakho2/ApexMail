@@ -53,5 +53,8 @@ final class ChainingKernelTest extends TestCase
         $validator = $this->container()->get(KiwiCaptchaValidator::class);
         self::assertSame($service, $this->property($validator, 'chainTickets'), 'the validator carries the wired chain ticket service');
         self::assertSame(1, $this->property($validator, 'policyVersion'));
+        $resolver = $this->property($validator, 'riskResolver');
+        self::assertNotNull($resolver, 'the validator carries the wired risk profile resolver (the stage-strength comparison)');
+        self::assertSame($this->container()->get('kiwi_captcha.risk.resolver'), $resolver, 'the resolver is the SAME service the risk gateway maps actions with');
     }
 }

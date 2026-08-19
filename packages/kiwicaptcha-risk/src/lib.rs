@@ -380,6 +380,13 @@ impl ProcessEmergencyCap {
 /// the capabilities still satisfies the bounds and the engine degrades the
 /// session-first-tag signals to neutral (consistent) — exactly the
 /// backend-miss semantics.
+///
+/// OPT-IN for third-party stores: a store implementing only
+/// [`RiskStateStore`] must add the two EMPTY capability impls
+/// (`impl SessionContextTagStore for MyStore {}` and
+/// `impl SessionTlsTagStore for MyStore {}`) to opt in — the default
+/// methods then provide the neutral v2 behavior. The built-in Redis store
+/// implements the real record surfaces.
 pub struct RiskEngine<
     S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore,
     N: NetworkClassifier,

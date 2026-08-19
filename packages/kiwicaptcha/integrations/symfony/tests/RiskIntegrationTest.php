@@ -455,7 +455,12 @@ final class RiskIntegrationTest extends TestCase
         ]])['risk'];
 
         self::assertSame([2, 6, 10], $process(['argon_escalation_target_bits' => [2, 6, 10]])['argon_escalation_target_bits']);
-        self::assertSame([20, 20, 20], $process(['argon_escalation_target_bits' => [20, 20, 20]])['argon_escalation_target_bits'], 'each rung may reach the widget-solvable ceiling 20');
+        // COMPILE-TIME LADDER VALIDATION: the rungs must satisfy
+        // 1 <= rung1 < rung2 < rung3 <= Config::MAX_ARGON2_TARGET_BITS —
+        // a non-monotone ladder or a rung above the core's Argon2id
+        // widget ceiling is refused at configuration time (never deferred
+        // to an issuance-time profile refusal).
+        self::assertSame([1, 4, Config::MAX_ARGON2_TARGET_BITS], $process(['argon_escalation_target_bits' => [1, 4, Config::MAX_ARGON2_TARGET_BITS]])['argon_escalation_target_bits']);
         // Exactly 3 entries.
         foreach ([[1, 4], [1, 4, 8, 12], []] as $bad) {
             try {
@@ -465,11 +470,12 @@ final class RiskIntegrationTest extends TestCase
                 self::assertTrue(true);
             }
         }
-        // Each rung within 1..20.
-        foreach ([[0, 4, 8], [1, 21, 8], [1, 4, 21]] as $bad) {
+        // Each rung within 1..Config::MAX_ARGON2_TARGET_BITS, strictly
+        // increasing.
+        foreach ([[0, 4, 8], [1, 4, Config::MAX_ARGON2_TARGET_BITS + 1], [20, 20, 20], [1, 4, 4], [5, 5, 10]] as $bad) {
             try {
                 $process(['argon_escalation_target_bits' => $bad]);
-                self::fail('a rung outside 1..20 must be rejected');
+                self::fail('a rung outside 1..'.Config::MAX_ARGON2_TARGET_BITS.' or a non-monotone ladder must be rejected: '.json_encode($bad));
             } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
                 self::assertTrue(true);
             }

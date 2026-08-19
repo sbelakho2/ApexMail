@@ -477,8 +477,27 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $issuanceCounterRef = null;
         $outstandingRef = null;
         $chainServiceRef = null;
+        $riskResolverRef = null;
         $riskRedis = null;
         if ($riskConfig['enabled']) {
+            // LADDER VALIDATION (defense in depth — the config tree refuses
+            // the same shape at compile time): the argon escalation ladder
+            // must satisfy 1 <= rung1 < rung2 < rung3 <=
+            // Config::MAX_ARGON2_TARGET_BITS — a non-monotone or
+            // out-of-range ladder is a configuration error, never silently
+            // accepted.
+            $argonLadder = $riskConfig['argon_escalation_target_bits'];
+            if (\count($argonLadder) !== 3
+                || $argonLadder[0] < 1
+                || $argonLadder[0] >= $argonLadder[1]
+                || $argonLadder[1] >= $argonLadder[2]
+                || $argonLadder[2] > Config::MAX_ARGON2_TARGET_BITS
+            ) {
+                throw new \InvalidArgumentException(sprintf(
+                    'kiwi_captcha.risk.argon_escalation_target_bits must satisfy 1 <= rung1 < rung2 < rung3 <= %d (the Argon16/32/64 ladder, bounded by Config::MAX_ARGON2_TARGET_BITS)',
+                    Config::MAX_ARGON2_TARGET_BITS,
+                ));
+            }
             [$policyConfig, $scopeIds, $postSolveScopes, $unknownScopeId] = $this->buildRiskPolicy($riskConfig);
             $riskRedis = $this->resolveRiskRedisClient($riskConfig, $redisRef, $container);
             $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
@@ -615,6 +634,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $riskConfig['argon_verification_memory_kib'],
                 $riskConfig['argon_escalation_target_bits'],
             ]));
+            $riskResolverRef = new Reference('kiwi_captcha.risk.resolver');
 
             // Atomic issuance-rate signal: the controller increments
             // {kiwi:<ns>}:issuance:<second> (INCR + EXPIRE 1) on every minted
@@ -717,16 +737,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $riskCookieRef = new Reference(ContinuityCookie::class);
 
             // ── Selective chained challenges (risk.chaining) ────────────
-            // The chain ticket service signs one-shot chain tickets over
-            // {chainId, stage1Nonce, scope, policyVersion, issuedAt,
-            // expiresAt} with the chain HMAC secret (risk.chaining.hmac_secret,
-            // falling back to the risk master_secret and then the captcha
-            // secret_key — the same secret-generation defaults as the other
-            // risk secrets). The server-held chain state rides the risk
-            // namespace ({kiwi:<ns>}:chain:<chainId>, TTL = chain ttl):
-            // Redis-backed when a Redis client is available, in-memory
-            // otherwise (test/dev semantics — mirroring the idempotency
-            // store wiring).
+            // The chain ticket service signs the MINIMAL one-shot chain
+            // ticket ({version, chainId, expiresAt} — the FULL server-held
+            // state {stage1Nonce, scope, requestBinding, requiredAction,
+            // policyVersion, chainDepth} lives in the state store) with
+            // the chain HMAC secret (risk.chaining.hmac_secret, falling
+            // back to the risk master_secret and then the captcha
+            // secret_key — the same secret-generation defaults as the
+            // other risk secrets). The server-held chain state rides the
+            // risk namespace ({kiwi:<ns>}:chain:<chainId>, TTL = chain
+            // ttl): Redis-backed when a Redis client is available,
+            // in-memory otherwise (test/dev semantics — mirroring the
+            // idempotency store wiring).
             if ($riskConfig['chaining']['enabled']) {
                 $chainStoreRedis = $riskRedis ?? $redisRef;
                 if ($chainStoreRedis !== null) {
@@ -1044,10 +1066,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The security-policy epoch stamped into issued chain tickets.
             ->setArgument('$policyVersion', $config['risk']['policy_version'])
             // The provider-metadata sidecar: the validator reads a
-            // verified challenge's stored cdata to detect the server-
-            // stamped chain marker (the chain ends at stage 2 — no third
-            // stage ticket).
+            // verified challenge's stored metadata chainId (the private
+            // server-stamped field) to detect the chain end (stage 2 — no
+            // third-stage ticket).
             ->setArgument('$metadataStore', $metadataStoreRef)
+            // The risk profile resolver: the authoritative stage-strength
+            // comparison for chaining (a chain opens only when the
+            // reassessed action is not satisfied by the solved challenge
+            // under the ACTUAL configured ladders).
+            ->setArgument('$riskResolver', $riskResolverRef)
             ->addTag('validator.constraint_validator'));
 
         // ── Twig widget runtime + twig function (embeds the shared widget assets) ──

@@ -111,6 +111,14 @@ pub trait RiskStateStore {
 /// (`Ok(None)`), so a store without the capability degrades the
 /// session-consistency signal to neutral (consistent) — exactly the
 /// backend-miss semantics.
+///
+/// OPT-IN: the capability traits are OPTIONAL — a third-party store
+/// implementing only [`RiskStateStore`] opts in by adding the two EMPTY
+/// impls (`impl SessionContextTagStore for MyStore {}` and
+/// `impl SessionTlsTagStore for MyStore {}`); the default methods then
+/// provide the neutral v2 signals (no record surface -> "consistent").
+/// The built-in Redis store ([`crate::redis::RedisRiskStateStore`])
+/// implements the real record surfaces.
 pub trait SessionContextTagStore {
     /// The risk-v2 session client-context record: records `tag` as the
     /// session's FIRST-seen client-context tag (SET NX, first write wins)
@@ -140,6 +148,14 @@ pub trait SessionContextTagStore {
 /// (`Ok(None)`), so a store without the capability degrades the
 /// tls-inconsistency signal to neutral (consistent) — exactly the
 /// backend-miss semantics.
+///
+/// OPT-IN: the capability traits are OPTIONAL — a third-party store
+/// implementing only [`RiskStateStore`] opts in by adding the two EMPTY
+/// impls (`impl SessionContextTagStore for MyStore {}` and
+/// `impl SessionTlsTagStore for MyStore {}`); the default methods then
+/// provide the neutral v2 signals (no record surface -> "consistent").
+/// The built-in Redis store ([`crate::redis::RedisRiskStateStore`])
+/// implements the real record surfaces.
 pub trait SessionTlsTagStore {
     /// The risk-v2 session trusted-edge TLS record: records `tag` as the
     /// session's FIRST-seen TLS classification tag (SET NX, first write

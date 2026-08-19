@@ -888,13 +888,24 @@ final class SiteVerifyController
         // server-side condition (outage, admission rejection, capacity).
         // A too-fast or wrong-solution token is an invalid response,
         // never a malformed request.
+        //
+        // ConsumeIndeterminate is a RETRYABLE SERVER-SIDE condition, never
+        // an asserted duplicate: the atomic consume's response was lost, so
+        // the storage may or may not have executed the transition. The
+        // internal-error arm returns BEFORE any finalize, so the claim
+        // stays PENDING and a same-key retry can re-verify a challenge the
+        // transition never executed, or reconstruct the retained outcome of
+        // a challenge the transition did execute. Mapping it to
+        // timeout-or-duplicate would finalize the claim as COMPLETE_SAME
+        // and permanently destroy the idempotency_key retry contract for a
+        // challenge that may still be perfectly redeemable.
         return match ($error) {
-            VerifyError::Expired,
-            VerifyError::ConsumeIndeterminate => 'timeout-or-duplicate',
+            VerifyError::Expired => 'timeout-or-duplicate',
             VerifyError::StorageUnavailable,
             VerifyError::AdmissionUnavailable,
             VerifyError::CapacityExceeded,
-            VerifyError::TooManyAttempts => 'internal-error',
+            VerifyError::TooManyAttempts,
+            VerifyError::ConsumeIndeterminate => 'internal-error',
             VerifyError::BadSignature,
             VerifyError::MalformedRecord,
             VerifyError::MalformedToken,

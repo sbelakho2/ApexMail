@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\AmbiguousForwardingException;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner;
@@ -143,12 +144,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         private readonly int $policyVersion = 1,
         /**
          * The server-side provider-metadata sidecar: the stage-2 chain
-         * controller stamps the issued challenge's cdata with the chain
-         * marker (ChallengeController::CHAIN_CDATA_PREFIX), and the
-         * validator refuses to open a THIRD stage when a verified
-         * challenge carries that marker — the chain ends at stage 2.
+         * controller stamps the issued challenge's PRIVATE chainId/
+         * chainDepth metadata fields (never the cdata), and the validator
+         * refuses to open a THIRD stage when a verified challenge's
+         * metadata carries a chainId — the chain ends at stage 2.
          */
         private readonly ?SiteVerifyMetadataStore $metadataStore = null,
+        /**
+         * The risk profile resolver (the same service the risk gateway
+         * maps actions with): the authoritative stage-strength comparison
+         * (risk.chaining) — a chain opens only when the reassessed action
+         * is NOT satisfied by the solved challenge under the ACTUAL
+         * configured ladders (risk.chaining; null = chaining disabled).
+         */
+        private readonly ?RiskProfileResolver $riskResolver = null,
     ) {
     }
 
@@ -405,15 +414,27 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             $postSolveScope = $outcome->isOk() && $this->risk->postSolveCheck($constraint->scope);
             // Chaining (risk.chaining): a SUCCESSFUL first-stage proof
             // opens the selective second stage — the reassessment runs for
-            // every valid solve, and when it demands a stronger action than
-            // the first-stage profile, the validator issues a signed
-            // one-shot chain ticket (CHAIN_REQUIRED) instead of passing.
-            // The chain ENDS at stage 2: a verified challenge whose record
-            // carries the server-stamped chain marker in its cdata (the
-            // stage-2 controller stamped it at issuance) never opens a
-            // third stage — no ticket is ever issued from a stage-2
-            // verification.
-            $chainEligible = $outcome->isOk() && $this->chainTickets !== null && !$this->verifiedChallengeCarriesChainMarker($value);
+            // every valid solve, and when it demands an action the solved
+            // challenge does NOT already satisfy (the resolver's ACTUAL
+            // configured ladders), the validator issues a signed one-shot
+            // chain ticket (CHAIN_REQUIRED) instead of passing. StepUp is
+            // TERMINAL application-level step-up (never a chained PoW) and
+            // Deny rejects the submission; only a strictly-stronger
+            // non-StepUp/Deny post-solve action opens a chain. The chain
+            // ENDS at stage 2: a verified challenge whose metadata sidecar
+            // carries a server-stamped chainId (the stage-2 controller
+            // wrote it at issuance) never opens a third stage — no ticket
+            // is ever issued from a stage-2 verification.
+            try {
+                $chainEligible = $outcome->isOk() && $this->chainTickets !== null && !$this->verifiedChallengeCarriesChainMarker($value);
+            } catch (\Throwable) {
+                // The metadata sidecar could not be read (transient
+                // outage): the chain marker is treated as POSSIBLY present
+                // — no chain ticket is issued (a metadata-read failure
+                // must never open a third stage or a repeated-challenge
+                // loop). The verification itself still passes.
+                $chainEligible = false;
+            }
 
             // FORM-SUBMISSION HONEYPOT (post-verification): the expected
             // decoy field name derives from the VERIFIED nonce
@@ -493,15 +514,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
                     return;
                 }
-                if ($chainEligible && $postSolve->action->rank() > $this->firstStageActionRank($value)) {
-                    // CHAIN REQUIRED: the reassessment demands a stronger
-                    // stage than the first-stage profile (an Argon action).
-                    // Issue the signed one-shot chain ticket binding the
-                    // REQUIRED action (the stage-2 issuance enforces it as
-                    // the floor) and the stage-1 request binding (the
-                    // chain cannot detach from its transaction); the
-                    // violation's {{ chain_ticket }} parameter carries it
-                    // in the documented machine-readable format.
+                if ($chainEligible && !$this->recordSatisfiesRequiredAction($value, $postSolve->action)) {
+                    // CHAIN REQUIRED: the reassessment demands an action
+                    // the solved challenge does NOT already satisfy under
+                    // the ACTUAL configured ladders (a missing/unreadable
+                    // record is treated as NOT satisfied — the chain opens
+                    // with the required action, failing toward more
+                    // security). Issue the signed one-shot chain ticket
+                    // binding the REQUIRED action (the stage-2 issuance
+                    // enforces it as the floor) and the stage-1 request
+                    // binding (the chain cannot detach from its
+                    // transaction); the violation's {{ chain_ticket }}
+                    // parameter carries it in the documented
+                    // machine-readable format.
                     $ticket = $this->chainTickets->issue(
                         $this->verifiedNonceOf($value),
                         $constraint->scope,
@@ -791,14 +816,67 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
+     * Whether the VERIFIED challenge behind a token already SATISFIES the
+     * reassessed action — the authoritative stage-strength comparison
+     * (risk.chaining) via the resolver's ACTUAL configured ladders. Allow
+     * is the base: a neutral post-solve assessment can never open a
+     * chain. A MISSING or UNREADABLE record (or a missing resolver) is
+     * treated as NOT satisfied (Allow-level): the chain OPENS with the
+     * required action, failing toward more security — a solved challenge
+     * whose strength cannot be confirmed is never assumed to have met
+     * the reassessed action.
+     */
+    private function recordSatisfiesRequiredAction(string $token, RiskAction $action): bool
+    {
+        if ($action === RiskAction::Allow) {
+            return true;
+        }
+        if ($this->riskResolver === null) {
+            return false;
+        }
+        $record = $this->findVerifiedRecord($token);
+        if ($record === null) {
+            return false;
+        }
+
+        return $this->riskResolver->recordSatisfies($record, $action);
+    }
+
+    /**
+     * The VERIFIED challenge's record, read by the verified nonce (the
+     * same storage find the metadata sidecar uses): after a successful
+     * verification the consumed record is kept for replay protection, so
+     * the plain find resolves the record whose algorithm + target bits
+     * decide the stage-strength comparison. null when storage is not
+     * wired, the token cannot be decoded or the read fails (an unreadable
+     * record is treated as NOT satisfied — the chain opens).
+     */
+    private function findVerifiedRecord(string $token): ?ChallengeRecord
+    {
+        if ($this->storage === null) {
+            return null;
+        }
+        try {
+            $nonce = SolutionToken::decode($token)->nonce;
+        } catch (DecodeError) {
+            return null;
+        }
+        try {
+            return $this->storage->find($nonce);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
      * Whether the verified challenge behind a token carries the chain
-     * marker in its server-held cdata — the stage-2 controller stamped
-     * the marker (ChallengeController::CHAIN_CDATA_PREFIX + chainId) into
-     * the metadata sidecar at the stage-2 issuance. A marked challenge is
-     * the END of its chain: no third-stage ticket can ever be issued from
-     * it. The check is best-effort (a metadata read failure means "not
-     * marked" — the marker is defense-in-depth on top of the one-shot
-     * consume).
+     * marker in its SERVER-HELD metadata (the PRIVATE chainId field — the
+     * stage-2 controller stamped it at the stage-2 issuance; it never
+     * travels in the cdata, so client input can never forge it). A marked
+     * challenge is the END of its chain: no third-stage ticket can ever be
+     * issued from it. FAILS CLOSED: a metadata READ failure THROWS — the
+     * caller treats the marker as possibly present (no chain ticket; the
+     * verification itself still passes).
      */
     private function verifiedChallengeCarriesChainMarker(string $token): bool
     {
@@ -810,24 +888,17 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         } catch (DecodeError) {
             return false;
         }
-        try {
-            $metadata = $this->metadataStore->find($nonce);
-        } catch (\Throwable) {
-            return false;
-        }
-        if ($metadata === null || !\is_string($metadata->cdata) || $metadata->cdata === '') {
-            return false;
-        }
+        $metadata = $this->metadataStore->find($nonce);
 
-        return str_starts_with($metadata->cdata, \BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController::CHAIN_CDATA_PREFIX);
+        return $metadata !== null && $metadata->chainId !== null;
     }
 
     /**
      * The stage-1 challenge nonce behind a solution token (the verified
      * proof's nonce), or null when the token cannot be decoded. The chain
-     * ticket signs this nonce so the stage-2 controller can prove the
-     * ticket holder really verified a stage-1 proof AND cannot re-run the
-     * same stage.
+     * ticket's server-held state records this nonce so the stage-2
+     * controller can prove the ticket holder really verified a stage-1
+     * proof AND cannot re-run the same stage.
      */
     private function verifiedNonceOf(string $token): ?string
     {
@@ -836,38 +907,6 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         } catch (DecodeError) {
             return null;
         }
-    }
-
-    /**
-     * The risk-action CLASS of the first-stage proof (the challenge the
-     * client actually solved), derived from the CONSUMED record's
-     * algorithm + difficulty: sha256 at >= 20 bits is the Sha20 class,
-     * >= 18 Sha18, otherwise Sha16; Argon2id at >= 8 target bits is the
-     * Argon64 class, >= 4 Argon32, otherwise Argon16. A record that
-     * cannot be resolved falls back to the WEAKEST first-stage
-     * assumption (Sha16) — fail-safe: any escalation then opens the
-     * chain. Used to decide whether the reassessment demands a STRONGER
-     * stage than what the client already did.
-     */
-    private function firstStageActionRank(string $token): int
-    {
-        $record = $this->findConsumedRecord($token);
-        if ($record === null) {
-            return RiskAction::Sha16->rank();
-        }
-        if ($record->algorithm === \KiwiCaptcha\PoWAlgorithm::Argon2id) {
-            return match (true) {
-                $record->targetBits >= 8 => RiskAction::Argon64->rank(),
-                $record->targetBits >= 4 => RiskAction::Argon32->rank(),
-                default => RiskAction::Argon16->rank(),
-            };
-        }
-
-        return match (true) {
-            $record->targetBits >= 20 => RiskAction::Sha20->rank(),
-            $record->targetBits >= 18 => RiskAction::Sha18->rank(),
-            default => RiskAction::Sha16->rank(),
-        };
     }
 
     /**
