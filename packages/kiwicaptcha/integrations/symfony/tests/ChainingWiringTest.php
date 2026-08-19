@@ -10,6 +10,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
 use KiwiCaptcha\Risk\RiskV2Weights;
@@ -47,6 +48,64 @@ final class ChainingWiringTest extends TestCase
         ]], $container);
 
         return $container;
+    }
+
+    public function testStrictPrivacyModeRefusesClientContext(): void
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->register('fake_redis', FakePredisClient::class);
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('risk.client_context cannot be true under privacy_mode "strict"');
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => self::SECRET,
+            'difficulty_bits' => 8,
+            'privacy_mode' => 'strict',
+            'risk' => [
+                'enabled' => true,
+                'redis_service' => 'fake_redis',
+                'client_context' => true,
+            ],
+        ]], $container);
+    }
+
+    public function testStrictPrivacyModeRendersNoOptInAttributeEvenWithTheRenderOverride(): void
+    {
+        $env = new \Twig\Environment(new \Twig\Loader\FilesystemLoader(__DIR__.'/../src/Resources/views'));
+        $runtime = new KiwiCaptchaRuntime(
+            '/kiwi-captcha',
+            \dirname(__DIR__).'/Resources/public',
+            'form_div_layout.html.twig',
+            'off',
+            null,
+            [],
+            false,
+            true,
+        );
+
+        $html = $runtime->renderWidget($env, ['risk_client_context' => true]);
+        // The attribute name also appears in the embedded driver source;
+        // assert on the CONTAINER tag sequence (the only render surface).
+        self::assertStringNotContainsString('data-kiwi-telemetry="off" data-kiwi-risk-context="coarse"', $html, 'strict privacy mode must never render the opt-in attribute');
+    }
+
+    public function testClientContextOptInRendersTheAttributeAndDefaultsAreOff(): void
+    {
+        $env = new \Twig\Environment(new \Twig\Loader\FilesystemLoader(__DIR__.'/../src/Resources/views'));
+        $runtime = new KiwiCaptchaRuntime(
+            '/kiwi-captcha',
+            \dirname(__DIR__).'/Resources/public',
+            'form_div_layout.html.twig',
+            'off',
+            null,
+            [],
+            false,
+            false,
+        );
+
+        self::assertStringNotContainsString('data-kiwi-telemetry="off" data-kiwi-risk-context="coarse"', $runtime->renderWidget($env), 'the attribute must be off by default');
+        $html = $runtime->renderWidget($env, ['risk_client_context' => true]);
+        self::assertStringContainsString('data-kiwi-telemetry="off" data-kiwi-risk-context="coarse"', $html, 'the per-render override must render the attribute when not strict');
     }
 
     public function testChainingEnabledWiresRedisStoreAndTicketService(): void

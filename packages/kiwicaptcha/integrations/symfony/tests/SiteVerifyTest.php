@@ -30,6 +30,57 @@ final class SiteVerifyTest extends TestCase
     private const SECRET = '0123456789abcdef0123456789abcdef';
     private const SITEVERIFY_SECRET = 'compat-secret-42';
 
+    public function testTooFastSolutionMapsToInvalidInputResponse(): void
+    {
+        $controller = $this->controller();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120, minDurationMs: 3000), $storage);
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $solution = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
+
+        // Verified IMMEDIATELY after issuance: the server-side timing floor
+        // (minDurationMs 3000) rejects the solve as too fast — a too-fast
+        // solution is an invalid RESPONSE, never a malformed request.
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '127.0.0.1',
+        ]));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame(false, $body['success'] ?? null);
+        self::assertSame(['invalid-input-response'], $body['error-codes'] ?? null, 'a too-fast solve must map to the invalid-response vocabulary');
+    }
+
+    public function testWrongProofSolutionMapsToInvalidInputResponse(): void
+    {
+        $controller = $this->controller();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $valid = $this->solve($challenge->prefix, $challenge->salt, $challenge->targetBits);
+
+        // The first counter whose hash fails the target is guaranteed to
+        // exist and is deterministic (all counters below the solver's
+        // first success failed it).
+        $saltBytes = base64_decode($challenge->salt, true);
+        $wrong = 0;
+        while (Verifier::leadingZeroBits(hash('sha256', $challenge->prefix.$wrong.$saltBytes, true)) >= $challenge->targetBits) {
+            $wrong++;
+        }
+        self::assertNotSame($valid, $wrong, 'the wrong counter must differ from the valid solution');
+
+        $token = SolutionToken::create($challenge->nonce, $wrong, 5000, [])->encode();
+        $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+            'secret' => self::SITEVERIFY_SECRET,
+            'response' => $token,
+            'remoteip' => '127.0.0.1',
+        ]));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame(false, $body['success'] ?? null);
+        self::assertSame(['invalid-input-response'], $body['error-codes'] ?? null, 'insufficient work must map to the invalid-response vocabulary');
+    }
+
     private function controller(
         array $secrets = [self::SITEVERIFY_SECRET => 'login'],
         ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,

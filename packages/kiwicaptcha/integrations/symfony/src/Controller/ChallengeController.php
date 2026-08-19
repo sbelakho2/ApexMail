@@ -627,7 +627,7 @@ final class ChallengeController
         }
         if ($clientContext !== null && preg_match(self::CLIENT_CONTEXT_PATTERN, $clientContext) !== 1) {
             return $this->privateJson(
-                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The client_context must be 1-64 characters of [a-z0-9+_:-].']],
+                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The client_context must be 1-64 characters of [a-z0-9+_,=:-].']],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
@@ -1077,14 +1077,20 @@ final class ChallengeController
                     // evidence. This NEVER gates issuance — the evidence
                     // already rode the assessment above; this only records
                     // the event kind for the risk state.
-                    $this->risk->honeypotEvidence(
-                        $decoyField !== null ? RiskEventKind::DecoyFieldSubmitted : RiskEventKind::HoneypotTriggered,
-                        $scope,
-                        $clientIp,
-                        $riskSession,
-                        null,
-                        $decision->decisionId,
-                    );
+                    try {
+                        $this->risk->honeypotEvidence(
+                            $decoyField !== null ? RiskEventKind::DecoyFieldSubmitted : RiskEventKind::HoneypotTriggered,
+                            $scope,
+                            $clientIp,
+                            $riskSession,
+                            null,
+                            $decision->decisionId,
+                        );
+                    } catch (\Throwable) {
+                        // Evidence only — a recording failure never gates
+                        // or breaks issuance (mirrors the validator's
+                        // form-submission counterpart).
+                    }
                 }
 
                 // CHAIN FLOOR (stage-2): the issued profile is driven by

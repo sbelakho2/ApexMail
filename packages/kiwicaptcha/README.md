@@ -231,9 +231,11 @@ the app renders the opt-in attribute on the widget container:
 Without the attribute the field is never sent. The tag is deliberately
 COARSE: no canvas/audio/font-list/GPU signals, no stable identifiers — a
 missing capability contributes nothing. `privacy_mode: strict` refuses the
-opt-in (`risk.client_context: true` fails at container compile time), so
-strict deployments keep collecting no device-capability or screen-size
-signal under every configuration.
+opt-in (`risk.client_context: true` fails at container compile time, and
+the runtime never renders the attribute under strict — a per-render
+`risk_client_context` override is ignored there too), so strict
+deployments keep collecting no device-capability or screen-size signal
+under every configuration.
 
 ### 3. Verify the Solution
 

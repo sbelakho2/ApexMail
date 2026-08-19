@@ -1065,8 +1065,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The coarse client-context opt-in: true renders
             // data-kiwi-risk-context="coarse" on the widget container so
             // the driver sends the coarse capability tag (refused under
-            // privacy_mode strict).
+            // privacy_mode strict). The privacy flag rides alongside so
+            // the runtime can also refuse the per-render override.
             $config['risk']['client_context'],
+            $config['privacy_mode'] === 'strict',
         ]))->addTag('twig.runtime'));
         $container->setDefinition(TwigExtension::class, (new Definition(TwigExtension::class))
             ->addTag('twig.extension'));

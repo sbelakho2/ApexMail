@@ -758,9 +758,6 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         if (!\is_string($value) || $value === '') {
             return false;
         }
-        if (\strlen($value) > 256) {
-            $value = substr($value, 0, 256);
-        }
         try {
             $this->risk?->honeypotEvidence(RiskEventKind::DecoyFieldSubmitted, $scope, $ip, $session);
         } catch (\Throwable) {

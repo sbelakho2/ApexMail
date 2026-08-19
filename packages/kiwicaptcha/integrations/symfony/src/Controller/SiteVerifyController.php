@@ -752,7 +752,7 @@ final class SiteVerifyController
      */
     private function finalizeAsOwner(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonical, ?float $claimedAt): void
     {
-        if ($claimedAt !== null && microtime(true) - $claimedAt >= SiteVerifyIdempotencyStore::LEASE_SECONDS) {
+        if ($claimedAt !== null && microtime(true) - $claimedAt >= $this->idempotencyStore->leaseSeconds()) {
             $this->idempotencyStore?->renew($backendId, $idempotencyKey, $owner);
         }
         $this->idempotencyStore?->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonical);
@@ -879,16 +879,22 @@ final class SiteVerifyController
     private function mapError(VerifyError $error): string
     {
         // Provider-style error codes (reCAPTCHA-compatible vocabulary);
-        // the precise core reason stays in the application logs. A
-        // storage/admission/capacity outage is a RETRYABLE server-side
-        // failure — internal-error (503), never bad-request (which
-        // provider docs define as malformed input).
+        // the precise core reason stays in the application logs. The
+        // provider contract: bad-request is a malformed REQUEST (enforced
+        // at the request-shape layer), timeout-or-duplicate is an
+        // already-validated token, invalid-input-response is a token that
+        // fails validation (wrong work, wrong profile, wrong identity,
+        // bad signature, ...), and internal-error is a retryable
+        // server-side condition (outage, admission rejection, capacity).
+        // A too-fast or wrong-solution token is an invalid response,
+        // never a malformed request.
         return match ($error) {
             VerifyError::Expired,
             VerifyError::ConsumeIndeterminate => 'timeout-or-duplicate',
             VerifyError::StorageUnavailable,
             VerifyError::AdmissionUnavailable,
-            VerifyError::CapacityExceeded => 'internal-error',
+            VerifyError::CapacityExceeded,
+            VerifyError::TooManyAttempts => 'internal-error',
             VerifyError::BadSignature,
             VerifyError::MalformedRecord,
             VerifyError::MalformedToken,
@@ -899,8 +905,16 @@ final class SiteVerifyController
             VerifyError::MissingClientIp,
             VerifyError::WrongRegion,
             VerifyError::WrongIssuer,
-            VerifyError::WrongPolicyVersion => 'invalid-input-response',
-            default => 'bad-request',
+            VerifyError::WrongPolicyVersion,
+            VerifyError::TooFast,
+            VerifyError::InsufficientWork,
+            VerifyError::UnsupportedArgon2Params,
+            VerifyError::TelemetryRejected => 'invalid-input-response',
+            // Defensive fallback for future error classes: an unknown
+            // outcome is never a retryable server failure and never a
+            // request-shape violation — it maps to the invalid-response
+            // vocabulary.
+            default => 'invalid-input-response',
         };
     }
 
@@ -930,7 +944,12 @@ final class SiteVerifyController
         // Log on the powers of two (1, 2, 4, 8...) and never per-request.
         $isLogStep = $count !== null && ($count === 1 || ($count & ($count - 1)) === 0);
         if ($isLogStep) {
-            $this->logger?->warning(sprintf('kiwicaptcha siteverify: invalid-secret attempts (%s) — %s secret', $kind, $count));
+            try {
+                $this->logger?->warning(sprintf('kiwicaptcha siteverify: invalid-secret attempts (%s) — %s secret', $kind, $count));
+            } catch (\Throwable) {
+                // A raising logger must never turn an invalid-secret
+                // rejection into a 500 — the boundary doc holds.
+            }
         }
     }
 

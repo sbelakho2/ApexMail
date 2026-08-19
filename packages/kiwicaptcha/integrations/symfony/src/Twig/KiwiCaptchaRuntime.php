@@ -39,6 +39,7 @@ final class KiwiCaptchaRuntime
         private readonly ?string $requestBinding = null,
         private readonly array $challengeOriginAllowlist = [],
         private readonly bool $riskClientContext = false,
+        private readonly bool $privacyStrict = false,
     ) {
         $assetDir ??= \dirname(__DIR__, 2).'/Resources/public';
         $this->css = $this->readAsset($assetDir, 'widget.css');
@@ -112,8 +113,11 @@ final class KiwiCaptchaRuntime
             // data-kiwi-risk-context="coarse" (defaults to the configured
             // risk.client_context; the app may pass a dynamic per-render
             // override). Without the attribute the driver sends no
-            // client_context.
-            'risk_client_context' => $context['risk_client_context'] ?? $this->riskClientContext,
+            // client_context. Under privacy_mode "strict" the attribute
+            // is NEVER rendered — not even via the per-render override
+            // (the compile-time refusal covers the configured value; this
+            // closes the render-time bypass).
+            'risk_client_context' => $this->privacyStrict ? false : ($context['risk_client_context'] ?? $this->riskClientContext),
             // The transaction binding rendered into
             // data-kiwi-request-binding (defaults to the configured static
             // risk.request_binding; the app may pass a dynamic per-render
