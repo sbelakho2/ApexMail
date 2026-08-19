@@ -68,15 +68,24 @@ export_from_file API_KEY_HASH_SECRET      || true
 export_from_file WEBHOOK_SIGNING_SECRET   || true
 export_from_file TRACKING_SECRET_KEY      || true
 export_from_file INTERNAL_SERVICE_TOKEN   || true
+export_from_file SERVICE_AUTH_TOKEN       || true
 export_from_file SESSION_SECRET           || true
 export_from_file IMPERSONATION_SECRET     || true
 export_from_file CSRF_SECRET              || true
+export_from_file DKIM_PRIVATE_KEY_ENCRYPTION_KEY || true
 export_from_file KIWI_SECRET_KEY          || true
 export_from_file STRIPE_SECRET_KEY        || true
 export_from_file STRIPE_WEBHOOK_SECRET    || true
 export_from_file DB_PASSWORD              || true
 export_from_file REDIS_PASSWORD           || true
 export_from_file CLICKHOUSE_PASSWORD      || true
+
+# Percent-encode a value used in a URI user-info component. Docker secret
+# values are arbitrary and commonly contain characters such as `@` or `:`;
+# interpolating them directly changes the host or otherwise corrupts the URL.
+urlencode_userinfo() {
+  printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n' | sed 's/\(..\)/%\1/g'
+}
 
 # Direct fallback: if DB_PASSWORD wasn't exported by export_from_file (the
 # indirect export can fail in some POSIX sh implementations), read the
@@ -99,18 +108,24 @@ if [ -z "${DATABASE_URL:-}" ] && [ -n "${DB_HOST:-}" ]; then
   DB_PORT_VAL="${DB_PORT:-5432}"
   DB_NAME_VAL="${DB_NAME:-apexmail}"
   DB_USER_VAL="${DB_USER:-apexmail}"
+  DB_USER_ENCODED="$(urlencode_userinfo "${DB_USER_VAL}")"
   if [ -n "${DB_PASSWORD:-}" ]; then
-    export DATABASE_URL="postgresql://${DB_USER_VAL}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=disable"
+    DB_PASSWORD_ENCODED="$(urlencode_userinfo "${DB_PASSWORD}")"
+    export DATABASE_URL="postgresql://${DB_USER_ENCODED}:${DB_PASSWORD_ENCODED}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=disable"
+    unset DB_PASSWORD_ENCODED
   else
-    export DATABASE_URL="postgresql://${DB_USER_VAL}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=disable"
+    export DATABASE_URL="postgresql://${DB_USER_ENCODED}@${DB_HOST}:${DB_PORT_VAL}/${DB_NAME_VAL}?sslmode=disable"
   fi
+  unset DB_USER_ENCODED
 fi
 
 # ── Construct REDIS_URL from REDIS_* parts if not already set ──────────────
 if [ -z "${REDIS_URL:-}" ] && [ -n "${REDIS_HOST:-}" ]; then
   REDIS_PORT_VAL="${REDIS_PORT:-6379}"
   if [ -n "${REDIS_PASSWORD:-}" ]; then
-    export REDIS_URL="redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT_VAL}"
+    REDIS_PASSWORD_ENCODED="$(urlencode_userinfo "${REDIS_PASSWORD}")"
+    export REDIS_URL="redis://:${REDIS_PASSWORD_ENCODED}@${REDIS_HOST}:${REDIS_PORT_VAL}"
+    unset REDIS_PASSWORD_ENCODED
   else
     export REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT_VAL}"
   fi

@@ -11,7 +11,7 @@
         </h2>
       </div>
 
-      {% set verdict_points = page.extra.verdict_points | default(value=["GDPR and HIPAA workflow support", "Deterministic telemetry engine", "Custom deployment review", "Deliverability insights", "Official polyglot SDKs", "Transparent allocation model"]) %}
+      {% set verdict_points = page.extra.verdict_points | default(value=["GDPR-oriented workflows", "Deterministic telemetry engine", "Custom deployment review", "Deliverability insights", "Current public catalog", "Transparent allocation model"]) %}
       <ul class="grid sm:grid-cols-2 gap-3 mb-16">
         {% for point in verdict_points %}
         <li class="flex items-center gap-4 p-4 border border-surface-100 bg-surface-50">

@@ -130,9 +130,10 @@ groups:
       # ── SLO Burn Rate Alerts ───────────────────────────────────────────────
 
       - alert: ApiAvailabilitySloBurnRate
-        expr: (
+        expr: |
+          (
           1 - (sum(increase(apexmail_http_requests_total{status=~"5.."}[1h])) / clamp_min(sum(increase(apexmail_http_requests_total[1h])), 1))
-        ) < 0.99
+          ) < 0.99
         for: 5m
         labels:
           severity: critical
@@ -143,9 +144,10 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/slo-burn-rate"
 
       - alert: ApiLatencySloBurnRate
-        expr: (
+        expr: |
+          (
           sum(increase(apexmail_http_request_duration_seconds_bucket{le="0.5"}[1h])) / clamp_min(sum(increase(apexmail_http_request_duration_seconds_count[1h])), 1)
-        ) < 0.95
+          ) < 0.95
         for: 5m
         labels:
           severity: warning

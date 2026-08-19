@@ -42,6 +42,15 @@ pub struct SystemHealthResponse {
     pub workers: Vec<WorkerStatus>,
     pub mta_nodes: Vec<MtaNode>,
     pub alerts: Vec<SystemAlert>,
+    pub system_sender: SystemSenderHealth,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemSenderHealth {
+    pub domain: String,
+    pub status: String,
+    pub ready: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,6 +98,22 @@ async fn system_health(
 ) -> Result<Json<SystemHealthResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&auth)?;
+
+    let system_sender = match crate::routes::domains::system_sender_status(&state).await {
+        Ok(sender) => SystemSenderHealth {
+            domain: sender.domain,
+            status: sender.status,
+            ready: sender.ready,
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "system sender is unavailable in health check");
+            SystemSenderHealth {
+                domain: crate::routes::system_sender::SYSTEM_DOMAIN.into(),
+                status: "unavailable".into(),
+                ready: false,
+            }
+        }
+    };
 
     // ── Queues ─────────────────────────────────────────────────
     let queue_rows = optional_relation_rows(
@@ -222,5 +247,6 @@ async fn system_health(
         workers,
         mta_nodes,
         alerts,
+        system_sender,
     }))
 }

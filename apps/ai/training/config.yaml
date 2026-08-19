@@ -52,7 +52,7 @@ training:
   bf16: true
   tf32: true
   max_seq_length: 4096
-  packing: true
+  packing: false
   logging_steps: 10
   eval_strategy: "steps"
   eval_steps: 100
@@ -62,7 +62,7 @@ training:
   load_best_model_at_end: true
   metric_for_best_model: "eval_loss"
   greater_is_better: false
-  report_to: "wandb"
+  report_to: "none"
   seed: 42
   dataloader_num_workers: 4
   dataloader_pin_memory: true

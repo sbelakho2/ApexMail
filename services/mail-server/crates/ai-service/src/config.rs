@@ -6,8 +6,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AiConfig {
+    /// Explicit opt-in gate for the configured external model runtime.
+    pub model_enabled: bool,
     /// External model inference endpoint (e.g. llama-server URL).
     pub model_endpoint: String,
+    /// Model name passed to an OpenAI-compatible inference provider.
+    pub model_name: String,
+    /// Optional bearer credential for the model provider.
+    #[serde(default, skip_serializing)]
+    pub model_api_key: String,
+    /// Per-request timeout enforced when calling the model provider.
+    pub model_timeout_secs: u64,
     /// Embedding vector dimensionality.
     pub embedding_dim: usize,
     /// Maximum tokens for text generation.
@@ -35,12 +44,30 @@ pub struct AiConfig {
     pub checkpoint_interval_secs: u64,
     /// Directory path for training checkpoints (O-10.3).
     pub checkpoint_path: String,
+    /// Operator-controlled executable that starts a reviewed offline training
+    /// job. Empty means `/train` correctly returns unavailable.
+    pub training_runner: String,
+    /// Optional working directory supplied to the training runner.
+    pub training_working_dir: String,
+    /// Optional Postgres URL for authoritative tenant domain-record lookups.
+    /// This is intentionally omitted from serialized status/config output.
+    #[serde(default, skip_serializing)]
+    pub database_url: String,
+    /// AWS region used by the active SES custom MAIL FROM configuration.
+    pub aws_region: String,
+    /// Shared deployment transport selection. Only explicit `smtp` selects the
+    /// SMTP record contract; all other values select the SES contract.
+    pub email_transport: String,
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
-            model_endpoint: "http://localhost:8081".into(),
+            model_enabled: false,
+            model_endpoint: "http://127.0.0.1:8081/v1".into(),
+            model_name: "apexmail-assistant".into(),
+            model_api_key: String::new(),
+            model_timeout_secs: 30,
             embedding_dim: 384,
             max_tokens: 768,
             temperature: 0.0,
@@ -54,6 +81,11 @@ impl Default for AiConfig {
             sanitize_ai_output: true,
             checkpoint_interval_secs: 60,
             checkpoint_path: "./data/ai-service/checkpoints/".into(),
+            training_runner: String::new(),
+            training_working_dir: String::new(),
+            database_url: String::new(),
+            aws_region: "eu-central-1".into(),
+            email_transport: String::new(),
         }
     }
 }
@@ -63,7 +95,14 @@ impl AiConfig {
     pub fn from_env() -> Result<Self, String> {
         let defaults = Self::default();
         let config = Self {
+            model_enabled: env_bool("AI_MODEL_ENABLED", defaults.model_enabled)?,
             model_endpoint: std::env::var("AI_MODEL_ENDPOINT").unwrap_or(defaults.model_endpoint),
+            model_name: std::env::var("AI_MODEL_NAME").unwrap_or(defaults.model_name),
+            model_api_key: std::env::var("AI_MODEL_API_KEY").unwrap_or(defaults.model_api_key),
+            model_timeout_secs: std::env::var("AI_MODEL_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.model_timeout_secs),
             embedding_dim: std::env::var("AI_EMBEDDING_DIM")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -107,19 +146,34 @@ impl AiConfig {
                 .unwrap_or(defaults.checkpoint_interval_secs),
             checkpoint_path: std::env::var("AI_CHECKPOINT_PATH")
                 .unwrap_or(defaults.checkpoint_path),
+            training_runner: std::env::var("AI_TRAINING_RUNNER")
+                .unwrap_or(defaults.training_runner),
+            training_working_dir: std::env::var("AI_TRAINING_WORKING_DIR")
+                .unwrap_or(defaults.training_working_dir),
+            database_url: std::env::var("AI_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or(defaults.database_url),
+            aws_region: std::env::var("AWS_REGION").unwrap_or(defaults.aws_region),
+            email_transport: std::env::var("EMAIL_TRANSPORT").unwrap_or(defaults.email_transport),
         };
         config.validate()?;
         Ok(config)
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.model_endpoint.trim().is_empty() {
+        if self.model_enabled && self.model_endpoint.trim().is_empty() {
             return Err("AI_MODEL_ENDPOINT must not be empty".into());
         }
-        if !(self.model_endpoint.starts_with("http://")
+        if self.model_enabled && !(self.model_endpoint.starts_with("http://")
             || self.model_endpoint.starts_with("https://"))
         {
             return Err("AI_MODEL_ENDPOINT must be http/https".into());
+        }
+        if self.model_enabled && self.model_name.trim().is_empty() {
+            return Err("AI_MODEL_NAME must not be empty when AI_MODEL_ENABLED=true".into());
+        }
+        if self.model_timeout_secs == 0 || self.model_timeout_secs > 300 {
+            return Err("AI_MODEL_TIMEOUT_SECS must be between 1 and 300".into());
         }
         if self.embedding_dim == 0 {
             return Err("AI_EMBEDDING_DIM must be > 0".into());
@@ -154,7 +208,20 @@ impl AiConfig {
         if self.checkpoint_path.trim().is_empty() {
             return Err("AI_CHECKPOINT_PATH must not be empty".into());
         }
+        if self.aws_region.trim().is_empty() {
+            return Err("AWS_REGION must not be empty".into());
+        }
         Ok(())
+    }
+}
+
+fn env_bool(name: &str, default: bool) -> Result<bool, String> {
+    match std::env::var(name) {
+        Ok(value) if value.eq_ignore_ascii_case("true") || value == "1" => Ok(true),
+        Ok(value) if value.eq_ignore_ascii_case("false") || value == "0" => Ok(false),
+        Ok(value) => Err(format!("{name} must be true, false, 1, or 0; got {value:?}")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(format!("failed to read {name}: {error}")),
     }
 }
 
@@ -165,6 +232,9 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = AiConfig::default();
+        assert!(!cfg.model_enabled);
+        assert_eq!(cfg.model_name, "apexmail-assistant");
+        assert_eq!(cfg.model_timeout_secs, 30);
         assert_eq!(cfg.embedding_dim, 384);
         assert!((cfg.temperature - 0.0).abs() < f64::EPSILON);
         assert_eq!(cfg.sto_lookback_days, 90);
@@ -177,6 +247,9 @@ mod tests {
         assert!(cfg.sanitize_ai_output);
         assert_eq!(cfg.checkpoint_interval_secs, 60);
         assert_eq!(cfg.checkpoint_path, "./data/ai-service/checkpoints/");
+        assert!(cfg.training_runner.is_empty());
+        assert!(cfg.database_url.is_empty());
+        assert_eq!(cfg.aws_region, "eu-central-1");
     }
 
     #[test]
@@ -186,6 +259,7 @@ mod tests {
         let parsed: AiConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.embedding_dim, cfg.embedding_dim);
         assert_eq!(parsed.model_endpoint, cfg.model_endpoint);
+        assert_eq!(parsed.model_name, cfg.model_name);
         assert_eq!(parsed.bandit_state_path, cfg.bandit_state_path);
         assert_eq!(parsed.bandit_encryption_key, cfg.bandit_encryption_key);
         assert_eq!(parsed.sanitize_ai_output, cfg.sanitize_ai_output);
@@ -194,5 +268,19 @@ mod tests {
             cfg.checkpoint_interval_secs
         );
         assert_eq!(parsed.checkpoint_path, cfg.checkpoint_path);
+    }
+
+    #[test]
+    fn rejects_invalid_boolean_values() {
+        assert!(matches!(env_bool("AI_UNUSED_TEST_BOOLEAN", false), Ok(false)));
+        assert!(env_bool_value("maybe").is_err());
+    }
+
+    fn env_bool_value(value: &str) -> Result<bool, String> {
+        match value {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            _ => Err("invalid boolean".into()),
+        }
     }
 }

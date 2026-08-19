@@ -6,7 +6,7 @@ Complete this checklist before sending production email through ApexMail.
 
 - [ ] Domain verified in ApexMail.
 - [ ] SPF record configured (`v=spf1 include:spf.apexmail.ee ~all`).
-- [ ] DKIM records published (both `am1._domainkey` and `am2._domainkey`).
+- [ ] Every DKIM record currently shown for the domain in the dashboard is published.
 - [ ] DMARC policy set (`p=quarantine` initially, then `p=reject`).
 - [ ] Custom return-path domain configured.
 - [ ] Custom tracking domain configured.

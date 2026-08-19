@@ -26,12 +26,12 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 
 ## ApexMail Solution
 
-- **Dedicated IPs** — 1 managed dedicated IP on Growth, 1 on Business, up to 3 on Enterprise, 2 on Dedicated Tenant. IP eligibility review for all plans.
+- **Dedicated IPs** — Approved add-on on Pro; 1 included on Growth, 3 on Scale, and 10 on Enterprise. Contract-scoped deployment options are reviewed separately.
 - **Automated Warm-Up** — Gradual volume ramp following provider-specific schedules. Monitored for reputation signals. Manual override available.
 - **Queue Prioritization** — Per-stream priority configuration. Transactional streams processed ahead of broadcast. Time-to-inbox targets monitored.
 - **Batch API** (`POST /v1/emails/batch`) — Submit up to 1,000 emails per request. Lower per-message overhead than individual API calls.
-- **Rate Limits** — Up to 10,000 req/min on Enterprise. Dedicated and BYOC plans support negotiated limits.
-- **Contractual SLA** — 99.9% API availability on Enterprise. Enhanced SLA on Dedicated Tenant and BYOC.
+- **Rate Limits** — Limits are enforced per API key and plan; see the current API documentation for public limits.
+- **Contractual SLA** — Scale and Enterprise include plan-level SLA terms; non-standard deployments require a separate contract review.
 
 ## Technical Implementation
 
@@ -57,11 +57,9 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 
 | Plan | Monthly Volume | Dedicated IPs | Rate Limit | Support |
 |---|---|---|---|---|
-| Growth | 500,000 emails | 1 (review) | 3,000 req/min | 8 business hours |
-| Business | 2,000,000 emails | 1 (review) | 3,000 req/min | 4 business hours |
-| Enterprise | 5,000,000+ emails | Up to 3 | 10,000 req/min | Negotiated |
-| Dedicated Tenant | 5,000,000+ baseline | 2 included | Negotiated | Enhanced SLA |
-| BYOC | Negotiated | Customer-managed | Negotiated | Operational support |
+| Growth | 500,000 emails | 1 included | Per plan | Email support |
+| Scale | 2,000,000 emails | 3 included | Per plan | Priority support |
+| Enterprise | 5,000,000 emails | 10 included | Contract-scoped | Dedicated support |
 
 ## Security Considerations
 

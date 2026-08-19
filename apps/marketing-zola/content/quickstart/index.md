@@ -101,19 +101,20 @@ Navigate to **Settings → Domains** in the dashboard sidebar.
 
 ---
 
-## Step 5: Add SPF Record
+## Step 5: Add Custom MAIL FROM Records
 
 **Time:** ~2 minutes (DNS propagation may take up to 48 hours, but typically 5–30 minutes)
 
-Log in to your DNS provider's management console and add the following TXT record:
+Log in to your DNS provider's management console and copy both `bounce`
+records shown in the Domains settings (or returned by the DNS-records API): a
+TXT SPF record containing `include:amazonses.com` and an MX record with
+priority `10` pointing to `feedback-smtp.<aws-region>.amazonses.com`.
 
-| Record Type | Host | Value |
-|-------------|------|-------|
-| TXT | `@` (or your subdomain root) | `v=spf1 include:spf.apexmail.ee ~all` |
+**What this does:** Configures the custom MAIL FROM domain used for SPF
+alignment and bounce handling.
 
-**What this does:** Authorizes ApexMail servers to send email on behalf of your domain.
-
-**Expected result:** After DNS propagation, the SPF check in your domain status panel shows `verified`.
+**Expected result:** After DNS propagation, the SPF and return-path checks in
+your domain status panel show `verified`.
 
 ---
 
@@ -121,23 +122,19 @@ Log in to your DNS provider's management console and add the following TXT recor
 
 **Time:** ~2 minutes
 
-Add the following CNAME records to your DNS configuration:
-
-| Record Type | Host | Value |
-|-------------|------|-------|
-| CNAME | `am1._domainkey.yourdomain.com` | `am1.dkim.apexmail.ee` |
-| CNAME | `am2._domainkey.yourdomain.com` | `am2.dkim.apexmail.ee` |
-
-Replace `yourdomain.com` with the domain you added in Step 4.
+Copy the generated DKIM **TXT** record shown in the Domains settings. The
+hostname is `<selector>._domainkey.<your-domain>` and the value begins
+`v=DKIM1; k=rsa; p=`. The selector and public key are domain-specific, so the
+dashboard-generated record is the only supported source.
 
 **What this does:** Enables ApexMail to cryptographically sign outgoing messages, allowing receiving servers to verify message integrity and sender authenticity.
 
-**Expected result:** After DNS propagation, the DKIM check in your domain status panel shows `verified` for both selectors.
+**Expected result:** After DNS propagation, the DKIM check in your domain status panel shows `verified`.
 
 **Troubleshooting:**
 - Ensure you are adding records to the correct DNS zone (the domain you added in Step 4).
-- CNAME flattening: if your DNS provider automatically flattens CNAMEs at the apex, add the CNAMEs at the subdomain level instead.
-- Use `dig` to verify: `dig CNAME am1._domainkey.yourdomain.com` should return the ApexMail DKIM hostname.
+- DKIM is a TXT record, not a CNAME. Do not add an Easy-DKIM or ApexMail service-host CNAME.
+- Use the exact selector shown in the Domains settings when checking DNS with `dig`.
 
 ---
 
@@ -149,13 +146,17 @@ Return to the **Settings → Domains** page in the dashboard.
 
 **Button:** Click **Verify** next to your domain.
 
-**What happens:** ApexMail checks your SPF and DKIM records. If both resolve correctly, the domain status changes to `Verified`.
+**What happens:** ApexMail checks the custom MAIL FROM SPF/MX records, the
+exact DKIM public key, and DMARC. In SES mode it also waits for SES to report
+the BYODKIM identity and custom MAIL FROM domain ready.
 
-**Expected result:** Domain status shows `Verified` with green checkmarks for SPF and both DKIM selectors.
+**Expected result:** Domain status shows `Verified` with green checkmarks for
+SPF, DKIM, DMARC, and return path. SES verification can remain pending while
+AWS detects newly published DNS records.
 
 **Error cases:**
-- **`SPF record not found`**: Verify the host field is correct. For apex domains, use `@`. For subdomains, use the subdomain root.
-- **`DKIM selector not found`**: Verify the CNAME target is exact. No trailing dots unless your DNS provider requires them.
+- **`SPF record not found`**: Verify the host is `bounce.<your-domain>`, not the domain apex.
+- **`DKIM selector not found`**: Verify the generated TXT hostname and full `p=` public key are exact.
 - **`Verification timeout`**: DNS may still be propagating. Wait 5 minutes and retry.
 
 ---

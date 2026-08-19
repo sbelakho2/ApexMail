@@ -1,6 +1,6 @@
 +++
 title = "Vereinbarung zur Auftragsverarbeitung"
-description = "ApexMail-Auftragsverarbeitungsvereinbarung — DSGVO-konforme Datenverarbeitungsbedingungen."
+description = "ApexMail-Auftragsverarbeitungsvereinbarung — Datenverarbeitungsbedingungen nach Art. 28 DSGVO."
 template = "prose.html"
 
 [extra]
@@ -45,7 +45,9 @@ Die aktuelle Liste der autorisierten Unterauftragsverarbeiter wird im [ApexMail-
 
 | Unterauftragsverarbeiter | Zweck | Standort | Übertragungsgarantie |
 |---|---|---|---|
-| Hetzner Online GmbH | Kerninfrastruktur (Compute, Storage) | EU (Deutschland/Finnland) | Nicht anwendbar — Verarbeitung innerhalb des EWR |
+| Hetzner Online GmbH | Kerninfrastruktur (Compute, Storage) | Konfigurierte EU/EWR-Region | Aktive Bereitstellung und anwendbare Übertragungsgarantie bestätigen |
+| Amazon Web Services, Inc. | Telemetrie-Objektspeicher, wenn aktiviert | Konfigurierte S3-Region (Standard: `eu-central-1`) | Aktive Bereitstellung und anwendbare Übertragungsgarantie bestätigen |
+| Amazon Web Services, Inc. | E-Mail-Zustelltransport, wenn aktiviert | Konfigurierte SES-Region | Aktive Bereitstellung und anwendbare Übertragungsgarantie bestätigen |
 | Google LLC | Optionale OAuth-Authentifizierung | Global (US-Unternehmen, Datenverarbeitung gemäß OAuth-Konfiguration) | Standardvertragsklauseln |
 | GitHub, Inc. | Optionale OAuth-Authentifizierung | Global (US-Unternehmen) | Standardvertragsklauseln |
 | Stripe, Inc. | Zahlungsabwicklung | US (primär), Indien (Support) | Standardvertragsklauseln |
@@ -58,7 +60,7 @@ Der Auftragsverarbeiter benachrichtigt den Verantwortlichen mindestens **30 Tage
 
 ## 6. Internationale Übermittlungen
 
-Die Kerninfrastruktur-Verarbeitung erfolgt in Hetzner-Rechenzentren in Deutschland und Finnland. Siehe die [Datenstandorte](/data-locations/) Seite für eine vollständige kategorieweise Matrix. Personenbezogene Daten werden nicht ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45) außerhalb des EWR übermittelt.
+Die bereitgestellte Konfiguration zielt für Kerninfrastruktur und Telemetrie-Objektspeicher auf EU/EWR-Regionen. Aktive Anbieter und Standorte hängen von der Bereitstellung ab; siehe die [Datenstandorte](/data-locations/) Seite für eine vollständige kategorieweise Matrix. Personenbezogene Daten werden nicht ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45) außerhalb des EWR übermittelt.
 
 ## 7. Sicherheitsmaßnahmen
 

@@ -159,10 +159,10 @@ Rate limits apply per API key per second. The server returns `429 Too Many Reque
 | Plan | Requests/s | Batch size |
 |------|-----------|------------|
 | Free | 10 | 100 |
-| Developer | 100 | 500 |
+| Starter | 100 | 500 |
 | Pro | 100 | 500 |
 | Growth | 500 | 1,000 |
-| Business | 500 | 1,000 |
+| Scale | 500 | 1,000 |
 | Enterprise | Custom | Custom |
 
 Rate-limit headers returned on every response:

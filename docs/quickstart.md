@@ -65,11 +65,14 @@ For better deliverability, verify your sending domain:
 
 | Type | Name | Value |
 |------|------|-------|
-| TXT | `@` | `v=spf1 include:amazonses.com include:_spf.apexmail.ee ~all` |
-| CNAME | `em._domainkey` | `dkim.apexmail.ee` |
+| TXT | `bounce` | `v=spf1 include:amazonses.com ~all` |
+| MX | `bounce` | `10 feedback-smtp.<aws-region>.amazonses.com` |
+| TXT | `<selector>._domainkey` | `v=DKIM1; k=rsa; p=<domain-specific-public-key>` |
 | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee` |
 
-> **Note:** The `include:amazonses.com` is required because ApexMail delivers email via AWS SES by default. If your account uses self-hosted SMTP delivery, the SPF record will differ — check your domain settings page for the exact values.
+> **Note:** Use `GET /v1/domains/:id/dns-records` as the source of truth for
+> the generated selector, DKIM public key, and AWS-region MX target. Do not
+> substitute a static selector, a DKIM CNAME, or an ApexMail SPF include.
 
 ## What's Next?
 

@@ -2,8 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use ai_service::inference::InferenceEngine;
-use ai_service::types::{Model, ModelStatus, ModelType};
+use ai_service::content::ContentOptimizer;
 use apexmail_lib::generate_id;
 use apexmail_lib::validation::is_valid_email;
 use billing_service::config::PaygPricing;
@@ -68,32 +67,21 @@ fn test_sustained_validation() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Sustained predictions — >5 000/sec
+// 3. Sustained deterministic subject scoring — >5 000/sec
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_sustained_predictions() {
-    let engine = InferenceEngine::new();
-    engine.register_model(Model {
-        id: "perf-model".into(),
-        name: "perf-model".into(),
-        version: "1.0".into(),
-        model_type: ModelType::Classification,
-        accuracy: 0.95,
-        trained_at: chrono::Utc::now(),
-        status: ModelStatus::Ready,
-    });
-
-    let input = serde_json::json!({"feature": 42});
+fn test_sustained_subject_scoring() {
+    let optimizer = ContentOptimizer::new();
     let dur = Duration::from_secs(2);
     let count = run_for(dur, || {
-        let _ = engine.run_prediction("perf-model", input.clone()).unwrap();
+        let _ = optimizer.score_subject_line("Your weekly account update is ready");
     });
     let throughput = count as f64 / dur.as_secs_f64();
-    eprintln!("Prediction throughput: {throughput:.0} ops/sec ({count} total)");
+    eprintln!("Subject scoring throughput: {throughput:.0} ops/sec ({count} total)");
     assert!(
         throughput > 5_000.0,
-        "expected >5 000 predictions/sec, got {throughput:.0}"
+        "expected >5 000 subject scorings/sec, got {throughput:.0}"
     );
 }
 

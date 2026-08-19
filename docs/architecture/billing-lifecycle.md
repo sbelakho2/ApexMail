@@ -40,31 +40,63 @@ See `docs/pricing.md` for the user-facing plan summary.
 
 ### Checkout and activation
 
-- `checkout.session.completed` marks the tenant status as active.
-- `customer.subscription.created` and `customer.subscription.updated` upsert `stripe_subscriptions`.
-- The Stripe price ID is mapped back to an ApexMail plan through the billing-service Stripe price mapping. The live `plans` table does not persist Stripe price columns; legacy API fields for plan Stripe price IDs are exposed as `null`.
-- When a subscription becomes active, the billing service can auto-provision included dedicated IPs.
+- `checkout.session.completed` is recorded as an informational event only; it
+	does not change tenant status or grant an entitlement.
+- `customer.subscription.created` and `customer.subscription.updated` upsert
+	`stripe_subscriptions` after signature, tenant-binding, catalog-price, and
+	status-transition checks.
+- The live `plans` table persists monthly and yearly Stripe price IDs. A
+	generic public Checkout request is accepted only for an active Starter, Pro,
+	Growth, or Scale price; Enterprise and PAYG use managed flows.
+- Only verified `active` and `trialing` Stripe subscriptions grant the mapped
+	paid tenant plan. Incomplete, delinquent, paused, unpaid, and canceled
+	states resolve the tenant to `free`.
+- When a subscription becomes active, the billing service can auto-provision
+	included dedicated IPs.
 
 ### Plan changes
 
-`POST /switch-plan` drives the current plan-change flow.
+`POST /checkout` is the only self-service plan-change entry point. It accepts
+only a Stripe price ID that maps to an active self-service ApexMail plan and
+adds the tenant and resolved plan ID to Stripe Checkout and subscription
+metadata.
 
-- For subscription-to-subscription changes, the route previews proration first, then updates the active subscription row and tenant plan inside a transaction.
-- For switches to `payg`, the current Stripe subscription is marked `cancel_at_period_end = true` and the tenant plan is updated to `payg` immediately; the response still returns the existing period end as the effective date of the Stripe cancellation.
-- Every change writes an audit-log entry with the previous plan, new plan, billing interval, and proration details.
+- Checkout creation does not change the tenant plan.
+- `customer.subscription.created` and `customer.subscription.updated` map the
+	confirmed Stripe price back to the active ApexMail plan and update the tenant
+	in a transaction.
+- `POST /switch-plan` is a retained compatibility endpoint that always returns
+	`409 CHECKOUT_REQUIRED`; it cannot update tenant or subscription records.
+- Plan-change proration is calculated and applied by Stripe. Any ApexMail
+  proration preview is informational only and never changes a subscription or
+  tenant entitlement.
 
 ### Cancellation
 
-`POST /cancel` supports two modes:
+`POST /cancel` is retained as a compatibility endpoint and always returns
+`409 BILLING_PORTAL_REQUIRED`. A cancellation must be initiated through a
+Stripe billing portal session, then reconciled from a verified Stripe webhook.
 
-- end-of-period cancellation: sets `cancel_at_period_end = true`
-- immediate cancellation: marks the subscription canceled now and downgrades the tenant to `free`
+Stripe `customer.subscription.deleted` events mark the known Stripe
+subscription canceled and downgrade the matching tenant to `free`.
 
-Stripe `customer.subscription.deleted` events also downgrade the tenant to `free` and mark the Stripe subscription canceled.
+### Enterprise contracts
+
+Enterprise entitlement is distinct from generic Checkout. A current signed
+Enterprise contract can activate the tenant's Enterprise plan. Contract state
+transitions are constrained to the signed lifecycle: only a pending-signature,
+currently effective contract can be activated.
+
+The contract cancellation API supports immediate termination only. It rejects a
+future effective date rather than pretending that a scheduler will later change
+access. Immediate termination is transactional: it downgrades the tenant to
+Free only when no other current active Enterprise contract remains. It never
+substitutes another paid plan or creates a Stripe entitlement locally.
 
 ## Proration Logic
 
-Plan-change previews are computed in `preview_plan_proration()`.
+Plan-change previews are diagnostic estimates only; Stripe is the source of
+truth for charge and credit calculations.
 
 The current implementation:
 

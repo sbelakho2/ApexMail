@@ -18,8 +18,7 @@
     "/v1/events/lists",
     "/v1/analytics/ai/insights",
     "/api/v1/operator/*",
-    "/api/v1/discovery/run",
-    "/api/v1/campaigns/create"
+    "/api/v1/discovery/run"
   ],
   "backendRoutePatterns": [
     "/v1/campaigns*",
@@ -34,7 +33,6 @@
     "/v1/events/lists",
     "/v1/analytics/ai/insights",
     "/api/v1/operator/*",
-    "/api/v1/discovery/run",
-    "/api/v1/campaigns/create"
+    "/api/v1/discovery/run"
   ]
 }

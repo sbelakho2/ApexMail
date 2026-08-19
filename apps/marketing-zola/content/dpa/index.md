@@ -1,6 +1,6 @@
 +++
 title = "Data Processing Agreement"
-description = "ApexMail DPA — GDPR-compliant data processing terms."
+description = "ApexMail DPA — Article 28 data-processing terms."
 template = "prose.html"
 
 [extra]
@@ -45,7 +45,9 @@ The current authorised subprocessors are maintained in the [ApexMail Subprocesso
 
 | Sub-processor | Purpose | Location | Transfer Safeguard |
 |---|---|---|---|
-| Hetzner Online GmbH | Core infrastructure (compute, storage) | EU (Germany/Finland) | Not applicable — processing remains within the EEA |
+| Hetzner Online GmbH | Core infrastructure (compute, storage) | Configured EU/EEA region | Confirm the active deployment and applicable transfer safeguard |
+| Amazon Web Services, Inc. | Telemetry object storage when enabled | Configured S3 region (default: `eu-central-1`) | Confirm the active deployment and applicable transfer safeguard |
+| Amazon Web Services, Inc. | Email-delivery transport when enabled | Configured SES region | Confirm the active deployment and applicable transfer safeguard |
 | Google LLC | Optional OAuth authentication | Global (US entity, data processed per OAuth config) | Standard Contractual Clauses |
 | GitHub, Inc. | Optional OAuth authentication | Global (US entity) | Standard Contractual Clauses |
 | Stripe, Inc. | Payment processing | US (primary), India (support) | Standard Contractual Clauses |
@@ -58,7 +60,7 @@ The Processor shall notify the Controller at least **30 days** before adding or 
 
 ## 6. International Transfers
 
-Core infrastructure processing occurs in Hetzner data centers in Germany and Finland. See the [Data Locations](/data-locations/) page for a complete category-by-category matrix. No personal data is transferred outside the EEA without appropriate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
+The supplied deployment configuration targets EU/EEA regions for core infrastructure and telemetry object storage. Active providers and locations are deployment-specific; see the [Data Locations](/data-locations/) page for a complete category-by-category matrix. No personal data is transferred outside the EEA without appropriate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
 
 ## 7. Security Measures
 
@@ -66,7 +68,7 @@ Core infrastructure processing occurs in Hetzner data centers in Germany and Fin
 - TLS 1.2+ in transit (TLS 1.3 preferred)
 - Argon2id password hashing
 - Audit logging with hash-chain integrity
-- SOC 2-aligned security controls (SOC 2 Type II planned Q2 2028; Type I planned Q3 2027)
+- Security controls and audit logging; ApexMail is not currently SOC 2 certified
 - Access control with multi-factor authentication
 - Weekly automated vulnerability scanning; first external penetration test planned — results to be published after completion and remediation
 

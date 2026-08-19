@@ -1,6 +1,6 @@
 +++
 title = "Transactional Email Solution"
-description = "Application-driven transactional email: password resets, receipts, notifications. EU-hosted REST API and SMTP relay with signed webhooks."
+description = "Application-driven transactional email: password resets, receipts, notifications. REST API and SMTP relay with signed webhooks and EU/EEA-oriented deployment options."
 template = "prose.html"
 +++
 
@@ -66,11 +66,11 @@ Transactional email is mission-critical infrastructure. Delayed password resets 
 | Plan | Monthly Volume | Support |
 |---|---|---|
 | Free | 30,000 emails | Community |
-| Developer | 50,000 emails | 2 business days |
-| Pro | 150,000 emails | 1 business day |
-| Growth | 500,000 emails | 8 business hours |
-| Business | 2,000,000 emails | 4 business hours |
-| Enterprise | 5,000,000+ emails | Negotiated |
+| Starter | 50,000 emails | Email support |
+| Pro | 150,000 emails | Email support |
+| Growth | 500,000 emails | Email support |
+| Scale | 2,000,000 emails | Priority support |
+| Enterprise | 5,000,000 emails | Dedicated support |
 
 ## Security Considerations
 
@@ -81,9 +81,9 @@ Transactional email is mission-critical infrastructure. Delayed password resets 
 
 ## Compliance Considerations
 
-- EU data residency. All processing and storage in EEA data centers.
-- DPA available on Business and Enterprise plans.
-- BAA review eligibility for Enterprise and Dedicated Tenant plans.
+- EU/EEA-oriented deployment options; confirm active data locations and transfer safeguards for the deployment.
+- DPA is available under the applicable ApexMail agreement.
+- HIPAA availability and BAAs are not currently offered.
 - Customer responsible for recipient consent and opt-out management.
 
 ## Known Limitations

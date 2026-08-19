@@ -1,6 +1,14 @@
-# Hybrid Email Infrastructure
+# Historical Hybrid Email Infrastructure
 
-## Core Principle
+> **Superseded operational design:** The per-message hybrid routing described
+> below is not enabled by the current worker. Each deployment explicitly uses
+> `EMAIL_TRANSPORT_TYPE=ses` (default) or `EMAIL_TRANSPORT_TYPE=smtp`. Domains
+> always use generated direct DKIM TXT records; SES signs through BYODKIM and
+> custom MAIL FROM, while SMTP signs locally with the same key. See
+> [Deployment Configuration](../deployment/configuration.md) for the current
+> operational model.
+
+## Superseded Design
 
 | Path | Provider | Transport | When |
 |------|----------|-----------|------|

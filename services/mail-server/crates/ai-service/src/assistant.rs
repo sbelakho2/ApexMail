@@ -1,4 +1,4 @@
-//! AI Assistant — subject line suggestions, content improvement, sentiment, summarisation.
+//! Deterministic templates and rules for subject lines and basic text helpers.
 
 use crate::types::{ContentSuggestion, ImprovementType};
 
@@ -91,7 +91,7 @@ const FORMAL_TEMPLATES: &[TemplateFn] = &[formal_0, formal_1, formal_2, formal_3
 const CURIOUS_TEMPLATES: &[TemplateFn] = &[curious_0, curious_1, curious_2, curious_3, curious_4];
 const NEUTRAL_TEMPLATES: &[TemplateFn] = &[neutral_0, neutral_1, neutral_2, neutral_3, neutral_4];
 
-/// AI-powered assistant for email content tasks.
+/// Deterministic helper for email content tasks.
 pub struct AiAssistant;
 
 impl Default for AiAssistant {
@@ -106,7 +106,8 @@ impl AiAssistant {
     }
 
     /// Generate subject line suggestions for a topic with a given tone.
-    /// `tone` can be "urgent", "friendly", "formal", "curious", "playful".
+    /// `tone` can be "urgent", "friendly", "formal", or "curious".
+    /// Unrecognised tones use neutral templates.
     pub fn suggest_subject_lines(&self, topic: &str, tone: &str, count: usize) -> Vec<String> {
         let templates: &[TemplateFn] = match tone {
             "urgent" => URGENT_TEMPLATES,

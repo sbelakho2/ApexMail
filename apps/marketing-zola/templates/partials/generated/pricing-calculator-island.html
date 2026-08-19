@@ -16,60 +16,67 @@
       <p class="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] }}{% else %}Transparent plan math with a 30,000-email free tier, published overages, and Enterprise pricing reserved for managed ownership.{% endif %}</p>
     </div>
 
-    {# ── Volume Tier Comparison ─────────────────────── #}
+    {# ── Subscription Catalog ───────────────────────── #}
     <div class="apex-card overflow-hidden mb-16 border-surface-200/50">
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
             <tr class="border-b border-surface-100 bg-surface-100/50">
-              <th class="text-left px-8 py-6 font-bold text-surface-950 tracking-wider text-xs">Monthly Volume</th>
-              <th class="text-right px-8 py-6 font-bold text-brand-500 tracking-wider text-xs">ApexMail</th>
-              <th class="text-right px-8 py-6 font-bold text-surface-400 tracking-wider text-xs">SendGrid</th>
-              <th class="text-right px-8 py-6 font-bold text-surface-400 tracking-wider text-xs">Mailchimp</th>
-              <th class="text-right px-8 py-6 font-bold text-success-600 tracking-wider text-xs">You Save</th>
+              <th class="text-left px-8 py-6 font-bold text-surface-950 tracking-wider text-xs">Plan</th>
+              <th class="text-right px-8 py-6 font-bold text-brand-500 tracking-wider text-xs">Monthly price</th>
+              <th class="text-right px-8 py-6 font-bold text-surface-950 tracking-wider text-xs">Annual price</th>
+              <th class="text-right px-8 py-6 font-bold text-surface-950 tracking-wider text-xs">Included emails</th>
+              <th class="text-right px-8 py-6 font-bold text-surface-950 tracking-wider text-xs">Dedicated IPs</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-surface-100">
             <tr class="hover:bg-surface-100 transition-colors">
-              <td class="px-8 py-6 font-bold text-surface-950">30,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">Free</td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$14.95</td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$20.00</td>
-              <td class="px-8 py-6 text-right font-bold text-success-600">100%</td>
+              <td class="px-8 py-6 font-bold text-surface-950">Free</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">$0</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$0</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">30,000</td>
+              <td class="px-8 py-6 text-right text-surface-500">—</td>
             </tr>
             <tr class="hover:bg-surface-100 transition-colors">
-              <td class="px-8 py-6 font-bold text-surface-950">50,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">€29</td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$89.95</td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$110.00</td>
-              <td class="px-8 py-6 text-right font-bold text-success-600">68%</td>
+              <td class="px-8 py-6 font-bold text-surface-950">Starter</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">$25</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$250/yr</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">50,000</td>
+              <td class="px-8 py-6 text-right text-surface-500">—</td>
             </tr>
             <tr class="hover:bg-surface-100 transition-colors">
-              <td class="px-8 py-6 font-bold text-surface-950">100,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">€69 <span class="block text-xs font-bold tracking-tight text-surface-400">Developer + overage</span></td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$189.95</td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$230.00</td>
-              <td class="px-8 py-6 text-right font-bold text-success-600">64%</td>
+              <td class="px-8 py-6 font-bold text-surface-950">Pro</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">$65</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$650/yr</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">150,000</td>
+              <td class="px-8 py-6 text-right text-surface-500">Add-on</td>
             </tr>
             <tr class="hover:bg-surface-100 transition-colors">
-              <td class="px-8 py-6 font-bold text-surface-950">500,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">€229 <span class="block text-xs font-bold tracking-tight text-surface-400">Growth</span></td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$749.95</td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$900.00</td>
-              <td class="px-8 py-6 text-right font-bold text-success-600">69%</td>
+              <td class="px-8 py-6 font-bold text-surface-950">Growth</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">$150</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$1,500/yr</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">500,000</td>
+              <td class="px-8 py-6 text-right text-surface-500">1 included</td>
             </tr>
             <tr class="hover:bg-surface-100 transition-colors bg-brand-50/20">
-              <td class="px-8 py-6 font-bold text-surface-950 font-display text-lg">1,000,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums text-lg">€404 <span class="block text-xs font-bold tracking-tight text-surface-400">Growth + overage</span></td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$1,199.95</td>
-              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$1,510.00</td>
-              <td class="px-8 py-6 text-right font-bold text-success-600 text-lg">66%</td>
+              <td class="px-8 py-6 font-bold text-surface-950">Scale</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">$350</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$3,500/yr</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">2,000,000</td>
+              <td class="px-8 py-6 text-right text-surface-500">3 included</td>
+            </tr>
+            <tr class="hover:bg-surface-100 transition-colors bg-brand-50/20">
+              <td class="px-8 py-6 font-bold text-surface-950">Enterprise</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">$3,000</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$30,000/yr</td>
+              <td class="px-8 py-6 text-right text-surface-500 tabular-nums">5,000,000</td>
+              <td class="px-8 py-6 text-right text-surface-500">10 included</td>
             </tr>
           </tbody>
         </table>
       </div>
       <p class="px-8 py-4 text-xs text-surface-500 border-t border-surface-100">
-        ApexMail totals use the lowest published subscription plan plus subscription overage when that is cheaper than the next tier. Competitor prices are illustrative public-list rates; verify current rates on each provider's site before purchasing.
+        Annual billing is 10&times; the monthly price (two months free). Subscription overages are $0.40 per additional 1,000 emails. PAYG usage is configured through approved billing accounts rather than this subscription catalog.
       </p>
     </div>
 
@@ -77,15 +84,15 @@
     <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-16">
       <div class="apex-card p-6">
         <span class="block font-bold text-surface-950 mb-1">Dedicated IP</span>
-        <span class="block text-sm text-surface-500 font-medium">€30/mo per IP</span>
+        <span class="block text-sm text-surface-500 font-medium">$30/mo per IP (Pro+)</span>
       </div>
       <div class="apex-card p-6">
         <span class="block font-bold text-surface-950 mb-1">SSO/SAML</span>
-        <span class="block text-sm text-surface-500 font-medium">Business+ included</span>
+        <span class="block text-sm text-surface-500 font-medium">Scale+ included</span>
       </div>
       <div class="apex-card p-6">
-        <span class="block font-bold text-surface-950 mb-1">HIPAA Compliance</span>
-        <span class="block text-sm text-surface-500 font-medium">Enterprise plan</span>
+        <span class="block font-bold text-surface-950 mb-1">HIPAA Availability</span>
+        <span class="block text-sm text-surface-500 font-medium">Not currently offered</span>
       </div>
       <div class="apex-card p-6">
         <span class="block font-bold text-surface-950 mb-1">Private Cloud</span>
@@ -97,9 +104,9 @@
       <div class="max-w-2xl mx-auto p-12 bg-surface-950 rounded-sm text-white shadow-premium text-center relative overflow-hidden">
         <div class="absolute top-0 left-0 w-full h-1 bg-brand-500"></div>
       <h4 class="text-3xl font-bold mb-4 font-display">Ready to switch?</h4>
-      <p class="text-surface-400 text-lg leading-relaxed mb-10">Migration is seamless. Use our SMTP relay or API wrapper to start sending in minutes.</p>
+      <p class="text-surface-400 text-lg leading-relaxed mb-10">Create a Free workspace, verify your email, then configure paid billing securely when you are ready.</p>
       <a href="{{ config.extra.app_url }}/signup" class="btn-primary px-10 py-4 text-lg inline-flex items-center justify-center">
-        Start Free Trial
+        Start Free
         <svg class="ml-2 w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>
         </svg>

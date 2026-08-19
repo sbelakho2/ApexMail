@@ -88,7 +88,7 @@ Any published API latency number must specify the exact measurement boundaries.
 | Metric type | p50 (median), p95, p99 |
 | Sample size | All API requests in the measurement period |
 | Sample period | Rolling 30 days |
-| Regions | All regions where API servers are deployed (EU — Helsinki) |
+| Regions | All active production API regions, identified in the applicable deployment |
 | Included requests | All authenticated API requests (any HTTP method, any endpoint) |
 | Excluded requests | Health-check probes, unauthenticated requests, rate-limited requests (HTTP 429) |
 | Measurement | Server-side timing via Prometheus histogram |
@@ -115,7 +115,7 @@ Any published API latency number must specify the exact measurement boundaries.
 | Metric type | p50, p95 |
 | Sample size | All sandbox-mode requests in the measurement period |
 | Sample period | Rolling 7 days |
-| Regions | EU (Helsinki) |
+| Regions | Configured sandbox region |
 | Limitations | Guidance target only. Actual latency varies with request size, validation complexity, and template rendering. Does not touch production delivery pipeline. |
 
 ### 2.3 Queue-Processing Latency
@@ -127,7 +127,7 @@ Any published API latency number must specify the exact measurement boundaries.
 | Metric type | p50, p95, p99 |
 | Sample size | All accepted messages in the measurement period |
 | Sample period | Rolling 30 days |
-| Regions | EU (Helsinki) |
+| Regions | Configured queue-processing region |
 | Included | Internal validation, template rendering, recipient resolution, spam-filter assessment |
 | Excluded | Messages held for scheduled/send-at delivery before their scheduled time |
 | Measurement | Queue processor metrics (Prometheus histogram) |
@@ -222,7 +222,7 @@ Uptime is measured per component, not as a single global number. Each component 
 | Rule | Value |
 |---|---|
 | Probe interval | in minutes |
-| Probe locations | Minimum 3 geographic locations (Helsinki, Frankfurt, Amsterdam) |
+| Probe locations | Minimum 3 independently operated geographic locations, documented with each measurement period |
 | Failed-probe threshold | 3 consecutive failures from at least 2 locations before component marked degraded |
 | Partial outage | If some probe locations succeed and some fail, component marked degraded. If all locations fail, component marked down |
 | Degraded performance | Response time > 5x baseline for 3 consecutive probes marks component degraded |
@@ -253,9 +253,9 @@ Uptime is measured per component, not as a single global number. Each component 
 
 | Location | Provider | Type |
 |---|---|---|
-| Helsinki, Finland | Hetzner | Primary — same region as production infrastructure |
-| Frankfurt, Germany | Hetzner | Secondary — independent region |
-| Amsterdam, Netherlands | Independent VPS | Tertiary — fully independent infrastructure |
+| Deployment-selected primary probe | Documented for the measurement period | Primary probe; not a representation of every production region |
+| Independent secondary probe | Documented for the measurement period | Independent secondary probe |
+| Independent tertiary probe | Documented for the measurement period | Independent tertiary probe |
 
 ---
 

@@ -5,10 +5,14 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use apexmail_lib::dkim::{
+    decrypt_dkim_private_key, dkim_private_key_aad, dkim_public_keys_match,
+    public_key_base64_from_private_key_pem,
+};
 use chrono::{DateTime, Utc};
 use moka::sync::Cache;
 use sqlx::PgPool;
-use std::sync::{Mutex, RwLock};
+use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -21,7 +25,7 @@ use super::types::{
 };
 use crate::common::{
     Backpressure, BackpressureConfig, CircuitBreaker, CircuitBreakerConfig, EmailConfig,
-    ProcessorError, ProcessorResult, RedisPool,
+    ProcessorError, ProcessorResult, RedisPool, TransportType,
 };
 
 /// Maximum suppression cache size.
@@ -130,8 +134,6 @@ pub struct EmailProcessor {
         reason = "warmup day cache is retained for scheduled warmup routing integration"
     )]
     warmup_day_cache: Cache<String, i32>,
-    dkim_keys: RwLock<HashMap<String, DkimConfig>>,
-    domain_cache: Cache<String, Domain>,
 
     // Circuit breakers for SMTP endpoints
     smtp_circuit_breaker: CircuitBreaker,
@@ -179,11 +181,6 @@ impl EmailProcessor {
                 .max_capacity(1000)
                 .time_to_live(Duration::from_secs(3600))
                 .build(),
-            dkim_keys: RwLock::new(HashMap::new()),
-            domain_cache: Cache::builder()
-                .max_capacity(1000)
-                .time_to_live(Duration::from_secs(300))
-                .build(),
             smtp_circuit_breaker,
             recent_outcomes: Mutex::new(Vec::new()),
             error_cooldown_until: AtomicI64::new(0),
@@ -202,9 +199,11 @@ impl EmailProcessor {
         self.transport.verify().await?;
         info!("Email transport verified");
 
-        // Load DKIM keys
-        if self.config.dkim.enabled {
-            self.load_dkim_keys().await?;
+        if self.config.transport_type == TransportType::Smtp && !self.config.dkim.enabled {
+            return Err(ProcessorError::Config(
+                "DKIM_ENABLED must be true when EMAIL_TRANSPORT_TYPE=smtp; verified domains must not be sent unsigned"
+                    .into(),
+            ));
         }
 
         self.is_running.store(true, Ordering::SeqCst);
@@ -525,6 +524,18 @@ impl EmailProcessor {
 
         let result = self.process_job_inner(&job).await;
 
+        if let Err(error) = &result {
+            if matches!(error, ProcessorError::Job(_) | ProcessorError::Dkim(_)) {
+                if let Err(mark_error) = self.handle_permanent_job_failure(&job, error).await {
+                    error!(
+                        job_id = %job.id,
+                        error = %mark_error,
+                        "failed to dead-letter permanently rejected email job"
+                    );
+                }
+            }
+        }
+
         self.active_jobs.fetch_sub(1, Ordering::SeqCst);
 
         // Record outcome for error rate tracking
@@ -537,6 +548,7 @@ impl EmailProcessor {
                 SendOutcome::HardBounce
             }
             Err(ProcessorError::RateLimited(_)) => SendOutcome::RateLimit,
+            Err(ProcessorError::Job(_) | ProcessorError::Dkim(_)) => SendOutcome::Rejected,
             Err(_) => SendOutcome::TransportError,
         };
         self.record_outcome(outcome);
@@ -560,14 +572,17 @@ impl EmailProcessor {
             ));
         }
 
+        // Load and validate current domain state before any per-domain rate
+        // accounting or delivery. A queued job can outlive a domain's
+        // verification or deletion, so API-time authorization alone is not
+        // enough.
+        let domain = self.get_domain(job).await?;
+
         // Check warmup limits
-        if self.config.warmup.enabled && !self.check_warmup_limit(job).await? {
+        if self.config.warmup.enabled && !self.check_warmup_limit(job, &domain).await? {
             self.requeue_job(job, "warmup_limit").await?;
             return Ok(());
         }
-
-        // Get domain
-        let domain = self.get_domain(job).await?;
 
         // Prepare email
         let email = self.prepare_email(job, &domain)?;
@@ -612,9 +627,11 @@ impl EmailProcessor {
     /// atomic `INCR` for cross-worker correctness. The first worker to increment
     /// (return value == 1) also sets the TTL via `EXPIRE` (race-safe; extra EXPIRE
     /// calls are harmless). All workers share a single counter per domain per day.
-    async fn check_warmup_limit(&self, job: &EmailJob) -> ProcessorResult<bool> {
-        let domain = self.get_domain(job).await?;
-
+    async fn check_warmup_limit(
+        &self,
+        job: &EmailJob,
+        domain: &Domain,
+    ) -> ProcessorResult<bool> {
         if !domain.warmup_enabled {
             return Ok(true);
         }
@@ -665,40 +682,24 @@ impl EmailProcessor {
         Ok(true)
     }
 
-    /// Get domain configuration.
+    /// Get the ready sending-domain configuration for a queued job.
     ///
-    /// Falls back to a non-DKIM domain derived from the envelope sender when
-    /// the job has no registered `domain_id` (NULL/empty), so queued mail
-    /// from unknown domains still flows instead of dead-lettering.
+    /// Legacy jobs without a registered domain are permanently rejected: an
+    /// unsigned fallback would turn a revoked or spoofed sender into delivery.
     async fn get_domain(&self, job: &EmailJob) -> ProcessorResult<Domain> {
         if job.domain_id.is_empty() {
-            return Ok(Domain {
-                id: String::new(),
-                tenant_id: job.tenant_id.clone(),
-                domain: job
-                    .from
-                    .rsplit_once('@')
-                    .map(|(_, d)| d.to_string())
-                    .unwrap_or_default(),
-                dkim_selector: None,
-                dkim_private_key: None,
-                warmup_enabled: false,
-                warmup_day: 0,
-                return_path: None,
-            });
+            return Err(ProcessorError::Job(
+                "queued message has no authorized sending domain".into(),
+            ));
         }
 
-        let cache_key = format!("{}:{}", job.tenant_id, job.domain_id);
-
-        if let Some(domain) = self.domain_cache.get(&cache_key) {
-            return Ok(domain);
-        }
-
+        let requires_ses = self.config.transport_type == TransportType::Ses;
         let domain = sqlx::query_as::<_, Domain>(
             r#"
             SELECT
                 id::text, tenant_id, name AS domain,
                 dkim_selector,
+                dkim_public_key,
                 dkim_private_key,
                 -- Per-domain IP warmup lives on dedicated_ips/ip_pool_addresses,
                 -- not on domains (see migrations 071/093); no warmup at the
@@ -708,15 +709,39 @@ impl EmailProcessor {
                 NULL::text AS return_path
             FROM domains
             WHERE id = $1::uuid AND tenant_id = $2
+              AND status = 'verified'
+              AND dkim_enabled = true
+              AND dkim_selector IS NOT NULL
+              AND dkim_public_key IS NOT NULL
+              AND dkim_private_key IS NOT NULL
+              AND dkim_private_key LIKE 'dkim:v1:%'
+              AND ($3::boolean = false OR ses_verified = true)
             "#,
         )
         .bind(&job.domain_id)
         .bind(&job.tenant_id)
+        .bind(requires_ses)
         .fetch_optional(&self.db)
         .await?
-        .ok_or_else(|| ProcessorError::Job(format!("Domain not found: {}", job.domain_id)))?;
+        .ok_or_else(|| {
+            ProcessorError::Job(format!(
+                "sending domain is absent, unverified, incomplete, or not ready for {} delivery",
+                if requires_ses { "SES" } else { "SMTP" }
+            ))
+        })?;
 
-        self.domain_cache.insert(cache_key, domain.clone());
+        let sender_domain = job
+            .from
+            .rsplit_once('@')
+            .map(|(_, domain)| domain.trim().trim_end_matches('.'))
+            .filter(|domain| !domain.is_empty())
+            .ok_or_else(|| ProcessorError::Job("queued message has an invalid sender address".into()))?;
+        if !sender_domain.eq_ignore_ascii_case(&domain.domain) {
+            return Err(ProcessorError::Job(
+                "queued sender address does not match its authorized domain".into(),
+            ));
+        }
+
         Ok(domain)
     }
 
@@ -785,24 +810,17 @@ impl EmailProcessor {
             }
         }
 
-        // DKIM config
-        let dkim = if self.config.dkim.enabled {
-            domain
-                .dkim_private_key
-                .as_ref()
-                .map(|key| DkimConfig {
-                    selector: domain
-                        .dkim_selector
-                        .clone()
-                        .unwrap_or_else(|| self.config.dkim.selector.clone()),
-                    domain: domain.domain.clone(),
-                    private_key: key.clone(),
-                })
-                .or_else(|| {
-                    // Fallback:check pre-loaded dkim_keys map
-                    let dkim_keys = self.dkim_keys.read().unwrap_or_else(|e| e.into_inner());
-                    dkim_keys.get(&domain.id).cloned()
-                })
+        // SMTP delivery signs with the key whose public half was displayed in
+        // the dashboard. SES delivery is signed by SES BYODKIM using that same
+        // key, so it intentionally does not attach a second local signature.
+        let dkim = if self.config.transport_type == TransportType::Smtp {
+            if !self.config.dkim.enabled {
+                return Err(ProcessorError::Config(
+                    "DKIM is required for SMTP delivery of verified domains".into(),
+                ));
+            }
+
+            Some(smtp_dkim_config_for_domain(domain)?)
         } else {
             None
         };
@@ -1127,6 +1145,44 @@ impl EmailProcessor {
         Ok(())
     }
 
+    /// Permanently reject a queue row that cannot safely be delivered, such as
+    /// a legacy row with no domain ID or a DKIM key mismatch. Retrying such a
+    /// row cannot repair it and must never degrade into an unsigned send.
+    async fn handle_permanent_job_failure(
+        &self,
+        job: &EmailJob,
+        error: &ProcessorError,
+    ) -> ProcessorResult<()> {
+        let error_message = error.to_string();
+        let mut transaction = self.db.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE email_queue
+             SET status = 'failed', error_message = $1, locked_until = NULL, updated_at = NOW()
+             WHERE id = $2::uuid AND status = 'processing'",
+        )
+        .bind(&error_message)
+        .bind(&job.id)
+        .execute(&mut *transaction)
+        .await?;
+
+        if updated.rows_affected() > 0 {
+            sqlx::query(
+                "INSERT INTO email_dlq (id, job_id, tenant_id, message_id, error_message, created_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW())",
+            )
+            .bind(format!("dlq_{}", uuid::Uuid::new_v4()))
+            .bind(&job.id)
+            .bind(&job.tenant_id)
+            .bind(&job.message_id)
+            .bind(&error_message)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Requeue a job for later processing.
     async fn requeue_job(&self, job: &EmailJob, reason: &str) -> ProcessorResult<()> {
         let retry_at = Utc::now() + chrono::Duration::minutes(5);
@@ -1176,7 +1232,12 @@ impl EmailProcessor {
         if len >= ERROR_WINDOW_SIZE {
             let failures = outcomes
                 .iter()
-                .filter(|(o, _)| !matches!(o, SendOutcome::Success | SendOutcome::Suppressed))
+                .filter(|(o, _)| {
+                    !matches!(
+                        o,
+                        SendOutcome::Success | SendOutcome::Suppressed | SendOutcome::Rejected
+                    )
+                })
                 .count();
 
             if failures >= ERROR_THRESHOLD {
@@ -1193,40 +1254,39 @@ impl EmailProcessor {
         }
     }
 
-    /// Load DKIM keys from database.
-    async fn load_dkim_keys(&self) -> ProcessorResult<()> {
-        // Real columns added by migrations 093/094: only domains with signing
-        // actually enabled AND complete key material are eligible. (This used
-        // to be `WHERE false`, which disabled per-domain DKIM signing.)
-        let keys: Vec<(String, String, String, String)> = sqlx::query_as(
-            r#"
-            SELECT id::text, name AS domain, dkim_selector, dkim_private_key
-            FROM domains
-            WHERE dkim_enabled = true
-              AND dkim_private_key IS NOT NULL
-              AND dkim_selector IS NOT NULL
-            "#,
-        )
-        .fetch_all(&self.db)
-        .await?;
+}
 
-        let mut dkim_keys = self.dkim_keys.write().unwrap_or_else(|e| e.into_inner());
-        dkim_keys.clear();
-
-        for (id, domain, selector, key) in keys {
-            dkim_keys.insert(
-                id,
-                DkimConfig {
-                    selector,
-                    domain,
-                    private_key: key,
-                },
-            );
-        }
-
-        info!(count = dkim_keys.len(), "Loaded DKIM keys");
-        Ok(())
+fn smtp_dkim_config_for_domain(domain: &Domain) -> ProcessorResult<DkimConfig> {
+    let selector = domain
+        .dkim_selector
+        .as_deref()
+        .ok_or_else(|| ProcessorError::Dkim("verified domain is missing a DKIM selector".into()))?;
+    let encrypted_private_key = domain
+        .dkim_private_key
+        .as_deref()
+        .ok_or_else(|| ProcessorError::Dkim("verified domain is missing a DKIM private key".into()))?;
+    let public_key = domain
+        .dkim_public_key
+        .as_deref()
+        .ok_or_else(|| ProcessorError::Dkim("verified domain is missing a DKIM public key".into()))?;
+    let aad = dkim_private_key_aad(&domain.tenant_id, &domain.id);
+    let private_key = decrypt_dkim_private_key(encrypted_private_key, &aad).map_err(|error| {
+        ProcessorError::Dkim(format!("unable to decrypt the domain DKIM key: {error}"))
+    })?;
+    let derived_public_key = public_key_base64_from_private_key_pem(&private_key).map_err(|error| {
+        ProcessorError::Dkim(format!("domain DKIM private key is invalid: {error}"))
+    })?;
+    if !dkim_public_keys_match(public_key, &derived_public_key) {
+        return Err(ProcessorError::Dkim(
+            "domain DKIM public and private key material does not match".into(),
+        ));
     }
+
+    Ok(DkimConfig {
+        selector: selector.to_string(),
+        domain: domain.domain.clone(),
+        private_key,
+    })
 }
 
 use base64::Engine;
@@ -1552,12 +1612,19 @@ mod tests {
         if len > ERROR_WINDOW_SIZE {
             outcomes.drain(0..(len - ERROR_WINDOW_SIZE));
         }
-        // Check if cooldown should be triggered
-        let failures = outcomes
-            .iter()
-            .filter(|(o, _)| !matches!(o, SendOutcome::Success | SendOutcome::Suppressed))
-            .count();
-        failures >= ERROR_THRESHOLD
+        // Match `record_outcome`: permanent local rejections are not transport
+        // failures and cannot open the cooldown circuit.
+        outcomes.len() >= ERROR_WINDOW_SIZE
+            && outcomes
+                .iter()
+                .filter(|(o, _)| {
+                    !matches!(
+                        o,
+                        SendOutcome::Success | SendOutcome::Suppressed | SendOutcome::Rejected
+                    )
+                })
+                .count()
+                >= ERROR_THRESHOLD
     }
 
     #[test]
@@ -1654,6 +1721,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_permanent_rejections_do_not_trigger_transport_cooldown() {
+        let mut outcomes = Vec::new();
+        let now = Instant::now();
+
+        for _ in 0..ERROR_WINDOW_SIZE {
+            assert!(
+                !simulate_error_tracking(&mut outcomes, SendOutcome::Rejected, now),
+                "invalid domain or DKIM material must not be counted as a transport outage"
+            );
+        }
+
+        assert_eq!(outcomes.len(), ERROR_WINDOW_SIZE);
     }
 
     #[test]
@@ -1804,6 +1886,34 @@ mod tests {
             60_i64.saturating_mul(1_073_741_824),
             "attempt 30: delay capped at 2^30 * base"
         );
+    }
+
+    #[test]
+    fn smtp_dkim_configuration_requires_matching_key_pair() {
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().unwrap();
+        let mut domain = Domain {
+            id: "domain-1".into(),
+            tenant_id: "tenant-1".into(),
+            domain: "example.com".into(),
+            dkim_selector: Some("am-test".into()),
+            dkim_public_key: Some(key_pair.public_key),
+            // Plaintext is accepted only as a legacy migration read path; new
+            // API writes are encrypted and covered in apexmail-lib tests.
+            dkim_private_key: Some(key_pair.private_key_pem.to_string()),
+            warmup_enabled: false,
+            warmup_day: 0,
+            return_path: None,
+        };
+
+        let config = smtp_dkim_config_for_domain(&domain).unwrap();
+        assert_eq!(config.selector, "am-test");
+        assert!(config.private_key.starts_with("-----BEGIN PRIVATE KEY-----"));
+
+        domain.dkim_public_key = Some("not-the-same-key".into());
+        assert!(matches!(
+            smtp_dkim_config_for_domain(&domain),
+            Err(ProcessorError::Dkim(message)) if message.contains("does not match")
+        ));
     }
 
     // ---------------------------------------------------------------------------

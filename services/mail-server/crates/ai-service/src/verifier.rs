@@ -388,30 +388,31 @@ static EMAIL_RE: Lazy<Regex> = Lazy::new(|| {
         violations
     }
 
-    // ── Forbidden claims ───────────────────────────────────────────────
+    // ── DNS and forbidden claims ───────────────────────────────────────
 
     fn check_dns(&self, text: &str) -> Vec<Violation> {
         let mut v = Vec::new();
         let lower = text.to_lowercase();
-        if lower.contains("dkim") || lower.contains("_domainkey") {
-            if !lower.contains(".dkim.apexmail.ee") {
-                v.push(Violation::ForbiddenDomain { domain: "DKIM target must end with .dkim.apexmail.ee".into() });
+        // ApexMail provisions a unique selector and public key for every
+        // domain. The old CNAME/global-SPF support text is specifically unsafe:
+        // it can cause customers to publish another tenant's nonexistent
+        // record. Exact values must originate in an authenticated domain lookup.
+        let obsolete_static_claims = [
+            "apexmail.dkim.apexmail.ee",
+            "include:spf.apexmail.ee",
+            "bounce.apexmail.ee",
+            "bounces.apexmail.ee",
+            "dkim target always",
+            "dkim cname: host=apexmail._domainkey",
+        ];
+        for claim in obsolete_static_claims {
+            if lower.contains(claim) {
+                v.push(Violation::ForbiddenDomain {
+                    domain: format!(
+                        "obsolete static sender-DNS claim: {claim}; retrieve the tenant's exact DNS records"
+                    ),
+                });
             }
-            for bad in &[
-                "apexmail._domainkey.ee",
-                "_domainkey.ee.apexmail.ee",
-                "domainkey.apexmail.ee",
-                "dkim.apexmail.com",
-                "_domainkey.apexmail.com",
-                "apexmail._domainkey.com",
-            ] {
-                if lower.contains(bad) {
-                    v.push(Violation::ForbiddenDomain { domain: format!("Hallucinated DKIM: {bad}") });
-                }
-            }
-        }
-        if (lower.contains("spf") || lower.contains("v=spf1")) && lower.contains("include:") && !lower.contains("spf.apexmail.ee") {
-            v.push(Violation::ForbiddenDomain { domain: "SPF must include spf.apexmail.ee".into() });
         }
         v
     }
@@ -613,5 +614,27 @@ mod tests {
         let v = ResponseVerifier::new();
         let verdict = v.verify("We guarantee 99.99% uptime on all plans.");
         assert!(!verdict.passed);
+    }
+
+    #[test]
+    fn rejects_obsolete_static_dkim_and_spf_guidance() {
+        let verifier = ResponseVerifier::new();
+        let verdict = verifier.verify(
+            "Create a DKIM CNAME to apexmail.dkim.apexmail.ee and publish v=spf1 include:spf.apexmail.ee ~all.",
+        );
+        assert!(!verdict.passed);
+        assert!(verdict
+            .violations
+            .iter()
+            .any(|violation| matches!(violation, Violation::ForbiddenDomain { .. })));
+    }
+
+    #[test]
+    fn accepts_direct_dkim_explanation_without_a_static_target() {
+        let verifier = ResponseVerifier::new();
+        let verdict = verifier.verify(
+            "Open the authenticated domain DNS view and publish its unique direct-DKIM TXT record at the supplied selector._domainkey hostname.",
+        );
+        assert!(verdict.passed, "{:?}", verdict.violations);
     }
 }

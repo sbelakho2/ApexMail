@@ -6,7 +6,7 @@
 //! All tool parameters are validated against injection, bounds, and type constraints
 //! via the defense module before execution.
 
-use crate::defense;
+use crate::{defense, domain_dns::DomainDnsStore};
 use serde::{Deserialize, Serialize};
 
 const OVERAGE_RATE: f64 = 0.40;
@@ -90,6 +90,14 @@ pub struct ToolCall {
     pub role: Option<String>,  // "owner" | "admin" | "developer" | "viewer"
 }
 
+/// Identity asserted by the authenticated control plane, never by the model or
+/// customer-supplied conversation context.
+#[derive(Debug, Clone)]
+pub struct TrustedToolCaller {
+    pub tenant_id: String,
+    pub role: Role,
+}
+
 /// Execute a tool with tenant isolation + RBAC. Returns error JSON on any guard failure.
 pub fn execute_tool(call: &ToolCall, caller_tenant_id: &str, caller_role: &Role) -> serde_json::Value {
     // Guard 1: RBAC — does the caller's role have permission?
@@ -107,7 +115,7 @@ pub fn execute_tool(call: &ToolCall, caller_tenant_id: &str, caller_role: &Role)
         "get_audit_log", "get_api_key_usage", "get_send_history",
         "get_deliverability_report", "get_suppression_count", "get_contact_count",
         "get_security_events", "get_billing_history", "get_ip_warmup_status",
-        "get_domain_verification_status", "generate_compliance_report",
+        "get_domain_verification_status", "generate_compliance_report", "get_dns_record",
     ];
     if tools_needing_isolation.contains(&call.tool.as_str()) {
         let tool_tenant = call.tenant_id.as_deref().unwrap_or("");
@@ -131,7 +139,9 @@ pub fn execute_tool(call: &ToolCall, caller_tenant_id: &str, caller_role: &Role)
     match call.tool.as_str() {
         "calculate_overage" => calculate_overage(&call.params),
         "calculate_payg" => calculate_payg(&call.params),
-        "get_dns_record" => get_dns_record(&call.params),
+        "get_dns_record" => serde_json::json!({
+            "error": "exact DNS records require an authenticated tenant and authoritative domain data"
+        }),
         "compare_plans" => compare_plans(&call.params),
         "get_plan_details" => get_plan_details(&call.params),
         "get_price_diff" => get_price_diff(&call.params),
@@ -152,6 +162,55 @@ pub fn execute_tool(call: &ToolCall, caller_tenant_id: &str, caller_role: &Role)
     }
 }
 
+/// Execute a tool with the deployment's authoritative domain record source.
+/// DNS is deliberately asynchronous because it queries tenant-scoped current
+/// control-plane data; all other tools retain their deterministic behavior.
+pub async fn execute_tool_with_authoritative_data(
+    call: &ToolCall,
+    caller: &TrustedToolCaller,
+    domain_dns: Option<&DomainDnsStore>,
+) -> serde_json::Value {
+    if call.tool != "get_dns_record" {
+        return execute_tool(call, &caller.tenant_id, &caller.role);
+    }
+
+    if !role_can_execute(&caller.role, &call.tool) {
+        return serde_json::json!({"error": "caller is not permitted to retrieve DNS records"});
+    }
+    let asserted_tenant = call.tenant_id.as_deref().unwrap_or("");
+    if caller.tenant_id.is_empty()
+        || asserted_tenant.is_empty()
+        || asserted_tenant != caller.tenant_id
+    {
+        return serde_json::json!({
+            "error": "tenant_id required and must match authenticated caller"
+        });
+    }
+    if let Err(errors) = defense::validate_tool_params(&call.tool, &call.params) {
+        return serde_json::json!({
+            "error": format!("parameter validation failed: {}", errors.join("; "))
+        });
+    }
+    let domain = match call.params.get("domain").and_then(|value| value.as_str()) {
+        Some(domain) => domain,
+        None => return serde_json::json!({"error": "domain is required"}),
+    };
+    let store = match domain_dns {
+        Some(store) => store,
+        None => {
+            return serde_json::json!({
+                "error": "authoritative domain data is not configured; do not invent DNS records"
+            });
+        }
+    };
+    match store.records_for_domain(&caller.tenant_id, domain).await {
+        Ok(records) => serde_json::to_value(records).unwrap_or_else(|_| {
+            serde_json::json!({"error": "could not serialize authoritative DNS records"})
+        }),
+        Err(error) => serde_json::json!({"error": error.to_string()}),
+    }
+}
+
 pub const TOOL_DEFINITIONS: &str = r##"
 Available tools — emit tool_call for exact computation:
 
@@ -163,8 +222,8 @@ Available tools — emit tool_call for exact computation:
 {"tool":"get_price_diff","params":{"plan_a":"growth","plan_b":"scale"}}
 ```
 
-## DNS (no tenant_id needed)  
-```tool_call {"tool":"get_dns_record","params":{"domain":"example.com","type":"dkim"}}
+## DNS (authenticated tenant_id required; exact records are retrieved live)  
+```tool_call {"tool":"get_dns_record","params":{"domain":"example.com","type":"dkim"},"tenant_id":"<tenant_id>"}
 ```
 
 ## Support (tenant_id required — prevents cross-tenant data leak)
@@ -222,19 +281,6 @@ fn calculate_payg(params: &serde_json::Value) -> serde_json::Value {
     let mut r = emails; let mut total = 0.0; let mut breakdown = Vec::new();
     for (l,h,rate) in tiers { if r<=0{break} let t=r.min(h-l+1); let c=((t as f64)*rate*100.0).round()/100.0; breakdown.push(serde_json::json!({"range":format!("{}-{}",fmt_number(l),if h==i64::MAX{"∞".into()}else{fmt_number(h)}),"emails_in_tier":t,"rate":rate,"cost":c})); total+=c; r-=t; }
     serde_json::json!({"emails":emails,"total_cost":(total*100.0).round()/100.0,"tiers":breakdown})
-}
-
-fn get_dns_record(params: &serde_json::Value) -> serde_json::Value {
-    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("example.com");
-    let rtype = params.get("type").and_then(|v| v.as_str()).unwrap_or("spf");
-    match rtype {
-        "spf" => serde_json::json!({"type":"TXT","host":"@","value":"v=spf1 include:spf.apexmail.ee ~all"}),
-        "dkim" => serde_json::json!({"type":"CNAME","host":format!("apexmail._domainkey.{domain}"),"value":"apexmail.dkim.apexmail.ee","note":"Target ALWAYS ends in dkim.apexmail.ee"}),
-        "dmarc" => serde_json::json!({"type":"TXT","host":format!("_dmarc.{domain}"),"value":"v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee"}),
-        "return_path" => serde_json::json!({"type":"CNAME","host":format!("bounces.{domain}"),"value":"bounce.apexmail.ee"}),
-        "mta_sts" => serde_json::json!({"type":"TXT","host":format!("_mta-sts.{domain}"),"value":"v=STSv1; id=2026072101"}),
-        _ => serde_json::json!({"error":format!("unknown type: {rtype}")})
-    }
 }
 
 fn compare_plans(params: &serde_json::Value) -> serde_json::Value {
@@ -482,7 +528,16 @@ mod tests {
     #[test] fn test_overage_pro_160k() { let r=calculate_overage(&serde_json::json!({"plan":"pro","emails_sent":160000})); assert_eq!(r["total"],69.0); }
     #[test] fn test_overage_starter_210k() { let r=calculate_overage(&serde_json::json!({"plan":"starter","emails_sent":210000})); assert_eq!(r["total"],89.0); }
     #[test] fn test_payg_50k() { let r=calculate_payg(&serde_json::json!({"emails":50000})); assert_eq!(r["total_cost"],42.0); }
-    #[test] fn test_dkim() { let r=get_dns_record(&serde_json::json!({"domain":"launchpad.io","type":"dkim"})); assert_eq!(r["value"],"apexmail.dkim.apexmail.ee"); }
+    #[test] fn dns_tool_refuses_to_invent_static_records() {
+        let call = ToolCall {
+            tool: "get_dns_record".into(),
+            params: serde_json::json!({"domain":"launchpad.io","type":"dkim"}),
+            tenant_id: Some("tenant-a".into()),
+            role: None,
+        };
+        let result = execute_tool(&call, "tenant-a", &Role::Viewer);
+        assert!(result["error"].as_str().unwrap().contains("authoritative"));
+    }
     #[test] fn test_price_diff() { let r=get_price_diff(&serde_json::json!({"plan_a":"scale","plan_b":"enterprise"})); assert_eq!(r["diff"],2650); }
     
     // Tenant and RBAC isolation tests
@@ -493,7 +548,7 @@ mod tests {
     }
     #[test] fn test_tenant_isolation_allows_same_tenant() {
         let call = ToolCall { tool: "get_audit_log".into(), params: serde_json::json!({}), tenant_id: Some("tenant-A".into()), role: None };
-        let r = execute_tool(&call, "tenant-A", &crate::tools::Role::Owner);
+        let _r = execute_tool(&call, "tenant-A", &crate::tools::Role::Owner);
         // Should NOT error on tenant isolation
     }
     #[test] fn test_rbac_blocks_viewer_from_billing() {

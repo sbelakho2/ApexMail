@@ -22,6 +22,7 @@ pub mod self_hosted_bounces;
 pub mod ses_notifications;
 pub mod support;
 pub mod suppressions;
+pub(crate) mod system_sender;
 pub mod templates;
 pub mod webhooks;
 

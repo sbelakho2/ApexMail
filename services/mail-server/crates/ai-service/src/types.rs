@@ -11,20 +11,22 @@ use uuid::Uuid;
 pub enum AiError {
     #[error("model not found: {0}")]
     ModelNotFound(String),
-    #[error("inference failed: {0}")]
+    #[error("model inference failed: {0}")]
     InferenceFailed(String),
+    #[error("model runtime is unavailable: {0}")]
+    ModelUnavailable(String),
     #[error("training error: {0}")]
     TrainingError(String),
+    #[error("training runner is unavailable: {0}")]
+    TrainingUnavailable(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("arm not found: {0}")]
     ArmNotFound(String),
     #[error("job not found: {0}")]
     JobNotFound(String),
-    /// AES-256-GCM encryption or decryption of bandit state failed (O-10.1).
     #[error("encryption/decryption failed: {0}")]
     EncryptionFailed(String),
-    /// Periodic checkpoint persistence failed (O-10.3).
     #[error("checkpoint error: {0}")]
     CheckpointError(String),
     #[error("internal: {0}")]
@@ -36,6 +38,7 @@ impl AiError {
         match self {
             AiError::ModelNotFound(_) | AiError::ArmNotFound(_) | AiError::JobNotFound(_) => 404,
             AiError::InvalidInput(_) => 400,
+            AiError::ModelUnavailable(_) | AiError::TrainingUnavailable(_) => 503,
             _ => 500,
         }
     }
@@ -43,7 +46,7 @@ impl AiError {
 
 // ── Enums ────────────────────────────────────────────────────────
 
-/// The kind of ML model.
+/// The supported model operation class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelType {
@@ -53,7 +56,7 @@ pub enum ModelType {
     GenerativeText,
 }
 
-/// Lifecycle status of a model.
+/// Lifecycle status reported by the model registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelStatus {
@@ -72,7 +75,7 @@ pub enum ImprovementType {
     Personalization,
 }
 
-/// Status of a training job.
+/// Status of an externally executed training job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -85,27 +88,27 @@ pub enum JobStatus {
 
 // ── Structs ──────────────────────────────────────────────────────
 
-/// A single prediction produced by the inference engine.
+/// A result returned from the configured model provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prediction {
     pub id: String,
     pub model_id: String,
     pub input: serde_json::Value,
     pub output: serde_json::Value,
-    pub confidence: f64,
+    pub confidence: Option<f64>,
     pub latency_ms: u64,
     pub created_at: DateTime<Utc>,
 }
 
-/// A registered ML model.
+/// A configured model available to the AI service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
     pub name: String,
     pub version: String,
     pub model_type: ModelType,
-    pub accuracy: f64,
-    pub trained_at: DateTime<Utc>,
+    pub accuracy: Option<f64>,
+    pub trained_at: Option<DateTime<Utc>>,
     pub status: ModelStatus,
 }
 
@@ -127,7 +130,7 @@ pub struct SendTimeSlot {
     pub score: f64,
 }
 
-/// One arm in a multi-armed bandit.
+/// One tenant-scoped experiment variant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BanditArm {
     pub id: String,
@@ -137,19 +140,20 @@ pub struct BanditArm {
     pub reward: f64,
 }
 
-/// A training job record.
+/// A persisted training command lifecycle record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingJob {
     pub id: String,
     pub model_id: String,
     pub status: JobStatus,
     pub epochs: u32,
-    pub loss: f64,
+    pub loss: Option<f64>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
 }
 
-/// Evaluation metrics for a model.
+/// Binary-classification evaluation metrics emitted by offline evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalMetrics {
     pub accuracy: f64,
@@ -165,7 +169,7 @@ impl Prediction {
         model_id: &str,
         input: serde_json::Value,
         output: serde_json::Value,
-        confidence: f64,
+        confidence: Option<f64>,
         latency_ms: u64,
     ) -> Self {
         Self {
@@ -207,9 +211,10 @@ impl TrainingJob {
             model_id: model_id.to_string(),
             status: JobStatus::Queued,
             epochs,
-            loss: 0.0,
+            loss: None,
             started_at: Utc::now(),
             completed_at: None,
+            error: None,
         }
     }
 }
@@ -238,58 +243,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_prediction_new() {
-        let p = Prediction::new(
-            "m1",
-            serde_json::json!({"x":1}),
-            serde_json::json!(0.8),
-            0.95,
-            12,
-        );
-        assert_eq!(p.model_id, "m1");
-        assert!((p.confidence - 0.95).abs() < f64::EPSILON);
-        assert_eq!(p.latency_ms, 12);
-    }
-
-    #[test]
-    fn test_bandit_arm_conversion_rate() {
-        let mut arm = BanditArm::new("test");
-        assert!((arm.conversion_rate() - 0.0).abs() < f64::EPSILON);
-        arm.impressions = 100;
-        arm.conversions = 25;
-        assert!((arm.conversion_rate() - 0.25).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_training_job_new() {
-        let job = TrainingJob::new("model-1", 10);
-        assert_eq!(job.epochs, 10);
-        assert_eq!(job.status, JobStatus::Queued);
-        assert!(job.completed_at.is_none());
-    }
-
-    #[test]
-    fn test_model_serialization() {
-        let m = Model {
-            id: "m1".into(),
-            name: "test-model".into(),
-            version: "1.0".into(),
-            model_type: ModelType::Classification,
-            accuracy: 0.92,
-            trained_at: Utc::now(),
-            status: ModelStatus::Ready,
-        };
-        let json = serde_json::to_string(&m).unwrap();
-        assert!(json.contains("classification"));
-        assert!(json.contains("ready"));
-    }
-
-    #[test]
     fn test_ai_error_status_codes() {
         assert_eq!(AiError::ModelNotFound("x".into()).status_code(), 404);
         assert_eq!(AiError::InvalidInput("x".into()).status_code(), 400);
+        assert_eq!(AiError::ModelUnavailable("x".into()).status_code(), 503);
         assert_eq!(AiError::Internal("x".into()).status_code(), 500);
-        assert_eq!(AiError::ArmNotFound("x".into()).status_code(), 404);
-        assert_eq!(AiError::JobNotFound("x".into()).status_code(), 404);
+    }
+
+    #[test]
+    fn model_and_training_records_have_safe_defaults() {
+        let arm = BanditArm::new("subject-a");
+        assert_eq!(arm.conversion_rate(), 0.0);
+
+        let job = TrainingJob::new("support-assistant", 3);
+        assert_eq!(job.status, JobStatus::Queued);
+        assert!(job.error.is_none());
     }
 }

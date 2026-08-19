@@ -4,17 +4,37 @@ on:
   pull_request:
     paths:
       - docs/pricing.md
-      - apps/marketing-zola/templates/**
+      - docs/pricing-authority.md
+      - docs/architecture/billing-lifecycle.md
+      - docs/tool-contracts/stripe.md
+      - docs/api/endpoints/billing.md
+      - apps/marketing-zola/**
       - tools/validate_pricing_drift.py
-      - services/mail-server/crates/billing-service/src/plans.rs
+      - compliance/**
+      - services/mail-server/crates/billing-service/**
+      - services/mail-server/crates/api-server/**
+      - services/mail-server/crates/ui-foundation/**
+      - services/mail-server/crates/enterprise/**
+      - services/mail-server/migrations/**
+      - scripts/consistency-test.sh
       - .github/workflows/pricing-drift.yml
   push:
     branches: [main]
     paths:
       - docs/pricing.md
-      - apps/marketing-zola/templates/**
+      - docs/pricing-authority.md
+      - docs/architecture/billing-lifecycle.md
+      - docs/tool-contracts/stripe.md
+      - docs/api/endpoints/billing.md
+      - apps/marketing-zola/**
       - tools/validate_pricing_drift.py
-      - services/mail-server/crates/billing-service/src/plans.rs
+      - compliance/**
+      - services/mail-server/crates/billing-service/**
+      - services/mail-server/crates/api-server/**
+      - services/mail-server/crates/ui-foundation/**
+      - services/mail-server/crates/enterprise/**
+      - services/mail-server/migrations/**
+      - scripts/consistency-test.sh
       - .github/workflows/pricing-drift.yml
 
 jobs:
@@ -26,5 +46,10 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
-      - name: Validate pricing copy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: zola@0.19.2
+      - name: Build static marketing output
+        run: zola build --root apps/marketing-zola
+      - name: Validate runtime pricing consistency
         run: python3 tools/validate_pricing_drift.py

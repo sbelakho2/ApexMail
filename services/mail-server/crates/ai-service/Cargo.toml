@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "ApexMail AI Intelligence Suite — analytics, assistant, bandits, content, inference, STO, training"
+description = "ApexMail AI Intelligence Suite — analytics, assistant, bandits, content, inference, STO, and training"
 
 [[bin]]
 name = "ai-service"
@@ -12,7 +12,7 @@ path = "src/bin/server.rs"
 
 [dependencies]
 apexmail-lib = { path = "../apexmail-lib" }
-apexmail-db  = { path = "../apexmail-db" }
+apexmail-db = { path = "../apexmail-db" }
 
 # Async runtime
 tokio.workspace = true
@@ -26,19 +26,17 @@ tower-http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-# Database
+# Database and distributed rate limiting
 sqlx.workspace = true
-
-# Redis (distributed rate limiting)
 deadpool-redis.workspace = true
 redis.workspace = true
 
-# Crypto
+# Cryptography and persistence
 aes-gcm.workspace = true
 zeroize.workspace = true
 hex.workspace = true
 
-# HTML sanitization (O-10.2)
+# HTML sanitization
 ammonia = "4.0"
 
 # Utils
@@ -48,9 +46,13 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 observability-service = { path = "../observability-service" }
 thiserror.workspace = true
+anyhow.workspace = true
 reqwest.workspace = true
 dashmap.workspace = true
 parking_lot.workspace = true
+once_cell.workspace = true
+regex.workspace = true
+mail-builder.workspace = true
 rand.workspace = true
 
 [dev-dependencies]

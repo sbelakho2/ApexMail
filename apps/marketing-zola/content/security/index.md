@@ -23,13 +23,13 @@ last_updated = "2026-07-29"
 - Argon2id for password hashing (memory-hard, resistant to GPU/ASIC attacks).
 - Encrypted database volumes (LUKS/dm-crypt).
 - Encrypted backups with separate key management.
-- Customer-managed encryption keys on Dedicated Tenant and BYOC plans.
+- Customer-managed encryption-key requirements may be evaluated only in a separately contracted deployment; they are not a public plan entitlement.
 
 ## Authentication and Access Control
 
 - API keys scoped per environment (live/test) with configurable permissions.
 - Webhook HMAC signatures (SHA-256) for event payload integrity.
-- SAML SSO and SCIM provisioning (Business and Enterprise plans).
+- SAML SSO on Scale and Enterprise plans; any provisioning commitment is confirmed in the applicable contract.
 - Role-based access control (RBAC) with custom roles on Enterprise plan.
 - Multi-factor authentication (TOTP) for dashboard access.
 - Session management with configurable timeout and IP binding.
@@ -78,13 +78,13 @@ System integrity is verified through automated, recurring checks across the depl
 | **Verified backup restores** | Automated restore tests validate backup integrity and recoverability. | Weekly | Restore success/failure log; sample data comparison |
 | **Runtime integrity** | Application processes are monitored for unexpected binary changes or configuration drift vs. the declared infrastructure-as-code state. | Continuous | Drift detection alert; reconciliation report |
 
-All verification results are internal operational controls. Selected evidence (e.g., deployment attestation, audit-log chain verification) is available to Enterprise and Dedicated Tenant customers upon request.
+All verification results are internal operational controls. Current security-review material may be made available to qualified Enterprise prospects or customers upon request; it is not an external certification or a product entitlement.
 
 The term "System Integrity Controls" refers to the combination of these controls. It does not imply external third-party certification or attestation. Any badge or label using this phrase must reference this section.
 
 ## Infrastructure Security
 
-- Hetzner Online GmbH (Germany and Finland data centers) for compute, storage, and networking.
+- Hetzner Online GmbH for compute, storage, and networking in the configured deployment region.
 - CIS-hardened Debian/Ubuntu operating systems.
 - Automated security patching with staged rollout.
 - Immutable infrastructure through infrastructure-as-code.
@@ -117,11 +117,11 @@ The term "System Integrity Controls" refers to the combination of these controls
 
 ## Audit and Compliance Evidence
 
-- SOC 2 Type II is planned (Q2 2028 target, following Type I in Q3 2027). Not currently available. Internal controls are mapped and a readiness assessment is in progress.
+- ApexMail is not currently SOC 2 certified. Internal control mapping and readiness work do not create a certification, product entitlement, or certification-date commitment.
 - Penetration test summary: planned for publication after the first external application penetration test is completed and high/critical findings are remediated. Not currently available.
-- SIG, CAIQ, and HECVAT security questionnaires are in progress and available upon request for Enterprise customers.
-- Audit logs with configurable retention (premium audit logs on Enterprise).
-- Customer audit facilitation for Enterprise and Dedicated Tenant plans.
+- Security-questionnaire requests are assessed case by case using current review material; no standardized SIG, CAIQ, or HECVAT pack is a product entitlement.
+- Audit logs are available on Growth, Scale, and Enterprise, with retention determined by the subscribed plan.
+- Customer audit facilitation subject to Enterprise contract review.
 
 ## Operational Security
 

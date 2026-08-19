@@ -37,6 +37,20 @@ async fn main() -> anyhow::Result<()> {
     let config = MtaConfig::from_env()?;
     info!(mta_id = %config.mta_id, "Starting MTA server");
 
+    // The MTA emits SPF cache metrics through the `metrics` facade. Install a
+    // dedicated Prometheus listener before any SMTP task starts so Prometheus
+    // can scrape both service availability and those counters.
+    if config.metrics.enabled {
+        let metrics_addr: std::net::SocketAddr =
+            format!("0.0.0.0:{}", config.metrics.port).parse()?;
+        metrics_exporter_prometheus::PrometheusBuilder::new()
+            .with_http_listener(metrics_addr)
+            .install_recorder()
+            .map_err(|error| anyhow::anyhow!("failed to start MTA metrics listener: {error}"))?;
+        metrics::gauge!("apexmail_mta_info").set(1.0);
+        info!(port = config.metrics.port, "Prometheus metrics listener ready");
+    }
+
     // Database pool
     let pool = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
@@ -116,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
             authenticator.clone(),
             config.inbound.hostname.clone(),
             config.mailstore_addr.clone(),
-        ));
+        )?);
         let s = srv.clone();
         let tls = tls_acceptor.clone();
         (

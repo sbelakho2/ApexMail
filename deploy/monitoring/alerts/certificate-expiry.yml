@@ -215,8 +215,8 @@ groups:
 
       - alert: CertificateCountDrop
         expr: |
-          count(certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail"})
-          offset 1d - ignoring() count(certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail"})
+          count(certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail"} offset 1d)
+          - count(certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail"})
           > 1
         for: 5m
         labels:

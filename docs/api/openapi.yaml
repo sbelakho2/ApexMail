@@ -5054,8 +5054,8 @@ paths:
       operationId: createDomain
       summary: Add a domain
       description: |
-        Add a domain for sending emails. Returns DNS records that must be
-        configured for verification.
+        Add a domain for sending emails. Retrieve generated DNS records from
+        the domain's `/dns-records` endpoint before verification.
       tags:
         - Domains
       parameters:
@@ -5119,7 +5119,7 @@ paths:
     get:
       operationId: getDomain
       summary: Get domain details
-      description: Retrieve details of a specific domain including DNS records.
+      description: Retrieve details of a specific domain. Use `/dns-records` for DNS setup values.
       tags:
         - Domains
       parameters:
@@ -10149,59 +10149,58 @@ components:
     CreateDomainRequest:
       type: object
       required:
-        - domain
+        - name
       properties:
-        domain:
+        name:
           type: string
           format: hostname
           example: example.com
 
     DnsRecord:
       type: object
+      required: [record_type, hostname, value]
       properties:
-        type:
+        record_type:
           type: string
-          enum: [TXT, CNAME, MX]
-        name:
+          enum: [TXT, MX]
+        hostname:
           type: string
         value:
           type: string
         priority:
           type: integer
-        status:
-          type: string
-          enum: [pending, verified, failed]
+          nullable: true
 
     Domain:
       type: object
       properties:
         id:
           type: string
-          example: domain_01HQMXJ5KXMW0NREP0YGCZKNVD
-        domain:
+          format: uuid
+        name:
           type: string
           example: example.com
         status:
           type: string
           enum: [pending, verified, failed]
-        dnsRecords:
-          type: array
-          items:
-            $ref: '#/components/schemas/DnsRecord'
-        createdAt:
-          type: string
-          format: date-time
-        verifiedAt:
+        ses_verified:
+          type: boolean
+        spf_verified:
+          type: boolean
+        dkim_verified:
+          type: boolean
+        dmarc_verified:
+          type: boolean
+        return_path_verified:
+          type: boolean
+        created_at:
           type: string
           format: date-time
 
     DomainListResponse:
-      type: object
-      properties:
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/Domain'
+      type: array
+      items:
+        $ref: '#/components/schemas/Domain'
 
     VerifyResponse:
       type: object
@@ -10215,13 +10214,13 @@ components:
           description: Whether SPF record was found and contains the expected include
         dkim_verified:
           type: boolean
-          description: Whether DKIM record was found
+          description: Whether the direct DKIM TXT record publishes the generated public key
         dmarc_verified:
           type: boolean
           description: Whether DMARC record was found
         return_path_verified:
           type: boolean
-          description: Whether return-path (bounce) CNAME was found
+          description: Whether the custom MAIL FROM MX record matches the configured SES region
         status:
           type: string
           enum: [pending, verified]

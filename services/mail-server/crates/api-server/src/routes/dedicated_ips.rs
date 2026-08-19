@@ -298,7 +298,7 @@ async fn release_ip(
 
 /// `POST /v1/dedicated-ips/:id/warmup` — Start or resume IP warmup.
 /// Updates the warmup tracking in the database. Warmup is enforced by
-/// the outbound-queue's IP rotation and warmup schedule.
+/// the unified delivery worker's IP rotation and warmup schedule.
 async fn start_warmup(
     State(state): State<AppState>,
     auth: AuthUser,

@@ -39,6 +39,9 @@ enum QueueOutcome {
     /// The MAIL FROM domain is not owned by the authenticated user's
     /// tenant — the message must be refused with `550 5.7.1`.
     SenderNotOwned,
+    /// The sender belongs to the tenant but does not satisfy the unified
+    /// current-domain readiness contract for the selected transport.
+    SenderNotReady,
 }
 
 pub struct SubmissionServer {
@@ -417,6 +420,13 @@ impl SubmissionServer {
                                 )
                                 .await;
                             }
+                            Ok(QueueOutcome::SenderNotReady) => {
+                                let _ = write_line(
+                                    stream,
+                                    "550 5.7.1 sender domain is not verified and ready for delivery\r\n",
+                                )
+                                .await;
+                            }
                             Err(_) => {
                                 let _ =
                                     write_line(stream, "451 4.3.0 Requested action aborted\r\n")
@@ -716,6 +726,8 @@ impl SubmissionServer {
             subject
         };
 
+        let mut tx = self.pool.begin().await.map_err(|_| ())?;
+
         // tenant_id is VARCHAR(26) referencing tenants(id) — never the user's
         // account UUID. Look up the authenticated user's actual tenant (by
         // email only: `users` has no `username` column).
@@ -723,28 +735,43 @@ impl SubmissionServer {
             "SELECT tenant_id FROM users WHERE LOWER(email) = LOWER($1)",
         )
         .bind(auth_email)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| ())?
         .flatten();
 
-        // domain_id is UUID referencing domains(id); resolve the sender's
-        // domain owned by the user's tenant so the worker can route/DKIM-sign.
-        let domain_id: Option<Uuid> = match tenant_id.as_deref() {
+        // Resolve the sender's domain while holding a share lock through queue
+        // insertion. This matches the API's authorization predicate and
+        // prevents acknowledging a message from a domain already being
+        // revoked/deleted at the same instant.
+        let requires_ses = apexmail_lib::transport::email_transport_is_ses(
+            std::env::var("EMAIL_TRANSPORT_TYPE").ok().as_deref(),
+        );
+        let domain: Option<(Uuid, bool)> = match tenant_id.as_deref() {
             Some(tenant) => {
                 let domain_name = mail_from
                     .rsplit_once('@')
-                    .map(|(_, d)| d)
+                    .map(|(_, d)| d.trim().trim_end_matches('.'))
                     .unwrap_or_default();
                 if domain_name.is_empty() {
                     None
                 } else {
-                    sqlx::query_scalar(
-                        "SELECT id FROM domains WHERE LOWER(name) = LOWER($1) AND tenant_id = $2 LIMIT 1",
+                    sqlx::query_as(
+                        "SELECT id, status = 'verified'
+                                AND dkim_enabled = true
+                                AND dkim_selector IS NOT NULL
+                                AND dkim_public_key IS NOT NULL
+                                AND dkim_private_key IS NOT NULL
+                                AND COALESCE(dkim_private_key LIKE 'dkim:v1:%', false)
+                                AND ($3::boolean = false OR ses_verified = true)
+                           FROM domains
+                          WHERE LOWER(name) = LOWER($1) AND tenant_id = $2
+                          LIMIT 1 FOR SHARE",
                     )
                     .bind(domain_name)
                     .bind(tenant)
-                    .fetch_optional(&self.pool)
+                    .bind(requires_ses)
+                    .fetch_optional(&mut *tx)
                     .await
                     .map_err(|_| ())?
                 }
@@ -752,18 +779,24 @@ impl SubmissionServer {
             None => None,
         };
 
-        // Sender-spoofing gate: the MAIL FROM address was already validated to
-        // carry a non-empty domain, so a `None` domain_id here means the
-        // domain does not belong to the authenticated user's tenant. Refuse
-        // the message instead of relaying mail as an address the account
-        // does not own.
-        if domain_id.is_none() {
-            warn!(
-                from = %mail_common::pii::redact_email(mail_from),
-                "Submission MAIL FROM domain not owned by account's tenant; rejecting"
-            );
-            return Ok(QueueOutcome::SenderNotOwned);
-        }
+        let domain_id = match domain {
+            None => {
+                warn!(
+                    from = %mail_common::pii::redact_email(mail_from),
+                    "Submission MAIL FROM domain not owned by account's tenant; rejecting"
+                );
+                return Ok(QueueOutcome::SenderNotOwned);
+            }
+            Some((_, false)) => {
+                warn!(
+                    from = %mail_common::pii::redact_email(mail_from),
+                    requires_ses,
+                    "Submission MAIL FROM domain is not ready; rejecting"
+                );
+                return Ok(QueueOutcome::SenderNotReady);
+            }
+            Some((domain_id, true)) => domain_id,
+        };
 
         let message_uuid = Uuid::parse_str(msg_id).map_err(|_| ())?;
         let to_first = rcpt_to.first().cloned().unwrap_or_default();
@@ -786,13 +819,15 @@ impl SubmissionServer {
         .bind(&to_first)
         .bind(&html_body)
         .bind(&text_body)
-        .bind(tenant_id)
+        .bind(&tenant_id)
         .bind(message_uuid)
         .bind(domain_id)
         .bind(Option::<serde_json::Value>::None)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
+
+        tx.commit().await.map_err(|_| ())?;
 
         info!(
             message_id = %msg_id,

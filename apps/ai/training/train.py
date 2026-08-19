@@ -58,7 +58,17 @@ logger = logging.getLogger("apexmail.train")
 def load_config(path: str = "config.yaml") -> dict:
     """Load training configuration from YAML."""
     with open(path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    # The managed runner controls these deployment paths. They are not taken
+    # from an API request and allow each job to produce an isolated artifact.
+    if model_base := os.environ.get("AI_MODEL_BASE"):
+        cfg["model"]["base"] = model_base
+    if output_dir := os.environ.get("AI_OUTPUT_DIR"):
+        cfg["paths"]["output_dir"] = output_dir
+    if logs_dir := os.environ.get("AI_LOGS_DIR"):
+        cfg["paths"]["logs_dir"] = logs_dir
+    return cfg
 
 
 def print_gpu_info() -> None:
@@ -307,6 +317,9 @@ def main(
     max_seq_len: int | None = typer.Option(None, help="Override max_seq_length"),
     resume: str | None = typer.Option(None, help="Resume from checkpoint path"),
     no_eval: bool = typer.Option(False, help="Skip post-training eval"),
+    metrics_output: str = typer.Option(
+        "", help="Write real training/evaluation metrics to this JSON file",
+    ),
 ) -> None:
     """Fine-tune Qwen3-Next-80B-A3B-Instruct with QLoRA."""
     console.print(Panel(
@@ -428,6 +441,7 @@ def main(
     console.print(f"[green]✓ Adapter saved to {paths['output_dir']}[/green]")
 
     # ── Eval ─────────────────────────────────────────────────────────────
+    eval_metrics: dict = {}
     if not no_eval:
         eval_metrics = trainer.evaluate()
         trainer.log_metrics("eval", eval_metrics)
@@ -436,6 +450,22 @@ def main(
 
         # Run golden-set eval
         run_eval_after_training(model, tokenizer, cfg)
+
+    # The managed API runner consumes this artifact only after the real
+    # training process exits successfully. Do not synthesize loss values.
+    if metrics_output:
+        metrics_path = Path(metrics_output)
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        reported_loss = eval_metrics.get("eval_loss", metrics.get("train_loss"))
+        artifact = {
+            "loss": float(reported_loss) if reported_loss is not None else None,
+            "train_metrics": metrics,
+            "evaluation": eval_metrics,
+            "adapter_path": str(Path(paths["output_dir"]).resolve()),
+            "completed_at": datetime.now().astimezone().isoformat(),
+        }
+        metrics_path.write_text(json.dumps(artifact, indent=2, default=str) + "\n")
+        console.print(f"[green]✓ Metrics written to {metrics_path}[/green]")
 
     console.print(Panel(
         f"[bold green]Done![/bold green]\n"

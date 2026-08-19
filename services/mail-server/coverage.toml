@@ -93,12 +93,6 @@ branches = 75
 functions = 80
 description = "Mail Transfer Agent - Core routing"
 
-[packages.outbound-queue]
-lines = 80
-branches = 75
-functions = 80
-description = "Outbound message queue - Delivery management"
-
 [packages.mailstore-core]
 lines = 80
 branches = 75

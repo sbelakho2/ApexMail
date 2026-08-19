@@ -48,6 +48,7 @@ Complete developer documentation for the ApexMail email infrastructure platform.
 - [Deployment Guides](../deployment/quickstart.md)
 - [Enterprise Features](../enterprise/README.md)
 - [Operations Runbooks](../operations/monitoring.md)
+- [Platform Sender Readiness](operations/runbooks/system-sender-readiness.md)
 - [Development Guides](../development/contributing.md)
 
 ## Company

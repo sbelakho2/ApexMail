@@ -11,12 +11,12 @@ competitor_description = "Resend is a modern email API for developers with compo
 pricing_as_of = "2026-05-09"
 og_image = "/images/og-image.svg"
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 19
+apexmail_wins = 0
 competitor_wins = 0
 verdict_title = "Why Choose ApexMail Over Resend?"
 verdict_points = [
   "Full enterprise features: SSO, white-label, sub-accounts",
-  "HIPAA BAA workflow for regulated Enterprise programs",
+  "Current compliance documentation and audit-capable plan controls",
   "Custom deployment reviews for dedicated infrastructure needs",
   "Advanced analytics, content diagnostics, and send-time recommendations",
   "Built-in consent management, audit logs, and GDPR automation",
@@ -31,7 +31,7 @@ verdict_points = [
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "tie" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">From $30/mo</span>', comp = '<span class="text-surface-600">approximately €28/month ($30/month)</span>', winner = "tie" },
+    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Scale</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
     { feature = "IP Warming", apex = '<span class="text-brand-600 font-semibold">Automatic geometric</span>', comp = '<span class="text-surface-600">Automatic (managed)</span>', winner = "tie" },
     { feature = "BIMI Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
     { feature = "ARC Signing", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
@@ -39,7 +39,7 @@ comparison_sections = [
   ]},
   { title = "COMPLIANCE", rows = [
     { feature = "GDPR Automation", apex = '<span class="text-brand-600 font-semibold">DSR workflows</span>', comp = '<span class="text-surface-600">Standard controls</span>', winner = "apexmail" },
-    { feature = "HIPAA BAA", apex = '<span class="text-brand-600 font-semibold">Enterprise plan</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
+    { feature = "HIPAA availability", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">Not evaluated in this comparison</span>', winner = "none" },
     { feature = "Consent Management", apex = '<span class="text-brand-600 font-semibold">Built-in</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
     { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Growth plan & above</span>', comp = '<span class="text-surface-600">Activity logs only</span>', winner = "apexmail" },
     { feature = "Idempotency Keys", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "tie" }

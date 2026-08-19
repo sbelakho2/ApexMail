@@ -1228,15 +1228,39 @@ fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
 }
 
 /// Signup page.
-pub fn web_signup_page(
-    csrf_token: &str,
-) -> String {
+pub fn web_signup_page(csrf_token: &str) -> String {
+    web_signup_page_with_plan(csrf_token, None)
+}
+
+/// Signup page with a vetted public plan-selection intent. The hidden field
+/// only records onboarding preference; API registration always provisions the
+/// Free plan until a completed, authenticated billing flow activates a paid
+/// subscription.
+pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) -> String {
+    let (plan_id, plan_display_name) = match selected_plan {
+        Some("starter") => ("starter", Some("Starter")),
+        Some("pro") => ("pro", Some("Pro")),
+        Some("growth") => ("growth", Some("Growth")),
+        Some("scale") => ("scale", Some("Scale")),
+        Some("free") | None => ("free", None),
+        // This helper can be reused outside the HTTP router, so repeat the
+        // allow-list check here instead of trusting a caller's query parsing.
+        Some(_) => ("free", None),
+    };
     let csrf = csrf_hidden_input(csrf_token);
+    let plan_input = web_auth_hidden_input("plan", plan_id);
+    let plan_notice = plan_display_name.map_or_else(String::new, |display_name| {
+        format!(
+            "<p class=\"text-xs leading-relaxed text-surface-500\" data-signup-plan-intent=\"{plan_id}\">You selected {display_name}. Your workspace starts on Free; activate {display_name} after email verification through secure billing setup.</p>"
+        )
+    });
     let kiwi_html = kiwicaptcha::kiwi_widget_html_default();
     let password_hint = password_requirements_hint();
     let form_html = format!(
         "<form class=\"p-8 space-y-6\" action=\"/v1/auth/signup\" method=\"POST\">\
 {csrf}\
+{plan_input}\
+{plan_notice}\
 <div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-name\">Full name</label>\
@@ -1266,6 +1290,8 @@ pub fn web_signup_page(
 <div class=\"text-center text-xs font-medium text-surface-500\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
 </form>",
         csrf = csrf,
+        plan_input = plan_input,
+        plan_notice = plan_notice,
         arrow = web_auth_arrow_icon(),
         kiwi_html = kiwi_html,
         password_pattern = password_pattern(),
@@ -4308,8 +4334,21 @@ mod tests {
         assert!(html.contains(r"\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E"));
         assert!(html.contains("ASCII punctuation"));
         assert!(html.contains("action=\"/v1/auth/signup\""));
+        assert!(html.contains("name=\"plan\" value=\"free\""));
         assert!(html.contains("Create Account"));
         assert!(html.contains("Already have an account?"));
+    }
+
+    #[test]
+    fn web_signup_page_preserves_only_vetted_paid_plan_intent() {
+        let selected = web_signup_page_with_plan("", Some("scale"));
+        assert!(selected.contains("name=\"plan\" value=\"scale\""));
+        assert!(selected.contains("data-signup-plan-intent=\"scale\""));
+        assert!(selected.contains("activate Scale after email verification"));
+
+        let invalid = web_signup_page_with_plan("", Some("enterprise"));
+        assert!(invalid.contains("name=\"plan\" value=\"free\""));
+        assert!(!invalid.contains("data-signup-plan-intent"));
     }
 
     #[test]

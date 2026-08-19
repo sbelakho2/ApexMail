@@ -54,7 +54,7 @@ Platforms that send email for customers inherit every customer's reputation risk
 
 ## Required Plan
 
-Subaccounts are available from the Growth plan (5 subaccounts) upward. Enterprise plans support 50 subaccounts. Dedicated Tenant and BYOC plans support unlimited subaccounts subject to infrastructure capacity.
+Subaccounts are available on Scale (up to 10) and Enterprise (up to 100). Any non-standard deployment arrangement requires a separate architecture and contract review.
 
 ## Security Considerations
 
@@ -67,14 +67,14 @@ Subaccounts are available from the Growth plan (5 subaccounts) upward. Enterpris
 
 - Each subaccount maintains independent suppression lists, domain authentication, and event retention.
 - DPA coverage for subaccounts requires the platform's DPA with ApexMail. Contractual flow-down to tenants is the platform's responsibility.
-- Data residency applies at the platform level. All subaccount data resides in the same EEA region.
+- Data-location requirements apply at the platform level and must be confirmed for the active deployment and applicable agreement.
 - Platform operators are responsible for their tenants' acceptable use compliance.
 
 ## Known Limitations
 
-- Subaccount isolation is logical, not physical, on Shared Cloud plans. Dedicated Tenant provides physical data isolation.
+- Subaccount isolation is logical on Shared Cloud plans. A separately contracted deployment may define additional isolation requirements, but it is not a public plan entitlement.
 - Cross-subaccount analytics require the platform to aggregate subaccount event data externally.
-- White-label branding is available on Business plans and above.
+- White-label branding is available on the Enterprise plan.
 
 ## Recommended Next Action
 

@@ -106,6 +106,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "ammonia",
+ "anyhow",
  "apexmail-db",
  "apexmail-lib",
  "axum 0.7.9",
@@ -113,10 +114,13 @@ dependencies = [
  "dashmap 6.1.0",
  "deadpool-redis",
  "hex",
+ "mail-builder",
  "observability-service",
+ "once_cell",
  "parking_lot",
  "rand 0.9.4",
  "redis",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -278,6 +282,7 @@ name = "apexmail-db"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apexmail-lib",
  "chrono",
  "once_cell",
  "prometheus",
@@ -329,6 +334,7 @@ dependencies = [
  "redis",
  "regex",
  "reqwest",
+ "rsa",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -422,6 +428,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "x509-parser 0.16.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -3081,6 +3088,8 @@ dependencies = [
  "hmac 0.12.1",
  "jsonwebtoken",
  "mail-common",
+ "metrics",
+ "metrics-exporter-prometheus",
  "nonzero_ext",
  "observability-service",
  "opentelemetry",
@@ -6661,46 +6670,6 @@ checksum = "49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79"
 dependencies = [
  "dlv-list",
  "hashbrown 0.14.5",
-]
-
-[[package]]
-name = "outbound-queue"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "clap",
- "futures",
- "governor",
- "hickory-resolver",
- "mail-auth 0.5.1",
- "mail-builder",
- "mail-common",
- "mail-proto",
- "metrics",
- "moka",
- "observability-service",
- "parking_lot",
- "rand 0.9.4",
- "reqwest",
- "rsa",
- "rustls 0.23.40",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls 0.26.4",
- "tonic",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "webpki-roots 0.26.11",
- "zeroize",
 ]
 
 [[package]]
@@ -12019,6 +11988,7 @@ dependencies = [
  "aes-gcm",
  "aho-corasick",
  "anyhow",
+ "apexmail-lib",
  "async-trait",
  "aws-config",
  "aws-sdk-sesv2",
@@ -12035,6 +12005,8 @@ dependencies = [
  "mail-auth 0.5.1",
  "mail-builder",
  "mail-send",
+ "metrics",
+ "metrics-exporter-prometheus",
  "moka",
  "nonzero_ext",
  "observability-service",

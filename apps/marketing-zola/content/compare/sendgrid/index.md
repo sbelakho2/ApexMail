@@ -17,10 +17,10 @@ competitor_wins = 0
 verdict_title = "Why Choose ApexMail Over SendGrid?"
 verdict_points = [
   "Better deliverability with automatic IP warming and reputation protection",
-  "GDPR DSR, consent, audit, and BAA workflows built into the platform",
+  "GDPR-oriented workflows, consent records, and audit logs",
   "Deliverability insights without automatic black-box send decisions",
   "Custom deployment reviews for regulated enterprise programs",
-  "SSO on Business and Enterprise with clearer plan packaging",
+  "SSO on Scale and Enterprise with current plan packaging",
 ]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
@@ -30,7 +30,7 @@ verdict_points = [
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "none" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">€30/mo add-on (Pro tier)</span>', comp = '<span class="text-surface-600">Pro+ ($89.95/mo)</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Scale</span>', comp = '<span class="text-surface-600">Pro+ ($89.95/mo)</span>', winner = "none" },
     { feature = "IP Warming", apex = '<span class="text-brand-600 font-semibold">Automatic</span>', comp = '<span class="text-surface-600">Automatic</span>', winner = "tie" },
     { feature = "DKIM Rotation", apex = '<span class="text-brand-600 font-semibold">Configurable automatic</span>', comp = '<span class="text-surface-600">Manual</span>', winner = "none" },
     { feature = "Reputation Circuit Breaker", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -38,7 +38,7 @@ comparison_sections = [
   ]},
   { title = "COMPLIANCE", rows = [
     { feature = "GDPR Tools", apex = '<span class="text-brand-600 font-semibold">DSR workflows</span>', comp = '<span class="text-surface-600">Documented DPA</span>', winner = "apexmail" },
-    { feature = "HIPAA BAA", apex = '<span class="text-brand-600 font-semibold">Enterprise plan</span>', comp = '<span class="text-surface-600">Enterprise only</span>', winner = "none" },
+    { feature = "HIPAA availability", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">See provider documentation</span>', winner = "none" },
     { feature = "Data Encryption", apex = '<span class="text-brand-600 font-semibold">AES-256 at rest</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Growth plan & above</span>', comp = '<span class="text-surface-600">Access logs only</span>', winner = "apexmail" },
     { feature = "Residency Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-600">Enterprise only</span>', winner = "none" }
@@ -53,7 +53,7 @@ comparison_sections = [
   { title = "PRICING", rows = [
     { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">30,000 emails/mo</span>', comp = '<span class="text-surface-600">100 emails/day</span>', winner = "none" },
     { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">$65 (Pro: 150K)</span>', comp = '<span class="text-surface-600">$89.95 (Essentials from $19.95)</span>', winner = "apexmail" },
-    { feature = "SSO Included", apex = '<span class="text-brand-600 font-semibold">Business & Enterprise plans</span>', comp = '<span class="text-surface-600">Included on Pro</span>', winner = "apexmail" },
+    { feature = "SSO Included", apex = '<span class="text-brand-600 font-semibold">Scale and Enterprise plans</span>', comp = '<span class="text-surface-600">Included on Pro</span>', winner = "none" },
     { feature = "Custom Deployment Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "INSIGHTS & INTELLIGENCE", rows = [

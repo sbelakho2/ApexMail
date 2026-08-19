@@ -11,7 +11,7 @@ groups:
       # ── CPU Saturation ─────────────────────────────────────────────────────
 
       - alert: HighCpuUsage
-        expr: sum(rate(container_cpu_usage_seconds_total{pod=~\".*apexmail.*\"}[5m])) by (pod) / sum(kube_pod_container_resource_limits{pod=~\".*apexmail.*\", resource=\"cpu\"}) by (pod) > 0.85
+        expr: sum(rate(container_cpu_usage_seconds_total{pod=~".*apexmail.*"}[5m])) by (pod) / sum(kube_pod_container_resource_limits{pod=~".*apexmail.*", resource="cpu"}) by (pod) > 0.85
         for: 10m
         labels:
           severity: warning
@@ -22,7 +22,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/high-cpu-usage"
 
       - alert: CriticalCpuUsage
-        expr: sum(rate(container_cpu_usage_seconds_total{pod=~\".*apexmail.*\"}[5m])) by (pod) / sum(kube_pod_container_resource_limits{pod=~\".*apexmail.*\", resource=\"cpu\"}) by (pod) > 0.95
+        expr: sum(rate(container_cpu_usage_seconds_total{pod=~".*apexmail.*"}[5m])) by (pod) / sum(kube_pod_container_resource_limits{pod=~".*apexmail.*", resource="cpu"}) by (pod) > 0.95
         for: 5m
         labels:
           severity: critical
@@ -35,7 +35,7 @@ groups:
       # ── Memory Saturation ──────────────────────────────────────────────────
 
       - alert: HighMemoryUsage
-        expr: sum(container_memory_working_set_bytes{pod=~\".*apexmail.*\"}) by (pod) / sum(kube_pod_container_resource_limits{pod=~\".*apexmail.*\", resource=\"memory\"}) by (pod) > 0.85
+        expr: sum(container_memory_working_set_bytes{pod=~".*apexmail.*"}) by (pod) / sum(kube_pod_container_resource_limits{pod=~".*apexmail.*", resource="memory"}) by (pod) > 0.85
         for: 10m
         labels:
           severity: warning
@@ -46,7 +46,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/high-memory-usage"
 
       - alert: CriticalMemoryUsage
-        expr: sum(container_memory_working_set_bytes{pod=~\".*apexmail.*\"}) by (pod) / sum(kube_pod_container_resource_limits{pod=~\".*apexmail.*\", resource=\"memory\"}) by (pod) > 0.95
+        expr: sum(container_memory_working_set_bytes{pod=~".*apexmail.*"}) by (pod) / sum(kube_pod_container_resource_limits{pod=~".*apexmail.*", resource="memory"}) by (pod) > 0.95
         for: 3m
         labels:
           severity: critical
@@ -59,7 +59,7 @@ groups:
       # ── OOM Kill Detection ─────────────────────────────────────────────────
 
       - alert: OOMKillDetected
-        expr: increase(kube_pod_container_status_restarts_total{pod=~\".*apexmail.*\"}[5m]) > 0 and on(pod) (container_memory_working_set_bytes / container_spec_memory_limit_bytes > 0.9)
+        expr: increase(kube_pod_container_status_restarts_total{pod=~".*apexmail.*"}[5m]) > 0 and on(pod) (container_memory_working_set_bytes / container_spec_memory_limit_bytes > 0.9)
         for: 1m
         labels:
           severity: critical
@@ -70,7 +70,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/oom-kill"
 
       - alert: ContainerRestartLoop
-        expr: increase(kube_pod_container_status_restarts_total{pod=~\".*apexmail.*\"}[30m]) > 5
+        expr: increase(kube_pod_container_status_restarts_total{pod=~".*apexmail.*"}[30m]) > 5
         for: 5m
         labels:
           severity: critical
@@ -83,7 +83,7 @@ groups:
       # ── Disk Space ─────────────────────────────────────────────────────────
 
       - alert: DiskSpaceWarning
-        expr: container_fs_usage_bytes{pod=~\".*apexmail.*\"} / container_fs_limit_bytes{pod=~\".*apexmail.*\"} > 0.80
+        expr: container_fs_usage_bytes{pod=~".*apexmail.*"} / container_fs_limit_bytes{pod=~".*apexmail.*"} > 0.80
         for: 10m
         labels:
           severity: warning
@@ -94,7 +94,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/disk-space"
 
       - alert: DiskSpaceCritical
-        expr: container_fs_usage_bytes{pod=~\".*apexmail.*\"} / container_fs_limit_bytes{pod=~\".*apexmail.*\"} > 0.95
+        expr: container_fs_usage_bytes{pod=~".*apexmail.*"} / container_fs_limit_bytes{pod=~".*apexmail.*"} > 0.95
         for: 5m
         labels:
           severity: critical
@@ -107,7 +107,7 @@ groups:
       # ── Network ────────────────────────────────────────────────────────────
 
       - alert: HighNetworkErrorRate
-        expr: sum(rate(container_network_receive_errors_total{pod=~\".*apexmail.*\"}[5m])) by (pod) > 0
+        expr: sum(rate(container_network_receive_errors_total{pod=~".*apexmail.*"}[5m])) by (pod) > 0
         for: 10m
         labels:
           severity: warning
@@ -118,7 +118,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/network-errors"
 
       - alert: PodNetworkUnavailable
-        expr: sum(rate(container_network_receive_bytes_total{pod=~\".*apexmail.*\"}[5m])) by (pod) == 0 and sum(rate(container_network_transmit_bytes_total{pod=~\".*apexmail.*\"}[5m])) by (pod) == 0
+        expr: sum(rate(container_network_receive_bytes_total{pod=~".*apexmail.*"}[5m])) by (pod) == 0 and sum(rate(container_network_transmit_bytes_total{pod=~".*apexmail.*"}[5m])) by (pod) == 0
         for: 5m
         labels:
           severity: critical
@@ -131,7 +131,7 @@ groups:
       # ── Pod Status ─────────────────────────────────────────────────────────
 
       - alert: PodCrashLoopBackOff
-        expr: kube_pod_status_phase{pod=~\".*apexmail.*\", phase=\"Waiting\"} > 0
+        expr: kube_pod_container_status_waiting_reason{pod=~".*apexmail.*", reason="CrashLoopBackOff"} > 0
         for: 2m
         labels:
           severity: critical
@@ -142,7 +142,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/pod-crash-loop"
 
       - alert: PodNotReady
-        expr: kube_pod_status_ready{pod=~\".*apexmail.*\", condition=\"false\"} > 0
+        expr: kube_pod_status_ready{pod=~".*apexmail.*", condition="false"} > 0
         for: 5m
         labels:
           severity: critical
@@ -153,7 +153,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/pod-not-ready"
 
       - alert: PodPending
-        expr: kube_pod_status_phase{pod=~\".*apexmail.*\", phase=\"Pending\"} > 0
+        expr: kube_pod_status_phase{pod=~".*apexmail.*", phase="Pending"} > 0
         for: 10m
         labels:
           severity: warning
@@ -166,7 +166,7 @@ groups:
       # ── Node-Level ─────────────────────────────────────────────────────────
 
       - alert: NodeDiskPressure
-        expr: kube_node_status_condition{condition=\"DiskPressure\", status=\"true\"} == 1
+        expr: kube_node_status_condition{condition="DiskPressure", status="true"} == 1
         for: 5m
         labels:
           severity: critical
@@ -177,7 +177,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/node-disk-pressure"
 
       - alert: NodeMemoryPressure
-        expr: kube_node_status_condition{condition=\"MemoryPressure\", status=\"true\"} == 1
+        expr: kube_node_status_condition{condition="MemoryPressure", status="true"} == 1
         for: 5m
         labels:
           severity: critical
@@ -190,7 +190,7 @@ groups:
       # ── HPA & Scale ────────────────────────────────────────────────────────
 
       - alert: HpaMaxedOut
-        expr: kube_horizontalpodautoscaler_spec_max_replicas{pod=~\".*apexmail.*\"} == kube_horizontalpodautoscaler_status_current_replicas{pod=~\".*apexmail.*\"}
+        expr: kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler=~".*apexmail.*"} == kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*apexmail.*"}
         for: 30m
         labels:
           severity: warning
@@ -201,7 +201,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/runbooks/hpa-maxed-out"
 
       - alert: HpaScaleToZero
-        expr: kube_horizontalpodautoscaler_status_current_replicas{pod=~\".*apexmail.*\"} == 0
+        expr: kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*apexmail.*"} == 0
         for: 5m
         labels:
           severity: critical

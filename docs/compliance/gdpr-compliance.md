@@ -223,7 +223,7 @@ data, enabling controllers to fulfil their own notification obligations.
 
 ### 9.1 Current Data Residency
 
-All primary data processing and storage occurs within the EU:
+The supplied deployment configuration targets EU/EEA regions for primary data processing and storage. Active locations, storage providers, and transfer safeguards must be confirmed for the deployed environment:
 
 - **Compute:** Hetzner Cloud ARM servers (EU data centres).
 - **Database:** PostgreSQL (hosted on Hetzner, EU).
@@ -232,8 +232,9 @@ All primary data processing and storage occurs within the EU:
 
 ### 9.2 Transfers Outside the EEA
 
-Currently, no personal data is routinely transferred outside the EEA. If a transfer
-becomes necessary (e.g., new sub-processor):
+Configured providers (such as payment processing and optional OAuth) or a
+deployment-specific storage setting may transfer personal data outside the EEA.
+Where that occurs, a valid transfer mechanism is required:
 
 1. **Adequacy decision** — Preferred where available (Art. 45).
 2. **Standard Contractual Clauses (SCCs)** — EU Commission-approved SCCs
@@ -245,8 +246,9 @@ becomes necessary (e.g., new sub-processor):
 
 ### 9.3 Customer Data Localisation
 
-All customer data remains in the EU. There is no option to store data outside
-the EU at this time.
+Data localisation is determined by the active deployment and applicable
+agreement. Do not assume an EU-only location without confirming its configured
+providers, telemetry storage, and transfer safeguards.
 
 ---
 

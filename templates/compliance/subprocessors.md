@@ -14,15 +14,16 @@ A subprocessor is a third-party data processor engaged by ApexMail to process pe
 
 | Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **Hetzner Online GmbH** | Primary cloud infrastructure (bare metal, cloud servers, block storage, networking) | All platform data (account data, email content, event logs, analytics) | Germany & Finland (EU/EEA) | Not applicable — processing remains within the EEA |
+| **Hetzner Online GmbH** | Primary cloud infrastructure (bare metal, cloud servers, block storage, networking) | Core platform data in the default shared deployment | Configured EU/EEA region | Confirm the active deployment and applicable transfer safeguard |
 
 ### Email Delivery
 
 | Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **Amazon Web Services (AWS) SES** | Email delivery transport (secondary delivery path) | Email content (subject, body, headers), recipient email addresses | EU region (Ireland, Frankfurt) | Not applicable — processing remains within the EEA |
+| **Amazon Web Services (AWS) SES** | Configured email-delivery transport | Email content (subject, body, headers), recipient email addresses | Configured SES region | Confirm the active deployment and applicable transfer safeguard |
+| **Amazon Web Services, Inc. (AWS S3)** | Telemetry object storage when enabled | Loki logs and Tempo traces may contain operational metadata | Configured S3 region (default: `eu-central-1`) | Confirm the active deployment and applicable transfer safeguard |
 
-AWS SES is used as a secondary delivery path. The primary delivery path is ApexMail's own MTA infrastructure hosted on Hetzner.
+Whether AWS SES is enabled, and the delivery provider and region used, are controlled by the active deployment configuration. Confirm these details before relying on a data-location representation.
 
 ### Payment Processing
 
@@ -34,14 +35,14 @@ AWS SES is used as a secondary delivery path. The primary delivery path is ApexM
 
 | Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **Redis** (self-hosted open-source software on Hetzner) | In-memory caching, rate limiting, session storage | Session tokens, rate limit counters, ephemeral processing state | EU/EEA (Germany & Finland) | Not applicable — processing remains within the EEA. Redis Ltd. does not process customer data — ApexMail deploys and manages Redis on its own infrastructure. |
+| **Redis** (self-hosted open-source software on Hetzner) | In-memory caching, rate limiting, session storage | Session tokens, rate limit counters, ephemeral processing state | Configured deployment region | Redis Ltd. does not process customer data; confirm the active deployment and transfer safeguard. |
 
 ### Analytics and Monitoring
 
 | Subprocessor | Purpose | Data Processed | Location | Transfer Safeguard |
 |---|---|---|---|---|
-| **ClickHouse** (self-hosted open-source software deployed and managed by ApexMail on Hetzner infrastructure; ClickHouse, Inc. and ClickHouse Cloud are not subprocessors) | Analytics data storage and querying for per-account email analytics | Delivery events, engagement events (opens, clicks), aggregated metrics | EU/EEA (Germany & Finland) | Not applicable — processing remains within the EEA. ClickHouse, Inc. does not process customer data — ApexMail deploys and manages ClickHouse on its own infrastructure. |
-| **Plausible Analytics** (self-hosted) | Privacy-focused marketing website analytics | Anonymized page view data (no cookies, no personal data) | EU/EEA (Estonia) | Not applicable — processing remains within the EEA |
+| **ClickHouse** (self-hosted open-source software deployed and managed by ApexMail on Hetzner infrastructure; ClickHouse, Inc. and ClickHouse Cloud are not subprocessors) | Analytics data storage and querying for per-account email analytics | Delivery events, engagement events (opens, clicks), aggregated metrics | Configured deployment region | ClickHouse, Inc. does not process customer data; confirm the active deployment and transfer safeguard. |
+| **Plausible Analytics** (self-hosted) | Privacy-focused marketing website analytics | Anonymized page view data (no cookies, no personal data) | Configured deployment region | Confirm the active deployment and transfer safeguard |
 
 ### Support and Communications
 

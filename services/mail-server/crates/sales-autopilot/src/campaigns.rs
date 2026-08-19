@@ -21,7 +21,7 @@ use crate::types::{Campaign, CampaignStatus, SalesError};
 /// dependency on `CampaignManager`. When a campaign transitions to Active,
 /// `start_campaign` calls `dispatch()` with the campaign details so the
 /// caller can enqueue outbound emails. This keeps the sales-autopilot crate
-/// decoupled from the outbound-queue crate (no direct dependency).
+/// decoupled from the delivery worker (no direct dependency).
 pub trait CampaignEmailDispatcher: Send + Sync + std::fmt::Debug {
     /// Dispatch emails for a campaign that has just been started.
     ///

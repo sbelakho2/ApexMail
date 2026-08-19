@@ -97,11 +97,11 @@ For enterprise buying, security review, or private-cloud planning, complete the 
     <div class="space-y-3 mt-3">
       <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="checkbox" name="compliance_needs" value="gdpr" class="accent-brand-500" />
-        <span>GDPR (EU data residency)</span>
+        <span>GDPR / data-residency deployment review</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="checkbox" name="compliance_needs" value="hipaa" class="accent-brand-500" />
-        <span>HIPAA (BAA required)</span>
+        <span>HIPAA use case (not currently offered; discuss alternatives)</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="checkbox" name="compliance_needs" value="soc2" class="accent-brand-500" />

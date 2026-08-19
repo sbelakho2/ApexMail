@@ -1,6 +1,6 @@
 +++
 title = "Accord de traitement des données"
-description = "DPA ApexMail — conditions de traitement des données conformes au RGPD."
+description = "DPA ApexMail — conditions de traitement des données relevant de l'article 28 du RGPD."
 template = "prose.html"
 
 [extra]
@@ -45,7 +45,9 @@ La liste actuelle des sous-traitants autorisés est tenue dans le [Registre des 
 
 | Sous-traitant | Finalité | Localisation | Garantie de transfert |
 |---|---|---|---|
-| Hetzner Online GmbH | Infrastructure principale (calcul, stockage) | UE (Allemagne/Finlande) | Non applicable — le traitement reste dans l'EEE |
+| Hetzner Online GmbH | Infrastructure principale (calcul, stockage) | Région UE/EEE configurée | Confirmer le déploiement actif et la garantie de transfert applicable |
+| Amazon Web Services, Inc. | Stockage d'objets de télémétrie lorsqu'il est activé | Région S3 configurée (par défaut : `eu-central-1`) | Confirmer le déploiement actif et la garantie de transfert applicable |
+| Amazon Web Services, Inc. | Transport de livraison d'email lorsqu'il est activé | Région SES configurée | Confirmer le déploiement actif et la garantie de transfert applicable |
 | Google LLC | Authentification OAuth optionnelle | Mondial (entité américaine, données traitées selon la configuration OAuth) | Clauses contractuelles types |
 | GitHub, Inc. | Authentification OAuth optionnelle | Mondial (entité américaine) | Clauses contractuelles types |
 | Stripe, Inc. | Traitement des paiements | États-Unis (principal), Inde (support) | Clauses contractuelles types |
@@ -58,7 +60,7 @@ Le Sous-traitant notifiera le Responsable du traitement au moins **30 jours** av
 
 ## 6. Transferts internationaux
 
-Le traitement de l'infrastructure principale a lieu dans les centres de données Hetzner en Allemagne et en Finlande. Consultez la page [Emplacements des données](/data-locations/) pour une matrice complète catégorie par catégorie. Aucune donnée personnelle n'est transférée hors de l'EEE sans garanties appropriées (Clauses contractuelles types ou décision d'adéquation en vertu de l'Article 45).
+La configuration fournie cible des régions de l'UE/EEE pour l'infrastructure principale et le stockage d'objets de télémétrie. Les fournisseurs et emplacements actifs dépendent du déploiement ; consultez la page [Emplacements des données](/data-locations/) pour une matrice complète catégorie par catégorie. Aucune donnée personnelle n'est transférée hors de l'EEE sans garanties appropriées (Clauses contractuelles types ou décision d'adéquation en vertu de l'Article 45).
 
 ## 7. Mesures de sécurité
 

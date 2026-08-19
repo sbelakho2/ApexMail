@@ -131,6 +131,20 @@ pub struct UpdateTenantRequest {
     pub status: Option<String>,
 }
 
+fn validate_generic_tenant_update(body: &UpdateTenantRequest) -> Result<(), ApiError> {
+    // Tenant plan changes are entitlement-bearing. They must go through the
+    // dedicated billing admin override endpoint, which validates the plan and
+    // records the override reason/audit trail. This generic tenant editor must
+    // never grant a paid plan from an arbitrary request field.
+    if body.plan.is_some() {
+        return Err(ApiError::Validation(vec![
+            "plan updates must use the audited billing plan-override endpoint".to_string(),
+        ]));
+    }
+
+    Ok(())
+}
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn list_tenants(
@@ -161,6 +175,7 @@ async fn update_tenant(
     Json(body): Json<UpdateTenantRequest>,
 ) -> Result<StatusCode, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    validate_generic_tenant_update(&body)?;
     let id = body.id;
 
     // Handle suspend/unsuspend action
@@ -190,13 +205,6 @@ async fn update_tenant(
     if let Some(name) = &body.name {
         sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
             .bind(name)
-            .bind(&id)
-            .execute(&state.db)
-            .await?;
-    }
-    if let Some(plan) = &body.plan {
-        sqlx::query("UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id = $2")
-            .bind(plan)
             .bind(&id)
             .execute(&state.db)
             .await?;
@@ -297,5 +305,36 @@ mod tests {
             validate_delete_confirmation("tenant_123", "DELETE tenant_456"),
             Err(ApiError::Validation(_))
         ));
+    }
+
+    #[test]
+    fn generic_tenant_update_rejects_entitlement_bearing_plan_field() {
+        let request = UpdateTenantRequest {
+            id: "tenant_123".into(),
+            action: None,
+            name: None,
+            plan: Some("enterprise".into()),
+            status: None,
+        };
+
+        assert!(matches!(
+            validate_generic_tenant_update(&request),
+            Err(ApiError::Validation(errors))
+                if errors == ["plan updates must use the audited billing plan-override endpoint"]
+        ));
+    }
+
+    #[test]
+    fn generic_tenant_update_allows_non_entitlement_fields() {
+        let request = UpdateTenantRequest {
+            id: "tenant_123".into(),
+            action: None,
+            name: Some("Renamed tenant".into()),
+            plan: None,
+            status: Some("active".into()),
+        };
+
+        validate_generic_tenant_update(&request)
+            .expect("non-entitlement tenant fields should remain available");
     }
 }

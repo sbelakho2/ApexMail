@@ -14,9 +14,8 @@ rule_files:
   - 'prometheus/alerts/api-alerts.yml'
   - 'prometheus/alerts/infrastructure-alerts.yml'
 
-# Local Docker Compose only runs tracking plus the exporter stack.
-# Production-style service discovery for API/worker lives in deployment
-# targets that actually provision those services.
+# All listed service targets expose a Prometheus-compatible `/metrics` route
+# on a network shared with the Prometheus container.
 
 scrape_configs:
   # API server metrics
@@ -37,14 +36,21 @@ scrape_configs:
   # Enterprise metrics
   - job_name: 'apexmail-enterprise'
     static_configs:
-      - targets: ['enterprise:3002']
+      - targets: ['enterprise:3008']
     metrics_path: '/metrics'
     scrape_interval: 15s
 
-  - job_name: 'apexmail-internal-services'
-    file_sd_configs:
-      - files:
-          - targets.d/apexmail-internal.yml
+  # MTA metrics (SMTP ingress availability and auth/cache counters)
+  - job_name: 'apexmail-mta'
+    static_configs:
+      - targets: ['mta:9090']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Background processor health and operational metrics
+  - job_name: 'apexmail-worker'
+    static_configs:
+      - targets: ['worker:9093']
     metrics_path: '/metrics'
     scrape_interval: 15s
 
@@ -187,13 +193,6 @@ scrape_configs:
       - targets: ['synthetic-monitor:9128']
     metrics_path: '/metrics'
     scrape_interval: 30s
-
-  # ── Rate Limiter Metrics ──
-  - job_name: 'rate-limiter'
-    static_configs:
-      - targets: ['rate-limiter:9093']
-    metrics_path: '/metrics'
-    scrape_interval: 15s
 
   # ── ClickHouse Query Performance Metrics ──
   - job_name: 'clickhouse-query'

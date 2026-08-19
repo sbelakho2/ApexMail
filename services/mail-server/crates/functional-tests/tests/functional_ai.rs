@@ -1,7 +1,6 @@
-//! Functional tests for ai-service:analytics, bandits, content, inference, STO.
+//! Functional tests for deterministic ai-service analytics, content, and STO helpers.
 
 use ai_service::analytics::AnalyticsPredictor;
-use ai_service::bandits::BanditOptimizer;
 use ai_service::content::ContentOptimizer;
 use ai_service::sto::SendTimeOptimizer;
 
@@ -104,68 +103,6 @@ fn subject_line_scoring_length_heuristics() {
         optimal_upper_body.len(),
         long_body.len(),
     );
-}
-
-// ── Bandits ────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn bandit_epsilon_0_always_exploits() {
-    let b = BanditOptimizer::new(0.0);
-    let id_a = b.add_arm("variant-a").await.unwrap();
-    let id_b = b.add_arm("variant-b").await.unwrap();
-
-    // Give arm A a much higher reward rate
-    for _ in 0..50 {
-        b.record_reward(&id_a, 1.0).await.unwrap();
-    }
-    for _ in 0..50 {
-        b.record_reward(&id_b, 0.0).await.unwrap();
-    }
-
-    // epsilon=0 should always pick the best arm
-    for _ in 0..20 {
-        let choice = b.select_arm().unwrap();
-        assert_eq!(choice, id_a, "epsilon=0 should always exploit best arm");
-    }
-}
-
-#[tokio::test]
-async fn bandit_epsilon_1_explores_both_arms() {
-    let b = BanditOptimizer::new(1.0);
-    let id_a = b.add_arm("variant-a").await.unwrap();
-    let id_b = b.add_arm("variant-b").await.unwrap();
-    // Record some rewards so arms are initialized
-    b.record_reward(&id_a, 1.0).await.unwrap();
-    b.record_reward(&id_b, 0.0).await.unwrap();
-
-    let mut saw_a = false;
-    let mut saw_b = false;
-    for _ in 0..100 {
-        let choice = b.select_arm().unwrap();
-        if choice == id_a {
-            saw_a = true;
-        }
-        if choice == id_b {
-            saw_b = true;
-        }
-    }
-    assert!(saw_a && saw_b, "epsilon=1 should eventually pick both arms");
-}
-
-#[tokio::test]
-async fn bandit_record_reward_updates_stats() {
-    let b = BanditOptimizer::new(0.1);
-    let id = b.add_arm("cta-red").await.unwrap();
-    b.record_reward(&id, 1.0).await.unwrap();
-    b.record_reward(&id, 0.0).await.unwrap();
-    b.record_reward(&id, 1.0).await.unwrap();
-
-    let stats = b.get_stats();
-    assert_eq!(stats.len(), 1);
-    assert_eq!(stats[0].impressions, 3);
-    assert_eq!(stats[0].conversions, 2);
-    let cr = stats[0].conversion_rate();
-    assert!((cr - 2.0 / 3.0).abs() < 1e-9);
 }
 
 // ── K-means segmentation ───────────────────────────────────────

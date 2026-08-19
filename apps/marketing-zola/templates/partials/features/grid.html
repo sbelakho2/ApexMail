@@ -58,7 +58,7 @@
               <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_inbound_title"] %}{{ i18n_data[l]["features"]["f_inbound_title"] }}{% else %}Inbound Processing{% endif %}</h4>
-            <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_inbound_desc"] %}{{ i18n_data[l]["features"]["f_inbound_desc"] }}{% else %}Receive and parse incoming emails via webhooks (from Developer plans){% endif %}</p>
+            <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_inbound_desc"] %}{{ i18n_data[l]["features"]["f_inbound_desc"] }}{% else %}Receive and parse incoming emails via webhooks (from Scale plans){% endif %}</p>
           </div>
         </div>
       </div>
@@ -156,8 +156,8 @@
             <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-brand/10">
               <svg class="w-4 h-4 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="0" ry="0"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
             </div>
-            <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_hipaa_title"] %}{{ i18n_data[l]["features"]["f_hipaa_title"] }}{% else %}HIPAA BAA Workflow{% endif %}</h4>
-            <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_hipaa_desc"] %}{{ i18n_data[l]["features"]["f_hipaa_desc"] }}{% else %}BAA lifecycle tooling and regulated-use implementation review on Enterprise{% endif %}</p>
+            <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_hipaa_title"] %}{{ i18n_data[l]["features"]["f_hipaa_title"] }}{% else %}HIPAA Availability{% endif %}</h4>
+            <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_hipaa_desc"] %}{{ i18n_data[l]["features"]["f_hipaa_desc"] }}{% else %}HIPAA availability and BAAs are not currently offered{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-sm border border-surface-200 hover:bg-surface-50 transition-all bg-white">
             <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-brand/10">
@@ -177,8 +177,8 @@
             <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-brand/10">
               <svg class="w-4 h-4 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="0" ry="0"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
             </div>
-            <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_soc2_title"] %}{{ i18n_data[l]["features"]["f_soc2_title"] }}{% else %}SOC 2 Controls{% endif %}</h4>
-            <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_soc2_desc"] %}{{ i18n_data[l]["features"]["f_soc2_desc"] }}{% else %}Control tracking and evidence collection workflows for Enterprise reviews{% endif %}</p>
+            <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_soc2_title"] %}{{ i18n_data[l]["features"]["f_soc2_title"] }}{% else %}SOC 2 Status{% endif %}</h4>
+            <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_soc2_desc"] %}{{ i18n_data[l]["features"]["f_soc2_desc"] }}{% else %}SOC 2 certification is not currently offered; current security-review material is available on request{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-sm border border-surface-200 hover:bg-surface-50 transition-all bg-white">
             <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-brand/10">
@@ -312,7 +312,7 @@
               <svg class="w-4 h-4 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="0" ry="0"/><rect x="2" y="14" width="20" height="8" rx="0" ry="0"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_sso_title"] %}{{ i18n_data[l]["features"]["f_sso_title"] }}{% else %}SSO/SAML/OIDC{% endif %}</h4>
-            <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_sso_desc"] %}{{ i18n_data[l]["features"]["f_sso_desc"] }}{% else %}Enterprise identity provider integration (Business+ plans){% endif %}</p>
+            <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_sso_desc"] %}{{ i18n_data[l]["features"]["f_sso_desc"] }}{% else %}Enterprise identity-provider integration (Scale and Enterprise plans){% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-sm border border-surface-200 hover:bg-surface-50 transition-all bg-white">
             <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-brand/10">

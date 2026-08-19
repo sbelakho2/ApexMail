@@ -45,11 +45,11 @@ Nous traitons les données conformément à notre [Politique de confidentialité
 
 ## 7. Conditions de paiement
 
-Les frais sont facturés mensuellement ou annuellement selon votre choix. Tous les prix sont en EUR. La TVA estonienne (24 %) s'applique le cas échéant.
+Les frais sont facturés mensuellement ou annuellement selon votre choix. Les prix publiés sont en USD. Les taxes applicables sont déterminées selon les règles applicables à la facture et au pays de facturation.
 
 ### 7.1 Renouvellement automatique
 
-Les abonnements sont renouvelés automatiquement à la fin de chaque période de facturation, sauf résiliation avant la date de renouvellement. Vous pouvez résilier à tout moment depuis votre tableau de bord. La résiliation prend effet à la fin de la période de facturation en cours ; aucun remboursement n'est accordé pour les périodes partielles.
+Les abonnements sont renouvelés automatiquement à la fin de chaque période de facturation, sauf résiliation avant la date de renouvellement. Les modifications et résiliations en libre-service s'effectuent via le portail de facturation Stripe. La résiliation prend effet conformément à l'événement de facturation Stripe confirmé ; aucun remboursement n'est accordé pour les périodes partielles.
 
 ### 7.2 Changements de prix
 

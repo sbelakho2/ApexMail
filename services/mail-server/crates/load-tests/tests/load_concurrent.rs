@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use ai_service::bandits::BanditOptimizer;
 use apexmail_lib::validation::is_valid_email;
 use apexmail_lib::{create_hmac_signature, generate_id};
 use observability_service::metrics_collector::MetricsCollector;
@@ -153,41 +152,7 @@ async fn test_concurrent_metric_recording() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Concurrent bandit selection — 100 tasks on shared BanditOptimizer
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_concurrent_bandit_selection() {
-    let bandit = Arc::new(BanditOptimizer::new(0.3));
-
-    // Register some arms upfront
-    let mut arm_ids: Vec<String> = Vec::with_capacity(5);
-    for i in 0..5 {
-        arm_ids.push(bandit.add_arm(&format!("arm-{i}")).await.unwrap());
-    }
-
-    // Seed some rewards so selection has data
-    for id in &arm_ids {
-        bandit.record_reward(id, 1.0).await.unwrap();
-    }
-
-    let mut handles = Vec::new();
-    for _ in 0..100 {
-        let b = Arc::clone(&bandit);
-        let ids = arm_ids.clone();
-        handles.push(tokio::spawn(async move {
-            let selected = b.select_arm().unwrap();
-            assert!(ids.contains(&selected));
-        }));
-    }
-
-    for h in handles {
-        h.await.unwrap();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 8. Concurrent pattern matching — 50 tasks on shared PatternMatcher
+// 7. Concurrent pattern matching — 50 tasks on shared PatternMatcher
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

@@ -91,42 +91,22 @@ fn billing_plan_quota_hierarchy() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 3. AI pipeline:register model → predict → evaluate
+// 3. Deterministic content helper behavior
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn ai_pipeline_register_predict_evaluate() {
-    use ai_service::inference::InferenceEngine;
-    use ai_service::training::TrainingManager;
-    use ai_service::types::{Model, ModelStatus, ModelType};
+fn deterministic_content_helpers_have_explicit_semantics() {
+    use ai_service::content::ContentOptimizer;
+    use ai_service::sto::SendTimeOptimizer;
 
-    let engine = InferenceEngine::new();
-    let trainer = TrainingManager::new();
+    let content = ContentOptimizer::new();
+    let score = content.score_subject_line("Your account update is ready today");
+    assert!(score <= 100);
 
-    // Step 1:Register a model
-    engine.register_model(Model {
-        id: "clf-v1".into(),
-        name: "email-classifier".into(),
-        version: "1.0".into(),
-        model_type: ModelType::Classification,
-        accuracy: 0.95,
-        trained_at: chrono::Utc::now(),
-        status: ModelStatus::Ready,
-    });
-
-    // Step 2:Run a prediction
-    let pred = engine
-        .run_prediction("clf-v1", serde_json::json!({"text": "hello"}))
-        .unwrap();
-    assert_eq!(pred.model_id, "clf-v1");
-    assert!((pred.confidence - 0.95).abs() < f64::EPSILON);
-
-    // Step 3:Evaluate model quality
-    let predictions = vec![1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];
-    let actuals = vec![1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0];
-    let eval = trainer.evaluate_model(&predictions, &actuals).unwrap();
-    assert!(eval.accuracy > 0.8);
-    assert!(eval.f1 > 0.0);
+    let send_time = SendTimeOptimizer::new()
+        .find_optimal_time(&[(9, 1, 0.3), (10, 2, 0.9), (15, 3, 0.5)])
+        .expect("nonempty engagement data selects an existing slot");
+    assert_eq!((send_time.hour, send_time.day_of_week), (10, 2));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -275,55 +255,3 @@ fn compliance_pattern_matching_pipeline() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 8. Optimisation loop:create bandit arms → record rewards → select best
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn bandit_optimisation_loop() {
-    use ai_service::bandits::BanditOptimizer;
-
-    // Use epsilon=0.0 so selection is pure exploitation
-    let bandits = BanditOptimizer::new(0.0);
-
-    // Step 1:Register three arms (subject line variants)
-    let arm_a = bandits.add_arm("Subject A: 🔥 Hot deals").await.unwrap();
-    let arm_b = bandits.add_arm("Subject B: Weekly update").await.unwrap();
-    let arm_c = bandits.add_arm("Subject C: Don't miss out!").await.unwrap();
-
-    // Step 2:Simulate reward observations
-    // Arm A:high performer
-    for _ in 0..100 {
-        bandits.record_reward(&arm_a, 1.0).await.unwrap();
-    }
-    // Arm B:medium performer
-    for _ in 0..100 {
-        bandits.record_reward(&arm_b, 0.0).await.unwrap();
-    }
-    for _ in 0..30 {
-        bandits.record_reward(&arm_b, 1.0).await.unwrap();
-    }
-    // Arm C:low performer
-    for _ in 0..100 {
-        bandits.record_reward(&arm_c, 0.0).await.unwrap();
-    }
-    for _ in 0..5 {
-        bandits.record_reward(&arm_c, 1.0).await.unwrap();
-    }
-
-    // Step 3:Get statistics
-    let stats = bandits.get_stats();
-    assert_eq!(stats.len(), 3);
-
-    // Arm A should have highest conversion rate
-    let a_stats = stats.iter().find(|s| s.id == arm_a).unwrap();
-    let b_stats = stats.iter().find(|s| s.id == arm_b).unwrap();
-    let c_stats = stats.iter().find(|s| s.id == arm_c).unwrap();
-
-    assert!(a_stats.conversion_rate() > b_stats.conversion_rate());
-    assert!(b_stats.conversion_rate() > c_stats.conversion_rate());
-
-    // Step 4:With epsilon=0, selection should consistently pick arm A
-    // (It picks the one with best conversion rate)
-    let selected = bandits.select_arm().unwrap();
-    assert_eq!(selected, arm_a, "Should exploit best arm with epsilon=0");
-}

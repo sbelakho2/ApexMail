@@ -228,8 +228,11 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 priority_onboarding: true,
                 sla_guarantee: true,
                 sla_credit_percentage: 25,
-                hipaa_compliance: true,
-                soc2_compliance: true,
+                // Compliance certifications and HIPAA availability are not
+                // currently offered. Do not expose these as entitlement
+                // flags merely because Enterprise has related workflows.
+                hipaa_compliance: false,
+                soc2_compliance: false,
                 private_cloud: true,
                 byoip: true,
                 support_level: SupportLevel::Dedicated,
@@ -659,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn enterprise_has_all_premium_features() {
+    fn enterprise_exposes_only_currently_available_compliance_features() {
         let plans = default_plans();
         let ent_features = plans
             .iter()
@@ -669,11 +672,11 @@ mod tests {
             .as_ref()
             .map(|f| f.sso_enabled)
             .unwrap_or(false));
-        assert!(ent_features
+        assert!(!ent_features
             .as_ref()
             .map(|f| f.hipaa_compliance)
             .unwrap_or(false));
-        assert!(ent_features
+        assert!(!ent_features
             .as_ref()
             .map(|f| f.soc2_compliance)
             .unwrap_or(false));

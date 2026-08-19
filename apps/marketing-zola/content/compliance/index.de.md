@@ -1,6 +1,6 @@
 +++
-title = "Compliance-as-Code | DSGVO, HIPAA, SOC 2, SIG, CAIQ, HECVAT"
-description = "Compliance-Workflow-Unterstützung für E-Mail: Einwilligungsdatensätze, DSR-Verarbeitung, HIPAA-BAA-Lebenszyklus, Audit-Protokolle, SOC-2-Kontrollnachweise und generierte SIG-, CAIQ- und HECVAT-Antwortpakete."
+title = "Compliance-Workflows | DSGVO, DSR, Audit-Protokolle und Sicherheitsprüfung"
+description = "Compliance-Workflow-Unterstützung für E-Mail: Einwilligungsdatensätze, DSR-Verarbeitung, Audit-Protokolle und aktuelle Datenschutzdokumentation. HIPAA-Verfügbarkeit und SOC-2-Zertifizierung werden derzeit nicht angeboten."
 template = "compliance.html"
 
 [extra]

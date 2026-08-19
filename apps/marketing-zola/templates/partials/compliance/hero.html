@@ -19,9 +19,10 @@
         </h1>
 
         <p class="text-lg text-surface-600 mb-10 leading-relaxed max-w-lg">
-          Stop treating compliance as an afterthought. ApexMail includes GDPR workflow APIs,
-          HIPAA BAA lifecycle tooling, SOC 2 evidence workflows, and generated SIG, CAIQ,
-          and HECVAT answer packs for Enterprise customers.
+          Treat compliance as a current, documented operating concern. ApexMail includes
+          GDPR-oriented workflow APIs, audit-capable plans, and security-review material
+          for Enterprise evaluation. HIPAA availability and SOC 2 certification are not
+          currently offered.
         </p>
 
         <ul class="space-y-4 mb-10">
@@ -41,7 +42,7 @@
 
         <div class="flex flex-wrap gap-4">
           <a href="{{ config.extra.app_url }}/signup" class="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-brand-500 rounded-sm hover:bg-brand-600 transition-colors">
-            Start Free Trial
+            Start Free
             <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
           <a href="/contact/" class="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-950 bg-white border border-surface-200 rounded-sm hover:bg-surface-100 transition-colors">
@@ -54,7 +55,7 @@
       <div class="animate-in delay-200 relative">
         <div class="p-6 sm:p-8 bg-white rounded-sm border border-surface-200">
           <h3 class="text-[14px] font-semibold text-surface-500 mb-8 text-center">Compliance Workflows</h3>
-          {% set badges = ["GDPR DSR", "HIPAA BAA", "SIG / CAIQ", "HECVAT"] %}
+          {% set badges = ["GDPR DSR", "Audit logs", "SIG / CAIQ", "Current documentation"] %}
           <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
             {% for badge in badges %}
             <div class="animate-in min-h-[8rem] rounded-2xl bg-surface-100 border border-surface-200 flex flex-col items-center justify-center p-4 hover:border-surface-300 transition-colors">
@@ -68,7 +69,7 @@
           <div class="mt-10 p-4 rounded-sm bg-success-50 border border-success-100">
             <div class="flex items-center gap-3 text-success-700 text-[14px] font-bold">
               <span class="w-2 h-2 rounded-sm bg-success-500 animate-pulse"></span>
-              Enterprise security-review report generated from live controls
+              Current security-review information for qualified Enterprise evaluation
             </div>
           </div>
         </div>

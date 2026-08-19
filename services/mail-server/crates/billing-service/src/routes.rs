@@ -26,6 +26,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+#[cfg(test)]
 use billing_common::proration;
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
@@ -34,11 +35,14 @@ use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 
 use crate::{
-    config::{BillingConfig, PaygCalculationError, PaygPricing},
+    config::{PaygCalculationError, PaygPricing},
     invoices, plans, subscriptions,
     types::{BillingInterval, MeterEventType, Plan, PlanFeatures, SupportLevel},
     usage, AppState,
 };
+
+#[cfg(test)]
+use crate::config::BillingConfig;
 
 /// Build the full Axum router for billing.
 pub fn router(state: Arc<AppState>) -> Router {
@@ -866,8 +870,7 @@ async fn get_payg_usage(
     .into_response())
 }
 
-const LEGACY_DOWNGRADE_PLAN: &str = "free";
-
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct RouteSubscription {
     plan_name: String,
@@ -877,27 +880,7 @@ struct RouteSubscription {
     current_period_end: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(sqlx::FromRow)]
-struct RouteSubscriptionRow {
-    plan_name: String,
-    billing_interval: String,
-    status: String,
-    current_period_start: chrono::DateTime<chrono::Utc>,
-    current_period_end: chrono::DateTime<chrono::Utc>,
-}
-
-impl RouteSubscriptionRow {
-    fn into_subscription(self) -> RouteSubscription {
-        RouteSubscription {
-            plan_name: self.plan_name,
-            billing_interval: parse_billing_interval(&self.billing_interval),
-            status: self.status,
-            current_period_start: self.current_period_start,
-            current_period_end: self.current_period_end,
-        }
-    }
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacyProrationDto {
@@ -933,22 +916,9 @@ fn default_billing_interval() -> BillingInterval {
     BillingInterval::Monthly
 }
 
-fn parse_billing_interval(interval: &str) -> BillingInterval {
-    match interval {
-        "yearly" => BillingInterval::Yearly,
-        _ => BillingInterval::Monthly,
-    }
-}
-
-fn legacy_billing_interval(interval: BillingInterval) -> &'static str {
-    match interval {
-        BillingInterval::Monthly => "monthly",
-        BillingInterval::Yearly => "yearly",
-    }
-}
-
 // Replaced by billing_common::proration::{prorated_amount, ceil_day_count}
 
+#[cfg(test)]
 fn preview_plan_proration(
     config: &BillingConfig,
     current_plan: &Plan,
@@ -1175,64 +1145,11 @@ pub(crate) async fn append_audit_log(
     .map_err(|error| format!("{error:?}"))
 }
 
-async fn get_route_subscription(
-    pool: &sqlx::PgPool,
-    tenant_id: &str,
-) -> Result<Option<RouteSubscription>, ApiError> {
-    let row: Option<RouteSubscriptionRow> = sqlx::query_as(
-        r#"
-        SELECT plan_name, billing_interval, status, current_period_start, current_period_end
-        FROM subscriptions
-        WHERE tenant_id = $1
-          AND status IN ('active', 'trialing', 'past_due')
-        ORDER BY created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(ApiError::Plans)?;
-
-    Ok(row.map(RouteSubscriptionRow::into_subscription))
-}
-
-/// Validate that the subscription's current status permits the requested
-/// operation, according to the subscription state machine (BS-006).
-///
-/// Rules:
-/// - **Plan switch** is only allowed from `active` or `trialing`.
-///   Subscriptions in `past_due` must settle outstanding payments first.
-/// - **Cancellation** (immediate or end-of-period) is only allowed from
-///   `active` or `trialing`.  Past-due subscriptions cannot be cancelled
-///   without first resolving the outstanding balance.
-fn validate_subscription_transition(
-    subscription: &RouteSubscription,
-    operation: &str,
-) -> Result<(), ApiError> {
-    match subscription.status.as_str() {
-        "active" | "trialing" => Ok(()),
-        "past_due" => {
-            let msg = format!(
-                "Cannot {operation} a subscription with status '{status}'. \
-                 The subscription has outstanding payments that must be \
-                 resolved first.",
-                status = subscription.status
-            );
-            Err(ApiError::InvalidSubscriptionStatus(msg))
-        }
-        other => {
-            let msg = format!(
-                "Cannot {operation} a subscription with status '{other}'.",
-                other = other
-            );
-            Err(ApiError::InvalidSubscriptionStatus(msg))
-        }
-    }
-}
-
+/// Plan activation is driven exclusively by verified Stripe webhooks. This
+/// legacy internal endpoint remains only to return a clear migration error;
+/// mutating subscription and tenant rows here would bypass payment proof.
 async fn switch_plan(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Query(q): Query<TenantIdQuery>,
     Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<LegacySwitchPlanBody>,
@@ -1240,207 +1157,22 @@ async fn switch_plan(
     if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
         return Ok(response);
     }
-    let now = chrono::Utc::now();
+    let _ = (&body.plan_name, body.billing_interval);
 
-    if body.plan_name == "payg" {
-        let current_subscription = get_route_subscription(&state.db, &q.tenant_id).await?;
+    tracing::warn!(
+        tenant_id = %q.tenant_id,
+        "rejected direct internal billing plan transition; verified Stripe lifecycle is required"
+    );
 
-        // Validate the subscription status allows plan switching (BS-006).
-        if let Some(ref subscription) = current_subscription {
-            validate_subscription_transition(subscription, "switch plan")?;
-        }
-
-        let effective_date = current_subscription
-            .as_ref()
-            .map(|subscription| subscription.current_period_end)
-            .unwrap_or(now);
-        let previous_plan = current_subscription
-            .as_ref()
-            .map(|subscription| subscription.plan_name.clone())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let mut tx = state.db.begin().await.map_err(ApiError::Plans)?;
-
-        if current_subscription.is_some() {
-            sqlx::query(
-                r#"
-                UPDATE subscriptions
-                SET cancel_at_period_end = true, updated_at = $1
-                WHERE tenant_id = $2
-                  AND status IN ('active', 'trialing')
-                "#,
-            )
-            .bind(now)
-            .bind(&q.tenant_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiError::Plans)?;
-        }
-
-        let tenant_update =
-            sqlx::query("UPDATE tenants SET plan = 'payg', updated_at = $1 WHERE id = $2")
-                .bind(now)
-                .bind(&q.tenant_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(ApiError::Plans)?;
-
-        if tenant_update.rows_affected() != 1 {
-            return Ok(error_response(
-                StatusCode::NOT_FOUND,
-                ErrorCode::NotFound,
-                "Tenant not found",
-            ));
-        }
-
-        insert_audit_log(
-            &mut tx,
-            &q.tenant_id,
-            "plan.changed",
-            "subscription",
-            None,
-            serde_json::json!({
-                "previousPlan": previous_plan,
-                "newPlan": "payg",
-                "changeType": "downgrade",
-                "effectiveDate": effective_date,
-            }),
-            now,
-        )
-        .await?;
-
-        tx.commit().await.map_err(ApiError::Plans)?;
-
-        return Ok(Json(serde_json::json!({
-            "success": true,
-            "message": "Switched to Pay As You Go billing",
-            "effectiveDate": effective_date,
-        }))
-        .into_response());
-    }
-
-    let subscription = match get_route_subscription(&state.db, &q.tenant_id).await? {
-        Some(subscription) => subscription,
-        None => {
-            return Ok(error_response(
-                StatusCode::NOT_FOUND,
-                ErrorCode::NotFound,
-                "No active subscription found",
-            ))
-        }
-    };
-
-    // Validate the subscription status allows a plan switch (BS-006).
-    validate_subscription_transition(&subscription, "switch plan")?;
-
-    let current_plan = match plans::get_plan_by_name(&state.db, &subscription.plan_name).await? {
-        Some(plan) => plan,
-        None => {
-            return Ok(error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::InternalError,
-                "Operation failed",
-            ))
-        }
-    };
-
-    let new_plan = match plans::get_plan_by_name(&state.db, &body.plan_name).await? {
-        Some(plan) => plan,
-        None => {
-            return Ok(error_response(
-                StatusCode::NOT_FOUND,
-                ErrorCode::NotFound,
-                "Plan not found",
-            ))
-        }
-    };
-
-    let proration =
-        match preview_plan_proration(&state.config, &current_plan, &new_plan, &subscription) {
-            Ok(proration) => proration,
-            Err(error) => {
-                return Ok(error_response(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::InvalidInput,
-                    error,
-                ))
-            }
-        };
-
-    let mut tx = state.db.begin().await.map_err(ApiError::Plans)?;
-
-    let updated_subscription_id: Option<Uuid> = sqlx::query_scalar(
-        r#"
-        WITH target AS (
-            SELECT id
-            FROM subscriptions
-            WHERE tenant_id = $4
-              AND status IN ('active', 'trialing', 'past_due')
-            ORDER BY created_at DESC
-            LIMIT 1
-        )
-        UPDATE subscriptions s
-        SET plan_name = $1,
-            billing_interval = $2,
-            updated_at = $3
-        FROM target
-        WHERE s.id = target.id
-        RETURNING s.id
-        "#,
-    )
-    .bind(&body.plan_name)
-    .bind(legacy_billing_interval(body.billing_interval))
-    .bind(now)
-    .bind(&q.tenant_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(ApiError::Plans)?;
-
-    if updated_subscription_id.is_none() {
-        return Ok(error_response(
-            StatusCode::NOT_FOUND,
-            ErrorCode::NotFound,
-            "No active subscription found",
-        ));
-    }
-
-    sqlx::query("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3")
-        .bind(&body.plan_name)
-        .bind(now)
-        .bind(&q.tenant_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiError::Plans)?;
-
-    insert_audit_log(
-        &mut tx,
-        &q.tenant_id,
-        "plan.changed",
-        "subscription",
-        None,
-        serde_json::json!({
-            "newPlan": body.plan_name,
-            "billingInterval": legacy_billing_interval(body.billing_interval),
-            "proration": proration,
-            "changeType": if proration.net_amount >= 0 { "upgrade" } else { "downgrade" },
-        }),
-        now,
-    )
-    .await?;
-
-    tx.commit().await.map_err(ApiError::Plans)?;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "proration": proration,
-        "newPlan": body.plan_name,
-        "billingInterval": legacy_billing_interval(body.billing_interval),
-    }))
-    .into_response())
+    Ok(error_response(
+        StatusCode::CONFLICT,
+        ErrorCode::Conflict,
+        "Direct plan changes are disabled. Complete checkout and wait for the verified Stripe webhook before paid access is activated.",
+    ))
 }
 
 async fn cancel_subscription_request(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Query(q): Query<TenantIdQuery>,
     Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<LegacyCancelBody>,
@@ -1448,113 +1180,18 @@ async fn cancel_subscription_request(
     if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
         return Ok(response);
     }
-    let subscription = match get_route_subscription(&state.db, &q.tenant_id).await? {
-        Some(subscription) => subscription,
-        None => {
-            return Ok(error_response(
-                StatusCode::NOT_FOUND,
-                ErrorCode::NotFound,
-                "No active subscription found",
-            ))
-        }
-    };
+    let _ = (body.reason, body.feedback, body.cancel_immediately);
 
-    // Validate the subscription status allows cancellation (BS-006).
-    validate_subscription_transition(&subscription, "cancel")?;
+    tracing::warn!(
+        tenant_id = %q.tenant_id,
+        "rejected direct internal subscription cancellation; Stripe lifecycle is required"
+    );
 
-    let now = chrono::Utc::now();
-    let effective_date = if body.cancel_immediately {
-        now
-    } else {
-        subscription.current_period_end
-    };
-
-    let mut tx = state.db.begin().await.map_err(ApiError::Plans)?;
-
-    let rows_affected = if body.cancel_immediately {
-        sqlx::query(
-            r#"
-            UPDATE subscriptions
-            SET status = 'canceled',
-                cancel_at_period_end = false,
-                current_period_end = $1,
-                updated_at = $1
-            WHERE tenant_id = $2
-              AND status IN ('active', 'trialing', 'past_due')
-            "#,
-        )
-        .bind(now)
-        .bind(&q.tenant_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiError::Plans)?
-        .rows_affected()
-    } else {
-        sqlx::query(
-            r#"
-            UPDATE subscriptions
-            SET cancel_at_period_end = true,
-                updated_at = $1
-            WHERE tenant_id = $2
-              AND status IN ('active', 'trialing', 'past_due')
-            "#,
-        )
-        .bind(now)
-        .bind(&q.tenant_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiError::Plans)?
-        .rows_affected()
-    };
-
-    if rows_affected == 0 {
-        return Ok(error_response(
-            StatusCode::NOT_FOUND,
-            ErrorCode::NotFound,
-            "No active subscription found",
-        ));
-    }
-
-    if body.cancel_immediately {
-        sqlx::query("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3")
-            .bind(LEGACY_DOWNGRADE_PLAN)
-            .bind(now)
-            .bind(&q.tenant_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiError::Plans)?;
-    }
-
-    insert_audit_log(
-        &mut tx,
-        &q.tenant_id,
-        "subscription.cancelled",
-        "subscription",
-        None,
-        serde_json::json!({
-            "previousPlan": subscription.plan_name,
-            "reason": body.reason.unwrap_or_else(|| "not provided".to_string()),
-            "feedback": body.feedback,
-            "cancelImmediately": body.cancel_immediately,
-            "effectiveDate": effective_date,
-        }),
-        now,
-    )
-    .await?;
-
-    tx.commit().await.map_err(ApiError::Plans)?;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": if body.cancel_immediately {
-            "Subscription cancelled immediately"
-        } else {
-            "Subscription will be cancelled at the end of the billing period"
-        },
-        "effectiveDate": effective_date,
-        "willDowngradeTo": LEGACY_DOWNGRADE_PLAN,
-    }))
-    .into_response())
+    Ok(error_response(
+        StatusCode::CONFLICT,
+        ErrorCode::Conflict,
+        "Direct cancellation is disabled. Use the Stripe billing portal and wait for the verified Stripe webhook before subscription access changes.",
+    ))
 }
 
 #[derive(Deserialize)]

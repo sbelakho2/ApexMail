@@ -1,6 +1,6 @@
 +++
 title = "Nube Privada | Infraestructura de email dedicada"
-description = "Infraestructura de email en nube privada con tenencia de aplicación y datos dedicada, implementación BYOC, aislamiento de red, claves gestionadas por el cliente, residencia de datos EEE y controles de cumplimiento de nivel empresarial."
+description = "Evaluación de una implementación de nube privada para clientes Enterprise. Cada requisito de tenencia dedicada, BYOC, red, claves y residencia de datos está sujeto a revisión técnica y contractual."
 template = "private-cloud.html"
 
 [extra]

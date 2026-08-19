@@ -11,14 +11,14 @@
             <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
             <div>
               <span class="font-bold text-surface-950 text-xs tracking-widest">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_title"] %}{{ i18n_data[l]["security"]["item1_title"] }}{% else %}Enterprise Security Controls{% endif %}</span>
-              <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_desc"] %}{{ i18n_data[l]["security"]["item1_desc"] }}{% else %}SOC 2-aligned controls available on Enterprise plans.{% endif %}</p>
+              <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item1_desc"] %}{{ i18n_data[l]["security"]["item1_desc"] }}{% else %}Security and audit features vary by plan; SOC 2 certification is not currently offered.{% endif %}</p>
             </div>
           </li>
           <li class="flex items-start gap-4">
             <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0 mt-2"></div>
             <div>
-              <span class="font-bold text-surface-950 text-xs tracking-widest">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_title"] %}{{ i18n_data[l]["security"]["item2_title"] }}{% else %}GDPR &amp; HIPAA{% endif %}</span>
-              <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_desc"] %}{{ i18n_data[l]["security"]["item2_desc"] }}{% else %}GDPR-aligned processing in EU data centers. HIPAA BAA available (Enterprise plan).{% endif %}</p>
+              <span class="font-bold text-surface-950 text-xs tracking-widest">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_title"] %}{{ i18n_data[l]["security"]["item2_title"] }}{% else %}GDPR &amp; Compliance{% endif %}</span>
+              <p class="text-[13px] text-surface-600 mt-1">{% if i18n_data and i18n_data[l] and i18n_data[l]["security"] and i18n_data[l]["security"]["item2_desc"] %}{{ i18n_data[l]["security"]["item2_desc"] }}{% else %}GDPR-oriented processing in EU data centers. HIPAA availability is not currently offered.{% endif %}</p>
             </div>
           </li>
           <li class="flex items-start gap-4">

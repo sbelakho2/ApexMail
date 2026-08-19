@@ -22,27 +22,27 @@ comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "none" },
     { feature = "P95 acceptance to first attempt", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95)</span>', comp = '<span class="text-surface-600">Not publicly documented</span>', winner = "none" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">From $30/mo</span>', comp = '<span class="text-surface-600">From $50/mo</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Scale</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
     { feature = "Automatic IP Warming", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatic (Postmark-managed)</span>', winner = "none" },
     { feature = "BIMI Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "MTA-STS Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
   ]},
   { title = "COMPLIANCE", rows = [
     { feature = "GDPR Automation", apex = '<span class="text-brand-600 font-semibold">Full DSR handling</span>', comp = '<span class="text-surface-600">Self-managed</span>', winner = "none" },
-    { feature = "HIPAA BAA", apex = '<span class="text-brand-600 font-semibold">Enterprise plan</span>', comp = '<span class="text-surface-600">On request</span>', winner = "none" },
-    { feature = "SOC 2 Controls", apex = '<span class="text-brand-600 font-semibold">Enterprise plan</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
+    { feature = "HIPAA availability", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">See provider documentation</span>', winner = "none" },
+    { feature = "SOC 2 certification", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">See provider documentation</span>', winner = "none" },
     { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Growth plan & above</span>', comp = '<span class="text-surface-600">Event logs only</span>', winner = "none" },
     { feature = "Consent Management", apex = '<span class="text-brand-600 font-semibold">Built-in</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "FEATURES", rows = [
     { feature = "Transactional Email", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Marketing Email", apex = '<span class="text-brand-600 font-semibold">Yes (unified API)</span>', comp = '<span class="text-surface-600">Separate product</span>', winner = "none" },
-    { feature = "Inbound Processing", apex = '<span class="text-brand-600 font-semibold">Developer+ plans</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
+    { feature = "Inbound Processing", apex = '<span class="text-brand-600 font-semibold">Scale and Enterprise plans</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Templates", apex = '<span class="text-brand-600 font-semibold">Stored templates</span>', comp = '<span class="text-surface-600">Proprietary</span>', winner = "none" },
     { feature = "Scheduled Sending", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "ENTERPRISE", rows = [
-    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Business & Enterprise</span>', comp = '<span class="text-surface-600">Available on request</span>', winner = "none" },
+    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Scale and Enterprise</span>', comp = '<span class="text-surface-600">Available on request</span>', winner = "none" },
     { feature = "Custom Deployment Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Dedicated Deployment Options", apex = '<span class="text-brand-600 font-semibold">Custom review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},

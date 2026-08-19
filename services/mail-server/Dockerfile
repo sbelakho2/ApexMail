@@ -76,22 +76,6 @@ LABEL org.opencontainers.image.title="apexmail-mail-server" \
     org.opencontainers.image.licenses="PROPRIETARY"
 
 # =============================================================================
-# Outbound Queue Service
-# =============================================================================
-FROM runtime-base AS outbound-queue
-
-COPY --from=builder /app/target/release/outbound-queue /usr/local/bin/
-
-USER apexmail
-EXPOSE 50052
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 50052"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "outbound-queue"]
-CMD ["--listen", "0.0.0.0:50052"]
-
-# =============================================================================
 # Mailstore Service
 # =============================================================================
 FROM runtime-base AS mailstore
@@ -105,20 +89,6 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
     CMD ["sh", "-c", "nc -z 127.0.0.1 50051"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "mailstore"]
-
-# =============================================================================
-# Send Email CLI Tool
-# =============================================================================
-FROM runtime-base AS send-email
-
-COPY --from=builder /app/target/release/send-email /usr/local/bin/
-
-USER apexmail
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "/usr/local/bin/send-email --help > /dev/null 2>&1"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "send-email"]
 
 # =============================================================================
 # API Server
@@ -365,22 +335,6 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 
 ENTRYPOINT ["/usr/bin/tini", "--", "edge-cases-server"]
 CMD ["--listen", "0.0.0.0:3014"]
-
-# =============================================================================
-# AI Service
-# =============================================================================
-FROM runtime-base AS ai-service
-
-COPY --from=builder /app/target/release/ai-service /usr/local/bin/
-
-USER apexmail
-EXPOSE 3015
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3015"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "ai-service"]
-CMD ["--listen", "0.0.0.0:3015"]
 
 # =============================================================================
 # AI Embeddings

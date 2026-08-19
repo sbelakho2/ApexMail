@@ -514,6 +514,10 @@ pub fn build_app(state: AppState) -> Router {
             "/v1/admin/system/health",
             routes::admin::system_health::router(),
         )
+        .nest(
+            "/v1/admin/system-sender",
+            routes::admin::system_sender::router(),
+        )
         .nest("/v1/admin/vat", routes::admin::vat::router())
         .layer(axum::middleware::from_fn(
             auth::require_system_tenant_middleware,

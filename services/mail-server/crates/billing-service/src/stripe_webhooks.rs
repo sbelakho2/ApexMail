@@ -650,7 +650,7 @@ async fn handle_stripe_event(state: &AppState, event: &StripeEventPayload) -> Re
 }
 
 async fn handle_checkout_completed(
-    state: &AppState,
+    _state: &AppState,
     session: CheckoutSession,
 ) -> Result<(), String> {
     let Some(tenant_id) = tenant_id_from_metadata(session.metadata.as_ref()) else {
@@ -658,13 +658,11 @@ async fn handle_checkout_completed(
         return Ok(());
     };
 
-    sqlx::query("UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1")
-        .bind(tenant_id)
-        .execute(&state.db)
-        .await
-        .map_err(|error| format!("Failed to update tenant status after checkout: {error}"))?;
-
-    info!(tenant_id = %tenant_id, session_id = %session.id, "stripe checkout completed");
+    // Checkout completion is not an entitlement event: the subscription can
+    // still be incomplete or unpaid. Only the corresponding verified
+    // `customer.subscription.*` webhook below changes plan access. In
+    // particular, this must not reactivate a tenant suspended for abuse.
+    info!(tenant_id = %tenant_id, session_id = %session.id, "stripe checkout completed; awaiting subscription state webhook");
     Ok(())
 }
 
@@ -677,17 +675,23 @@ async fn handle_subscription_change(
         return Ok(());
     };
 
-    let current_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = $1",
+    let current_subscription = sqlx::query_as::<_, (String, String)>(
+        "SELECT tenant_id, status FROM stripe_subscriptions WHERE stripe_subscription_id = $1",
     )
     .bind(&subscription.id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|error| format!("Failed to load current subscription status: {error}"))?;
+    .map_err(|error| format!("Failed to load current Stripe subscription: {error}"))?;
 
-    if let Some(current_status) = current_status.as_deref() {
+    if let Some((current_tenant_id, current_status)) = current_subscription {
+        if current_tenant_id != tenant_id {
+            return Err(format!(
+                "Stripe subscription {} is already bound to a different tenant",
+                subscription.id
+            ));
+        }
         if current_status != subscription.status.as_str()
-            && !subscription.status.can_transition_from(current_status)
+            && !subscription.status.can_transition_from(&current_status)
         {
             return Err(format!(
                 "Invalid subscription status transition: {current_status} -> {}",
@@ -733,15 +737,21 @@ async fn handle_subscription_change(
         r#"
         SELECT name
         FROM plans
-        WHERE stripe_price_id_monthly = $1 OR stripe_price_id_yearly = $1
+        WHERE is_active = true
+          AND (
+              (stripe_price_id_monthly = $1 AND $2 = 'monthly')
+              OR (stripe_price_id_yearly = $1 AND $2 = 'yearly')
+          )
         LIMIT 1
         "#,
     )
     .bind(price_id)
+    .bind(interval.as_db_value())
     .fetch_optional(&state.db)
     .await
     .map_err(|error| format!("Failed to resolve plan for Stripe price {price_id}: {error}"))?
     .ok_or_else(|| format!("Unknown Stripe price ID: {price_id}"))?;
+    let entitlement_plan = subscription.status.entitlement_plan_name(&plan_name);
 
     // Run the upsert inside a transaction that first deactivates any other
     // active subscription rows for the tenant. Migration 078 added a partial
@@ -812,7 +822,7 @@ async fn handle_subscription_change(
     .bind(subscription.cancel_at_period_end)
     .bind(subscription.canceled_at)
     .bind(subscription.trial_end)
-    .bind(&plan_name)
+    .bind(entitlement_plan)
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert Stripe subscription: {error}"))?;
@@ -825,6 +835,7 @@ async fn handle_subscription_change(
         tenant_id = %tenant_id,
         subscription_id = %subscription.id,
         status = %subscription.status.as_str(),
+        entitlement_plan,
         "stripe subscription updated"
     );
 
@@ -1035,6 +1046,10 @@ async fn handle_subscription_deleted(
             UPDATE tenants
             SET plan = 'free', updated_at = NOW()
             WHERE id = $2
+              AND EXISTS (
+                  SELECT 1 FROM cancel_subscription
+                  WHERE tenant_id = $2
+              )
             RETURNING id
         )
         SELECT 1
@@ -1703,6 +1718,22 @@ impl SubscriptionStatus {
         matches!(self, Self::Incomplete | Self::Trialing | Self::Active)
     }
 
+    /// A verified Stripe subscription is the only source of paid-plan
+    /// entitlement. Incomplete, delinquent, paused, unpaid, and canceled
+    /// subscriptions remain recorded locally for reconciliation but resolve
+    /// to Free access until Stripe reports an entitled state again.
+    fn entitlement_plan_name<'a>(&self, paid_plan_name: &'a str) -> &'a str {
+        match self {
+            Self::Active | Self::Trialing => paid_plan_name,
+            Self::PastDue
+            | Self::Unpaid
+            | Self::Canceled
+            | Self::Incomplete
+            | Self::IncompleteExpired
+            | Self::Paused => "free",
+        }
+    }
+
     fn can_transition_from(&self, current_status: &str) -> bool {
         match current_status {
             "incomplete" => matches!(self, Self::Active | Self::IncompleteExpired),
@@ -2215,6 +2246,29 @@ pub async fn retry_deadlettered_webhooks(state: &AppState) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_entitled_stripe_statuses_grant_the_paid_plan() {
+        assert_eq!(
+            SubscriptionStatus::Active.entitlement_plan_name("scale"),
+            "scale"
+        );
+        assert_eq!(
+            SubscriptionStatus::Trialing.entitlement_plan_name("scale"),
+            "scale"
+        );
+
+        for status in [
+            SubscriptionStatus::Incomplete,
+            SubscriptionStatus::IncompleteExpired,
+            SubscriptionStatus::PastDue,
+            SubscriptionStatus::Unpaid,
+            SubscriptionStatus::Paused,
+            SubscriptionStatus::Canceled,
+        ] {
+            assert_eq!(status.entitlement_plan_name("scale"), "free");
+        }
+    }
 
     #[test]
     fn deadletter_entry_default_has_max_retries() {

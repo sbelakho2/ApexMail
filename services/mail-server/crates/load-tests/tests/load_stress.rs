@@ -1,6 +1,5 @@
 //! Stress tests — push data structures to large volumes and verify correctness.
 
-use ai_service::bandits::BanditOptimizer;
 use chrono::Utc;
 use observability_service::metrics_collector::MetricsCollector;
 use pattern_matcher::rules::{Rule, RuleCategory, RuleSet, Severity};
@@ -143,32 +142,3 @@ fn test_stress_pattern_rules() {
     let _ = ruleset.evaluate(&large_text);
 }
 
-// ---------------------------------------------------------------------------
-// 6. Stress bandit — 1 000 arms, record rewards, verify selection
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_stress_bandit_many_arms() {
-    let bandit = BanditOptimizer::new(0.1);
-    let mut arm_ids = Vec::with_capacity(1_000);
-
-    for i in 0..1_000 {
-        let id = bandit.add_arm(&format!("variant-{i}")).await.unwrap();
-        arm_ids.push(id);
-    }
-
-    // Record rewards for each arm
-    for (i, id) in arm_ids.iter().enumerate() {
-        let reward = if i % 2 == 0 { 1.0 } else { 0.0 };
-        bandit.record_reward(id, reward).await.unwrap();
-    }
-
-    let stats = bandit.get_stats();
-    assert_eq!(stats.len(), 1_000);
-
-    // Selection should still work with many arms
-    for _ in 0..100 {
-        let selected = bandit.select_arm().unwrap();
-        assert!(arm_ids.contains(&selected));
-    }
-}

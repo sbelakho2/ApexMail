@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
+use zeroize::Zeroizing;
 
 /// An email job from the queue.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -40,6 +41,10 @@ pub struct Domain {
     pub tenant_id: String,
     pub domain: String,
     pub dkim_selector: Option<String>,
+    /// Canonical DNS `p=` value used to validate the decrypted private key.
+    pub dkim_public_key: Option<String>,
+    /// Encrypted-at-rest private-key envelope; it is decrypted only while an
+    /// SMTP message is being prepared.
     pub dkim_private_key: Option<String>,
     pub warmup_enabled: bool,
     pub warmup_day: i32,
@@ -80,7 +85,7 @@ pub struct Attachment {
 pub struct DkimConfig {
     pub selector: String,
     pub domain: String,
-    pub private_key: String,
+    pub private_key: Zeroizing<String>,
 }
 
 /// Email send result.
@@ -99,6 +104,10 @@ pub enum SendOutcome {
     HardBounce,
     RateLimit,
     Suppressed,
+    /// A locally rejected job, such as a missing or mismatched authorized
+    /// domain. These are not transport failures and must not open the SMTP
+    /// circuit breaker.
+    Rejected,
     TransportError,
 }
 

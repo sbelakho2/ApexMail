@@ -31,6 +31,7 @@ sha2 = { workspace = true }
 sha1 = { version = "0.10", features = ["oid"] }
 hmac = { workspace = true }
 rsa = { workspace = true }
+zeroize = { workspace = true }
 reqwest = { workspace = true }
 bytes = { workspace = true }
 ipnetwork = { workspace = true }

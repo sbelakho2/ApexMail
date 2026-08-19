@@ -607,14 +607,15 @@ fn simulation_transport_creates_smtp_when_configured() {
 fn simulation_transport_type_from_env_smtp() {
     assert_eq!(TransportType::from_env("smtp"), TransportType::Smtp);
     assert_eq!(TransportType::from_env("SMTP"), TransportType::Smtp);
-    assert_eq!(TransportType::from_env("self-hosted"), TransportType::Smtp);
-    assert_eq!(TransportType::from_env("direct"), TransportType::Smtp);
+    assert_eq!(TransportType::from_env(" smtp "), TransportType::Smtp);
 }
 
 #[test]
 fn simulation_transport_type_from_env_ses_default() {
     assert_eq!(TransportType::from_env("ses"), TransportType::Ses);
     assert_eq!(TransportType::from_env("SES"), TransportType::Ses);
+    assert_eq!(TransportType::from_env("self-hosted"), TransportType::Ses);
+    assert_eq!(TransportType::from_env("direct"), TransportType::Ses);
     assert_eq!(TransportType::from_env("anything"), TransportType::Ses);
     assert_eq!(TransportType::from_env(""), TransportType::Ses);
     assert_eq!(TransportType::default(), TransportType::Ses);

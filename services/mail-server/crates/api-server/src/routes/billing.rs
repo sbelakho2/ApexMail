@@ -25,7 +25,7 @@ use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 const MINIMUM_MONTHLY_CHARGE_CENTS: i64 = 0;
-const LEGACY_DOWNGRADE_PLAN: &str = "free";
+const SELF_SERVE_CHECKOUT_PLAN_IDS: [&str; 4] = ["starter", "pro", "growth", "scale"];
 const DEFAULT_BILLING_CURRENCY: &str = "USD";
 const DEFAULT_NET_DAYS: i64 = 30;
 const USAGE_QUERY_CACHE_TTL_SECONDS: u64 = 30;
@@ -2079,13 +2079,6 @@ fn parse_billing_interval(interval: &str) -> BillingInterval {
     }
 }
 
-fn legacy_billing_interval(interval: BillingInterval) -> &'static str {
-    match interval {
-        BillingInterval::Monthly => "monthly",
-        BillingInterval::Yearly => "yearly",
-    }
-}
-
 // Replaced by billing_common::proration::ceil_day_count
 
 fn preview_plan_proration(
@@ -2655,13 +2648,30 @@ async fn create_checkout_session(
     Json(body): Json<CheckoutSessionBody>,
 ) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
-    if body.price_id.trim().is_empty() {
+    let price_id = body.price_id.trim();
+    if price_id.is_empty() || price_id.len() > 128 {
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "priceId is required" })),
         )
             .into_response());
     }
+
+    // Never forward an arbitrary Stripe price identifier supplied by a
+    // customer. The price must map to an active ApexMail plan in our catalog,
+    // which prevents cross-product purchases and makes the plan selection
+    // independently verifiable when the webhook arrives.
+    let plan_name = match active_plan_name_for_stripe_price(&state.db, price_id).await? {
+        Some(plan_name) => plan_name,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Unsupported priceId" })),
+            )
+                .into_response())
+        }
+    };
+
     if !is_allowed_billing_redirect_url(&body.success_url, state.config.environment) {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -2699,14 +2709,20 @@ async fn create_checkout_session(
             &[
                 ("customer", customer_id),
                 ("payment_method_types[0]", "card".into()),
-                ("line_items[0][price]", body.price_id),
+                ("line_items[0][price]", price_id.to_string()),
                 ("line_items[0][quantity]", "1".into()),
                 ("mode", "subscription".into()),
                 ("success_url", body.success_url),
                 ("cancel_url", body.cancel_url),
+                ("metadata[tenant_id]", auth.tenant_id.clone()),
+                ("metadata[plan_name]", plan_name.clone()),
                 (
                     "subscription_data[metadata][tenant_id]",
                     auth.tenant_id.clone(),
+                ),
+                (
+                    "subscription_data[metadata][plan_name]",
+                    plan_name.clone(),
                 ),
                 ("allow_promotion_codes", "true".into()),
                 ("billing_address_collection", "required".into()),
@@ -2732,6 +2748,35 @@ async fn create_checkout_session(
         "sessionId": session.id,
         "url": url,
     })))
+}
+
+/// Resolve a Stripe price only when it is attached to an active self-service
+/// ApexMail plan. Enterprise and PAYG follow managed/contractual flows and
+/// must not be purchased through the generic public Checkout endpoint.
+/// Stripe webhooks separately resolve all active catalog prices before
+/// granting an entitlement, so manual Enterprise subscriptions can still be
+/// reconciled through their verified Stripe lifecycle.
+async fn active_plan_name_for_stripe_price(
+    pool: &sqlx::PgPool,
+    price_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT name
+        FROM plans
+        WHERE is_active = true
+          AND (stripe_price_id_monthly = $1 OR stripe_price_id_yearly = $1)
+        LIMIT 1
+        "#,
+    )
+    .bind(price_id)
+    .fetch_optional(pool)
+    .await
+    .map(|plan_name| {
+        plan_name.filter(|plan_name| {
+            SELF_SERVE_CHECKOUT_PLAN_IDS.contains(&plan_name.as_str())
+        })
+    })
 }
 
 async fn create_portal_session(
@@ -2844,305 +2889,66 @@ async fn get_proration_preview(
     }
 }
 
+/// Direct mutation of a tenant's plan bypasses Stripe's payment confirmation
+/// and webhook reconciliation. Keep the legacy endpoint as an explicit,
+/// safe failure so old clients receive a deterministic migration signal rather
+/// than an accidental paid entitlement.
+fn checkout_required_response() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "Direct plan changes are disabled. Create a Stripe Checkout session and wait for the verified Stripe webhook before paid access is activated.",
+            "code": "CHECKOUT_REQUIRED",
+        })),
+    )
+        .into_response()
+}
+
 async fn switch_plan(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<LegacySwitchPlanBody>,
 ) -> Result<Response, ApiError> {
-    let now = Utc::now();
+    crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
+    let _ = (&body.plan_name, body.billing_interval);
 
-    if body.plan_name == "payg" {
-        let current_subscription = get_route_subscription(&state.db, &auth.tenant_id).await?;
-        let effective_date = current_subscription
-            .as_ref()
-            .map(|subscription| subscription.current_period_end)
-            .unwrap_or(now);
-        let previous_plan = current_subscription
-            .as_ref()
-            .map(|subscription| subscription.plan_name.clone())
-            .unwrap_or_else(|| "unknown".to_string());
+    tracing::warn!(
+        tenant_id = %auth.tenant_id,
+        "rejected direct billing plan transition; checkout and verified Stripe webhooks are required"
+    );
 
-        let mut tx = state.db.begin().await?;
+    Ok(checkout_required_response())
+}
 
-        if current_subscription.is_some() {
-            sqlx::query(
-                r#"
-                UPDATE subscriptions
-                SET cancel_at_period_end = true, updated_at = $1
-                WHERE tenant_id = $2
-                  AND status IN ('active', 'trialing', 'past_due')
-                "#,
-            )
-            .bind(now)
-            .bind(&auth.tenant_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        let tenant_update =
-            sqlx::query("UPDATE tenants SET plan = 'payg', updated_at = $1 WHERE id = $2")
-                .bind(now)
-                .bind(&auth.tenant_id)
-                .execute(&mut *tx)
-                .await?;
-
-        if tenant_update.rows_affected() != 1 {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "Tenant not found" })),
-            )
-                .into_response());
-        }
-
-        insert_audit_log(
-            &mut tx,
-            &auth.tenant_id,
-            "plan.changed",
-            "subscription",
-            None,
-            serde_json::json!({
-                "previousPlan": previous_plan,
-                "newPlan": "payg",
-                "changeType": "downgrade",
-                "effectiveDate": effective_date,
-            }),
-            now,
-        )
-        .await?;
-
-        tx.commit().await?;
-
-        return Ok(billing_success_response(serde_json::json!({
-            "success": true,
-            "message": "Switched to Pay As You Go billing",
-            "effectiveDate": effective_date,
-        })));
-    }
-
-    let subscription = match get_route_subscription(&state.db, &auth.tenant_id).await? {
-        Some(subscription) => subscription,
-        None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "No active subscription found" })),
-            )
-                .into_response())
-        }
-    };
-
-    let current_plan = match plans::get_plan_by_name(&state.db, &subscription.plan_name).await? {
-        Some(plan) => plan,
-        None => {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "Operation failed" })),
-            )
-                .into_response())
-        }
-    };
-
-    let new_plan = match plans::get_plan_by_name(&state.db, &body.plan_name).await? {
-        Some(plan) => plan,
-        None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "Plan not found" })),
-            )
-                .into_response())
-        }
-    };
-
-    let proration = match preview_plan_proration(
-        &BillingConfig::default(),
-        &current_plan,
-        &new_plan,
-        &subscription,
-    ) {
-        Ok(proration) => proration,
-        Err(error) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": error })),
-            )
-                .into_response())
-        }
-    };
-
-    let mut tx = state.db.begin().await?;
-
-    let updated_subscription_id: Option<Uuid> = sqlx::query_scalar(
-        r#"
-        WITH target AS (
-            SELECT id
-            FROM subscriptions
-            WHERE tenant_id = $4
-              AND status IN ('active', 'trialing', 'past_due')
-            ORDER BY created_at DESC
-            LIMIT 1
-        )
-        UPDATE subscriptions s
-        SET plan_name = $1,
-            billing_interval = $2,
-            updated_at = $3
-        FROM target
-        WHERE s.id = target.id
-        RETURNING s.id
-        "#,
+fn billing_portal_required_response() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "Direct cancellation is disabled. Create a Stripe billing portal session and wait for the verified Stripe webhook before subscription access changes.",
+            "code": "BILLING_PORTAL_REQUIRED",
+        })),
     )
-    .bind(&body.plan_name)
-    .bind(legacy_billing_interval(body.billing_interval))
-    .bind(now)
-    .bind(&auth.tenant_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    if updated_subscription_id.is_none() {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "No active subscription found" })),
-        )
-            .into_response());
-    }
-
-    sqlx::query("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3")
-        .bind(&body.plan_name)
-        .bind(now)
-        .bind(&auth.tenant_id)
-        .execute(&mut *tx)
-        .await?;
-
-    insert_audit_log(
-        &mut tx,
-        &auth.tenant_id,
-        "plan.changed",
-        "subscription",
-        None,
-        serde_json::json!({
-            "newPlan": body.plan_name,
-            "billingInterval": legacy_billing_interval(body.billing_interval),
-            "proration": proration,
-            "changeType": if proration.net_amount >= 0 { "upgrade" } else { "downgrade" },
-        }),
-        now,
-    )
-    .await?;
-
-    tx.commit().await?;
-
-    Ok(billing_success_response(serde_json::json!({
-        "success": true,
-        "proration": proration,
-        "newPlan": body.plan_name,
-        "billingInterval": legacy_billing_interval(body.billing_interval),
-    })))
+        .into_response()
 }
 
 async fn cancel_subscription_request(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<LegacyCancelBody>,
 ) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["billing:write"])?;
-    let subscription = match get_route_subscription(&state.db, &auth.tenant_id).await? {
-        Some(subscription) => subscription,
-        None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "No active subscription found" })),
-            )
-                .into_response())
-        }
-    };
+    let _ = (body.reason, body.feedback, body.cancel_immediately);
 
-    let now = Utc::now();
-    let effective_date = if body.cancel_immediately {
-        now
-    } else {
-        subscription.current_period_end
-    };
+    // Cancellation must be executed by Stripe (normally through the billing
+    // portal) and then reconciled from a verified webhook. Updating the local
+    // subscription record here can leave ApexMail and Stripe in different
+    // states and may revoke access without a confirmed cancellation.
+    tracing::warn!(
+        tenant_id = %auth.tenant_id,
+        "rejected direct subscription cancellation; Stripe billing portal and verified webhooks are required"
+    );
 
-    let mut tx = state.db.begin().await?;
-
-    let rows_affected = if body.cancel_immediately {
-        sqlx::query(
-            r#"
-            UPDATE subscriptions
-            SET status = 'canceled',
-                cancel_at_period_end = false,
-                current_period_end = $1,
-                updated_at = $1
-            WHERE tenant_id = $2
-              AND status IN ('active', 'trialing', 'past_due')
-            "#,
-        )
-        .bind(now)
-        .bind(&auth.tenant_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-    } else {
-        sqlx::query(
-            r#"
-            UPDATE subscriptions
-            SET cancel_at_period_end = true,
-                updated_at = $1
-            WHERE tenant_id = $2
-              AND status IN ('active', 'trialing', 'past_due')
-            "#,
-        )
-        .bind(now)
-        .bind(&auth.tenant_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-    };
-
-    if rows_affected == 0 {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "No active subscription found" })),
-        )
-            .into_response());
-    }
-
-    if body.cancel_immediately {
-        sqlx::query("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3")
-            .bind(LEGACY_DOWNGRADE_PLAN)
-            .bind(now)
-            .bind(&auth.tenant_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    insert_audit_log(
-        &mut tx,
-        &auth.tenant_id,
-        "subscription.cancelled",
-        "subscription",
-        None,
-        serde_json::json!({
-            "previousPlan": subscription.plan_name,
-            "reason": body.reason.unwrap_or_else(|| "not provided".to_string()),
-            "feedback": body.feedback,
-            "cancelImmediately": body.cancel_immediately,
-            "effectiveDate": effective_date,
-        }),
-        now,
-    )
-    .await?;
-
-    tx.commit().await?;
-
-    Ok(billing_success_response(serde_json::json!({
-        "success": true,
-        "message": if body.cancel_immediately {
-            "Subscription cancelled immediately"
-        } else {
-            "Subscription will be cancelled at the end of the billing period"
-        },
-        "effectiveDate": effective_date,
-        "willDowngradeTo": LEGACY_DOWNGRADE_PLAN,
-    })))
+    Ok(billing_portal_required_response())
 }
 
 async fn get_subscription(
@@ -3571,6 +3377,30 @@ async fn admin_apply_plan_override(
     if let Err(response) = require_admin_tenant_access(&auth, &tenant_id) {
         return Ok(response);
     }
+    let plan_id = body.plan_id.trim();
+    let reason = body.reason.trim();
+    if plan_id.is_empty() || reason.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "planId and reason are required for an audited plan override"
+            })),
+        )
+            .into_response());
+    }
+    let plan_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM plans WHERE name = $1 AND is_active = true)",
+    )
+    .bind(plan_id)
+    .fetch_one(&state.db)
+    .await?;
+    if !plan_exists {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Unknown or inactive planId" })),
+        )
+            .into_response());
+    }
     let admin_id = admin_actor_id(&auth);
     let expires_at = body.expires_at.as_deref().and_then(parse_query_date);
 
@@ -3589,8 +3419,8 @@ async fn admin_apply_plan_override(
         "#,
     )
     .bind(&tenant_id)
-    .bind(&body.plan_id)
-    .bind(&body.reason)
+    .bind(plan_id)
+    .bind(reason)
     .bind(&admin_id)
     .bind(expires_at)
     .execute(&state.db)
@@ -3609,8 +3439,8 @@ async fn admin_apply_plan_override(
     .bind(actor_id)
     .bind("admin")
     .bind(serde_json::json!({
-        "planId": body.plan_id,
-        "reason": body.reason,
+        "planId": plan_id,
+        "reason": reason,
         "expiresAt": body.expires_at,
     }))
     .execute(&state.db)
@@ -4379,6 +4209,15 @@ mod tests {
     use crate::ses_provider::SesIpProvider;
     use crate::state::AppStateInner;
 
+    async fn response_json(response: Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("conflict response body should be readable");
+        let json = serde_json::from_slice(&body).expect("conflict response should be JSON");
+        (status, json)
+    }
+
     fn initialize_billing_test_env() {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
@@ -4573,6 +4412,30 @@ mod tests {
             &auth_user(&["tenant:tenant_3"], "tenant_1"),
             "tenant_2"
         ));
+    }
+
+    #[tokio::test]
+    async fn direct_plan_switch_requires_checkout_and_verified_webhook() {
+        let (status, body) = response_json(checkout_required_response()).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CHECKOUT_REQUIRED");
+        assert!(body["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("verified Stripe webhook"));
+    }
+
+    #[tokio::test]
+    async fn direct_subscription_cancellation_requires_billing_portal() {
+        let (status, body) = response_json(billing_portal_required_response()).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "BILLING_PORTAL_REQUIRED");
+        assert!(body["error"]
+            .as_str()
+            .expect("error should be a string")
+            .contains("Stripe billing portal"));
     }
 
     #[test]

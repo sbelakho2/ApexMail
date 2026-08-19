@@ -3,6 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
+use billing_common::cost_throttle::{
+    cost_throttle_key, CostThrottleOverride, COST_THROTTLE_TTL_SECS,
+};
 use redis::AsyncCommands;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -2277,6 +2280,7 @@ async fn check_tenant_cost_margin(
     .map_err(|error| format!("Failed to load tenant cost summary for {tenant_id}: {error}"))?;
 
     if summary.total_cost == 0 && summary.revenue == 0 {
+        clear_cost_throttling(state, tenant_id).await;
         cache_cost_margin_status(state, tenant_id, CostMarginStatus::Healthy, None).await;
         return Ok(CostMarginStatus::Healthy);
     }
@@ -2302,7 +2306,7 @@ async fn check_tenant_cost_margin(
             &summary,
         )
         .await?;
-        apply_cost_throttling(state, tenant_id).await;
+        apply_cost_throttling(state, tenant_id, margin_percent).await;
         CostMarginStatus::Critical
     } else if margin_percent < COST_MARGIN_WARNING_THRESHOLD {
         create_cost_margin_alert(
@@ -2318,6 +2322,10 @@ async fn check_tenant_cost_margin(
     } else {
         CostMarginStatus::Healthy
     };
+
+    if status != CostMarginStatus::Critical {
+        clear_cost_throttling(state, tenant_id).await;
+    }
 
     cache_cost_margin_status(state, tenant_id, status, Some(margin_percent)).await;
     Ok(status)
@@ -2376,59 +2384,132 @@ async fn create_cost_margin_alert(
     Ok(())
 }
 
-// TODO(cost-throttling): the keys written here — `cost:throttle:<tenant>` and
-// `rate:limit:<tenant>:throttled` — are currently read by NOTHING. The
-// api-server rate limiter does not consult them, so this throttle has no
-// runtime effect beyond Redis state. Intentionally left in place: wire a
-// reader into the rate limiter (or remove this function) when the
-// cost-margin feature is revisited.
-async fn apply_cost_throttling(state: &AppState, tenant_id: &str) {
+/// Activate the shared API cost-throttle contract. The API derives the actual
+/// cap from each tenant's current plan at request time, so this remains valid
+/// if its rate-limit window or the tenant's plan changes.
+async fn apply_cost_throttling(state: &AppState, tenant_id: &str, margin_percent: f64) {
+    let override_ = CostThrottleOverride::critical_low_margin();
+    let key = cost_throttle_key(tenant_id);
+
     match state.redis.get().await {
         Ok(mut conn) => {
-            let throttle_payload = json!({
-                "appliedAt": Utc::now().to_rfc3339(),
-                "reason": "low_margin",
-            })
-            .to_string();
-
-            let current_limit: Option<String> = match conn
-                .get(format!("rate:limit:{tenant_id}"))
-                .await
-            {
-                Ok(value) => value,
+            let already_active: bool = match conn.exists(&key).await {
+                Ok(active) => active,
                 Err(error) => {
-                    warn!(tenant_id = %tenant_id, error = %error, "failed to read current tenant rate limit during cost throttling");
-                    None
+                    warn!(tenant_id = %tenant_id, error = %error, "failed to inspect existing cost throttle state");
+                    return;
                 }
             };
-            let throttled_limit = current_limit
-                .as_deref()
-                .and_then(|value| value.parse::<i64>().ok())
-                .map(|value| (value / 2).max(1))
-                .unwrap_or(50);
+            let payload = match serde_json::to_string(&override_) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    warn!(tenant_id = %tenant_id, error = %error, "failed to serialize cost throttle override");
+                    return;
+                }
+            };
 
             let mut pipeline = redis::pipe();
             pipeline
-                .set_ex(
-                    format!("cost:throttle:{tenant_id}"),
-                    throttle_payload,
-                    24 * 60 * 60,
-                )
+                .set_ex(&key, payload, COST_THROTTLE_TTL_SECS)
                 .ignore()
-                .set_ex(
-                    format!("rate:limit:{tenant_id}:throttled"),
-                    throttled_limit.to_string(),
-                    24 * 60 * 60,
-                )
+                // Remove the legacy keys written by the old no-op feature so
+                // future operators cannot mistake them for active controls.
+                .del(format!("cost:throttle:{tenant_id}"))
+                .ignore()
+                .del(format!("rate:limit:{tenant_id}:throttled"))
                 .ignore();
 
             if let Err(error) = pipeline.query_async::<()>(&mut conn).await {
                 warn!(tenant_id = %tenant_id, error = %error, "failed to persist cost throttling state");
+                return;
+            }
+
+            if !already_active {
+                info!(
+                    tenant_id = %tenant_id,
+                    margin_percent,
+                    cap_percent = override_.cap_percent,
+                    "activated cost-protection rate limit"
+                );
+                record_cost_throttle_audit(
+                    state,
+                    tenant_id,
+                    "billing.cost_throttle.applied",
+                    json!({
+                        "reason": "low_margin",
+                        "marginPercent": margin_percent,
+                        "capPercent": override_.cap_percent,
+                        "ttlSeconds": COST_THROTTLE_TTL_SECS,
+                    }),
+                )
+                .await;
             }
         }
         Err(error) => {
             warn!(tenant_id = %tenant_id, error = %error, "failed to get Redis connection for cost throttling");
         }
+    }
+}
+
+/// Remove a no-longer-required cost throttle once a tenant recovers above the
+/// critical margin threshold. This prevents an arbitrary 24-hour penalty after
+/// recovery while retaining a durable audit event for the state transition.
+async fn clear_cost_throttling(state: &AppState, tenant_id: &str) {
+    let key = cost_throttle_key(tenant_id);
+    match state.redis.get().await {
+        Ok(mut conn) => match conn.del::<_, usize>(&key).await {
+            Ok(0) => {}
+            Ok(_) => {
+                info!(tenant_id = %tenant_id, "cleared cost-protection rate limit");
+                record_cost_throttle_audit(
+                    state,
+                    tenant_id,
+                    "billing.cost_throttle.cleared",
+                    json!({ "reason": "margin_recovered" }),
+                )
+                .await;
+            }
+            Err(error) => {
+                warn!(tenant_id = %tenant_id, error = %error, "failed to clear cost throttling state");
+            }
+        },
+        Err(error) => {
+            warn!(tenant_id = %tenant_id, error = %error, "failed to get Redis connection for cost throttle cleanup");
+        }
+    }
+}
+
+async fn record_cost_throttle_audit(
+    state: &AppState,
+    tenant_id: &str,
+    action: &str,
+    metadata: Value,
+) {
+    let mut transaction = match state.db.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            warn!(tenant_id = %tenant_id, error = %error, "failed to start cost-throttle audit transaction");
+            return;
+        }
+    };
+
+    if let Err(error) = append_audit_log(
+        &mut transaction,
+        tenant_id,
+        action,
+        "tenant_rate_limit",
+        Some(tenant_id),
+        metadata,
+        Utc::now(),
+    )
+    .await
+    {
+        warn!(tenant_id = %tenant_id, error = %error, "failed to append cost-throttle audit event");
+        return;
+    }
+
+    if let Err(error) = transaction.commit().await {
+        warn!(tenant_id = %tenant_id, error = %error, "failed to commit cost-throttle audit event");
     }
 }
 

@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/mailstore-core",
-            "crates/outbound-queue",
     "crates/mail-proto",
     "crates/mail-common",
     "crates/tracking-service",

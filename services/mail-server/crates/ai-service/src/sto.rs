@@ -70,7 +70,7 @@ impl SendTimeOptimizer {
         heatmap
     }
 
-    /// Predict the best 2-hour send window for a given timezone offset.
+    /// Return the fixed best-effort 2-hour send window for a timezone offset.
     /// Returns `(start_hour, end_hour)` in UTC adjusted by `tz_offset` hours.
     pub fn predict_best_window(&self, tz_offset: i32) -> (u8, u8) {
         // Heuristic:business-hours peak in the recipient's local time is 10-12

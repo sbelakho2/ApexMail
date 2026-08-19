@@ -25,9 +25,11 @@ use crate::middleware::auth::{
 };
 use crate::middleware::rate_limiter::{extract_public_client_ip, INCR_EXPIRE_LUA};
 use crate::routes::csrf::validate_form_csrf;
+use crate::routes::system_sender::{
+    ensure_system_sender_ready, queue_system_email, queue_system_email_in_transaction,
+};
 use crate::state::AppState;
 
-const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
 const LOGIN_FAILURE_THRESHOLD: i64 = 5;
 const LOGIN_FAILURE_WINDOW_SECS: u64 = 5 * 60;
 const LOGIN_LOCKOUT_BASE_SECS: u64 = 15 * 60;
@@ -807,6 +809,16 @@ async fn delete_mfa_challenge(
     Ok(())
 }
 
+async fn delete_email_mfa_code(
+    redis_pool: &deadpool_redis::Pool,
+    user_id: &str,
+) -> Result<(), ApiError> {
+    let key = format!("apexmail:email_mfa:{user_id}");
+    let mut conn = redis_pool.get().await?;
+    let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &key).await?;
+    Ok(())
+}
+
 async fn revoke_user_sessions(
     redis_pool: &deadpool_redis::Pool,
     tenant_id: &str,
@@ -825,11 +837,11 @@ async fn revoke_user_sessions(
 }
 
 async fn enqueue_verification_email(
-    db: &sqlx::PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     base_url: &str,
     email: &str,
     token: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ApiError> {
     let verification_link = build_action_link(base_url, "/verify-email", email, token);
     let safe_email = html_escape(email);
     let safe_link = html_escape(&verification_link);
@@ -848,63 +860,16 @@ async fn enqueue_verification_email(
         "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours.\n\n© 2026 ApexMail — https://apexmail.ee",
     );
 
-    // Generate a message ID used in both the messages log and the email_queue.
-    // Production messages.id and email_queue.message_id are UUIDs.
-    let message_id = uuid::Uuid::new_v4().to_string();
-
-    // 1. Insert into messages table (audit/log)
-    sqlx::query(
-        "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at)
-         VALUES ($1::uuid, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
+    queue_system_email_in_transaction(
+        tx,
+        email,
+        "Verify your ApexMail account",
+        &html_body,
+        &text_body,
+        vec!["system".into(), "verification".into()],
     )
-    .bind(&message_id)
-    .bind(SYSTEM_TENANT_ID)
-    .bind("noreply@apexmail.ee")
-    .bind(serde_json::json!([email]))
-    .bind("Verify your ApexMail account")
-    .bind(&html_body)
-    .bind(&text_body)
-    .bind(serde_json::json!(["system", "verification"]))
-    .execute(db)
-    .await?;
-
-    // 2. Look up the domain_id for "apexmail.ee" (domains.name column;
-    //    NULL when the domain is not registered — DKIM is skipped for
-    //    unknown domains).
-    let domain_id: Option<String> = sqlx::query_scalar(
-        "SELECT id::text FROM domains WHERE name = 'apexmail.ee' LIMIT 1",
-    )
-    .fetch_optional(db)
-    .await?;
-
-    // 3. Insert into email_queue for the worker processor to pick up
-    let now = chrono::Utc::now();
-    sqlx::query(
-        "INSERT INTO email_queue (
-            id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
-            \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
-         ) VALUES (
-            $1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7,
-            $5, $6, $8, $9, $10, $11, $12, 5, 'pending', $13, $13
-         )",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(&message_id)
-    .bind(SYSTEM_TENANT_ID)
-    .bind(&domain_id)
-    .bind("noreply@apexmail.ee")
-    .bind(email)
-    .bind("Verify your ApexMail account")
-    .bind(&html_body)
-    .bind(&text_body)
-    .bind(vec!["system".to_string(), "verification".to_string()])
-    .bind(Option::<serde_json::Value>::None) // metadata
-    .bind(Option::<chrono::DateTime<chrono::Utc>>::None) // scheduled_at
-    .bind(now)
-    .execute(db)
-    .await?;
-
-    Ok(())
+    .await
+    .map(|_| ())
 }
 
 pub fn router() -> Router<AppState> {
@@ -1496,15 +1461,18 @@ async fn login(
                         }
                     }
                 } else {
+                    // A code without a sendable notification is unusable.
+                    // Check before writing the Redis challenge state.
+                    ensure_system_sender_ready(&state.db).await?;
+
                     use rand::Rng;
-                    let code: u32 = rand::thread_rng().gen_range(100000..999999);
+                    let code: u32 = rand::rng().random_range(100000..999999);
                     let code_str = code.to_string();
                     let key = format!("apexmail:email_mfa:{}", user.id);
                     let _: () = deadpool_redis::redis::AsyncCommands::set_ex(&mut *redis_conn, &key, &code_str, 300).await?;
                     tracing::info!(user_id = %user.id, email = %user.email, code_length = code_str.len(), "Email MFA code generated");
+                    drop(redis_conn);
 
-                    // Enqueue MFA email via email_queue (same pattern as forgot_password)
-                    let msg_id = uuid::Uuid::new_v4().to_string();
                     let safe_email = html_escape(&user.email);
                     let safe_code = html_escape(&code_str);
                     let html_body = format!(
@@ -1519,38 +1487,7 @@ async fn login(
 </body></html>"#,
                     );
                     let text_body = format!("Your MFA Code\n\nYour one-time verification code is: {code_str}\n\nThis code expires in 5 minutes.");
-                    let domain_id: Option<String> = sqlx::query_scalar(
-                        "SELECT id::text FROM domains
-                         WHERE tenant_id = $1 AND name = 'apexmail.ee'
-                           AND (status = 'verified' OR verified = true)
-                         LIMIT 1",
-                    )
-                        .bind(SYSTEM_TENANT_ID)
-                        .fetch_optional(&state.db)
-                        .await
-                        .map_err(|e| { tracing::error!(error=%e, "Failed to look up system domain"); ApiError::Internal("Failed to send MFA email".into()) })?;
-                    let _ = sqlx::query(
-                        "INSERT INTO email_queue (id, message_id, tenant_id, domain_id, from_address, to_addresses, subject, \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at)
-                         VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7, $5, $6, $8, $9, $10, $11, $12, 5, 'pending', $13, $13)",
-                    )
-                    .bind(uuid::Uuid::new_v4())
-                    .bind(&msg_id)
-                    .bind(SYSTEM_TENANT_ID)
-                    .bind(&domain_id)
-                    .bind("noreply@apexmail.ee")
-                    .bind(&user.email)
-                    .bind("Your ApexMail MFA Code")
-                    .bind(&html_body)
-                    .bind(&text_body)
-                    .bind(vec!["system".to_string(), "mfa".to_string()])
-                    .bind(Option::<serde_json::Value>::None)
-                    .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
-                    .bind(chrono::Utc::now())
-                    .execute(&state.db)
-                    .await;
-                    tracing::info!(user_id=%user.id, email=%user.email, "MFA email queued");
-
-                    let challenge_token = store_mfa_challenge(
+                    let challenge_token = match store_mfa_challenge(
                         &state.redis,
                         &MfaChallengeState {
                             user_id: user.id.clone(),
@@ -1562,7 +1499,62 @@ async fn login(
                             kind: MfaChallengeKind::Verify,
                         },
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(token) => token,
+                        Err(error) => {
+                            if let Err(cleanup_error) =
+                                delete_email_mfa_code(&state.redis, &user.id).await
+                            {
+                                tracing::error!(
+                                    error = %cleanup_error,
+                                    user_id = %user.id,
+                                    "failed to remove incomplete MFA code"
+                                );
+                            }
+                            return Err(error);
+                        }
+                    };
+
+                    let message_id = match queue_system_email(
+                        &state.db,
+                        &user.email,
+                        "Your ApexMail MFA Code",
+                        &html_body,
+                        &text_body,
+                        vec!["system".into(), "mfa".into()],
+                    )
+                    .await
+                    {
+                        Ok(message_id) => message_id,
+                        Err(error) => {
+                            if let Err(cleanup_error) =
+                                delete_email_mfa_code(&state.redis, &user.id).await
+                            {
+                                tracing::error!(
+                                    error = %cleanup_error,
+                                    user_id = %user.id,
+                                    "failed to remove undeliverable MFA code"
+                                );
+                            }
+                            if let Err(cleanup_error) =
+                                delete_mfa_challenge(&state.redis, &challenge_token).await
+                            {
+                                tracing::error!(
+                                    error = %cleanup_error,
+                                    user_id = %user.id,
+                                    "failed to remove undeliverable MFA challenge"
+                                );
+                            }
+                            tracing::error!(
+                                error = %error,
+                                user_id = %user.id,
+                                "failed to queue MFA email"
+                            );
+                            return Err(error);
+                        }
+                    };
+                    tracing::info!(user_id=%user.id, email=%user.email, %message_id, "MFA email queued");
 
                     return Ok(no_store_json_response(
                         StatusCode::ACCEPTED,
@@ -2141,6 +2133,32 @@ fn default_plan() -> String {
     "free".into()
 }
 
+/// Plans that may be selected during public registration. A selection is
+/// retained as non-entitling onboarding intent; it never changes the tenant's
+/// active plan. Enterprise sales and PAYG onboarding have separate flows, so
+/// they are intentionally not accepted by this public registration endpoint.
+const PUBLIC_SIGNUP_PLAN_IDS: &[&str] = &["free", "starter", "pro", "growth", "scale"];
+
+/// Validate a public registration plan and return the paid-plan intent, if
+/// any. The returned value is a static catalog identifier so untrusted input
+/// is never copied into tenant metadata or audit logs.
+fn signup_plan_intent(plan: &str) -> Result<Option<&'static str>, ApiError> {
+    if !PUBLIC_SIGNUP_PLAN_IDS.contains(&plan) {
+        return Err(ApiError::Validation(vec!["invalid plan selection".into()]));
+    }
+
+    match plan {
+        "free" => Ok(None),
+        "starter" => Ok(Some("starter")),
+        "pro" => Ok(Some("pro")),
+        "growth" => Ok(Some("growth")),
+        "scale" => Ok(Some("scale")),
+        // The allow-list above makes this unreachable while retaining an
+        // explicit fallback if the catalog is edited incorrectly.
+        _ => Err(ApiError::Validation(vec!["invalid plan selection".into()])),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct RegisterResponse {
     pub success: bool,
@@ -2203,22 +2221,10 @@ async fn register(
     }
     validate_password_strength(&body.password)?;
 
-    // Validate plan
-    let valid_plans = [
-        "free",
-        "starter",
-        "pro",
-        "growth",
-        "scale",
-        "enterprise",
-        "payg",
-    ];
-    if !valid_plans.contains(&body.plan.as_str()) {
-        return Err(ApiError::Validation(vec![format!(
-            "invalid plan: {}",
-            body.plan
-        )]));
-    }
+    // A plan submitted at sign-up is only an onboarding preference. Never
+    // grant a paid entitlement until the authenticated billing flow creates a
+    // Stripe subscription and its verified webhook updates the tenant.
+    let signup_plan_intent = signup_plan_intent(&body.plan)?;
 
     // Rate-limit only after cheap validation so ordinary form mistakes do not
     // burn the user's sign-up attempts. The limit still protects the database
@@ -2248,6 +2254,11 @@ async fn register(
     }
 
     let email_lower = body.email.to_lowercase();
+
+    // A new account cannot complete onboarding without a verification email.
+    // Check before creating tenant/user state so an outage never leaves an
+    // account stranded with a message the delivery worker will reject.
+    ensure_system_sender_ready(&state.db).await?;
 
     // Check if email already exists
     let existing: Option<String> =
@@ -2280,7 +2291,16 @@ async fn register(
         ApiError::Internal("database error".into())
     })?;
 
-    // Create tenant
+    let tenant_metadata = match signup_plan_intent {
+        Some(plan) => serde_json::json!({
+            "signup_plan_intent": plan,
+            "signup_plan_selected_at": now.to_rfc3339(),
+        }),
+        None => serde_json::json!({}),
+    };
+
+    // Every public registration begins on Free. The requested paid plan is
+    // auditable intent only and must be activated by the billing webhook.
     sqlx::query(
         "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
@@ -2288,10 +2308,10 @@ async fn register(
     .bind(&tenant_id)
     .bind(&body.company_name)
     .bind(&slug)
-    .bind(&body.plan)
+    .bind("free")
     .bind("pending")
     .bind(serde_json::json!({}))
-    .bind(serde_json::json!({}))
+    .bind(tenant_metadata)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -2336,32 +2356,27 @@ async fn register(
         }
     }
 
+    // Verification is required to complete a public registration, so account
+    // creation and queue admission use the same transaction. A concurrent
+    // sender-domain revoke or queue failure rolls the account back instead of
+    // stranding an unverifiable tenant.
+    enqueue_verification_email(&mut tx, &state.config.base_url, &email_lower, &verification_token)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, tenant_id = %tenant_id, user_id = %user_id, "failed to queue verification email during registration");
+            error
+        })?;
+
     tx.commit().await.map_err(|error| {
         tracing::error!(error = %error, tenant_id = %tenant_id, user_id = %user_id, "failed to commit registration transaction");
         ApiError::Internal("database error".into())
     })?;
 
-    // Enqueue verification email AFTER transaction commit so the email
-    // is only sent if the DB transaction succeeded. This prevents sending
-    // verification emails for registrations that are rolled back.
-    enqueue_verification_email(&state.db, &state.config.base_url, &email_lower, &verification_token)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, tenant_id = %tenant_id, user_id = %user_id, "failed to queue verification email during registration");
-            // Non-fatal: registration succeeded but email failed to queue.
-            // The user can request a new verification email via the resend flow.
-            tracing::warn!(
-                tenant_id = %tenant_id,
-                user_id = %user_id,
-                "Registration succeeded but verification email could not be queued. User can request resend."
-            );
-            ApiError::Internal("registration succeeded but verification email could not be sent".into())
-        })?;
-
     tracing::info!(
         tenant_id = %tenant_id,
         user_id = %user_id,
-        plan = %body.plan,
+        signup_plan_intent = ?signup_plan_intent,
+        active_plan = "free",
         "New tenant registered"
     );
 
@@ -2712,58 +2727,66 @@ async fn reset_password(
         return Err(ApiError::Forbidden(format!("account is {status}")));
     }
 
-    // Primary expiration check: token-level expiry (typically 1 hour)
-    if let Some(expires_str) = metadata
+    // Primary expiration check: token-level expiry (typically one hour).
+    // Missing or malformed expiry metadata must never turn a reset token into
+    // a non-expiring credential.
+    let expires_str = metadata
         .get("password_reset_expires")
         .and_then(|value| value.as_str())
-    {
-        if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expires_str) {
-            if Utc::now() > expires {
-                return Err(ApiError::BadRequest(
-                    "password reset token has expired".into(),
-                ));
-            }
-        }
+        .ok_or_else(|| ApiError::BadRequest("invalid or expired reset token".into()))?;
+    let expires = chrono::DateTime::parse_from_rfc3339(expires_str)
+        .map_err(|_| ApiError::BadRequest("invalid or expired reset token".into()))?;
+    if Utc::now() > expires {
+        return Err(ApiError::BadRequest(
+            "password reset token has expired".into(),
+        ));
     }
 
     // SA2-003: Secondary hard-coded expiration check (24h absolute max)
     // This ensures tokens cannot be used beyond a hard-coded window even if
-    // the primary `password_reset_expires` field is manipulated or missing.
+    // the primary expiration value is extended.
     const MAX_RESET_TOKEN_TTL_HOURS: i64 = 24;
-    if let Some(iat_str) = metadata
+    let iat_str = metadata
         .get("password_reset_iat")
         .and_then(|value| value.as_str())
-    {
-        if let Ok(iat) = chrono::DateTime::parse_from_rfc3339(iat_str) {
-            let hard_deadline = iat + chrono::Duration::hours(MAX_RESET_TOKEN_TTL_HOURS);
-            if Utc::now() > hard_deadline {
-                return Err(ApiError::BadRequest(
-                    "password reset token has exceeded maximum lifetime".into(),
-                ));
-            }
-        }
+        .ok_or_else(|| ApiError::BadRequest("invalid or expired reset token".into()))?;
+    let iat = chrono::DateTime::parse_from_rfc3339(iat_str)
+        .map_err(|_| ApiError::BadRequest("invalid or expired reset token".into()))?;
+    let now = Utc::now();
+    if iat > now || now > iat + chrono::Duration::hours(MAX_RESET_TOKEN_TTL_HOURS) {
+        return Err(ApiError::BadRequest(
+            "password reset token has exceeded maximum lifetime".into(),
+        ));
     }
 
     let password_hash = apexmail_lib::hash_password(&body.password)
         .map_err(|error| ApiError::Internal(format!("password hashing failed: {error}")))?;
 
-    sqlx::query(
+    // Revoke before changing the password. A Redis failure therefore fails
+    // closed without updating credentials; a later optimistic-lock miss only
+    // causes a harmless extra session revocation.
+    let ttl = state.config.jwt_expiry.as_secs();
+    revoke_user_sessions(&state.redis, &tenant_id, &user_id, ttl).await?;
+
+    let password_update = sqlx::query(
         "UPDATE users
          SET password_hash = $1,
-             metadata = metadata - 'password_reset_token_hash' - 'password_reset_token' - 'password_reset_expires',
+             metadata = metadata - 'password_reset_token_hash' - 'password_reset_token' - 'password_reset_expires' - 'password_reset_iat',
              updated_at = NOW()
-         WHERE id = $2",
+         WHERE id = $2
+           AND status = 'active'
+           AND metadata->>'password_reset_token_hash' = $3",
     )
     .bind(password_hash)
     .bind(&user_id)
+    .bind(&token_hash)
     .execute(&state.db)
     .await?;
-
-    // A password reset must invalidate every existing session — otherwise a
-    // stolen reset token leaves the attacker's (or anyone else's) live
-    // sessions valid after the victim changes the password.
-    let ttl = state.config.jwt_expiry.as_secs();
-    revoke_user_sessions(&state.redis, &tenant_id, &user_id, ttl).await?;
+    if password_update.rows_affected() != 1 {
+        return Err(ApiError::BadRequest(
+            "invalid or expired reset token".into(),
+        ));
+    }
 
     Ok(Json(ResetPasswordResponse {
         success: true,
@@ -3033,6 +3056,29 @@ mod tests {
         assert!(json.get("tenant_id").is_none());
         assert!(json.get("user_id").is_none());
         assert!(json.get("verification_token").is_none());
+    }
+
+    #[test]
+    fn public_signup_plan_selection_is_bounded_and_non_entitling() {
+        assert_eq!(signup_plan_intent("free").unwrap(), None);
+        assert_eq!(signup_plan_intent("starter").unwrap(), Some("starter"));
+        assert_eq!(signup_plan_intent("pro").unwrap(), Some("pro"));
+        assert_eq!(signup_plan_intent("growth").unwrap(), Some("growth"));
+        assert_eq!(signup_plan_intent("scale").unwrap(), Some("scale"));
+
+        // Legacy identifiers and sales/PAYG plans must not be accepted by the
+        // unauthenticated public registration endpoint.
+        for invalid in ["developer", "business", "enterprise", "payg", "admin"] {
+            assert!(matches!(
+                signup_plan_intent(invalid),
+                Err(ApiError::Validation(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn public_signup_plan_catalog_matches_the_declared_allowlist() {
+        assert_eq!(PUBLIC_SIGNUP_PLAN_IDS, ["free", "starter", "pro", "growth", "scale"]);
     }
 
     #[test]

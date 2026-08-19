@@ -10,17 +10,16 @@
 #   ./pipeline.sh full      # Validate → train → test (blocking)
 # ============================================================================
 
-set -e
-
-# Use WORKSPACE_DIR env var (fallback to /workspace)
-WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
-
-WORKSPACE="${WORKSPACE_DIR:-/workspace}"
-MODEL_PATH="$WORKSPACE/models/Qwen3-Next-80B-A3B-Instruct"
-DATA_PATH="$WORKSPACE/train_agent.jsonl"
-OUTPUT_DIR="$WORKSPACE/output_agent"
-TRAIN_LOG="$WORKSPACE/train.log"
-TEST_LOG="$WORKSPACE/test.log"
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+CONFIG_PATH="${AI_TRAINING_CONFIG:-$SCRIPT_DIR/config.yaml}"
+MODEL_PATH="${AI_MODEL_BASE:-/workspace/models/Qwen3-Next-80B-A3B-Instruct}"
+DATA_PATH="$PROJECT_ROOT/data/train.jsonl"
+OUTPUT_DIR="${AI_OUTPUT_DIR:-$PROJECT_ROOT/artifacts/ai-training/output}"
+TRAIN_LOG="${AI_TRAIN_LOG:-$PROJECT_ROOT/artifacts/ai-training/train.log}"
+TEST_LOG="${AI_TEST_LOG:-$PROJECT_ROOT/artifacts/ai-training/test.log}"
+TRAIN_EXTRA_ARGS=()
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -48,7 +47,7 @@ verify_env() {
     EXAMPLE_COUNT=$(wc -l < "$DATA_PATH")
     log "  Dataset: $EXAMPLE_COUNT examples"
     
-    python3 -c "import torch, transformers, peft, trl, datasets" 2>/dev/null || \
+    python3 -c "import torch, transformers, peft, trl, datasets, yaml" 2>/dev/null || \
         error "Missing Python packages"
     log "  Python packages: OK"
     
@@ -56,41 +55,43 @@ verify_env() {
 }
 
 run_training() {
-    log "Starting 4-GPU training..."
-    
-    pkill -f "torchrun.*train_4gpu" 2>/dev/null || true
-    sleep 2
-    
-    rm -rf "$OUTPUT_DIR"
-    mkdir -p "$OUTPUT_DIR"
+    log "Starting QLoRA training with the maintained train.py entrypoint..."
+    mkdir -p "$OUTPUT_DIR" "$(dirname "$TRAIN_LOG")"
     
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
     export NCCL_ALGO=Ring
     export NCCL_NET_GDR_LEVEL=5
     export NCCL_P2P_LEVEL=NVL
     export NCCL_MIN_NCHANNELS=16
-    export MODEL_PATH="$MODEL_PATH"
-    export DATA_PATH="$DATA_PATH"
-    export OUTPUT_DIR="$OUTPUT_DIR"
+    export AI_MODEL_BASE="$MODEL_PATH"
+    export AI_OUTPUT_DIR="$OUTPUT_DIR"
+    export AI_LOGS_DIR="${AI_LOGS_DIR:-$(dirname "$TRAIN_LOG")/logs}"
     
-    cd "$WORKSPACE"
+    local gpu_count
+    gpu_count="${AI_TRAINING_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')}"
+    [ "$gpu_count" -gt 0 ] || error "No CUDA GPUs available"
+
+    cd "$PROJECT_ROOT"
     
     log "Training log: $TRAIN_LOG"
     
-    nohup torchrun --nproc_per_node=4 train_4gpu.py > "$TRAIN_LOG" 2>&1 &
-    TRAIN_PID=$!
-    
-    log "Training launched (PID: $TRAIN_PID)"
-    log "Monitor with: tail -f $TRAIN_LOG"
-    
-    echo $TRAIN_PID > "$WORKSPACE/.train_pid"
+    if [ "${AI_TRAINING_BACKGROUND:-false}" = "true" ]; then
+        nohup torchrun --standalone --nproc_per_node="$gpu_count" "$SCRIPT_DIR/train.py" \
+            --config "$CONFIG_PATH" "${TRAIN_EXTRA_ARGS[@]}" > "$TRAIN_LOG" 2>&1 &
+        TRAIN_PID=$!
+        log "Training launched (PID: $TRAIN_PID)"
+        echo "$TRAIN_PID" > "$(dirname "$TRAIN_LOG")/.train_pid"
+    else
+        torchrun --standalone --nproc_per_node="$gpu_count" "$SCRIPT_DIR/train.py" \
+            --config "$CONFIG_PATH" "${TRAIN_EXTRA_ARGS[@]}" 2>&1 | tee "$TRAIN_LOG"
+    fi
 }
 
 check_status() {
     log "Checking training status..."
     
-    if pgrep -f "torchrun.*train_4gpu" > /dev/null; then
-        TRAIN_PID=$(pgrep -f "torchrun.*train_4gpu" | head -1)
+    if pgrep -f "torchrun.*train.py" > /dev/null; then
+        TRAIN_PID=$(pgrep -f "torchrun.*train.py" | head -1)
         log "Training is RUNNING (PID: $TRAIN_PID)"
         
         echo ""
@@ -121,11 +122,11 @@ run_tests() {
         error "No adapter found at $OUTPUT_DIR"
     fi
     
-    cd "$WORKSPACE"
+    cd "$PROJECT_ROOT"
     
-    if [ -f "test_agent.py" ]; then
+    if [ -f "$SCRIPT_DIR/test_agent.py" ]; then
         log "Running agent tests..."
-        python3 test_agent.py \
+        python3 "$SCRIPT_DIR/test_agent.py" \
             --base-model "$MODEL_PATH" \
             --adapter "$OUTPUT_DIR" \
             --auto-device-map 2>&1 | tee "$TEST_LOG"
@@ -151,6 +152,56 @@ run_validate_pricing() {
     fi
 }
 
+# Called only by the AI service's operator-configured `AI_TRAINING_RUNNER`.
+# Arguments are parsed as data, never evaluated as shell code. On success the
+# underlying trainer must have emitted a real metrics.json artifact.
+run_managed_job() {
+    local job_id=""
+    local model_id=""
+    local epochs=""
+    local artifact_dir=""
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --job-id) job_id="${2:?missing value for --job-id}"; shift 2 ;;
+            --model-id) model_id="${2:?missing value for --model-id}"; shift 2 ;;
+            --epochs) epochs="${2:?missing value for --epochs}"; shift 2 ;;
+            --artifact-dir) artifact_dir="${2:?missing value for --artifact-dir}"; shift 2 ;;
+            *) error "Unknown managed-job option: $1" ;;
+        esac
+    done
+
+    [[ "$job_id" =~ ^[0-9a-fA-F-]{36}$ ]] || error "Invalid job ID"
+    [[ "$model_id" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || error "Invalid model ID"
+    [[ "$epochs" =~ ^[0-9]+$ ]] && [ "$epochs" -ge 1 ] && [ "$epochs" -le 100 ] || error "Invalid epoch count"
+    [[ "$artifact_dir" = /* ]] || error "Artifact directory must be absolute"
+
+    OUTPUT_DIR="$artifact_dir/model"
+    TRAIN_LOG="$artifact_dir/train.log"
+    export AI_OUTPUT_DIR="$OUTPUT_DIR"
+    export AI_LOGS_DIR="$artifact_dir/logs"
+    TRAIN_EXTRA_ARGS=(--epochs "$epochs" --metrics-output "$artifact_dir/metrics.json")
+    mkdir -p "$artifact_dir"
+
+    log "Running managed training job $job_id for model $model_id"
+    verify_env
+    run_training
+    [ -s "$artifact_dir/metrics.json" ] || error "Training completed without metrics.json"
+    python3 - "$artifact_dir/metrics.json" <<'PY'
+import json
+import math
+import sys
+
+path = sys.argv[1]
+with open(path) as handle:
+    metrics = json.load(handle)
+loss = metrics.get("loss")
+if not isinstance(loss, (int, float)) or not math.isfinite(loss):
+    raise SystemExit("metrics.json must contain a finite real loss")
+print(f"Validated training artifact with loss={loss}")
+PY
+}
+
 run_full() {
     run_validate_pricing
     verify_env
@@ -158,7 +209,7 @@ run_full() {
     
     log "Waiting for training to complete..."
     
-    while pgrep -f "torchrun.*train_4gpu" > /dev/null; do
+    while pgrep -f "torchrun.*train.py" > /dev/null; do
         sleep 60
         if [ -f "$TRAIN_LOG" ]; then
             LAST=$(grep -oP "epoch.*?[0-9.]+" "$TRAIN_LOG" 2>/dev/null | tail -1 || echo "starting...")
@@ -176,6 +227,9 @@ run_full() {
 }
 
 case "${1:-help}" in
+    --job-id)
+        run_managed_job "$@"
+        ;;
     validate)
         run_validate_pricing
         ;;
@@ -184,7 +238,7 @@ case "${1:-help}" in
         ;;
     train)
         verify_env
-        run_training
+        AI_TRAINING_BACKGROUND=true run_training
         ;;
     test)
         run_tests
@@ -203,7 +257,7 @@ case "${1:-help}" in
         echo "Commands:"
         echo "  validate  - Validate pricing data against canonical rates"
         echo "  verify    - Verify environment"
-        echo "  train     - Start training (background)"
+        echo "  train     - Start training in the background"
         echo "  test      - Run tests on adapter"
         echo "  full      - Validate → train → test (blocking)"
         echo "  status    - Check training status"
@@ -214,5 +268,7 @@ case "${1:-help}" in
         echo "  3. $0 train"
         echo "  4. $0 status"
         echo "  5. $0 test"
+        echo ""
+        echo "Managed runner: set AI_TRAINING_RUNNER to this executable and invoke it only through ai-service."
         ;;
 esac

@@ -35,8 +35,8 @@ Email provider migration is a high-risk operation. Dropped delivery during cutov
 ## Technical Implementation
 
 1. Create an ApexMail account and verify your sending domain.
-2. Configure DKIM with two selectors (`am1`, `am2`) alongside your existing provider's selectors.
-3. Add `include:spf.apexmail.ee` to your SPF record (do not remove existing provider's SPF).
+2. Copy the domain-specific DKIM record or records generated in the Domains settings alongside your existing provider's selectors.
+3. Add the generated ApexMail SPF mechanism to the existing SPF record; do not remove a previous provider until the transition is validated.
 4. Set DMARC policy to `p=none` during transition to collect reports without enforcement.
 5. Import templates using the Template API.
 6. Configure webhook endpoints for event delivery.
@@ -65,9 +65,9 @@ Email provider migration is a high-risk operation. Dropped delivery during cutov
 
 | Plan | Dedicated IP | Support |
 |---|---|---|
-| Growth | 1 managed dedicated IP (eligibility review) | 8 business hours |
-| Business | 1 managed dedicated IP (eligibility review) | 4 business hours |
-| Enterprise | Up to 3 managed dedicated IPs | Negotiated |
+| Growth | 1 included dedicated IP | Email support |
+| Scale | 3 included dedicated IPs | Priority support |
+| Enterprise | 10 included dedicated IPs | Dedicated support |
 
 ## Security Considerations
 
@@ -77,8 +77,7 @@ Email provider migration is a high-risk operation. Dropped delivery during cutov
 
 ## Compliance Considerations
 
-- EU data residency applies upon cutover.
-- DPA execution required before migrating production data.
+- Confirm data-location and DPA requirements during account or Enterprise review; a technical cutover does not itself create a residency or compliance commitment.
 - Customer retains responsibility for recipient consent continuity during migration.
 
 ## Known Limitations

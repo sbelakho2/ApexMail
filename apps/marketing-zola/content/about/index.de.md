@@ -1,6 +1,6 @@
 +++
 title = "Über ApexMail"
-description = "ApexMail ist eine EU-gehostete Transaktions-E-Mail-Infrastruktur, entwickelt von Bel Consulting OÜ, einem in Estland gegründeten Unternehmen, mit Datenhosting in Deutschland und Finnland."
+description = "ApexMail ist eine Transaktions-E-Mail-Infrastruktur von Bel Consulting OÜ, einem in Estland gegründeten Unternehmen, mit EU/EWR-orientierten Bereitstellungskonfigurationen."
 template = "prose.html"
 
 [extra]
@@ -25,11 +25,11 @@ ApexMail ist ein Handelsname von **Bel Consulting OÜ**, einem in der Republik E
 
 ## Mission
 
-ApexMail bietet EU-gehostete Transaktions-E-Mail-Infrastruktur für SaaS-Plattformen und regulierte Organisationen, die nachweisbare Datenresidenz, vertragliche Compliance-Kontrollen und operative Transparenz benötigen.
+ApexMail bietet Transaktions-E-Mail-Infrastruktur für SaaS-Plattformen und regulierte Organisationen, die eine bereitstellungsspezifische Prüfung der Datenresidenz, vertragliche Compliance-Kontrollen und operative Transparenz benötigen.
 
 ## Infrastruktur
 
-ApexMail operiert von EU-Rechenzentren in Helsinki, Finnland und Nürnberg, Deutschland. Die gesamte Verarbeitung und Speicherung von Kundendaten erfolgt innerhalb des EWR. Siehe unsere [Architekturseite](/architecture) für Bereitstellungsmodelle, Netzwerkarchitektur und die Verantwortlichkeitsmatrix.
+Die bereitgestellte ApexMail-Konfiguration ist auf EU/EWR-Regionen ausgerichtet. Aktive Speicherorte für Kundendaten und Telemetrie sowie Übermittlungsgarantien werden während der Bereitstellung oder im anwendbaren Vertrag bestätigt. Siehe unsere [Architekturseite](/architecture) für Bereitstellungsmodelle, Netzwerkarchitektur und die Verantwortlichkeitsmatrix.
 
 ## Kontakt
 

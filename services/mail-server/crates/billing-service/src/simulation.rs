@@ -41,11 +41,11 @@ mod simulation {
     }
 
     #[test]
-    fn sim_enterprise_has_all_premium_features() {
+    fn sim_enterprise_has_only_available_compliance_entitlements() {
         let ent = plans::builtin_plan_seed(Some("enterprise"));
         assert!(ent.features.sso_enabled);
-        assert!(ent.features.hipaa_compliance);
-        assert!(ent.features.soc2_compliance);
+        assert!(!ent.features.hipaa_compliance);
+        assert!(!ent.features.soc2_compliance);
         assert!(ent.features.private_cloud);
         assert!(ent.features.byoip);
         assert!(ent.features.dedicated_ip);

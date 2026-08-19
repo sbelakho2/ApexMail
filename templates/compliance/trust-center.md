@@ -6,7 +6,7 @@ The ApexMail Trust Center provides inspectable evidence of our security and comp
 
 ## Security Overview
 
-ApexMail provides EU-hosted transactional email infrastructure with security designed for regulated industries.
+ApexMail provides transactional email infrastructure with EU/EEA-oriented deployment configurations and security designed for regulated industries. Active data and telemetry locations are deployment-specific and confirmed under the applicable agreement.
 
 ### Encryption in Transit
 
@@ -80,7 +80,7 @@ ApexMail provides EU-hosted transactional email infrastructure with security des
 - **Restore testing**: Full database restore tested monthly in an isolated environment. Backup integrity verified automatically after each backup completes (checksum validation). Restore test results are logged and reviewed.
 - **Recovery Point Objective (RPO)**: 24 hours for full database restore from daily backups. Point-in-time recovery available within the 7-day WAL archive window (near-real-time).
 - **Recovery Time Objective (RTO)**: 4 hours for critical services (API, SMTP, queue). 8 hours for non-critical services (dashboard, analytics). Cross-region failover available for Enterprise within 2 hours.
-- **Geographic separation**: Primary and backup data stores are in separate physical data center halls within the same region (Helsinki, Finland). Off-site backup copies are stored in a separate region. Cross-region disaster recovery is available for Enterprise plans.
+- **Geographic separation**: Primary and backup locations are selected by the active deployment configuration and applicable agreement. Cross-region disaster recovery, where offered, is contract-specific and not a public-plan entitlement.
 
 ### Data Deletion
 

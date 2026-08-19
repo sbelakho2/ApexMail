@@ -22,7 +22,7 @@ Every comparison page discloses:
 | **ApexMail plan compared** | Exact ApexMail plan used for feature-to-feature mapping |
 | **Monthly volume assumption** | The email volume at which pricing is calculated |
 | **Billing period** | Monthly or annual billing used for price comparison |
-| **Currency** | Currency used (EUR for ApexMail; USD where competitor prices in USD) |
+| **Currency** | Currency used (USD for ApexMail; competitor pricing shown in its published denomination) |
 | **Tax treatment** | All prices exclude VAT unless stated |
 | **Feature definitions** | How each compared feature is defined |
 | **Source policy** | Only public, official documentation and pricing pages |
@@ -49,7 +49,7 @@ Every row in a comparison table is backed by:
 ## Pricing Comparison Rules
 
 - Pricing comparisons use **equivalent monthly volumes** on both sides.
-- Annual discounts are applied consistently: ApexMail annual discount is applied when comparing annual billing.
+- Annual billing is compared only when each provider's current public catalog expressly supports it; no assumed discount is applied.
 - Where competitor pricing varies by volume tier, the tier closest to the stated volume assumption is selected.
 - Currencies are displayed in their native denomination. Where conversion context is useful, the ECB reference rate at the verification date is noted.
 

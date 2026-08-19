@@ -24,6 +24,7 @@ pub mod sales;
 pub mod secrets;
 pub mod support;
 pub mod support_analytics;
+pub mod system_sender;
 pub mod system_health;
 pub mod tenants;
 pub mod vat;

@@ -1,12 +1,12 @@
 //! LLM-powered email answering agent.
 //!
 //! Polls the `inbound_messages` table for unprocessed inbound emails,
-//! generates AI replies via the LlmClient, and sends them back via SMTP.
+//! generates AI reply drafts via the LlmClient, and requires a separately
+//! authorized control-plane approval before any outbound queueing occurs.
 
 use crate::defense::{self, ThreatLevel};
 use crate::inference::{InferenceConfig, LlmClient};
 use chrono::Utc;
-use mail_builder::headers::address::Address;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use tracing;
 /// Approximated as characters × 0.4 (rough chars-to-token ratio for English).
 const MAX_TOTAL_TOKENS_HARD: usize = 4096;
 
-/// Enforce a hard character ceiling on the LLM response before SMTP delivery.
+/// Enforce a hard character ceiling on the LLM response before draft storage.
 /// Approximating 1 token ≈ 2.5 English characters gives us ~10,240 chars max.
 const MAX_RESPONSE_CHARS_HARD: usize = MAX_TOTAL_TOKENS_HARD * 5 / 2;
 
@@ -32,18 +32,12 @@ pub struct EmailAnsweringConfig {
     pub system_prompt: String,
     pub poll_interval_secs: u64,
     pub database_url: String,
-    pub smtp_host: String,
-    pub smtp_port: u16,
-    pub smtp_username: String,
-    pub smtp_password: String,
-    pub smtp_helo_hostname: String,
     pub reply_from: String,
     /// Maximum length of email body text to send to the LLM for processing.
     /// Longer bodies are truncated to avoid token limits.
     pub max_body_chars: usize,
-    /// Whether to require human approval before sending AI-generated email replies.
-    /// When true, replies are stored as drafts and must be approved via the dashboard.
-    /// Production deployments should set this to true (LLM08 — Excessive Agency).
+    /// Must remain true. The agent is draft-only until the control plane queues
+    /// an approved reply through the normal sender-readiness path.
     pub require_approval: bool,
 }
 
@@ -79,18 +73,7 @@ impl EmailAnsweringConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
             database_url: std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://localhost:5432/apexmail".into()),
-            smtp_host: std::env::var("SMTP_HOST")
-                .unwrap_or_else(|_| "127.0.0.1".into()),
-            smtp_port: std::env::var("SMTP_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(587),
-            smtp_username: std::env::var("SMTP_USERNAME").unwrap_or_default(),
-            smtp_password: std::env::var("SMTP_PASSWORD").unwrap_or_default(),
-            smtp_helo_hostname: std::env::var("MAIL_HOSTNAME")
-                .or_else(|_| std::env::var("SMTP_HELO_HOSTNAME"))
-                .unwrap_or_else(|_| "localhost".into()),
+                .unwrap_or_default(),
             reply_from: std::env::var("AI_REPLY_FROM")
                 .unwrap_or_else(|_| "ai@apexmail.ee".into()),
             max_body_chars: std::env::var("AI_EMAIL_MAX_BODY_CHARS")
@@ -99,7 +82,7 @@ impl EmailAnsweringConfig {
                 .unwrap_or(4000),
             require_approval: std::env::var("AI_EMAIL_REQUIRE_APPROVAL")
                 .map(|v| v == "true" || v == "1")
-                .unwrap_or(false),
+                .unwrap_or(true),
         }
     }
 }
@@ -114,7 +97,6 @@ struct InboundRow {
     subject: String,
     body_text: Option<String>,
     body_html: Option<String>,
-    headers: Option<serde_json::Value>,
 }
 
 // ── Email Answerer ────────────────────────────────────────────────────────────
@@ -127,17 +109,20 @@ pub struct EmailAnswerer {
 }
 
 impl EmailAnswerer {
-    pub fn new(config: EmailAnsweringConfig) -> Self {
+    pub fn new(config: EmailAnsweringConfig) -> Result<Self, String> {
+        if config.database_url.trim().is_empty() {
+            return Err("DATABASE_URL is required for the email-answering draft agent".into());
+        }
         let inference_config = InferenceConfig::default();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url)
-            .expect("Failed to create lazy database pool for email agent");
+            .map_err(|error| format!("invalid email-answering database URL: {error}"))?;
 
-        Self {
+        Ok(Self {
             config,
             llm: Arc::new(LlmClient::new(inference_config)),
             pool,
             running: AtomicBool::new(false),
-        }
+        })
     }
 
     /// Spawn a background task that polls for unprocessed inbound messages.
@@ -146,6 +131,13 @@ impl EmailAnswerer {
     pub fn start(self: Arc<Self>) -> bool {
         if !self.config.enabled {
             tracing::info!("Email answering agent is disabled (AI_EMAIL_AGENT_ENABLED=false)");
+            return false;
+        }
+
+        if !self.config.require_approval {
+            tracing::error!(
+                "refusing to start AI email agent without mandatory human approval; direct sending is unsupported"
+            );
             return false;
         }
 
@@ -189,18 +181,27 @@ impl EmailAnswerer {
 
     /// Fetch and process up to 10 unprocessed inbound messages.
     async fn process_batch(&self) -> Result<usize, sqlx::Error> {
-        // SELECT unprocessed messages that arrived in the last 5 minutes,
-        // using SKIP LOCKED to avoid contention with the reply handler.
+                // Atomically claim rows. A bare `SELECT ... FOR UPDATE` outside a
+                // transaction releases its lock before processing and lets another
+                // worker generate a duplicate draft.
         let rows: Vec<InboundRow> = sqlx::query_as::<_, InboundRow>(
             r#"
-            SELECT id, from_email, to_email, subject, body_text, body_html, headers
-            FROM inbound_messages
-            WHERE processed_at IS NULL
-              AND processing = false
-              AND received_at > NOW() - INTERVAL '5 minutes'
-            ORDER BY received_at ASC
-            LIMIT 10
-            FOR UPDATE SKIP LOCKED
+                        WITH candidates AS (
+                                SELECT id
+                                FROM inbound_messages
+                                WHERE processed_at IS NULL
+                                    AND processing = false
+                                    AND received_at > NOW() - INTERVAL '5 minutes'
+                                ORDER BY received_at ASC
+                                LIMIT 10
+                                FOR UPDATE SKIP LOCKED
+                        )
+                        UPDATE inbound_messages AS inbound
+                        SET processing = true
+                        FROM candidates
+                        WHERE inbound.id = candidates.id
+                        RETURNING inbound.id, inbound.from_email, inbound.to_email, inbound.subject,
+                                  inbound.body_text, inbound.body_html
             "#,
         )
         .fetch_all(&self.pool)
@@ -210,16 +211,22 @@ impl EmailAnswerer {
         for row in &rows {
             if let Err(e) = self.process_message(row).await {
                 tracing::error!(msg_id = %row.id, error = %e, "Failed to process inbound message");
+                let _ = sqlx::query(
+                    "UPDATE inbound_messages SET processing = false WHERE id = $1 AND processed_at IS NULL",
+                )
+                .bind(&row.id)
+                .execute(&self.pool)
+                .await;
             }
         }
 
         Ok(count)
     }
 
-    /// Process a single inbound message: extract content, call LLM, send reply,
-    /// mark as processed.
+    /// Process a single inbound message into a human-approval draft. This method
+    /// deliberately has no SMTP or raw-message fallback.
     async fn process_message(&self, row: &InboundRow) -> anyhow::Result<()> {
-        let body = extract_body(row);
+        let body = extract_body(row, self.config.max_body_chars);
         let prompt = build_prompt(&row.from_email, &row.subject, &body);
 
         // Check the composed prompt for injection patterns before sending to LLM
@@ -280,67 +287,31 @@ impl EmailAnswerer {
         // LLM04: truncate response to hard character limit with marker
         let safe_response = truncate_response(&safe_response);
 
-        let reply_subject = if row.subject.to_lowercase().starts_with("re:") {
-            row.subject.clone()
-        } else {
-            format!("Re: {}", row.subject)
-        };
-
         let reply_body = format_reply(&row.from_email, &row.subject, &body, &safe_response);
 
-        // LLM08: Excessive Agency — require human approval before sending.
-        if self.config.require_approval {
-            tracing::info!(
-                msg_id = %row.id,
-                "AI reply stored as pending draft — requires human approval"
-            );
-            // Mark as processed but pending approval; do NOT send via SMTP.
-            sqlx::query(
-                r#"
-                UPDATE inbound_messages
-                SET processed_at = NOW(), processing = false, processed = true,
-                    ai_response = $2, ai_tokens_used = $3,
-                    pending_approval = true
-                WHERE id = $1
-                "#,
-            )
-            .bind(&row.id)
-            .bind(&safe_response)
-            .bind(token_count as i32)
-            .execute(&self.pool)
-            .await?;
-            return Ok(());
-        }
-
-        if let Err(e) = send_reply_email(
-            &self.config,
-            &row.from_email,
-            &row.to_email,
-            &reply_subject,
-            &reply_body,
-            &row.id,
-            row.headers.as_ref(),
-        )
-        .await
-        {
-            tracing::error!(msg_id = %row.id, error = %e, "Failed to send reply email");
-        }
-
-        // Mark as processed, store the AI response (sanitized)
+        tracing::info!(
+            msg_id = %row.id,
+            to = %row.to_email,
+            "AI reply stored as pending draft — requires human approval"
+        );
+        // The approval control plane must revalidate tenant ownership and the
+        // selected sender's current DKIM/transport readiness before queueing.
         sqlx::query(
             r#"
             UPDATE inbound_messages
-            SET processed_at = NOW(), processing = false, processed = true, ai_response = $2, ai_tokens_used = $3
+            SET processed_at = NOW(), processing = false, processed = true,
+                ai_response = $2, ai_tokens_used = $3,
+                pending_approval = true
             WHERE id = $1
             "#,
         )
         .bind(&row.id)
-        .bind(&safe_response)
+        .bind(&reply_body)
         .bind(token_count as i32)
         .execute(&self.pool)
         .await?;
 
-        tracing::info!(msg_id = %row.id, "AI reply sent and marked processed");
+        tracing::info!(msg_id = %row.id, "AI reply draft marked processed");
         Ok(())
     }
 }
@@ -358,24 +329,24 @@ pub(crate) fn truncate_response(response: &str) -> String {
 }
 
 /// Extract the best available text body from the inbound message.
-fn extract_body(row: &InboundRow) -> String {
+fn extract_body(row: &InboundRow, max_body_chars: usize) -> String {
     if let Some(ref text) = row.body_text {
         if !text.trim().is_empty() {
-            return limit_body(text);
+            return limit_body(text, max_body_chars);
         }
     }
     if let Some(ref html) = row.body_html {
         let stripped = strip_html_tags(html);
         if !stripped.trim().is_empty() {
-            return limit_body(&stripped);
+            return limit_body(&stripped, max_body_chars);
         }
     }
     String::new()
 }
 
-fn limit_body(body: &str) -> String {
-    if body.len() > 4000 {
-        let truncated: String = body.chars().take(4000).collect();
+fn limit_body(body: &str, max_body_chars: usize) -> String {
+    if body.chars().count() > max_body_chars {
+        let truncated: String = body.chars().take(max_body_chars).collect();
         format!("{}\n\n[Message truncated]", truncated)
     } else {
         body.to_string()
@@ -443,148 +414,6 @@ pub(crate) fn format_reply(from: &str, subject: &str, original_body: &str, ai_re
         reply.push_str(&format!("> {}\n", line));
     }
     reply
-}
-
-/// Send the AI-generated reply via SMTP using the configured relay.
-async fn send_reply_email(
-    config: &EmailAnsweringConfig,
-    to: &str,
-    _original_to: &str,
-    subject: &str,
-    body: &str,
-    message_id: &str,
-    _headers: Option<&serde_json::Value>,
-) -> anyhow::Result<()> {
-    // Build the reply message using the mail-builder crate from the workspace.
-    let reply_message_id = format!("<{}@apexmail.ee>", uuid::Uuid::new_v4());
-
-    let from_addr = Address::new_address(None::<&str>, config.reply_from.as_str());
-    let to_addr = Address::new_address(None::<&str>, to);
-
-    let mut email = mail_builder::MessageBuilder::new()
-        .from(from_addr)
-        .to(to_addr)
-        .subject(subject)
-        .text_body(body)
-        .message_id(reply_message_id.clone());
-
-    // Add threading headers for proper email threading
-    email = email.in_reply_to(vec![message_id.to_string()]);
-    email = email.references(vec![message_id.to_string()]);
-
-    let raw_message = email
-        .write_to_vec()
-        .map_err(|e| anyhow::anyhow!("Failed to build email: {}", e))?;
-    let smtp_message = raw_message.clone();
-
-    tracing::debug!(
-        msg_id = %message_id,
-        reply_id = %reply_message_id,
-        size = raw_message.len(),
-        "Sending AI reply email"
-    );
-
-    // Use reqwest to send via the submission service HTTP API, or raw SMTP if
-    // configured. First try the submission API for consistency with the rest
-    // of the platform.
-    let submission_url = std::env::var("SUBMISSION_API_URL")
-        .unwrap_or_else(|_| format!("http://127.0.0.1:3011/api/v1/submit"));
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
-
-    let resp = client
-        .post(&submission_url)
-        .header("Content-Type", "message/rfc822")
-        .body(raw_message)
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            tracing::info!(msg_id = %message_id, reply_id = %reply_message_id, "Reply submitted successfully");
-            Ok(())
-        }
-        Ok(r) => {
-            let status = r.status();
-            let body_text = r.text().await.unwrap_or_default();
-            Err(anyhow::anyhow!(
-                "Submission API returned {}: {}",
-                status,
-                body_text,
-            ))
-        }
-        Err(e) => {
-            // Fallback to direct SMTP if the submission API is unavailable.
-            tracing::warn!(
-                error = %e,
-                "Submission API unavailable, falling back to direct SMTP"
-            );
-            send_via_smtp(config, to, subject, &smtp_message).await
-        }
-    }
-}
-
-/// Fallback: send the reply directly via SMTP using TCP.
-async fn send_via_smtp(
-    config: &EmailAnsweringConfig,
-    to: &str,
-    _subject: &str,
-    raw_message: &[u8],
-) -> anyhow::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    use tokio::net::TcpStream;
-
-    let addr = format!("{}:{}", config.smtp_host, config.smtp_port);
-    let mut stream = TcpStream::connect(&addr).await?;
-
-    smtp_read_response(&mut stream).await?; // greeting
-
-    stream
-        .write_all(format!("EHLO {}\r\n", config.smtp_helo_hostname).as_bytes())
-        .await?;
-    smtp_read_response(&mut stream).await?;
-
-    if !config.smtp_username.is_empty() {
-        stream.write_all(b"STARTTLS\r\n").await?;
-        smtp_read_response(&mut stream).await?;
-    }
-
-    stream
-        .write_all(format!("MAIL FROM:<{}>\r\n", config.reply_from).as_bytes())
-        .await?;
-    smtp_read_response(&mut stream).await?;
-
-    stream
-        .write_all(format!("RCPT TO:<{}>\r\n", to).as_bytes())
-        .await?;
-    smtp_read_response(&mut stream).await?;
-
-    stream.write_all(b"DATA\r\n").await?;
-    smtp_read_response(&mut stream).await?;
-
-    stream.write_all(raw_message).await?;
-    stream.write_all(b"\r\n.\r\n").await?;
-    smtp_read_response(&mut stream).await?;
-
-    stream.write_all(b"QUIT\r\n").await?;
-    Ok(())
-}
-
-async fn smtp_read_response(stream: &mut tokio::net::TcpStream) -> anyhow::Result<String> {
-    use tokio::io::AsyncReadExt;
-    let mut buf = [0u8; 1024];
-    match tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf)).await {
-        Ok(Ok(n)) if n > 0 => {
-            let resp = String::from_utf8_lossy(&buf[..n]).to_string();
-            if resp.starts_with('4') || resp.starts_with('5') {
-                anyhow::bail!("SMTP error: {}", resp.trim());
-            }
-            Ok(resp)
-        }
-        _ => anyhow::bail!("SMTP read timeout or empty response"),
-    }
 }
 
 // ── Handler for HTTP endpoint ──────────────────────────────────────────────────
@@ -677,9 +506,8 @@ mod tests {
             subject: "S".into(),
             body_text: Some("text version".into()),
             body_html: Some("<p>html version</p>".into()),
-            headers: None,
         };
-        assert_eq!(extract_body(&row), "text version");
+        assert_eq!(extract_body(&row, 4_000), "text version");
     }
 
     #[test]
@@ -691,15 +519,14 @@ mod tests {
             subject: "S".into(),
             body_text: None,
             body_html: Some("<p>html only</p>".into()),
-            headers: None,
         };
-        assert_eq!(extract_body(&row), "html only");
+        assert_eq!(extract_body(&row, 4_000), "html only");
     }
 
     #[test]
     fn test_limit_body_truncates() {
         let long = "a".repeat(5000);
-        let result = limit_body(&long);
+        let result = limit_body(&long, 4_000);
         assert!(result.len() <= 4100); // 4000 chars + truncation message
         assert!(result.contains("[Message truncated]"));
     }

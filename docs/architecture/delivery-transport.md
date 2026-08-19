@@ -1,12 +1,20 @@
-# Delivery Transport Architecture
+# Historical Delivery Transport Architecture
 
 > Last updated: 2026-03-02
 
-This document describes how ApexMail delivers outbound email using a **hybrid per-message routing** architecture. Both AWS SES (shared pool) and self-hosted SMTP (dedicated IPs via Hetzner) are always available — the `TransportRouter` decides per-message which path to use.
+> **Superseded operational design:** This document preserves the earlier
+> per-message-routing proposal. It is not the current runtime contract.
+> Current deployments select one transport with `EMAIL_TRANSPORT_TYPE`:
+> `ses` (default) uses SES with per-domain BYODKIM and custom MAIL FROM;
+> `smtp` uses a configured relay with local per-domain DKIM signing. No
+> dedicated-IP, tenant, plan, or message-level automatic routing is active.
+
+See [Deployment Configuration](../deployment/configuration.md) for the
+current operator contract.
 
 ---
 
-## Core Principle
+## Superseded Design
 
 | Path | Provider | Transport | When Used |
 |------|----------|-----------|-----------|

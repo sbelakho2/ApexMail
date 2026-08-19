@@ -343,6 +343,11 @@ services:
       API_PORT: 8080
       # ── Internal service auth (shared with pdf-renderer) ──────────────────
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      # Per-domain DKIM private keys are encrypted before database storage.
+      # Local development must provide a real 64-hex-character key in .env.
+      DKIM_PRIVATE_KEY_ENCRYPTION_KEY: ${DKIM_PRIVATE_KEY_ENCRYPTION_KEY:?DKIM_PRIVATE_KEY_ENCRYPTION_KEY is required}
+      # Opt-in provisioning only; it never marks the platform sender verified.
+      SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP: ${SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP:-false}
       # ── Inbox placement tests (runs in-process; sends via platform MTA) ───
       # The api-server shares the apexmail_data network with the mta service,
       # so unauthenticated submission on mta:25 measures real reputation.
@@ -490,6 +495,7 @@ services:
       SUBMISSION_PORT: ${SUBMISSION_PORT:-587}
       # METRICS_PORT is read by the MTA's metrics listener (enabled via
       # METRICS_ENABLED). The healthcheck probes SMTP port 25 directly.
+      METRICS_ENABLED: "true"
       METRICS_PORT: 9090
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 25"]
@@ -714,7 +720,6 @@ services:
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/alerting-rules.yml:/etc/prometheus/alerting-rules.yml:ro
-      - ./deploy/prometheus-targets.d:/etc/prometheus/targets.d:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'

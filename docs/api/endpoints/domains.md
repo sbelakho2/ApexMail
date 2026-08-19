@@ -10,13 +10,8 @@ Manage sending domains, DNS verification, and advanced email authentication.
 | GET | `/v1/domains` | List all domains |
 | GET | `/v1/domains/:id` | Get domain details |
 | POST | `/v1/domains/:id/verify` | Verify domain DNS |
-| GET | `/v1/domains/:id/health` | Check DNS health |
 | DELETE | `/v1/domains/:id` | Delete a domain |
 | GET | `/v1/domains/:id/dns-records` | Get DNS setup instructions |
-| GET | `/v1/domains/:id/mta-sts` | Check MTA-STS configuration |
-| GET | `/v1/domains/:id/bimi` | Check BIMI configuration |
-| POST | `/v1/domains/:id/bimi/validate-logo` | Validate BIMI logo |
-| GET | `/v1/domains/:id/tlsrpt` | Check TLS reporting |
 | GET | `/v1/domains/:id/auth-status` | Comprehensive auth score |
 
 ---
@@ -29,8 +24,7 @@ X-API-Key: {{api_key}}
 Content-Type: application/json
 
 {
-  "domain": "example.com",
-  "verificationMethod": "dns_txt"
+  "name": "example.com"
 }
 ```
 
@@ -38,40 +32,37 @@ Content-Type: application/json
 
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
-| `domain` | string | Yes | Domain name (e.g., `example.com`) |
-| `verificationMethod` | string | No | `dns_txt` (default), `dns_cname`, or `meta_tag` |
+| `name` | string | Yes | Domain name (e.g., `example.com`) |
 
 ### Response
 
 ```json
 {
-  "domain": {
-    "id": "dom_abc123",
-    "domain": "example.com",
-    "status": "pending",
-    "verificationMethod": "dns_txt",
-    "verificationToken": "apexmail-verify-abc123xyz",
-    "dnsRecords": {
-      "spf": { "value": "v=spf1 include:_spf.apexmail.ee ~all", "verified": false },
-      "dkim": { "selector": "apexmail2024", "value": "p=MIIBIjAN...", "verified": false },
-      "dmarc": { "value": "v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee", "verified": false },
-      "returnPath": { "value": "bounce.example.com", "verified": false }
-    },
-    "createdAt": "2024-01-15T10:00:00Z"
-  },
-  "instructions": {
-    "type": "DNS TXT Record",
-    "name": "_apexmail.example.com",
-    "value": "apexmail-verify-abc123xyz",
-    "instructions": [
-      "Add a TXT record to your DNS",
-      "Name/Host: _apexmail",
-      "Value: apexmail-verify-abc123xyz",
-      "TTL: 3600 (or your provider's default)"
-    ]
-  }
+  "id": "018f0b28-b99a-7b41-84ac-66ebc643e3d1",
+  "name": "example.com",
+  "status": "pending",
+  "ses_verified": false,
+  "spf_verified": false,
+  "dkim_verified": false,
+  "dmarc_verified": false,
+  "return_path_verified": false,
+  "created_at": "2026-05-16T10:00:00Z"
 }
 ```
+
+Creation generates an encrypted 2048-bit RSA private key and a unique DKIM
+selector. The private key is never returned. Retrieve the DNS values before
+publishing records:
+
+```http
+GET /v1/domains/:id/dns-records
+X-API-Key: {{api_key}}
+```
+
+The response contains four records: a `bounce.<domain>` SPF TXT record, a
+direct `<selector>._domainkey.<domain>` DKIM TXT record, a region-specific
+`bounce.<domain>` MX record with priority `10`, and a DMARC TXT record. Do not
+replace them with SES Easy-DKIM CNAME records or ApexMail-owned DNS targets.
 
 ---
 
@@ -86,21 +77,15 @@ X-API-Key: {{api_key}}
 
 ```json
 {
-  "domain": {
-    "id": "dom_abc123",
-    "domain": "example.com",
-    "status": "verified",
-    "verificationMethod": "dns_txt",
-    "verifiedAt": "2024-01-15T12:00:00Z",
-    "dnsRecords": { ... },
-    "healthStatus": {
-      "overall": "healthy",
-      "issues": [],
-      "lastChecked": "2024-01-15T14:00:00Z"
-    },
-    "createdAt": "2024-01-15T10:00:00Z",
-    "updatedAt": "2024-01-15T14:00:00Z"
-  }
+  "id": "018f0b28-b99a-7b41-84ac-66ebc643e3d1",
+  "name": "example.com",
+  "status": "verified",
+  "ses_verified": true,
+  "spf_verified": true,
+  "dkim_verified": true,
+  "dmarc_verified": true,
+  "return_path_verified": true,
+  "created_at": "2026-05-16T10:00:00Z"
 }
 ```
 
@@ -115,54 +100,23 @@ POST /v1/domains/:id/verify
 X-API-Key: {{api_key}}
 ```
 
-### Response (Success)
-
-```json
-{
-  "verified": true,
-  "message": "Domain verified successfully"
-}
-```
-
-### Response (Failure)
-
-```json
-{
-  "verified": false,
-  "message": "Verification failed",
-  "details": "TXT record not found or does not match verification token"
-}
-```
-
----
-
-## DNS Health Check
-
-```http
-GET /v1/domains/:id/health
-X-API-Key: {{api_key}}
-```
-
 ### Response
 
 ```json
 {
   "domain": "example.com",
-  "healthStatus": {
-    "overall": "warning",
-    "issues": [
-      "DMARC policy is 'none'. Consider upgrading to 'quarantine' or 'reject'"
-    ],
-    "lastChecked": "2024-01-15T14:00:00Z"
-  },
-  "dnsRecords": {
-    "spf": { "value": "v=spf1 include:_spf.apexmail.ee ~all", "verified": true },
-    "dkim": { "selector": "apexmail2024", "verified": true },
-    "dmarc": { "value": "v=DMARC1; p=none", "verified": true },
-    "returnPath": { "verified": true }
-  }
+  "spf_verified": true,
+  "dkim_verified": true,
+  "dmarc_verified": true,
+  "return_path_verified": true,
+  "status": "verified"
 }
 ```
+
+In SES mode, a successful DNS check configures the BYODKIM identity and custom
+MAIL FROM domain, then checks their actual SES status. The domain remains
+`pending` until SES reports both as ready; a successful SES create request does
+not by itself authorize sending.
 
 ---
 

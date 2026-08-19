@@ -275,9 +275,9 @@ zola build --root apps/marketing-zola
 - Tracking IDs use AES-128-GCM encryption
 - JWT tokens have configurable expiry
 - Rate limiting is applied per tenant
-- DKIM signing for all outbound email (SES Easy DKIM 2048-bit or self-hosted keys)
+- Per-domain 2048-bit DKIM keys with encrypted private-key storage; SES uses BYODKIM and SMTP signs locally
 - SPF/DMARC validation for inbound email
-- Dual delivery transport: AWS SES (primary) with self-hosted SMTP opt-in
+- Explicit deployment-wide transport selection: AWS SES by default or configured SMTP relay
 - Optional KiwiCaptcha protection on login routes for both web and control-plane apps (native Rust proof-of-work CAPTCHA)
 
 ## License

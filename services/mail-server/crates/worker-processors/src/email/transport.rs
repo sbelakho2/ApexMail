@@ -270,7 +270,7 @@ impl EmailTransport for SmtpTransport {
 // ═══════════════════════════════════════════════════════════════
 
 /// AWS SES v2 transport — sends via the `SendEmail` API with raw MIME content.
-/// SES handles:/// - DKIM signing (Easy DKIM for verified identities)
+/// SES handles:/// - DKIM signing through the domain's configured BYODKIM identity
 /// - IP reputation management
 /// - Bounce/complaint processing (via SNS notifications)
 /// - TLS to recipient MX servers
@@ -459,8 +459,9 @@ mod tests {
     fn test_transport_type_from_env() {
         assert_eq!(TransportType::from_env("smtp"), TransportType::Smtp);
         assert_eq!(TransportType::from_env("SMTP"), TransportType::Smtp);
-        assert_eq!(TransportType::from_env("self-hosted"), TransportType::Smtp);
-        assert_eq!(TransportType::from_env("direct"), TransportType::Smtp);
+        assert_eq!(TransportType::from_env(" smtp "), TransportType::Smtp);
+        assert_eq!(TransportType::from_env("self-hosted"), TransportType::Ses);
+        assert_eq!(TransportType::from_env("direct"), TransportType::Ses);
         assert_eq!(TransportType::from_env("ses"), TransportType::Ses);
         assert_eq!(TransportType::from_env("SES"), TransportType::Ses);
         assert_eq!(TransportType::from_env("anything"), TransportType::Ses);

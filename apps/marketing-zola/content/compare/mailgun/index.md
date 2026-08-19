@@ -12,12 +12,12 @@ last_verified = "2026-07-29"
 methodology = "Public Mailgun documentation at mailgun.com/docs reviewed on the verification date. Pricing compared at Foundation 100K plan. Monthly billing. Features, limits, and pricing may change."
 volume_assumption = "100,000 emails/month"
 billing_period = "monthly"
-currency_note = "EUR for ApexMail; USD for Mailgun (Mailgun prices in USD). Prices exclude VAT."
+currency_note = "USD for ApexMail and Mailgun. Prices exclude applicable taxes."
 # Feature comparison counts — update when capabilities change
 apexmail_wins = 8
 competitor_wins = 2
 verdict_title = "How ApexMail differs from Mailgun"
-verdict_points = ["EEA data processing by default vs US-based with EU option on request", "Idempotency keys on all plans vs not supported", "SCIM on Enterprise plan vs not documented", "Dedicated tenancy from €4,000/mo vs not available", "Audit logs from Growth plan — searchable and exportable vs event logs only"]
+verdict_points = ["EU/EEA-oriented deployment configuration", "Current public catalog in USD", "Scale and Enterprise access controls", "Audit logs on Growth and above", "Architecture and contract review for non-standard deployments"]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
 # single loop, so design changes to the row/winner markup happen in ONE place.
@@ -26,37 +26,37 @@ verdict_points = ["EEA data processing by default vs US-based with EU option on 
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "EEA DATA PROCESSING", rows = [
-    { feature = "Primary hosting region", apex = 'EU (Hetzner, Germany &amp; Finland)', comp = 'US (EU region available on Foundation 50K+ and higher plans)<sup><a href="#src-mg1">1</a></sup>', winner = "apexmail" },
-    { feature = "EEA data processing default", apex = 'Yes — all customer data processed and stored in Germany/Finland', comp = 'No — US-based by default; EU region configured per sending domain<sup><a href="#src-mg1">1</a></sup>', winner = "apexmail" },
-    { feature = "DPA availability", apex = 'Business plan and above — incorporates Subprocessor Register by reference', comp = 'Available — Sinch DPA covers Mailgun services<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
+    { feature = "Primary hosting region", apex = 'EU/EEA-oriented default configuration; confirm active deployment', comp = 'US (EU region available on Foundation 50K+ and higher plans)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "EEA data processing default", apex = 'EU/EEA-oriented default configuration; active locations are agreement-specific', comp = 'No — US-based by default; EU region configured per sending domain<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "DPA availability", apex = 'Available under the applicable ApexMail agreement', comp = 'Available — Sinch DPA covers Mailgun services<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},
   { title = "SENDING CAPABILITIES", rows = [
     { feature = "REST API", apex = 'Yes — <code>POST /v1/messages</code>', comp = 'Yes — <code>POST /v3/{domain}/messages</code><sup><a href="#src-mg3">3</a></sup>', winner = "none" },
     { feature = "SMTP relay", apex = 'Yes — smtp.apexmail.ee:587 (STARTTLS)', comp = 'Yes — smtp.mailgun.org:587 (STARTTLS)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Batch sending", apex = 'Yes (Developer+) — single API call with recipient array', comp = 'Yes — batch sending via <code>recipient-variables</code> with up to 1,000 recipients<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "Batch sending", apex = 'Available where enabled for the subscribed plan', comp = 'Yes — batch sending via <code>recipient-variables</code> with up to 1,000 recipients<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
     { feature = "Idempotency keys", apex = 'Yes (all plans) — <code>Idempotency-Key</code> header', comp = 'Not supported — applications must implement deduplication logic<sup><a href="#src-mg3">3</a></sup>', winner = "apexmail" },
-    { feature = "Scheduled sending", apex = 'Yes (Developer+) — <code>send_at</code>, up to 72 hours', comp = 'Yes — <code>o:deliverytime</code> parameter (RFC 2822 format, up to 3 days)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Inbound email", apex = 'Pro plan and above', comp = 'Yes — inbound routes with forwarding, storage, and webhook actions<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
+    { feature = "Scheduled sending", apex = 'Available where enabled for the subscribed plan', comp = 'Yes — <code>o:deliverytime</code> parameter (RFC 2822 format, up to 3 days)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
+    { feature = "Inbound email", apex = 'Scale and Enterprise plans', comp = 'Yes — inbound routes with forwarding, storage, and webhook actions<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "DEPLOYMENT MODELS", rows = [
     { feature = "Shared cloud", apex = 'Yes (all plans) — multi-tenant on Hetzner', comp = 'Yes (all plans)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
-    { feature = "Dedicated IP", apex = '€30/mo add-on (Pro tier); included on Growth+', comp = 'Available as add-on on Foundation plan and above<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
-    { feature = "Dedicated tenancy", apex = 'Yes — Dedicated Tenant from €4,000/mo (12-month minimum)', comp = 'Not available<sup><a href="#src-mg5">5</a></sup>', winner = "apexmail" },
-    { feature = "BYOC / private deployment", apex = 'Yes — BYOC from €6,500/mo (12–24 month minimum)', comp = 'Not available<sup><a href="#src-mg5">5</a></sup>', winner = "apexmail" }
+    { feature = "Dedicated IP", apex = 'Approved add-on on Pro; 1 included on Growth, 3 on Scale', comp = 'Available as add-on on Foundation plan and above<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Dedicated tenancy", apex = 'Subject to architecture and contract review', comp = 'See provider documentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "BYOC / private deployment", apex = 'Subject to architecture and contract review', comp = 'See provider documentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
   { title = "ENTERPRISE CONTROLS", rows = [
-    { feature = "SAML SSO", apex = 'Business plan and above', comp = 'Foundation 100K and higher plans<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'Scale and Enterprise plans', comp = 'Foundation 100K and higher plans<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
     { feature = "SCIM", apex = 'Enterprise plan', comp = 'Not documented as of verification date — user provisioning through Mailgun API<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
     { feature = "Audit logs", apex = 'Growth plan and above — account activity, API key usage, configuration changes; searchable, exportable', comp = 'Event logs accessible via Events API; retention varies by plan; no consolidated account-level audit trail<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},
   { title = "PRICING AT 100K/MO (verified 2026-07-29)", rows = [
-    { feature = "Plan compared", apex = 'Pro: €89/mo (150,000 emails included)', comp = 'Foundation 100K: $75/mo (100,000 emails included)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
-    { feature = "Overage rate", apex = '€0.60 per 1,000 emails', comp = '$1.00/1,000 for Foundation; varies by volume tier; Flex pricing available<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
+    { feature = "Plan compared", apex = 'Pro: $65/mo (150,000 emails included)', comp = 'Foundation 100K: $75/mo (100,000 emails included)<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
+    { feature = "Usage terms", apex = 'See the current public catalog and checkout for applicable usage terms', comp = '$1.00/1,000 for Foundation; varies by volume tier; Flex pricing available<sup><a href="#src-mg8">8</a></sup>', winner = "none" },
     { feature = "Free tier", apex = '30,000 emails/month', comp = '100 emails/day (Flex trial — no credit card)<sup><a href="#src-mg8">8</a></sup>', winner = "apexmail" }
   ]},
   { title = "AREAS WHERE MAILGUN IS STRONGER", rows = [
     { feature = "Email validation", apex = 'Email Grader API (DNS/SPF/DKIM/DMARC/content/reputation)', comp = 'Dedicated Email Validation API with real-time and bulk validation<sup><a href="#src-mg9">9</a></sup>', winner = "competitor" },
-    { feature = "Inbound email processing", apex = 'Inbound email on Pro plan and above', comp = 'Inbound routing with forwarding, HTTP webhook, and storage actions; included on all plans<sup><a href="#src-mg4">4</a></sup>', winner = "competitor" },
+    { feature = "Inbound email processing", apex = 'Inbound email on Scale and Enterprise plans', comp = 'Inbound routing with forwarding, HTTP webhook, and storage actions; included on all plans<sup><a href="#src-mg4">4</a></sup>', winner = "competitor" },
     { feature = "Email testing sandbox", apex = 'Sandbox environment with sandbox domains and rate limits', comp = 'Sandbox domain for testing on all plans with separate test credentials<sup><a href="#src-mg3">3</a></sup>', winner = "none" }
   ]}
 ]
@@ -74,7 +74,7 @@ sources = [
   { ref = "mg8", n = 8, label = "Mailgun Pricing page", url = "https://www.mailgun.com/pricing/" },
   { ref = "mg9", n = 9, label = "Mailgun Email Validation", url = "https://www.mailgun.com/email-validation/" }
 ]
-sources_disclaimer = "Last verified: 2026-07-29. Volume assumption: 100,000 emails/month, monthly billing. EUR for ApexMail; USD for Mailgun. Prices exclude VAT. Reviewed by: ApexMail marketing engineering."
+sources_disclaimer = "Last verified: 2026-07-29. Volume assumption: 100,000 emails/month, monthly billing. Prices are shown in USD and exclude applicable taxes. Reviewed by: ApexMail marketing engineering."
 +++
 
 <!-- Comparison rows and sources block are rendered from the

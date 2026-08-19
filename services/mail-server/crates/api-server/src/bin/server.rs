@@ -16,6 +16,7 @@ use apexmail_db::pool::set_query_timeout;
 use api_server::app::build_app;
 use api_server::config::Config;
 use api_server::ip_provider::DedicatedIpProvider;
+use api_server::routes::domains::bootstrap_system_sender;
 use api_server::ses_provider::SesIpProvider;
 use api_server::state::AppStateInner;
 
@@ -132,6 +133,23 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         "resilience layer initialised — circuit breakers (db, redis, clickhouse) and bulkheads active"
     );
+
+    // The migration only creates a pending platform domain. Provisioning is
+    // opt-in so a deployment never invents DNS state, but operators can safely
+    // request encrypted per-domain key material during a controlled rollout.
+    if system_sender_bootstrap_requested()? {
+        let status = bootstrap_system_sender(&state)
+            .await
+            .map_err(|error| anyhow::anyhow!("system sender bootstrap failed: {error}"))?;
+        tracing::info!(
+            domain = %status.domain,
+            status = %status.status,
+            ready = status.ready,
+            dns_record_count = status.records.len(),
+            "system sender bootstrap completed; publish the returned records and verify explicitly"
+        );
+    }
+
     let shutdown_state = state.clone();
 
     // ── Inbox-placement scheduler ───────────────────────────
@@ -216,6 +234,22 @@ fn init_tracing() -> Option<TracingGuard> {
         .json()
         .init();
     None
+}
+
+fn system_sender_bootstrap_requested() -> anyhow::Result<bool> {
+    match std::env::var("SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP") {
+        Ok(value) if value.eq_ignore_ascii_case("true") || value == "1" => Ok(true),
+        Ok(value) if value.eq_ignore_ascii_case("false") || value == "0" || value.is_empty() => {
+            Ok(false)
+        }
+        Ok(_) => Err(anyhow::anyhow!(
+            "SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP must be true, false, 1, or 0"
+        )),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(error) => Err(anyhow::anyhow!(
+            "failed to read SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP: {error}"
+        )),
+    }
 }
 
 async fn shutdown_signal() {

@@ -7,12 +7,12 @@ use anyhow::{bail, Context, Result};
 use base64::Engine;
 use clap::Parser;
 use futures::StreamExt;
-use mail_proto::mailstore_service_client::MailstoreServiceClient;
 use mail_proto::{
     CopyMessageRequest, CreateMailboxRequest, DeleteMailboxRequest, ExpungeRequest,
-    FlagOperation, GetMailboxStatusRequest, GetMessageRequest, ListMailboxesRequest,
-    ListMessagesRequest, MailboxEvent, MessageFlags, MoveMessageRequest,
-    SearchMessagesRequest, SetFlagsRequest, StoreMessageRequest, SubscribeMailboxRequest,
+    FlagOperation, GetMailboxStatusRequest, GetMessageRequest, InternalServiceAuthInterceptor,
+    ListMailboxesRequest, ListMessagesRequest, MailboxEvent, MailstoreServiceClient,
+    MessageFlags, MoveMessageRequest, SearchMessagesRequest, SetFlagsRequest,
+    StoreMessageRequest, SubscribeMailboxRequest,
 };
 use rustls::ServerConfig;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -123,47 +123,18 @@ type SubscriptionTable = HashMap<String, HashSet<String>>;
 static SUBSCRIPTIONS: LazyLock<Arc<Mutex<SubscriptionTable>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-// ── Internal service token ──────────────────────────────────────────────────
-//
-// When the mailstore enables shared-token authentication
-// (INTERNAL_SERVICE_TOKEN on the mailstore side), the IMAP server attaches the
-// same secret to every gRPC call as `authorization: Bearer <token>`.
-
-static INTERNAL_SERVICE_TOKEN: LazyLock<String> =
-    LazyLock::new(|| std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default());
-
-/// gRPC client interceptor that attaches the internal service token when one
-/// is configured (no-op otherwise, so the client type is uniform).
-#[derive(Clone, Debug)]
-struct MailstoreAuthInterceptor {
-    token: Arc<str>,
-}
-
-impl tonic::service::Interceptor for MailstoreAuthInterceptor {
-    fn call(
-        &mut self,
-        mut request: tonic::Request<()>,
-    ) -> Result<tonic::Request<()>, tonic::Status> {
-        if !self.token.is_empty() {
-            if let Ok(value) = format!("Bearer {}", self.token).parse() {
-                request.metadata_mut().insert("authorization", value);
-            }
-        }
-        Ok(request)
-    }
-}
-
 type MailstoreClient =
-    MailstoreServiceClient<tonic::service::interceptor::InterceptedService<Channel, MailstoreAuthInterceptor>>;
+    MailstoreServiceClient<tonic::service::interceptor::InterceptedService<Channel, InternalServiceAuthInterceptor>>;
 
-/// Build the mailstore client (with the internal service token attached when
-/// configured).
-fn build_mailstore_client(channel: Channel) -> MailstoreClient {
+/// Build the mailstore client with the validated internal service-token
+/// interceptor configured at process startup.
+fn build_mailstore_client(
+    channel: Channel,
+    interceptor: InternalServiceAuthInterceptor,
+) -> MailstoreClient {
     MailstoreServiceClient::with_interceptor(
         channel,
-        MailstoreAuthInterceptor {
-            token: Arc::from(INTERNAL_SERVICE_TOKEN.as_str()),
-        },
+        interceptor,
     )
 }
 
@@ -3604,6 +3575,7 @@ async fn handle_connection(
     stream: TcpStream,
     tls: Option<TlsAcceptor>,
     mailstore_addr: String,
+    mailstore_auth: InternalServiceAuthInterceptor,
     is_tls: bool,
     allow_insecure_auth: bool,
 ) -> Result<()> {
@@ -3621,7 +3593,7 @@ async fn handle_connection(
         .timeout(Duration::from_secs(30))
         .connect_lazy();
 
-    let client = build_mailstore_client(channel)
+    let client = build_mailstore_client(channel, mailstore_auth)
         .max_decoding_message_size(64 * 1024 * 1024)
         .max_encoding_message_size(64 * 1024 * 1024);
     let session = Arc::new(Mutex::new({
@@ -3892,6 +3864,8 @@ async fn main() -> Result<()> {
     );
 
     let cli = Cli::parse();
+    let mailstore_auth = InternalServiceAuthInterceptor::from_env()
+        .map_err(|error| anyhow::anyhow!("invalid internal mailstore authentication: {error}"))?;
 
     info!(
         "IMAP server starting on {}:{} / {}:{} (mailstore={}, allow_insecure_auth={})",
@@ -3924,16 +3898,25 @@ async fn main() -> Result<()> {
 
         let acceptor = acceptor.clone();
         let mailstore = cli.mailstore_addr.clone();
+        let mailstore_auth = mailstore_auth.clone();
         Some(tokio::spawn(async move {
             loop {
                 match imaps_listener.accept().await {
                     Ok((stream, addr)) => {
                         let acceptor = acceptor.clone();
                         let mailstore = mailstore.clone();
+                        let mailstore_auth = mailstore_auth.clone();
                         tokio::spawn(async move {
                             if let Err(e) =
-                                handle_connection(stream, Some(acceptor), mailstore, true, false)
-                                    .await
+                                handle_connection(
+                                    stream,
+                                    Some(acceptor),
+                                    mailstore,
+                                    mailstore_auth,
+                                    true,
+                                    false,
+                                )
+                                .await
                             {
                                 error!("Connection error from {}: {}", addr, e);
                             }
@@ -3948,17 +3931,20 @@ async fn main() -> Result<()> {
     };
 
     let mailstore = cli.mailstore_addr.clone();
+    let mailstore_auth = mailstore_auth.clone();
     let allow_insecure_auth = cli.allow_insecure_auth;
     loop {
         match imap_listener.accept().await {
             Ok((stream, addr)) => {
                 let mailstore = mailstore.clone();
+                let mailstore_auth = mailstore_auth.clone();
                 let tls_for_plaintext = plaintext_tls_acceptor.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(
                         stream,
                         tls_for_plaintext,
                         mailstore,
+                        mailstore_auth,
                         false,
                         allow_insecure_auth,
                     )

@@ -1,164 +1,309 @@
-//! Inference engine — model registry and prediction dispatch.
+//! Remote model-runtime client.
+//!
+//! ApexMail never fabricates a prediction locally. Every generative response
+//! comes from the configured OpenAI-compatible model endpoint, and requests
+//! fail closed when model serving has not been explicitly enabled.
 
-use dashmap::DashMap;
-use std::sync::Arc;
-use std::time::Instant;
+use reqwest::Client;
+use serde::Serialize;
+use std::time::{Duration, Instant};
 
-use crate::types::{AiError, Model, ModelStatus, Prediction};
+use crate::config::AiConfig;
+use crate::types::{AiError, Prediction};
 
-/// In-process inference engine backed by a concurrent model registry.
-pub struct InferenceEngine {
-    models: Arc<DashMap<String, Model>>,
+/// Connection details for an OpenAI-compatible chat-completions runtime.
+#[derive(Debug, Clone)]
+pub struct InferenceConfig {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub timeout: Duration,
 }
 
-impl Default for InferenceEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl InferenceEngine {
-    pub fn new() -> Self {
+impl InferenceConfig {
+    pub fn from_ai_config(config: &AiConfig) -> Self {
         Self {
-            models: Arc::new(DashMap::new()),
+            enabled: config.model_enabled,
+            endpoint: config.model_endpoint.trim().trim_end_matches('/').to_string(),
+            model: config.model_name.trim().to_string(),
+            api_key: (!config.model_api_key.trim().is_empty())
+                .then(|| config.model_api_key.clone()),
+            timeout: Duration::from_secs(config.model_timeout_secs),
         }
     }
 
-    /// Register (or replace) a model in the registry.
-    pub fn register_model(&self, model: Model) {
-        self.models.insert(model.id.clone(), model);
+    pub fn from_env() -> Result<Self, String> {
+        AiConfig::from_env().map(|config| Self::from_ai_config(&config))
     }
 
-    /// Run a single prediction against a registered model.
-    /// In this simple implementation the "prediction" is a mock pass-through
-    /// that measures latency and produces a placeholder output.
-    pub fn run_prediction(
+    fn chat_completions_url(&self) -> String {
+        if self.endpoint.ends_with("/chat/completions") {
+            self.endpoint.clone()
+        } else {
+            format!("{}/chat/completions", self.endpoint)
+        }
+    }
+
+    fn validate(&self) -> Result<(), AiError> {
+        if !self.enabled {
+            return Err(AiError::ModelUnavailable(
+                "AI_MODEL_ENABLED is false".into(),
+            ));
+        }
+        if self.model.is_empty() {
+            return Err(AiError::ModelUnavailable(
+                "AI_MODEL_NAME is not configured".into(),
+            ));
+        }
+        if !(self.endpoint.starts_with("http://") || self.endpoint.starts_with("https://")) {
+            return Err(AiError::ModelUnavailable(
+                "AI_MODEL_ENDPOINT must use http or https".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self::from_env().unwrap_or_else(|_| Self::from_ai_config(&AiConfig::default()))
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ChatMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+/// A bounded client for the model provider.
+#[derive(Clone)]
+pub struct LlmClient {
+    config: InferenceConfig,
+    http: Client,
+}
+
+impl LlmClient {
+    pub fn new(config: InferenceConfig) -> Self {
+        let http = Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        Self { config, http }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    pub fn configured_model(&self) -> &str {
+        &self.config.model
+    }
+
+    /// Run a chat request against the configured model. The endpoint must use
+    /// the OpenAI `POST /chat/completions` response shape.
+    pub async fn generate(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String, AiError> {
+        self.generate_for_model(
+            &self.config.model,
+            system_prompt,
+            user_prompt,
+            max_tokens,
+            0.0,
+        )
+        .await
+    }
+
+    pub async fn plan(&self, system_prompt: &str, user_prompt: &str) -> Result<String, AiError> {
+        self.generate_for_model(
+            &self.config.model,
+            system_prompt,
+            user_prompt,
+            768,
+            0.0,
+        )
+        .await
+    }
+
+    /// Generate a response and invoke the supplied callback with bounded text
+    /// chunks. This preserves the pipeline's progressive response contract for
+    /// providers that do not expose server-sent streaming.
+    pub async fn generate_streaming<F>(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        _assistant_prefix: &str,
+        mut on_chunk: F,
+    ) -> Result<String, AiError>
+    where
+        F: FnMut(&str),
+    {
+        let response = self.generate(system_prompt, user_prompt, 768).await?;
+        let mut start = 0;
+        while start < response.len() {
+            let mut end = (start + 512).min(response.len());
+            while end > start && !response.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == start {
+                end = response.len();
+            }
+            on_chunk(&response[start..end]);
+            start = end;
+        }
+        Ok(response)
+    }
+
+    /// Execute an explicitly requested model against structured input. The
+    /// input is serialized to JSON rather than interpreted as configuration.
+    pub async fn predict(
         &self,
         model_id: &str,
         input: serde_json::Value,
     ) -> Result<Prediction, AiError> {
-        let model = self
-            .models
-            .get(model_id)
-            .ok_or_else(|| AiError::ModelNotFound(model_id.to_string()))?;
-
-        if model.status != ModelStatus::Ready {
-            return Err(AiError::InferenceFailed(format!(
-                "model {} is not ready (status: {:?})",
-                model_id, model.status
-            )));
+        self.config.validate()?;
+        if model_id.trim() != self.config.model {
+            return Err(AiError::ModelNotFound(model_id.to_string()));
         }
 
-        let start = Instant::now();
+        let started = Instant::now();
+        let prompt = serde_json::to_string_pretty(&input)
+            .map_err(|error| AiError::InvalidInput(format!("cannot serialize model input: {error}")))?;
+        let text = self
+            .generate_for_model(
+                model_id,
+                "You are an ApexMail model runtime. Return only the response to the supplied JSON input.",
+                &prompt,
+                768,
+                0.0,
+            )
+            .await?;
 
-        // Simple mock inference — echo a confidence based on model accuracy
-        let confidence = model.accuracy;
-        let output = serde_json::json!({
-            "model": model.name,
-            "version": model.version,
-            "result": "predicted",
-        });
-
-        let latency_ms = start.elapsed().as_millis() as u64;
         Ok(Prediction::new(
-            model_id, input, output, confidence, latency_ms,
+            model_id,
+            input,
+            serde_json::json!({ "text": text }),
+            None,
+            started.elapsed().as_millis() as u64,
         ))
     }
 
-    /// Run predictions for a batch of inputs.
-    pub fn batch_predict(
+    pub async fn generate_for_model(
         &self,
-        model_id: &str,
-        inputs: Vec<serde_json::Value>,
-    ) -> Result<Vec<Prediction>, AiError> {
-        inputs
-            .into_iter()
-            .map(|input| self.run_prediction(model_id, input))
-            .collect()
-    }
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: u32,
+        temperature: f64,
+    ) -> Result<String, AiError> {
+        self.config.validate()?;
+        if model.trim().is_empty() || model != self.config.model {
+            return Err(AiError::ModelNotFound(model.to_string()));
+        }
+        if system_prompt.trim().is_empty() || user_prompt.trim().is_empty() {
+            return Err(AiError::InvalidInput(
+                "system and user prompts must not be empty".into(),
+            ));
+        }
+        if max_tokens == 0 || max_tokens > 8_192 {
+            return Err(AiError::InvalidInput(
+                "max_tokens must be between 1 and 8192".into(),
+            ));
+        }
 
-    /// Retrieve a model by ID.
-    pub fn get_model(&self, id: &str) -> Option<Model> {
-        self.models.get(id).map(|entry| entry.value().clone())
-    }
+        let payload = serde_json::json!({
+            "model": model,
+            "messages": [
+                ChatMessage { role: "system", content: system_prompt },
+                ChatMessage { role: "user", content: user_prompt },
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature.clamp(0.0, 2.0),
+            "stream": false,
+        });
 
-    /// List all registered models.
-    pub fn list_models(&self) -> Vec<Model> {
-        self.models
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect()
-    }
+        let mut request = self.http.post(self.config.chat_completions_url()).json(&payload);
+        if let Some(api_key) = &self.config.api_key {
+            request = request.bearer_auth(api_key);
+        }
 
-    /// Return summary statistics for a model.
-    pub fn model_stats(&self, id: &str) -> Result<serde_json::Value, AiError> {
-        let model = self
-            .models
-            .get(id)
-            .ok_or_else(|| AiError::ModelNotFound(id.to_string()))?;
+        let response = request.send().await.map_err(|error| {
+            AiError::ModelUnavailable(format!("model provider request failed: {error}"))
+        })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            AiError::ModelUnavailable(format!("could not read model provider response: {error}"))
+        })?;
 
-        Ok(serde_json::json!({
-            "id": model.id,
-            "name": model.name,
-            "version": model.version,
-            "model_type": model.model_type,
-            "accuracy": model.accuracy,
-            "status": model.status,
-            "trained_at": model.trained_at.to_rfc3339(),
-        }))
+        if !status.is_success() {
+            let detail: String = body.chars().take(512).collect();
+            return Err(AiError::ModelUnavailable(format!(
+                "model provider returned {status}: {detail}"
+            )));
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+            AiError::InferenceFailed(format!("model provider returned invalid JSON: {error}"))
+        })?;
+        let content = json
+            .pointer("/choices/0/message/content")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| json.pointer("/choices/0/text").and_then(serde_json::Value::as_str))
+            .or_else(|| json.get("response").and_then(serde_json::Value::as_str))
+            .ok_or_else(|| {
+                AiError::InferenceFailed(
+                    "model provider response did not contain choices[0].message.content".into(),
+                )
+            })?;
+
+        let content = content.trim();
+        if content.is_empty() {
+            return Err(AiError::InferenceFailed(
+                "model provider returned an empty response".into(),
+            ));
+        }
+        Ok(content.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ModelStatus, ModelType};
-    use chrono::Utc;
-
-    fn make_model(id: &str) -> Model {
-        Model {
-            id: id.to_string(),
-            name: format!("test-{id}"),
-            version: "1.0".to_string(),
-            model_type: ModelType::Classification,
-            accuracy: 0.92,
-            trained_at: Utc::now(),
-            status: ModelStatus::Ready,
-        }
-    }
 
     #[test]
-    fn test_register_and_predict() {
-        let engine = InferenceEngine::new();
-        let model = make_model("m1");
-        engine.register_model(model);
+    fn normalizes_chat_completion_urls() {
+        let mut config = InferenceConfig::default();
+        config.endpoint = "http://model.example/v1".into();
+        assert_eq!(
+            config.chat_completions_url(),
+            "http://model.example/v1/chat/completions"
+        );
 
-        let pred = engine
-            .run_prediction("m1", serde_json::json!({"feature": 42}))
-            .unwrap();
-        assert_eq!(pred.model_id, "m1");
-        assert!((pred.confidence - 0.92).abs() < f64::EPSILON);
+        config.endpoint = "https://model.example/v1/chat/completions".into();
+        assert_eq!(
+            config.chat_completions_url(),
+            "https://model.example/v1/chat/completions"
+        );
     }
 
-    #[test]
-    fn test_predict_unknown_model_errors() {
-        let engine = InferenceEngine::new();
-        let res = engine.run_prediction("nope", serde_json::json!({}));
-        assert!(res.is_err());
+    #[tokio::test]
+    async fn disabled_runtime_fails_closed() {
+        let client = LlmClient::new(InferenceConfig::default());
+        let result = client.generate("system", "user", 16).await;
+        assert!(matches!(result, Err(AiError::ModelUnavailable(_))));
     }
 
-    #[test]
-    fn test_batch_predict_and_list() {
-        let engine = InferenceEngine::new();
-        engine.register_model(make_model("b1"));
-        engine.register_model(make_model("b2"));
-
-        let preds = engine
-            .batch_predict("b1", vec![serde_json::json!(1), serde_json::json!(2)])
-            .unwrap();
-        assert_eq!(preds.len(), 2);
-
-        let models = engine.list_models();
-        assert_eq!(models.len(), 2);
+    #[tokio::test]
+    async fn rejects_unknown_model_before_network_access() {
+        let mut config = InferenceConfig::default();
+        config.enabled = true;
+        let client = LlmClient::new(config);
+        let result = client.predict("unknown", serde_json::json!({})).await;
+        assert!(matches!(result, Err(AiError::ModelNotFound(_))));
     }
 }

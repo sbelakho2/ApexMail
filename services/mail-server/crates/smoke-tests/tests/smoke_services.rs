@@ -430,7 +430,7 @@ mod sales_tests {
 }
 
 // ============================================================================
-// ai-service (3 tests)
+// ai-service (2 tests)
 // ============================================================================
 
 #[cfg(test)]
@@ -445,26 +445,6 @@ mod ai_tests {
             rate
         );
         assert!(rate > 0.0, "open rate should be > 0");
-    }
-
-    #[tokio::test]
-    async fn test_ai_bandits() {
-        let bandit = ai_service::bandits::BanditOptimizer::new(0.1);
-        let arm1 = bandit.add_arm("subject-a").await.unwrap();
-        let arm2 = bandit.add_arm("subject-b").await.unwrap();
-        assert!(!arm1.is_empty());
-        assert!(!arm2.is_empty());
-
-        // Record some rewards
-        bandit.record_reward(&arm1, 1.0).await.unwrap();
-        bandit.record_reward(&arm1, 1.0).await.unwrap();
-        bandit.record_reward(&arm2, 0.0).await.unwrap();
-
-        let selected = bandit.select_arm();
-        assert!(selected.is_ok());
-
-        let stats = bandit.get_stats();
-        assert_eq!(stats.len(), 2);
     }
 
     #[test]

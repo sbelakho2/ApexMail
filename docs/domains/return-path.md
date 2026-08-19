@@ -1,6 +1,7 @@
 # Return Path
 
-The return path (also called the bounce domain or envelope sender) is the email address where bounce messages and delivery notifications are sent.
+The return path (also called the custom MAIL FROM domain or envelope sender)
+is the domain used for bounce handling and SPF alignment.
 
 ## What the Return Path Does
 
@@ -9,15 +10,21 @@ The return path (also called the bounce domain or envelope sender) is the email 
 - Must align with the `From` domain for DMARC to pass.
 - Separate from the `From` header (visible to recipients) and `Reply-To`.
 
-## Custom Return Path
+## Required Custom MAIL FROM Domain
 
-By default, ApexMail uses `@bounce.apexmail.ee` as the return path. To use your own domain, add a CNAME record:
+Every verified ApexMail sending domain uses `bounce.<your-domain>` as its
+custom MAIL FROM domain. Add the exact records returned by
+`GET /v1/domains/:id/dns-records`:
 
 | Type | Host | Value |
 |---|---|---|
-| CNAME | `bounce` | `return.apexmail.ee` |
+| TXT | `bounce` | `v=spf1 include:amazonses.com ~all` |
+| MX | `bounce` | `10 feedback-smtp.<aws-region>.amazonses.com` |
 
-This configures `bounce.example.com` as your return path, so bounce emails go to `recipient@bounce.example.com`, which routes to ApexMail's bounce processing system.
+The MX target is region-specific. It is not an ApexMail-owned CNAME, and it
+must use priority `10`. SES is configured to reject delivery when this MX is
+not ready rather than falling back to an unaligned Amazon-owned MAIL FROM
+domain.
 
 ## Benefits of Custom Return Path
 
@@ -50,10 +57,10 @@ You receive bounce events via webhooks regardless of return path configuration.
 
 ## Configuration in Dashboard
 
-1. Navigate to **Domains → [your domain] → Settings**.
-2. Under **Return Path**, select "Custom domain."
-3. Add the CNAME record to your DNS.
-4. Verify the record.
+1. Create the domain in **Domains**.
+2. Retrieve its DNS records.
+3. Publish the `bounce` TXT and MX records alongside DKIM and DMARC.
+4. Verify the domain after DNS propagation.
 
 ## Related
 

@@ -1,12 +1,13 @@
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::{header::{AUTHORIZATION, CONTENT_TYPE}, HeaderMap, StatusCode},
     middleware,
     response::{Html, IntoResponse},
     routing::{delete, get, post, put},
     Extension, Json, Router,
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -51,10 +52,13 @@ pub struct AppState {
     /// Shared HTTP client with connection pooling — avoids creating a new
     /// reqwest::Client per request (H-04).
     pub http_client: reqwest::Client,
+    /// Prometheus recorder handle rendered by the unauthenticated `/metrics`
+    /// endpoint for the monitoring network.
+    pub metrics_handle: PrometheusHandle,
 }
 
 impl AppState {
-    pub fn new(db: PgPool, config: Config) -> Self {
+    pub fn new(db: PgPool, config: Config, metrics_handle: PrometheusHandle) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .pool_max_idle_per_host(8)
@@ -82,6 +86,7 @@ impl AppState {
             qbr: QBRService::new(db.clone()),
             db,
             http_client,
+            metrics_handle,
         }
     }
 }
@@ -113,6 +118,7 @@ async fn auth_middleware(
     let path = req.uri().path();
     if path == "/health"
         || path == "/readiness"
+        || path == "/metrics"
         || path.starts_with("/sso/login/")
         || path == "/sso/validate"
     {
@@ -616,6 +622,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Health (unauthenticated)
         .route("/health", get(health_check))
         .route("/readiness", get(readiness_check))
+        .route("/metrics", get(metrics))
         .merge(contract_routes())
         .nest("/api/enterprise", contract_routes())
         // SSO
@@ -893,6 +900,13 @@ async fn readiness_check(State(state): State<S>) -> impl IntoResponse {
         Ok(_) => ok_json(serde_json::json!({"status": "ready"})),
         Err(_) => err_json(StatusCode::SERVICE_UNAVAILABLE, "Database not ready"),
     }
+}
+
+async fn metrics(State(state): State<S>) -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        state.metrics_handle.render(),
+    )
 }
 
 // ── Contract Handlers ──────────────────────────────────────────────────
@@ -2836,6 +2850,7 @@ async fn compliance_report_pdf(
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
+    use metrics_exporter_prometheus::PrometheusBuilder;
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;
 
@@ -2850,7 +2865,8 @@ mod tests {
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
         let config = Config::from_env().unwrap();
-        let app = router(Arc::new(AppState::new(pool, config)));
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let app = router(Arc::new(AppState::new(pool, config, recorder.handle())));
 
         let root = app
             .clone()

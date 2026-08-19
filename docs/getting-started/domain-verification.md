@@ -28,16 +28,9 @@ ApexMail generates DNS records you must add to your domain's DNS configuration:
 
 ### 3. Add Records to DNS
 
-Log into your DNS provider and add each record. Example records:
-
-| Type | Host | Value |
-|---|---|---|
-| TXT | `@` | `apexmail-verify=abc123def456` |
-| TXT | `@` | `v=spf1 include:spf.apexmail.ee ~all` |
-| CNAME | `am1._domainkey` | `am1.dkim.apexmail.ee` |
-| CNAME | `am2._domainkey` | `am2.dkim.apexmail.ee` |
-| CNAME | `mail` | `return.apexmail.ee` |
-| CNAME | `track` | `track.apexmail.ee` |
+Log into your DNS provider and copy each record from the domain's dashboard
+view. Exact ownership, SPF, DKIM, return-path, and tracking values are
+deployment- and domain-specific; examples from another account may not verify.
 
 ### 4. Verify
 

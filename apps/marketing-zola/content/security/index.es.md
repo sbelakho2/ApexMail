@@ -23,13 +23,13 @@ last_updated = "2026-07-29"
 - Argon2id para hash de contraseñas (resistente a memoria, resistente a ataques GPU/ASIC).
 - Volúmenes de base de datos cifrados (LUKS/dm-crypt).
 - Copias de seguridad cifradas con gestión de claves separada.
-- Claves de cifrado gestionadas por el cliente en planes Dedicated Tenant y BYOC.
+- Los requisitos de claves de cifrado gestionadas por el cliente solo pueden evaluarse en una implementación con contrato independiente; no son un derecho de plan público.
 
 ## Autenticación y control de acceso
 
 - Claves API con ámbito por entorno (live/test) con permisos configurables.
 - Firmas HMAC de webhooks (SHA-256) para integridad de carga útil de eventos.
-- SAML SSO y aprovisionamiento SCIM (planes Business y Enterprise).
+- SAML SSO en los planes Scale y Enterprise; los compromisos de aprovisionamiento se confirman en el contrato aplicable.
 - Control de acceso basado en roles (RBAC) con roles personalizados en plan Enterprise.
 - Autenticación multifactor (TOTP) para acceso al panel.
 - Gestión de sesiones con tiempo de espera configurable y vinculación IP.
@@ -80,7 +80,7 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 
 ## Seguridad de infraestructura
 
-- Hetzner Online GmbH (centros de datos en Alemania y Finlandia) para computación, almacenamiento y redes.
+- Hetzner Online GmbH para computación, almacenamiento y redes en la región de implementación configurada.
 - Sistemas operativos Debian/Ubuntu reforzados con CIS.
 - Parches de seguridad automatizados con implementación por etapas.
 - Infraestructura inmutable mediante infraestructura como código.
@@ -113,11 +113,11 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 
 ## Evidencia de auditoría y cumplimiento
 
-- SOC 2 Type II está planificado (objetivo T2 2028, después de Type I en T3 2027). Actualmente no disponible. Los controles internos están mapeados y se está realizando una evaluación de preparación.
+- ApexMail no cuenta actualmente con certificación SOC 2. El mapeo interno de controles y el trabajo de preparación no crean una certificación, un derecho de producto ni un compromiso de fecha de certificación.
 - Resumen de prueba de penetración: planificado para publicación después de completar la primera prueba de penetración externa de la aplicación y remediar los hallazgos altos/críticos. Actualmente no disponible.
-- Los cuestionarios de seguridad SIG, CAIQ y HECVAT están en progreso y disponibles bajo solicitud para clientes Enterprise.
-- Registros de auditoría con retención configurable (registros de auditoría premium en Enterprise).
-- Facilitación de auditoría de cliente para planes Enterprise y Dedicated Tenant.
+- Las solicitudes de cuestionarios de seguridad se evalúan caso por caso usando los materiales de revisión actuales; los paquetes SIG, CAIQ o HECVAT estandarizados no son un derecho de producto.
+- Los registros de auditoría están disponibles en Growth, Scale y Enterprise; la retención depende del plan contratado.
+- La facilitación de auditorías de clientes está sujeta a revisión contractual Enterprise.
 
 ## Seguridad operativa
 

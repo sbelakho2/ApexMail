@@ -2,7 +2,7 @@
 name = "apexmail-canonical-config"
 version = "1.0.0"
 edition = "2021"
-description = "Single source of truth for ApexMail company, product, pricing, and claims data"
+description = "ApexMail legal-entity and public-claim constants; billing catalog is runtime-owned"
 license = "AGPL-3.0-or-later"
 
 [lib]

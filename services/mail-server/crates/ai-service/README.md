@@ -1,22 +1,31 @@
 # ai-service
 
-ApexMail AI Intelligence Suite — analytics, assistant, bandits, content, inference, STO, training.
+`ai-service` contains small, deterministic email-assistance helpers. It is **not** a model-serving, LLM, autonomous-agent, or training service.
 
-## Overview
+## Supported behavior
 
-The `ai-service` crate is the central AI intelligence layer for ApexMail. It integrates analytics-driven insights, a conversational assistant, multi-armed bandit optimization, content generation, model inference, send-time optimization (STO), and training pipelines into a unified service.
+- Template-based subject-line suggestions.
+- Fixed-rule subject-line scoring and improvement suggestions.
+- Selection of the highest score supplied in engagement data for send-time assistance.
+- Basic text sentiment, summary, and local analytics utility functions.
+- HTML sanitization and preview generation.
 
-## Usage
+The authenticated HTTP routes are:
 
-This crate is an internal workspace member of the ApexMail mail-server. Add it as a dependency:
+- `POST /suggest`
+- `POST /optimize-time`
+- `POST /content/score`
 
-```toml
-ai-service = { path = "../ai-service" }
-```
+Each route returns its deterministic method in the response. `GET /health` is public and declares that model serving and training are unavailable.
+
+## Explicit non-goals
+
+This crate does not load or execute models, call external AI providers, train models, persist tenant experiment data, choose campaign variants autonomously, or send mail. The retired `/predict`, `/models`, `/train`, and `/bandits` routes are intentionally not registered.
+
+A future model-serving system requires a separate design covering authenticated tenant boundaries, approved artifacts, offline and online evaluation, promotion/rollback, observability, data governance, and deployment.
 
 ## Development
 
 ```sh
-cargo test -p ai-service
-cargo clippy -p ai-service
+cargo test -p ai-service --lib --bins
 ```

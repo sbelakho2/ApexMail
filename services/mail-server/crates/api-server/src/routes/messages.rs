@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use uuid::Uuid;
 
+use crate::config::Config;
 use crate::error::{success, ApiError, ApiResponse};
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::middleware::rate_limiter::INCR_EXPIRE_LUA;
@@ -203,16 +204,18 @@ fn canonical_email(email: &str) -> String {
 /// Extract the lowercased sender domain from a `from` address.
 fn sender_domain(from: &str) -> Option<String> {
     from.rsplit_once('@')
-        .map(|(_, domain)| domain.to_lowercase())
+        .map(|(_, domain)| domain.trim().trim_end_matches('.').to_ascii_lowercase())
         .filter(|domain| !domain.is_empty())
 }
 
-/// Resolve the verified `domains.id` for a sender domain.
+/// Resolve the ready `domains.id` for a sender domain while holding a row lock
+/// through queue insertion. This closes the check-then-enqueue race where a
+/// domain could be disabled or deleted after request validation.
 ///
-/// Production domains.id is UUID; unknown/unverified sender domains yield
-/// `None` (the worker skips DKIM signing for unknown domains).
+/// Production domains.id is UUID; unknown, incomplete, or transport-unready
+/// sender domains yield `None` and are never handed to the worker unsigned.
 async fn resolve_sender_domain_id(
-    db: &sqlx::PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
     from: &str,
 ) -> Result<Option<String>, sqlx::Error> {
@@ -221,12 +224,17 @@ async fn resolve_sender_domain_id(
     };
     sqlx::query_scalar(
         "SELECT id::text FROM domains
-         WHERE tenant_id = $1 AND name = $2 AND (status = 'verified' OR verified = true)
-         LIMIT 1",
+                 WHERE tenant_id = $1 AND name = $2 AND status = 'verified'
+                     AND dkim_enabled = true
+                     AND dkim_selector IS NOT NULL AND dkim_public_key IS NOT NULL AND dkim_private_key IS NOT NULL
+                           AND dkim_private_key LIKE 'dkim:v1:%'
+                     AND ($3::boolean = false OR ses_verified = true)
+                 LIMIT 1 FOR SHARE",
     )
     .bind(tenant_id)
     .bind(&sender_domain)
-    .fetch_optional(db)
+        .bind(Config::ses_transport_enabled())
+        .fetch_optional(&mut **tx)
     .await
 }
 
@@ -234,7 +242,7 @@ async fn resolve_sender_domain_id(
 /// one query per batch (instead of one query per message — the previous code
 /// performed an N+1 lookup inside `insert_message_and_queue` for each item).
 async fn resolve_batch_domain_ids(
-    db: &sqlx::PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
     bodies: &[SendMessageRequest],
 ) -> Result<std::collections::HashMap<String, Option<String>>, sqlx::Error> {
@@ -253,11 +261,17 @@ async fn resolve_batch_domain_ids(
     let domains: Vec<String> = unique.into_iter().collect();
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT name, id::text FROM domains
-         WHERE tenant_id = $1 AND name = ANY($2) AND (status = 'verified' OR verified = true)",
+                 WHERE tenant_id = $1 AND name = ANY($2) AND status = 'verified'
+                     AND dkim_enabled = true
+                     AND dkim_selector IS NOT NULL AND dkim_public_key IS NOT NULL AND dkim_private_key IS NOT NULL
+                       AND dkim_private_key LIKE 'dkim:v1:%'
+                     AND ($3::boolean = false OR ses_verified = true)
+                 FOR SHARE",
     )
     .bind(tenant_id)
     .bind(&domains)
-    .fetch_all(db)
+        .bind(Config::ses_transport_enabled())
+        .fetch_all(&mut **tx)
     .await?;
 
     for domain in domains {
@@ -485,8 +499,6 @@ async fn send_message(
 
     ensure_tenant_message_circuit_closed(&state, &auth.tenant_id).await?;
 
-    let quota_reservation = reserve_email_quota(&state, &auth.tenant_id).await?;
-
     // Merge idempotency key into metadata if present.
     let metadata = {
         let mut meta = body
@@ -508,12 +520,19 @@ async fn send_message(
     })?;
 
     // Resolve the sender domain once (shared by validation and the insert).
-    let domain_id = resolve_sender_domain_id(&state.db, &auth.tenant_id, &body.from)
+    let domain_id = resolve_sender_domain_id(&mut tx, &auth.tenant_id, &body.from)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to resolve sender domain");
             ApiError::Internal("database error".into())
+        })?
+        .ok_or_else(|| {
+            ApiError::Validation(vec![
+                "sender domain is not ready for the configured delivery transport".into(),
+            ])
         })?;
+
+    let quota_reservation = reserve_email_quota(&state, &auth.tenant_id).await?;
 
     // Idempotency key for the send — stored in the dedicated column so the
     // UNIQUE(tenant_id, idempotency_key) index is enforced inside the insert
@@ -530,7 +549,7 @@ async fn send_message(
         &body,
         &metadata,
         idempotency_key,
-        domain_id,
+        Some(domain_id),
     )
     .await
     {
@@ -667,7 +686,7 @@ async fn send_batch(
 
     // Resolve every unique sender domain once per batch instead of once per
     // message (removes the N+1 domain lookups from validation and inserts).
-    let domain_ids = resolve_batch_domain_ids(&state.db, &auth.tenant_id, &body.messages)
+    let domain_ids = resolve_batch_domain_ids(&mut tx, &auth.tenant_id, &body.messages)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to resolve batch sender domains");
@@ -1079,11 +1098,16 @@ async fn validate_send_with_domain_cache(
                 None => {
                     let exists: Option<String> = sqlx::query_scalar(
                         "SELECT id::text FROM domains
-                         WHERE tenant_id = $1 AND name = $2 AND (status = 'verified' OR verified = true)
+                                                 WHERE tenant_id = $1 AND name = $2 AND status = 'verified'
+                                                     AND dkim_enabled = true
+                                                     AND dkim_selector IS NOT NULL AND dkim_public_key IS NOT NULL AND dkim_private_key IS NOT NULL
+                                                       AND dkim_private_key LIKE 'dkim:v1:%'
+                                                     AND ($3::boolean = false OR ses_verified = true)
                          LIMIT 1",
                     )
                     .bind(tenant_id)
                     .bind(&domain)
+                                        .bind(Config::ses_transport_enabled())
                     .fetch_optional(db)
                     .await
                     .map_err(|e| {
@@ -1096,7 +1120,7 @@ async fn validate_send_with_domain_cache(
 
             if !verified {
                 errors.push(format!(
-                    "domain '{domain}' is not verified for this account"
+                    "domain '{domain}' is not ready for the configured delivery transport"
                 ));
             }
         }
@@ -1343,8 +1367,9 @@ mod tests {
         // the test fixture must use uuid ids too.
         let id = Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO domains (id, tenant_id, name, status)
-             VALUES ($1, $2, $3, 'verified')",
+            "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, ses_verified,
+             dkim_selector, dkim_public_key, dkim_private_key)
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'test-selector', 'test-public-key', 'dkim:v1:test')",
         )
         .bind(&id)
         .bind(tenant_id)

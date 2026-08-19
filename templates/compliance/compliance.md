@@ -83,13 +83,13 @@ Customers should direct DSR requests to their account administrator. ApexMail wi
 
 ### Data Location
 
-All customer data is hosted in the European Union / European Economic Area. Primary regions: Helsinki, Finland and Nuremberg, Germany (Hetzner). Backup region: separate EU location. See [Data Locations](data-locations.md) for full details.
+The supplied deployment configuration targets European Union / European Economic Area regions for core service data and telemetry. Active regions, storage providers, and backup locations are deployment-specific and are confirmed in the applicable agreement. See [Data Locations](data-locations.md) for full details.
 
 ### Transfer Safeguards
 
-- Data is not transferred outside the EU/EEA as part of standard operations.
+- The supplied configuration defaults core service and telemetry object storage to EU/EEA regions; active storage locations must be confirmed for the deployed environment.
 - If a transfer is required (e.g., for a customer using a non-EU recipient email provider), the transfer occurs as part of the email delivery process (inherent to SMTP email routing).
-- ApexMail does not use Standard Contractual Clauses (SCCs) because data remains within the EU/EEA during processing and storage. The email delivery SMTP path is outside ApexMail's control and is an inherent function of internet email.
+- Standard Contractual Clauses (SCCs) or another valid transfer mechanism are used where an active provider or deployment transfers personal data outside the EU/EEA. The email delivery SMTP path is outside ApexMail's control and is an inherent function of internet email.
 
 ### Customer Responsibilities
 

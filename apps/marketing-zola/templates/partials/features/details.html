@@ -64,12 +64,12 @@ print(status.status)  # 'delivered'</code></pre>
       {# ── Built-In Compliance ── #}
       <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
         <div class="lg:order-2">
-          <span class="text-sm font-bold text-surface-950 mb-2 block">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_label"] %}{{ i18n_data[l]["features"]["detail_compliance_label"] }}{% else %}GDPR &amp; HIPAA{% endif %}</span>
+          <span class="text-sm font-bold text-surface-950 mb-2 block">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_label"] %}{{ i18n_data[l]["features"]["detail_compliance_label"] }}{% else %}GDPR &amp; Compliance{% endif %}</span>
           <h3 class="text-2xl lg:text-3xl font-bold text-surface-950 mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_title"] %}{{ i18n_data[l]["features"]["detail_compliance_title"] }}{% else %}Built-In Compliance{% endif %}</h3>
           <p class="text-lg text-surface-600 mb-6">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["detail_compliance_desc"] %}{{ i18n_data[l]["features"]["detail_compliance_desc"] }}{% else %}Compliance workflows are built into the platform. Data subject requests, consent records, encrypted storage, and audit trails are available through APIs and enterprise operations.{% endif %}</p>
           <ul class="space-y-3 mb-8">
             {% set comp_benefits_labels = ["detail_compliance_benefit_1", "detail_compliance_benefit_2", "detail_compliance_benefit_3", "detail_compliance_benefit_4", "detail_compliance_benefit_5"] %}
-            {% set comp_benefits_defaults = ["GDPR data export and erasure workflows", "Consent tracking", "HIPAA BAA workflow on Enterprise", "Residency requirements scoped during review", "Complete audit logs"] %}
+            {% set comp_benefits_defaults = ["GDPR data export and erasure workflows", "Consent tracking", "Current compliance documentation", "Residency requirements scoped during review", "Complete audit logs"] %}
             {% for label in comp_benefits_labels %}
             <li class="flex items-start gap-3">
               <span class="w-5 h-5 rounded-sm bg-brand-100 flex items-center justify-center flex-shrink-0 mt-0.5">

@@ -1,6 +1,6 @@
 +++
-title = "Conformité en tant que code | RGPD, HIPAA, SOC 2, SIG, CAIQ, HECVAT"
-description = "Support des workflows de conformité pour l'email : enregistrements de consentement, traitement DSR, cycle de vie BAA HIPAA, journaux d'audit, preuves de contrôle SOC 2 et packs de réponses SIG, CAIQ et HECVAT générés."
+title = "Workflows de conformité | RGPD, DSR, journaux d'audit, revue de sécurité"
+description = "Support des workflows de conformité pour l'email : consentement, traitement DSR, journaux d'audit, documentation actuelle et revue de sécurité factuelle. La disponibilité HIPAA et la certification SOC 2 ne sont pas actuellement proposées."
 template = "compliance.html"
 
 [extra]

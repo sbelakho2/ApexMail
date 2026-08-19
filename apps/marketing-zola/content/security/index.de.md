@@ -23,13 +23,13 @@ last_updated = "2026-07-29"
 - Argon2id für Passwort-Hashing (speicherhart, resistent gegen GPU/ASIC-Angriffe).
 - Verschlüsselte Datenbank-Volumes (LUKS/dm-crypt).
 - Verschlüsselte Backups mit separatem Schlüsselmanagement.
-- Kundenseitig verwaltete Verschlüsselungsschlüssel bei Dedicated-Tenant- und BYOC-Tarifen.
+- Anforderungen an kundenseitig verwaltete Verschlüsselungsschlüssel können nur im Rahmen einer gesondert vereinbarten Bereitstellung geprüft werden; sie sind kein öffentliches Tarifmerkmal.
 
 ## Authentifizierung und Zugriffskontrolle
 
 - API-Schlüssel pro Umgebung (Live/Test) mit konfigurierbaren Berechtigungen.
 - Webhook-HMAC-Signaturen (SHA-256) für die Integrität von Ereignisnutzdaten.
-- SAML SSO und SCIM-Bereitstellung (Business- und Enterprise-Tarife).
+- SAML SSO für Scale- und Enterprise-Tarife; Bereitstellungszusagen werden im jeweiligen Vertrag bestätigt.
 - Rollenbasierte Zugriffskontrolle (RBAC) mit benutzerdefinierten Rollen im Enterprise-Tarif.
 - Multi-Faktor-Authentifizierung (TOTP) für den Dashboard-Zugriff.
 - Sitzungsverwaltung mit konfigurierbarem Timeout und IP-Bindung.
@@ -80,7 +80,7 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 
 ## Infrastruktursicherheit
 
-- Hetzner Online GmbH (Rechenzentren in Deutschland und Finnland) für Compute, Storage und Networking.
+- Hetzner Online GmbH für Compute, Storage und Networking in der konfigurierten Bereitstellungsregion.
 - CIS-gehärtete Debian/Ubuntu-Betriebssysteme.
 - Automatisierte Sicherheitspatches mit gestaffelter Einführung.
 - Unveränderliche Infrastruktur durch Infrastructure-as-Code.
@@ -113,11 +113,11 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 
 ## Audit- und Compliance-Nachweise
 
-- SOC 2 Type II ist geplant (Ziel Q2 2028, nach Type I in Q3 2027). Derzeit nicht verfügbar. Interne Kontrollen sind kartiert und eine Bereitschaftsbewertung ist im Gange.
+- ApexMail ist derzeit nicht SOC-2-zertifiziert. Interne Kontrollkartierung und Bereitschaftsarbeit begründen weder eine Zertifizierung noch ein Produktmerkmal oder eine Zusage für ein Zertifizierungsdatum.
 - Zusammenfassung des Penetrationstests: geplant zur Veröffentlichung nach Abschluss des ersten externen Anwendungs-Penetrationstests und Behebung hoher/kritischer Ergebnisse. Derzeit nicht verfügbar.
-- Sicherheitsfragebögen SIG, CAIQ und HECVAT sind in Bearbeitung und auf Anfrage für Enterprise-Kunden verfügbar.
-- Audit-Protokolle mit konfigurierbarer Aufbewahrung (Premium-Audit-Protokolle für Enterprise).
-- Kunden-Audit-Erleichterung für Enterprise- und Dedicated-Tenant-Tarife.
+- Sicherheitsfragebögen werden anhand aktueller Prüfdokumentation im Einzelfall bewertet; standardisierte SIG-, CAIQ- oder HECVAT-Pakete sind kein Produktmerkmal.
+- Audit-Protokolle sind für Growth, Scale und Enterprise verfügbar; die Aufbewahrung richtet sich nach dem abonnierten Tarif.
+- Unterstützung bei Kundenaudits unterliegt einer Enterprise-Vertragsprüfung.
 
 ## Betriebliche Sicherheit
 

@@ -522,6 +522,15 @@ fn normalize_host(host: &str) -> String {
 }
 
 impl Config {
+    /// Whether the process is configured to deliver through SES. This mirrors
+    /// the worker's shared transport parser: only an explicit `smtp` value
+    /// selects SMTP; absent and unrecognized values use the SES default.
+    pub fn ses_transport_enabled() -> bool {
+        apexmail_lib::transport::email_transport_is_ses(
+            env::var("EMAIL_TRANSPORT_TYPE").ok().as_deref(),
+        )
+    }
+
     /// Load configuration from environment variables.
     pub fn from_env() -> Result<Self, ConfigError> {
         let environment = match env_or("ENVIRONMENT", "development").to_lowercase().as_str() {

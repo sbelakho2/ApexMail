@@ -9,6 +9,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use billing_common::cost_throttle::{cost_throttle_key, CostThrottleOverride};
 use billing_service::{plans, types::RateLimitTier};
 use deadpool_redis::redis::{self, AsyncCommands};
 use ipnetwork::IpNetwork;
@@ -136,12 +137,13 @@ async fn resolve_rate_limit_max_requests(
     };
 
     if let Ok(Some(cached_tier)) = lookup_cached_rate_limit_tier(state, tenant_id).await {
-        return cached_tier
+        let baseline = cached_tier
             .map(|tier| requests_per_window_for_tier(tier, window_ms))
             .unwrap_or(state.config.rate_limit_max_requests);
+        return apply_cost_throttle(state, tenant_id, baseline).await;
     }
 
-    match plans::get_quota_for_tenant(&state.db, tenant_id).await {
+    let baseline = match plans::get_quota_for_tenant(&state.db, tenant_id).await {
         Ok(Some(quota)) => {
             cache_rate_limit_tier(state, tenant_id, Some(quota.rate_limit_tier)).await;
             requests_per_window_for_tier(quota.rate_limit_tier, window_ms)
@@ -153,6 +155,66 @@ async fn resolve_rate_limit_max_requests(
         Err(error) => {
             tracing::warn!(tenant_id = %tenant_id, error = %error, "Failed to resolve tenant plan for rate limiting");
             state.config.rate_limit_max_requests
+        }
+    };
+
+    apply_cost_throttle(state, tenant_id, baseline).await
+}
+
+/// Apply a billing-owned cost throttle only when it can strictly reduce the
+/// normal plan-derived request limit. A bad Redis value never lets a tenant
+/// receive a larger limit or turns rate limiting off.
+async fn apply_cost_throttle(state: &AppState, tenant_id: &str, baseline: u64) -> u64 {
+    let key = cost_throttle_key(tenant_id);
+    let mut connection = match state.redis.get().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            tracing::warn!(tenant_id = %tenant_id, error = %error, "redis pool error while resolving cost throttle");
+            return baseline;
+        }
+    };
+
+    let raw_override: Option<String> = match connection.get(&key).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(tenant_id = %tenant_id, error = %error, "redis GET error while resolving cost throttle");
+            return baseline;
+        }
+    };
+
+    let Some(raw_override) = raw_override else {
+        return baseline;
+    };
+
+    let override_ = match serde_json::from_str::<CostThrottleOverride>(&raw_override) {
+        Ok(override_) => override_,
+        Err(error) => {
+            tracing::warn!(tenant_id = %tenant_id, error = %error, "ignoring malformed cost throttle override");
+            return baseline;
+        }
+    };
+
+    match override_.capped_limit(baseline) {
+        Some(capped) => {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                baseline,
+                capped,
+                cap_percent = override_.cap_percent,
+                reason = ?override_.reason,
+                "applying temporary cost-protection rate limit"
+            );
+            capped
+        }
+        None => {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                baseline,
+                cap_percent = override_.cap_percent,
+                version = override_.version,
+                "ignoring non-reducing or unsupported cost throttle override"
+            );
+            baseline
         }
     }
 }
@@ -647,6 +709,18 @@ mod tests {
             Some(None)
         );
         assert_eq!(parse_cached_rate_limit_tier("not-a-tier"), None);
+    }
+
+    #[test]
+    fn cost_throttle_contract_only_reduces_the_plan_limit() {
+        let override_ = CostThrottleOverride::critical_low_margin();
+        assert_eq!(override_.capped_limit(30_000), Some(15_000));
+
+        let cap_increase = CostThrottleOverride {
+            cap_percent: 100,
+            ..override_
+        };
+        assert_eq!(cap_increase.capped_limit(30_000), None);
     }
 
     #[test]

@@ -71,7 +71,7 @@ Start from `.env.production.example` and fill in real values
 (generate secrets with `openssl rand -base64 32`). The result is what
 goes into the `APEXMAIL_PROD_ENV` GitHub secret as a single blob.
 
-`docker-compose.prod.yml` requires **14 `PROD_*_FILE` variables** (`${VAR:?}`)
+`docker-compose.prod.yml` requires **15 `PROD_*_FILE` variables** (`${VAR:?}`)
 that point at the rendered secret files; each must have its value defined
 as a plain variable in the `.env`:
 
@@ -91,8 +91,9 @@ as a plain variable in the `.env`:
 | `IMPERSONATION_SECRET`          | `PROD_IMPERSONATION_SECRET_FILE`                |
 | `CSRF_SECRET`                   | `PROD_CSRF_SECRET_FILE`                         |
 | `KIWI_SECRET_KEY`               | `PROD_KIWI_SECRET_KEY_FILE`                     |
+| `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | `PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE`   |
 
-The workflow renders **all 14** secret files on the host from these values
+The workflow renders **all 15** secret files on the host from these values
 (see `deploy-hetzner.yml` — "Render docker secret files"), writing each to
 the exact path its `PROD_*_FILE` var points at. The `JWT_*_PEM` values must
 be quoted PEM blocks (literal newlines inside the quoted value; the workflow
@@ -155,10 +156,11 @@ The workflow:
    Encrypt store under `deploy/nginx/ssl/` is protected from `--delete`)
 4. Pipes `APEXMAIL_PROD_ENV` to `/opt/apexmail/.env` (mode 0600) without
    touching the runner filesystem
-5. Renders **all 14 secret files** required by the compose (`PROD_*_FILE`,
+5. Renders **all 15 secret files** required by the compose (`PROD_*_FILE`,
    incl. `api_key_hash_secret`, `webhook_signing_secret`, `tracking_secret_key`,
    `internal_service_token`, `jwt_secret`, `jwt_private_key`, `jwt_public_key`,
-   `session_secret`, `impersonation_secret`, `csrf_secret`, `kiwi_secret_key`)
+  `session_secret`, `impersonation_secret`, `csrf_secret`, `kiwi_secret_key`)
+  and the separate `dkim_private_key_encryption_key` file.
    into `secrets/` on the host
 6. Logs in to GHCR on the host, `docker compose pull`, `up -d --remove-orphans`
    over the canonical service set (`api-server mta imap-server mailstore worker

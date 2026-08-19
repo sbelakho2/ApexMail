@@ -1,6 +1,6 @@
 +++
-title = "Cumplimiento como código | RGPD, HIPAA, SOC 2, SIG, CAIQ, HECVAT"
-description = "Soporte de flujos de trabajo de cumplimiento para correo electrónico: registros de consentimiento, procesamiento DSR, ciclo de vida BAA HIPAA, registros de auditoría, evidencia de control SOC 2 y paquetes de respuestas SIG, CAIQ y HECVAT generados."
+title = "Flujos de cumplimiento | RGPD, DSR, registros de auditoría y revisión de seguridad"
+description = "Soporte de flujos de cumplimiento para correo electrónico: consentimiento, procesamiento DSR, registros de auditoría, documentación actual y revisión de seguridad factual. La disponibilidad HIPAA y la certificación SOC 2 no se ofrecen actualmente."
 template = "compliance.html"
 
 [extra]

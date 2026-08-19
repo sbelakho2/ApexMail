@@ -11,14 +11,13 @@ DomainKeys Identified Mail (DKIM) adds a cryptographic signature to every outgoi
 
 ## Required DKIM Records
 
-ApexMail provides two DKIM selectors for key rotation. Add both CNAME records to your DNS:
+Create the domain in the dashboard, then copy the exact DKIM record or records
+shown in its DNS settings. The selector is stored per domain; it is not safe to
+reuse a selector or target from an example, another tenant, or an older guide.
+The default selector applies only when a domain has not been assigned one.
 
-| Type | Host | Value |
-|---|---|---|
-| CNAME | `am1._domainkey` | `am1.dkim.apexmail.ee` |
-| CNAME | `am2._domainkey` | `am2.dkim.apexmail.ee` |
-
-These are CNAME records that point to ApexMail's DKIM infrastructure, where the actual TXT records (public keys) are hosted and automatically rotated.
+Key changes follow an operational overlap and DNS-propagation procedure. They
+are not an automatic public rotation service.
 
 ### Custom DKIM (Enterprise)
 
@@ -39,8 +38,6 @@ ApexMail signs the following headers by default:
 - `Message-ID`
 - `MIME-Version`
 - `Content-Type`
-- `Reply-To`
-- `X-ApexMail-*` headers
 
 ## Verifying DKIM
 
@@ -48,7 +45,7 @@ Send a test email and check the headers:
 
 ```
 DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com;
-  s=am1; h=from:to:subject:date:message-id;
+  s=<assigned-selector>; h=from:to:subject:date:message-id;
   bh=...; b=...
 Authentication-Results: mx.google.com;
        dkim=pass header.i=@example.com

@@ -1,8 +1,8 @@
-//! Predictive analytics — open rate, click rate, unsub risk, k-means segmentation.
+//! Deterministic engagement estimates and local k-means segmentation helpers.
 
 use crate::types::AiError;
 
-/// Predictive analytics engine using simple statistical models.
+/// Fixed-rule analytics helper. Its estimates are not trained or calibrated.
 pub struct AnalyticsPredictor {
     /// Baseline open-rate intercept.
     base_open_rate: f64,

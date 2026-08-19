@@ -40,12 +40,13 @@
     "test": "test_sustained_validation",
     "source": "load-tests :: load_throughput"
   },
-  "prediction_scoring": {
-    "throughput_ops_per_sec": 477443,
+  "deterministic_subject_scoring": {
+    "throughput_ops_per_sec": null,
     "elapsed_ms": 2000,
-    "total_ops": 954886,
-    "test": "test_sustained_predictions",
-    "source": "load-tests :: load_throughput"
+    "total_ops": null,
+    "test": "test_sustained_subject_scoring",
+    "source": "load-tests :: load_throughput",
+    "notes": "The former synthetic inference baseline was retired. Re-measure this deterministic helper before publishing a numeric baseline."
   },
   "pattern_matching": {
     "throughput_ops_per_sec": 561315,
@@ -130,12 +131,6 @@
       }
     },
     "ai_service": {
-      "prediction": {
-        "throughput_ops_per_sec": 10000000,
-        "iterations": 10000,
-        "elapsed_ms": 0.001,
-        "test": "test_prediction_throughput"
-      },
       "sentiment_analysis": {
         "throughput_ops_per_sec": 1988862,
         "iterations": 10000,
@@ -147,12 +142,6 @@
         "iterations": 10000,
         "elapsed_ms": 5.046,
         "test": "test_subject_scoring_throughput"
-      },
-      "bandit_selection": {
-        "throughput_ops_per_sec": 27656137,
-        "iterations": 100000,
-        "elapsed_ms": 3.616,
-        "test": "test_bandit_selection_throughput"
       }
     },
     "billing": {

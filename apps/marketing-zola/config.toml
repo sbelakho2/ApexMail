@@ -4,7 +4,7 @@
 
 base_url = "https://apexmail.ee"
 title = "ApexMail - Enterprise Email API for Developers"
-description = "Enterprise email API with compliance workflow support, delivery tracking, and developer-first APIs. EU-hosted, GDPR-aligned, with Enterprise private deployment options."
+description = "Enterprise email API with compliance workflow support, delivery tracking, and developer-first APIs. EU/EEA-oriented deployment configurations and contract-reviewed Enterprise options."
 default_language = "en"
 # theme = ""  # No external theme; templates are in ./templates/
 
@@ -101,15 +101,15 @@ primary = true
 
 [languages.fr]
 title = "ApexMail - API d'email professionnelle pour développeurs"
-description = "API d'email professionnelle avec support de conformité, suivi de livraison et API orientées développeur. Hébergé dans l'UE, conforme RGPD, avec options de déploiement privé Enterprise."
+description = "API d'email professionnelle avec support de conformité, suivi de livraison et API orientées développeur. Configurations de déploiement orientées UE/EEE et options Enterprise soumises à contrat."
 
 [languages.de]
 title = "ApexMail - E-Mail-API für Entwickler"
-description = "Enterprise-E-Mail-API mit Compliance-Workflow-Unterstützung, Zustellungsverfolgung und entwicklerfreundlichen APIs. EU-gehostet, DSGVO-konform, mit privaten Enterprise-Bereitstellungsoptionen."
+description = "Enterprise-E-Mail-API mit Compliance-Workflow-Unterstützung, Zustellungsverfolgung und entwicklerfreundlichen APIs. EU/EWR-orientierte Bereitstellungskonfigurationen und vertraglich geprüfte Enterprise-Optionen."
 
 [languages.es]
 title = "ApexMail - API de correo electrónico empresarial para desarrolladores"
-description = "API de correo electrónico empresarial con soporte de flujos de cumplimiento normativo, seguimiento de entrega y APIs orientadas a desarrolladores. Alojado en la UE, conforme al RGPD, con opciones de implementación privada Enterprise."
+description = "API de correo electrónico empresarial con soporte de flujos de cumplimiento normativo, seguimiento de entrega y APIs orientadas a desarrolladores. Configuraciones de implementación orientadas a la UE/EEE y opciones Enterprise sujetas a contrato."
 
 [extra.company]
 product_name = "ApexMail"

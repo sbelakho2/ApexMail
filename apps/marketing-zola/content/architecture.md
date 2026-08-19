@@ -9,20 +9,20 @@ last_updated = "2026-07-29"
 
 ## Deployment Models
 
-ApexMail offers three deployment models designed to meet different regulatory, scale, and control requirements.
+Shared EU Cloud is the publicly available deployment model. Dedicated Tenant and BYOC below describe contract-only deployment patterns that may be assessed case by case; they are not public plan entitlements and are not available unless a written agreement confirms the scope, controls, and operations.
 
 ### Shared EU Cloud
 
-Multi-tenant infrastructure hosted in EU data centers. You share compute, network, and IP pools with other ApexMail customers, with logical tenant isolation at the application layer.
+Multi-tenant infrastructure with an EU/EEA-oriented default deployment configuration. You share compute, network, and IP pools with other ApexMail customers, with logical tenant isolation at the application layer. Active service and telemetry locations are deployment-specific and confirmed under the applicable agreement.
 
 **Ideal for:** Startups, SMBs, and teams who want zero infrastructure responsibility and fast time-to-value.
 
 **Key characteristics:**
 - No infrastructure management required.
 - Shared IP pools with automatic reputation management.
-- 99.9% uptime SLA (Enterprise, annual contract; Business plan eligible).
+- 99.9% uptime SLA (Scale and Enterprise, subject to the applicable service terms).
 - Pay-as-you-go or committed monthly plans.
-- EU data residency (Finland and Germany).
+- EU/EEA-oriented storage configuration; confirm active regions and transfer safeguards for the deployment.
 - Provisioned in minutes.
 
 ### Dedicated Tenant
@@ -42,8 +42,7 @@ Isolated infrastructure provisioned exclusively for your organization within Ape
 - Monthly service reviews.
 - Enhanced SLA and support.
 - 12-month minimum term.
-- One-time setup: €10,000–€40,000.
-- Monthly fee from €4,000 (includes 5,000,000 recipients).
+- Pricing, setup, and service terms are contractual and confirmed during an Enterprise review.
 
 ### BYOC (Bring Your Own Cloud)
 
@@ -58,8 +57,7 @@ ApexMail software deployed and operated within your own cloud accounts (AWS, GCP
 - Customer manages cloud infrastructure, databases, and networking.
 - Customer pays cloud costs directly (compute, storage, egress).
 - 12–24 month minimum term.
-- One-time setup: €20,000–€60,000.
-- Monthly fee from €6,500.
+- Pricing, setup, and service terms are contractual and confirmed during an Enterprise review.
 - Includes: software license, deployment automation, upgrades, release management, monitoring integration, operational support, deliverability services, architecture reviews, security documentation, incident coordination.
 
 ## Responsibility Matrix
@@ -105,7 +103,7 @@ Shared EU Cloud customers send from ApexMail's shared IP pools:
 
 ### Dedicated IPs
 
-Available on Scale, Enterprise, and Dedicated Tenant plans:
+Available through the applicable runtime entitlement: an approved Pro add-on, Growth (one included), Scale (three included), and Enterprise (ten included). Private-deployment availability is contractual:
 
 - Exclusive IP addresses not shared with other customers.
 - Full control over sending reputation.
@@ -137,11 +135,12 @@ ApexMail's MTA (Mail Transfer Agent) implements the full suite of modern email a
 
 ### DKIM (DomainKeys Identified Mail) — RFC 6376
 
-- 2048-bit RSA keys with automatic rotation.
-- Two selectors (`am1`, `am2`) published as CNAME records to `dkim.apexmail.ee`.
-- Signing covers: `From`, `To`, `Subject`, `Date`, `Message-ID`, `MIME-Version`, `Content-Type`, `Reply-To`, and `X-ApexMail-*` headers.
+- The signer rejects RSA keys shorter than 2048 bits.
+- DKIM selectors are assigned per sending domain. Copy the exact selector and DNS record from the Domains settings; do not reuse an example selector from another account.
+- Signing covers `From`, `To`, `Subject`, `Date`, `Message-ID`, `MIME-Version`, and `Content-Type` headers.
+- Key changes follow an operational overlap and DNS-propagation procedure; rotation is not represented as an automatic public entitlement.
 - `relaxed/relaxed` canonicalization for header and body.
-- Enterprise customers may bring their own DKIM keys.
+- Customer-managed keys require a separately approved Enterprise arrangement.
 
 ### DMARC (Domain-based Message Authentication, Reporting, and Conformance) — RFC 7489
 
@@ -194,8 +193,8 @@ Sender Application
              ├─ Spam/phishing analysis (outbound)
                     │
               Delivery Attempt
-             ├─ Primary: Own MTA (Hetzner)
-             ├─ Secondary: AWS SES (EU regions)
+             ├─ Configured delivery provider (self-hosted SMTP or SES integration)
+             └─ Provider and region selected by the applicable deployment configuration
                     │
               Recipient Mailbox
                     │
@@ -263,8 +262,8 @@ Internet
 
 | Component | Location |
 |---|---|
-| Primary data center | Helsinki, Finland |
-| Secondary data center | Nuremberg, Germany |
+| Primary data center | Deployment-specific; default EEA configuration is confirmed during provisioning |
+| Secondary data center | Deployment-specific; backup location is confirmed during provisioning |
 | External monitoring probes | Western Europe, Northern Europe, North America |
 | Status page hosting | Independent of primary infrastructure |
 
@@ -330,7 +329,7 @@ Internet
 │  │ Pipeline │  │Collector │  │ Ticketing         │   │
 │  └──────────┘  └──────────┘  └──────────────────┘   │
 │                                                       │
-│  EU Data Center (Helsinki / Nuremberg)                │
+│  Configured EU/EEA Data Center                         │
 └───────────────────────────────────────────────────────┘
 
 Trust boundaries:
@@ -414,7 +413,7 @@ Encryption boundary: Data at rest (customer-managed keys available)
 ### Backup Architecture
 - **Frequency:** Daily full backups; transaction log backups every 15 minutes.
 - **Retention:** 30 days standard; configurable up to 730 days (Enterprise).
-- **Geographic separation:** Backups stored in secondary data center (Nuremberg for Helsinki primary, Helsinki for Nuremberg primary).
+- **Geographic separation:** Backup location is selected by the active deployment configuration and confirmed during provisioning.
 - **Encryption:** AES-256 at rest; TLS 1.2+ in transit.
 - **Verification:** Quarterly automated restore tests.
 
@@ -422,7 +421,7 @@ Encryption boundary: Data at rest (customer-managed keys available)
 - **RPO (Recovery Point Objective):** 15 minutes (transaction log shipping).
 - **RTO (Recovery Time Objective):** 60 minutes (automated failover and restore).
 - **DR testing:** Quarterly full restore tests with results shared with Enterprise customers.
-- **Multi-region:** Traffic is served from primary region (Helsinki or Nuremberg). Cross-region failover is a planned capability for Dedicated Tenant — not yet live. Multi-region active-active is not currently offered.
+- **Multi-region:** Regional routing and failover scope are deployment- and agreement-specific. Cross-region failover is a planned capability for Dedicated Tenant — not yet live. Multi-region active-active is not currently offered.
 
 ### High Availability
 - Redundant compute instances within primary region.

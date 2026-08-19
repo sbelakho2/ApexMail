@@ -27,16 +27,16 @@ Wir verarbeiten Daten gemäß DSGVO Art. 6 Abs. 1 lit. b) (Vertragserfüllung), 
 
 ## 4. Datenspeicherung
 
-Die Kerninfrastruktur-Daten werden in Hetzner-Rechenzentren in Deutschland und Finnland gespeichert. Konto- und Abrechnungsdaten können ebenfalls an diesen Standorten gespeichert werden. Für eine vollständige Aufschlüsselung aller Datenkategorien und ihrer Standorte besuchen Sie unsere [Datenstandorte](/data-locations/) Seite.
+Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespeicher auf EWR-Regionen. Aktive Standorte, aktivierte Unterauftragsverarbeiter und Übertragungsgarantien hängen von der bereitgestellten Umgebung und dem anwendbaren Vertrag ab. Eine vollständige Aufschlüsselung und den Bestätigungsprozess finden Sie auf unserer Seite [Datenstandorte](/data-locations/).
 
 ### Zusammenfassende Standort-Matrix
 
 | Datenkategorie | Primärer Standort | Backup / Replikat | Verarbeitung |
 |---|---|---|---|
-| Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | Hetzner, Deutschland (Falkenstein/Nürnberg) | Hetzner, Finnland (Tuusula) | Nur EWR |
+| Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | Hetzner, Deutschland (Falkenstein/Nürnberg) | Hetzner, Finnland (Tuusula) | EWR-Standard; aktive Bereitstellung bestätigen |
 | OAuth-Authentifizierungstoken | Google LLC / GitHub, Inc. (US-Unternehmen, SCCs) | Anbieter-verwaltet | US (SCCs) |
 | Zahlungs- und Abrechnungsdaten | Stripe, Inc. (US, SCCs) | Anbieter-verwaltet (Indien für Support) | US/Indien (SCCs) |
-| Support-Tickets | Hetzner, Deutschland | Hetzner, Finnland | Nur EWR |
+| Support-Tickets | Hetzner, Deutschland | Hetzner, Finnland | EWR-Standard; aktive Bereitstellung bestätigen |
 
 Wir übermitteln keine personenbezogenen Daten außerhalb des EWR ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45).
 

@@ -14,9 +14,10 @@ use std::net::SocketAddr;
 use crate::error::ApiError;
 use crate::middleware::rate_limiter::extract_public_client_ip;
 use crate::routes::csrf::validate_form_csrf;
+use crate::routes::system_sender::{
+    ensure_system_sender_ready, queue_system_email_in_transaction,
+};
 use crate::state::AppState;
-
-const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", post(forgot_password))
@@ -131,6 +132,11 @@ async fn forgot_password(
         }
     }
 
+    // Check before looking up the account so a sender outage produces the
+    // same service-level response for every address and cannot become an
+    // account-enumeration oracle.
+    ensure_system_sender_ready(&state.db).await?;
+
     // Look up user — always return success to avoid email enumeration
     let user: Option<(String, String)> = sqlx::query_as(
         "SELECT id::text, email FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1",
@@ -145,9 +151,12 @@ async fn forgot_password(
         let expires = chrono::Utc::now() + chrono::Duration::hours(1);
         let now_rfc = chrono::Utc::now().to_rfc3339();
 
-        // Store reset token in user metadata
-        sqlx::query(
-            "UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2::uuid",
+        // The token update and the queue record must commit together. Otherwise
+        // a transaction failure could leave the account with an unusable reset
+        // token that was never delivered.
+        let mut tx = state.db.begin().await?;
+        let token_update = sqlx::query(
+            "UPDATE users SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2::uuid AND status = 'active'",
         )
         .bind(serde_json::json!({
             "password_reset_token_hash": hash_token(&token),
@@ -155,16 +164,17 @@ async fn forgot_password(
             "password_reset_iat": now_rfc,
         }))
         .bind(&user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+        if token_update.rows_affected() != 1 {
+            // The user can be deactivated or deleted between the deliberately
+            // non-enumerating lookup and this update. Do not issue a token or
+            // queue a message for a no-longer-active account.
+            return Ok(Json(ForgotPasswordResponse { success: true }));
+        }
 
-        tracing::info!(
-            user_id = %user_id,
-            "Password reset token generated"
-        );
-
-        // Enqueue the password reset email into both the messages audit log
-        // and the email_queue so the worker processor delivers it.
+        // Queue the password reset email into both the messages audit log and
+        // email_queue under the same transaction as the token update.
         let encoded_token = percent_encode_component(&token);
         // CWE-598: Use path-based token instead of query parameter to prevent
         // sensitive token exposure in server logs, referrer headers, and browser history.
@@ -172,8 +182,6 @@ async fn forgot_password(
             "{}/reset-password/{}",
             state.config.base_url, encoded_token,
         );
-        // Production messages.id and email_queue.message_id are UUIDs.
-        let msg_id = uuid::Uuid::new_v4().to_string();
         let safe_email = html_escape(&email);
         let safe_link = html_escape(&reset_link);
         let html_body = format!(
@@ -191,68 +199,17 @@ async fn forgot_password(
             "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee",
         );
 
-        // 1. Insert into messages table (audit/log)
-        sqlx::query(
-            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at)
-             VALUES ($1::uuid, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
+        let msg_id = queue_system_email_in_transaction(
+            &mut tx,
+            &email,
+            "Reset your ApexMail password",
+            &html_body,
+            &text_body,
+            vec!["system".into(), "password-reset".into()],
         )
-        .bind(&msg_id)
-        .bind(SYSTEM_TENANT_ID)
-        .bind("noreply@apexmail.ee")
-        .bind(serde_json::json!([email]))
-        .bind("Reset your ApexMail password")
-        .bind(&html_body)
-        .bind(&text_body)
-        .bind(serde_json::json!(["system", "password-reset"]))
-        .execute(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to enqueue password reset email");
-            ApiError::Internal("Failed to send reset email".into())
-        })?;
+        .await?;
 
-        // 2. Look up the domain_id for "apexmail.ee" (domains.name column;
-        //    NULL when the domain is not yet registered).
-        let domain_id: Option<String> = sqlx::query_scalar(
-            "SELECT id::text FROM domains WHERE name = 'apexmail.ee' LIMIT 1",
-        )
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to look up system domain");
-            ApiError::Internal("Failed to send reset email".into())
-        })?;
-
-        // 3. Insert into email_queue for the worker processor to pick up
-        let now = chrono::Utc::now();
-        sqlx::query(
-            "INSERT INTO email_queue (
-                id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
-                \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
-             ) VALUES (
-                $1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7,
-                $5, $6, $8, $9, $10, $11, $12, 5, 'pending', $13, $13
-             )",
-        )
-        .bind(uuid::Uuid::new_v4())
-        .bind(&msg_id)
-        .bind(SYSTEM_TENANT_ID)
-        .bind(&domain_id)
-        .bind("noreply@apexmail.ee")
-        .bind(&email)
-        .bind("Reset your ApexMail password")
-        .bind(&html_body)
-        .bind(&text_body)
-        .bind(vec!["system".to_string(), "password-reset".to_string()])
-        .bind(Option::<serde_json::Value>::None) // metadata
-        .bind(Option::<chrono::DateTime<chrono::Utc>>::None) // scheduled_at
-        .bind(now)
-        .execute(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to enqueue password reset email to worker queue");
-            ApiError::Internal("Failed to send reset email".into())
-        })?;
+        tx.commit().await?;
 
         tracing::info!(
             user_id = %user_id,

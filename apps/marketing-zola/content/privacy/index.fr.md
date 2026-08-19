@@ -27,16 +27,16 @@ Nous traitons les données en vertu du RGPD Article 6(1)(b) (exécution du contr
 
 ## 4. Stockage des données
 
-Les données d'infrastructure principales sont stockées dans les centres de données Hetzner en Allemagne et en Finlande. Les données de compte et de facturation peuvent également être stockées à ces emplacements. Pour une ventilation complète de toutes les catégories de données et de leurs emplacements, consultez notre page [Emplacements des données](/data-locations/).
+La configuration fournie cible des régions de l'EEE pour les données de messagerie principales et le stockage de télémétrie. Les emplacements actifs, sous-traitants activés et garanties de transfert dépendent de l'environnement déployé et de l'accord applicable. Pour une ventilation complète et le processus de confirmation, consultez notre page [Emplacements des données](/data-locations/).
 
 ### Tableau récapitulatif des emplacements
 
 | Catégorie de données | Emplacement principal | Sauvegarde / Réplica | Traitement |
 |---|---|---|---|
-| Infrastructure de messagerie principale (messages, métadonnées de livraison, données de compte) | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE uniquement |
+| Infrastructure de messagerie principale (messages, métadonnées de livraison, données de compte) | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut ; confirmer le déploiement actif |
 | Jetons d'authentification OAuth | Google LLC / GitHub, Inc. (entités américaines, CCT) | Géré par le fournisseur | États-Unis (CCT) |
 | Données de paiement et de facturation | Stripe, Inc. (États-Unis, CCT) | Géré par le fournisseur (Inde pour le support) | États-Unis/Inde (CCT) |
-| Tickets de support | Hetzner, Allemagne | Hetzner, Finlande | EEE uniquement |
+| Tickets de support | Hetzner, Allemagne | Hetzner, Finlande | EEE par défaut ; confirmer le déploiement actif |
 
 Nous ne transférons pas de données personnelles en dehors de l'EEE sans garanties appropriées (Clauses contractuelles types ou décision d'adéquation en vertu de l'Article 45).
 

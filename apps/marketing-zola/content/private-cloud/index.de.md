@@ -1,6 +1,6 @@
 +++
 title = "Private Cloud | Dedizierte E-Mail-Infrastruktur"
-description = "Private-Cloud-E-Mail-Infrastruktur mit mandantenfähiger Anwendung und Daten, BYOC-Bereitstellung, Netzwerkisolation, vom Kunden verwalteten Schlüsseln, EWR-Datenresidenz und unternehmensfähigen Compliance-Kontrollen."
+description = "Prüfung einer Private-Cloud-Bereitstellung für Enterprise-Kunden. Jede dedizierte Tenancy-, BYOC-, Netzwerk-, Schlüssel- und Datenresidenz-Anforderung unterliegt einer technischen und vertraglichen Prüfung."
 template = "private-cloud.html"
 
 [extra]

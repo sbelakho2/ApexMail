@@ -11,11 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 CRATES = ROOT / "services" / "mail-server" / "crates"
 APPROVED_FILES = {
     "api-server/src/routes/messages.rs",
-    "outbound-queue/src/queue.rs",
-    "outbound-queue/src/service.rs",
-    "outbound-queue/src/smtp_sender.rs",
-    "outbound-queue/src/bin/send-email.rs",
-    "outbound-queue/src/main.rs",
     "submission/src/session.rs",
     "worker-processors/src/email/processor.rs",
     "worker-processors/src/email/transport.rs",
@@ -30,8 +25,16 @@ SENDER_PATTERNS = [
 
 def main() -> int:
     violations: list[str] = []
+    retired_manifest = CRATES / "outbound-queue" / "Cargo.toml"
+    if retired_manifest.exists():
+        violations.append("outbound-queue/Cargo.toml (retired delivery package restored)")
+
     for path in sorted(CRATES.rglob("*.rs")):
         relative = path.relative_to(CRATES).as_posix()
+        if relative.startswith("outbound-queue/"):
+            # Historical source is deliberately retained without a Cargo
+            # manifest. It is not a runnable or supported delivery path.
+            continue
         if relative in APPROVED_FILES:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")

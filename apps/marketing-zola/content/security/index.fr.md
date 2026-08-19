@@ -23,13 +23,13 @@ last_updated = "2026-07-29"
 - Argon2id pour le hachage des mots de passe (résistant à la mémoire, aux attaques GPU/ASIC).
 - Volumes de base de données chiffrés (LUKS/dm-crypt).
 - Sauvegardes chiffrées avec gestion séparée des clés.
-- Clés de chiffrement gérées par le client sur les forfaits Dedicated Tenant et BYOC.
+- Les exigences de clés de chiffrement gérées par le client ne peuvent être évaluées que dans le cadre d'un déploiement faisant l'objet d'un contrat distinct ; elles ne constituent pas un droit de forfait public.
 
 ## Authentification et contrôle d'accès
 
 - Clés API limitées par environnement (live/test) avec permissions configurables.
 - Signatures HMAC des webhooks (SHA-256) pour l'intégrité des charges utiles d'événements.
-- SAML SSO et provisionnement SCIM (forfaits Business et Enterprise).
+- SAML SSO sur les forfaits Scale et Enterprise ; tout engagement de provisionnement est confirmé dans le contrat applicable.
 - Contrôle d'accès basé sur les rôles (RBAC) avec rôles personnalisés sur le forfait Enterprise.
 - Authentification multi-facteurs (TOTP) pour l'accès au tableau de bord.
 - Gestion des sessions avec délai d'expiration configurable et liaison IP.
@@ -80,7 +80,7 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 
 ## Sécurité de l'infrastructure
 
-- Hetzner Online GmbH (centres de données en Allemagne et en Finlande) pour le calcul, le stockage et le réseau.
+- Hetzner Online GmbH pour le calcul, le stockage et le réseau dans la région de déploiement configurée.
 - Systèmes d'exploitation Debian/Ubuntu renforcés CIS.
 - Correctifs de sécurité automatisés avec déploiement progressif.
 - Infrastructure immuable via infrastructure-as-code.
@@ -113,11 +113,11 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 
 ## Preuves d'audit et de conformité
 
-- SOC 2 Type II est prévu (objectif T2 2028, après Type I au T3 2027). Actuellement non disponible. Les contrôles internes sont cartographiés et une évaluation de préparation est en cours.
+- ApexMail n'est pas actuellement certifié SOC 2. La cartographie interne des contrôles et les travaux de préparation ne constituent ni une certification, ni un droit de produit, ni un engagement de date de certification.
 - Résumé du test d'intrusion : prévu pour publication après la réalisation du premier test d'intrusion externe de l'application et la remédiation des résultats élevés/critiques. Actuellement non disponible.
-- Les questionnaires de sécurité SIG, CAIQ et HECVAT sont en cours et disponibles sur demande pour les clients Enterprise.
-- Journaux d'audit avec conservation configurable (journaux d'audit premium sur Enterprise).
-- Facilitation d'audit client pour les forfaits Enterprise et Dedicated Tenant.
+- Les demandes de questionnaires de sécurité sont évaluées au cas par cas à partir des éléments de revue actuels ; les packs SIG, CAIQ ou HECVAT standardisés ne constituent pas un droit de produit.
+- Les journaux d'audit sont disponibles sur Growth, Scale et Enterprise ; la conservation dépend du forfait souscrit.
+- La facilitation d'audit client est soumise à une revue contractuelle Enterprise.
 
 ## Sécurité opérationnelle
 

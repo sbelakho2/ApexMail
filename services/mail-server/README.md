@@ -2,13 +2,14 @@
 
 A modular, security-focused mail server written in Rust for ApexMail.
 
-> **⚠️ STANDALONE SERVER - HIGH-PERFORMANCE EMAIL INFRASTRUCTURE**
+> **Delivery architecture**
 >
-> This mail server is completely self-contained:
-> - **Outbound:** Direct SMTP delivery with DKIM signing
+> The maintained delivery path is the `worker-processors` worker:
+> - **Outbound:** SES by default or explicitly configured SMTP, with current
+>   per-domain authorization and encrypted DKIM material
 > - **Inbound:** SMTP server on port 25
 > - **Storage:** PostgreSQL + local blob storage
-> - **Purpose-built mail infrastructure with full delivery control**
+> - **No standalone global-DKIM outbound queue is deployed**
 
 ## Architecture
 
@@ -17,16 +18,15 @@ A modular, security-focused mail server written in Rust for ApexMail.
 │                         PROTOCOL EDGES                                │
 │                                                                       │
 │  ┌─────────────┐   ┌─────────────┐   ┌─────────────────────────┐    │
-│  │ smtp-edge   │   │ submission  │   │   outbound-queue        │    │
+│  │ smtp-edge   │   │ submission  │   │ worker-processors      │    │
 │  │ (Port 25)   │   │ (Port 587)  │   │                         │    │
-│  │             │   │             │   │   Sends emails via      │    │
-│  │ Inbound     │   │ Client      │   │   direct SMTP with      │    │
-│  │ SMTP        │   │ Sending     │   │   DKIM signing          │    │
+│  │             │   │             │   │ Checks current sender  │    │
+│  │ Inbound     │   │ Persists to │   │ readiness and delivers │    │
+│  │ SMTP        │   │ email_queue │   │ with SES or SMTP       │    │
 │  └──────┬──────┘   └──────┬──────┘   └───────────┬─────────────┘    │
 │         │                 │                       │                  │
 └─────────┼─────────────────┼───────────────────────┼──────────────────┘
           │                 │                       │
-          │  gRPC           │  gRPC                 │  gRPC
           ▼                 ▼                       ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         CORE SERVICES                                 │
@@ -53,7 +53,7 @@ A modular, security-focused mail server written in Rust for ApexMail.
 | `mailstore-core` | Central message storage and mailbox management |
 | `smtp-edge` | Inbound SMTP server (port 25) |
 | `submission` | Authenticated client submission (port 587) |
-| `outbound-queue` | Outbound delivery with retry logic and DKIM |
+| `worker-processors` | Unified outbound delivery, retries, and per-domain readiness enforcement |
 
 ## Configuration
 
@@ -76,12 +76,9 @@ index_path = "/var/lib/apexmail/index"
 cert_path = "/etc/letsencrypt/live/mail.apexmail.ee/fullchain.pem"
 key_path = "/etc/letsencrypt/live/mail.apexmail.ee/privkey.pem"
 
-[dkim]
-selector = "apexmail2026"
-private_key_path = "/etc/apexmail/dkim/apexmail2026.private"
-
 [outbound]
-# Direct SMTP delivery with enterprise-grade infrastructure
+# Only explicit `smtp` selects SMTP; all other values select SES.
+transport = "ses"
 max_retries = 5
 retry_delay_seconds = 300
 concurrent_deliveries = 10
@@ -115,8 +112,8 @@ cargo test
 # Build Docker image
 docker build -t apexmail/mail-server .
 
-# Run with docker-compose
-docker-compose up -d mail-server
+# Run the maintained services
+docker compose -f docker-compose.yml up -d
 ```
 
 ## Integration Notes

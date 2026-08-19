@@ -27,16 +27,16 @@ We process data under GDPR Article 6(1)(b) (contract performance), Article 6(1)(
 
 ## 4. Data Storage
 
-Account and tenant data is stored in EU data centres. Primary infrastructure operates on Hetzner cloud in Germany and Finland. Email content and event data may be processed transiently in the EU/EEA. For a complete breakdown of all data categories and their locations, see our [Data Locations](/data-locations/) page.
+The supplied configuration targets EEA regions for core email-service data and telemetry storage. Active locations, enabled subprocessors, and transfer safeguards depend on the deployed environment and applicable agreement. For a complete breakdown and confirmation process, see our [Data Locations](/data-locations/) page.
 
 ### Summary Location Matrix
 
 | Data Category | Primary Location | Backup / Replica | Processing |
 |---|---|---|---|
-| Core email infrastructure (messages, delivery metadata, account data) | Hetzner, Germany (Falkenstein/Nuremberg) | Hetzner, Finland (Tuusula) | EEA only |
+| Core email infrastructure (messages, delivery metadata, account data) | Hetzner, Germany (Falkenstein/Nuremberg) | Hetzner, Finland (Tuusula) | EEA default; confirm active deployment |
 | OAuth authentication tokens | Google LLC / GitHub, Inc. (US entities, SCCs) | Provider-managed | US (SCCs) |
 | Payment and billing records | Stripe, Inc. (US, SCCs) | Provider-managed (India for support) | US/India (SCCs) |
-| Support tickets | Hetzner, Germany | Hetzner, Finland | EEA only |
+| Support tickets | Hetzner, Germany | Hetzner, Finland | EEA default; confirm active deployment |
 
 We do not transfer personal data outside the EEA without adequate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
 

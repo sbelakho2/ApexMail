@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::{routing::get, Router};
+use axum::{http::header::CONTENT_TYPE, response::IntoResponse, routing::get, Router};
 use deadpool_redis::{Config as RedisConfig, Runtime};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use observability_service::otlp_exporter::{
     init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
 };
@@ -17,8 +18,8 @@ use tracing_subscriber::EnvFilter;
 
 use worker_processors::{
     common::{
-        AnalyticsConfig, DkimConfig, EmailConfig, ProcessorConfig, ReplyHandlerConfig,
-        SmtpConfig, TransportType, WebhookConfig,
+        AnalyticsConfig, DkimConfig, EmailConfig, ProcessorConfig, ReplyHandlerConfig, SmtpConfig,
+        SesConfig, TransportType, WebhookConfig,
     },
     AnalyticsProcessor, EmailProcessor, ReplyHandler, WebhookProcessor,
 };
@@ -59,14 +60,15 @@ async fn main() -> Result<()> {
 
     let _guard = init_tracing();
 
-    // Install the ring crypto provider for rustls BEFORE any TLS use.
-    // The workspace enables rustls with the `ring` feature, but other
-    // dependencies (reqwest/rustls-tls, redis/tokio-rustls-comp) can pull
-    // rustls in with aws-lc-rs too, leaving no unambiguous process-level
-    // default. Without an explicit install, the first TLS connection
-    // panics with "Could not automatically determine the process-level
-    // CryptoProvider" and kills the email processor task.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // Keep health and Prometheus metrics on the worker's probe port. The
+    // service previously accepted TCP connections there but returned no
+    // scrapeable metrics, which made the configured monitoring target fail.
+    let metrics_recorder = PrometheusBuilder::new().build_recorder();
+    let metrics_handle = metrics_recorder.handle();
+    if let Err(error) = metrics::set_global_recorder(Box::new(metrics_recorder)) {
+        warn!(error = %error, "Prometheus recorder already installed");
+    }
+    metrics::gauge!("apexmail_worker_info").set(1.0);
 
     info!("Starting ApexMail Worker (Rust)");
 
@@ -158,7 +160,7 @@ async fn main() -> Result<()> {
     // Start email processor
     if run_email {
         // Choose transport backend via EMAIL_TRANSPORT_TYPE env var.
-        // Values:"ses" (default), "smtp" / "self-hosted" / "direct".
+        // Only `smtp` selects SMTP; SES is the default for every other value.
         let transport_type = env::var("EMAIL_TRANSPORT_TYPE")
             .map(|v| TransportType::from_env(&v))
             .unwrap_or_default();
@@ -191,13 +193,24 @@ async fn main() -> Result<()> {
             secure: env::var("SMTP_TLS")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(true),
-            username: env::var("SMTP_USERNAME")
-                .ok()
-                .filter(|s| !s.is_empty()),
+            username: env::var("SMTP_USERNAME").ok().filter(|s| !s.is_empty()),
             password: env::var("SMTP_PASSWORD")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(zeroize::Zeroizing::new),
+            ..Default::default()
+        };
+        let ses_config = SesConfig {
+            // Keep this default aligned with api-server's Config::from_env.
+            // Production compose passes AWS_REGION explicitly to both
+            // services; this fallback only protects local/test deployments.
+            region: env::var("AWS_REGION")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "us-east-1".to_string()),
+            configuration_set: env::var("SES_CONFIGURATION_SET")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             ..Default::default()
         };
 
@@ -210,13 +223,15 @@ async fn main() -> Result<()> {
             },
             transport_type,
             smtp: smtp_config,
+            ses: ses_config,
             dkim: DkimConfig {
                 enabled: env::var("DKIM_ENABLED")
                     .map(|v| v == "true" || v == "1")
                     .unwrap_or(false),
-                selector: env::var("DKIM_SELECTOR").unwrap_or_else(|_| "apexmail2026".into()),
-                key_path: env::var("DKIM_KEY_PATH").ok().filter(|s| !s.is_empty()),
-                domain: env::var("DKIM_DOMAIN").ok().filter(|s| !s.is_empty()),
+                // Customer-domain selectors and keys are retrieved from the
+                // encrypted domains table per job. Do not load one global key
+                // that could sign another tenant's domain.
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -303,7 +318,22 @@ async fn main() -> Result<()> {
         .or_else(|| env::var("METRICS_PORT").ok().and_then(|s| s.parse().ok()))
         .unwrap_or(9090);
 
-    let health_app = Router::new().route("/health", get(|| async { "OK" }));
+    let metrics_handler = metrics_handle.clone();
+    let health_app = Router::new()
+        .route("/health", get(|| async { "OK" }))
+        .route(
+            "/metrics",
+            get(move || {
+                let metrics_handle = metrics_handler.clone();
+                async move {
+                    (
+                        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+                        metrics_handle.render(),
+                    )
+                        .into_response()
+                }
+            }),
+        );
     let health_addr = SocketAddr::from(([0, 0, 0, 0], health_port));
     let health_listener = tokio::net::TcpListener::bind(health_addr).await?;
     info!(port = health_port, "Health check server listening");

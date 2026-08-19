@@ -1,164 +1,55 @@
-# ApexMail AI — 3-Model Pipeline Architecture
+# Deterministic Email Assistance
 
-> **Implementation Note (2026-02):** AI capabilities are implemented in Rust crates at `services/mail-server/crates/ai-service/` and `services/mail-server/crates/ai-embeddings/`. Historical browser-surface interface snippets were removed to keep this document aligned with the live implementation.
+## Current implementation
 
-## Overview
+ApexMail does not deploy a planner/generator/verifier LLM pipeline, ONNX runtime, model registry, model training service, autonomous email agent, or external-provider integration.
 
-The ApexMail assistant uses a three-stage pipeline for every user interaction. This design separates _planning_ from _generation_ from _verification_, enabling each stage to be tested, swapped, and improved independently.
+The Rust `ai-service` crate provides authenticated deterministic helpers only:
 
-```
-User message
-    │
-    ▼
-┌──────────────────────────────────────┐
-│  Stage 1 — PLANNER                   │
-│  Qwen 2.5-7B-Instruct (fine-tuned)  │
-│  Classifies intent, extracts params, │
-│  selects knowledge context           │
-└──────────────────────────────────────┘
-    │  PlanResult { intent, params, context, tool_call? }
-    ▼
-┌──────────────────────────────────────┐
-│  Stage 2 — GENERATOR                 │
-│  Qwen 2.5-7B-Instruct (same model)  │
-│  Generates the user-facing response  │
-│  grounded in the plan's context      │
-└──────────────────────────────────────┘
-    │  Draft response text
-    ▼
-┌──────────────────────────────────────┐
-│  Stage 3 — VERIFIER                  │
-│  Deterministic rules + model check   │
-│  Validates facts, blocks halluc.,    │
-│  ensures safety & compliance         │
-└──────────────────────────────────────┘
-    │  Final response (or retry)
-    ▼
-User
+```mermaid
+flowchart LR
+    Request[Authenticated internal request] --> H[Deterministic helper]
+    H --> S[Subject templates]
+    H --> T[Highest supplied engagement score]
+    H --> C[Fixed-rule subject score]
+    S --> Response[Response includes method]
+    T --> Response
+    C --> Response
 ```
 
-## Stage 1: Planner
+Supported HTTP endpoints:
 
-**Model**: Qwen 2.5-7B-Instruct (fine-tuned QLoRA adapter, ONNX)
+| Endpoint | Behavior | Limitation |
+| --- | --- | --- |
+| `POST /suggest` | Selects from fixed templates using the supplied topic and tone. | Does not generate text with a model. |
+| `POST /optimize-time` | Returns the valid input slot with the highest supplied engagement score. | Does not learn from delivery events or predict future engagement. |
+| `POST /content/score` | Applies fixed length, word-count, urgency, personalization, and emoji rules. | Score is not calibrated deliverability or engagement probability. |
+| `GET /health` | Reports service availability and its disabled model/training capabilities. | It does not attest to any ML runtime. |
 
-The planner receives the user message and chat history, then produces a structured plan:
+Every non-health endpoint requires the internal service token. The service does not send email or mutate campaign state.
 
-```text
-Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
-```
+## Unsupported capabilities
 
-**Training data**: The planner is trained on (user_message → PlanResult JSON) pairs. The fine-tuned model learns to produce valid JSON plans for every input.
+The following are intentionally absent from the deployment and API surface:
 
-**Key responsibilities**:
-- Intent classification (question vs action vs greeting vs off-topic)
-- Entity extraction (campaign name, list name, plan tier, etc.)
-- Context selection (which knowledge articles to inject)
-- Confidence estimation
-- Action parameter mapping
+- Model upload, registration, inference, or prediction routes.
+- Training jobs, checkpointing, promotion, or synthetic completion states.
+- Qwen, ONNX, OpenAI, Anthropic, or other provider integration.
+- Autonomous email reply generation or delivery.
+- Tenant-shared multi-armed bandit experimentation.
+- Planner, generator, verifier, RAG, and hallucination-control claims.
 
-## Stage 2: Generator
+Historical training artifacts and experimental data are not evidence of a supported production ML feature.
 
-**Model**: Same Qwen 2.5-7B-Instruct model (separate inference call)
+## Requirements for any future model-serving system
 
-The generator receives a prompt constructed from the plan:
+Model-serving can be introduced only through a separately reviewed implementation that includes:
 
-```
-System: {system_prompt}
-Context: {selected_knowledge_articles}
-Plan: {plan_summary}
-User: {original_user_message}
-```
+1. Authenticated and tenant-scoped request, storage, and evaluation boundaries.
+2. Versioned, approved model artifacts with integrity verification and rollback.
+3. Offline evaluation and production monitoring against explicit success and safety metrics.
+4. Human-controlled promotion and rollback rather than immediate "training complete" state.
+5. Input/output governance, abuse controls, audit trails, and cost limits.
+6. Authoritative domain, billing, and delivery integrations; no generated DNS, routing, or pricing facts.
 
-It generates a natural-language response grounded in the provided context. The generator never sees raw product data — it only sees what the planner selected.
-
-**Key responsibilities**:
-- Natural language response generation
-- Markdown formatting (tables, code blocks, lists)
-- Action block formatting (`\`\`\`action {...}\`\`\``)
-- Tone & voice consistency
-
-## Stage 3: Verifier
-
-**Implementation**: Deterministic rules (primary) + optional model check (secondary)
-
-The verifier is a fast, rule-based pipeline that validates the generator's output before returning it to the user.
-
-### Rule checks (deterministic)
-
-| Rule | Description |
-|------|-------------|
-| **Pricing facts** | Regex-check that any dollar amounts match the canonical pricing table |
-| **URL validation** | Ensure URLs are `api.apexmail.ee` or `app.apexmail.ee` (no hallucinated domains) |
-| **API key format** | Any API key patterns must match `am_live_*` or `am_test_*` format |
-| **Action JSON** | Validate action blocks parse as valid JSON with required fields |
-| **Forbidden claims** | Block responses containing uptime SLA numbers, competitor bashing, legal advice |
-| **Off-topic leak** | If planner said `off_topic`, verify the response declines the request |
-| **Response length** | Block very short (<20 chars) or very long (>4000 chars) responses |
-| **Repetition** | Detect degenerate repetitive output |
-| **PII detection** | Block responses that echo back potential PII from user input |
-
-### Retry logic
-
-If the verifier rejects a response:
-1. First retry: Re-generate with the same plan + a correction hint
-2. Second retry: Re-run the planner with a forced context expansion
-3. Final fallback: Return a safe template-based response from the knowledge base
-
-Maximum 2 retries before fallback.
-
-## Deployment
-
-```
-VPS (production)
-├── ONNX Runtime (CPU)
-│   └── qwen2.5-7b-instruct.onnx  (~8 GB INT8)
-├── Planner inference call (~200-500ms)
-├── Generator inference call (~500-2000ms)
-└── Verifier rules (~1-5ms)
-```
-
-Total latency budget: **< 3 seconds** for the full pipeline.
-
-## Knowledge Context Store
-
-The planner selects from a pre-indexed knowledge store:
-
-| Key | Content |
-|-----|---------|
-| `pricing_table` | Full plan pricing with limits |
-| `payg_rates` | PAYG email and API overage rates |
-| `api_auth` | Authentication methods and key formats |
-| `api_endpoints` | Endpoint reference (messages, campaigns, domains, etc.) |
-| `domain_setup` | SPF/DKIM/DMARC verification steps |
-| `deliverability` | Best practices, benchmarks, warm-up guidance |
-| `webhooks` | Event types, payload format, signatures |
-| `templates` | Handlebars syntax, dynamic content |
-| `sdks` | Python, Go, Ruby, PHP, and Java SDK installation and usage |
-| `suppression` | Suppression list management |
-| `compliance` | GDPR, CAN-SPAM, consent management |
-| `troubleshooting` | Common errors (401, 429, spam folder) |
-| `automation` | Workflows, drip campaigns, triggers |
-| `segmentation` | Audience targeting, segments |
-| `sto` | Send-time optimisation |
-| `capabilities` | Feature summary |
-| `security_systems` | 8-layer security stack: DDoS protection, WAF, IDS/IPS, spam filter, attachment sandbox, ATO protection, DLP, threat intelligence |
-
-Each context article is ~200-500 tokens, ensuring the full prompt (system + context + plan + user) stays well within the 8192-token context window.
-
-## Testing & Evaluation
-
-| Test suite | What it checks | Target |
-|------------|----------------|--------|
-| **Golden QA set** (eval.py) | End-to-end pipeline accuracy | ≥95% A-grade |
-| **Planner unit tests** | Intent classification + entity extraction | ≥98% accuracy |
-| **Verifier rule tests** | Each rule fires correctly on positive/negative examples | 100% |
-| **Hallucination tests** | Model correctly refuses non-existent features | ≥99% |
-| **Prompt injection tests** | Model resists jailbreak/injection attempts | 100% |
-| **Latency benchmarks** | Full pipeline under 3 seconds on target VPS | P99 < 3s |
-
-## Future Evolution
-
-1. **Planner → dedicated small model**: If latency is critical, train a 1B Qwen model specifically for planning (structured output only)
-2. **Generator → larger model**: If quality needs improve, swap to a 14B or 32B model (may need GPU inference)
-3. **Verifier → LLM judge**: Add a small model as a secondary judge for subjective quality checks
-4. **RAG integration**: Replace static context store with vector search over the full documentation corpus
+Until those requirements are implemented and deployed, product and operational documentation must describe the current helpers as deterministic heuristics.

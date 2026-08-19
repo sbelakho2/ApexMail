@@ -45,11 +45,11 @@ Wir verarbeiten Daten gemäß unserer [Datenschutzerklärung](/privacy/) und [Au
 
 ## 7. Zahlungsbedingungen
 
-Gebühren werden monatlich oder jährlich nach Wahl abgerechnet. Alle Preise sind in EUR (zur Bequemlichkeit auf der Preisseite als entsprechende EUR-Beträge angezeigt). Estnische Umsatzsteuer (24 %) fällt an, wo erforderlich.
+Gebühren werden monatlich oder jährlich gemäß dem gewählten Tarif abgerechnet. Alle veröffentlichten Preise sind in USD angegeben. Anwendbare Steuern werden nach den geltenden Regeln und dem Rechnungsland behandelt.
 
 ### 7.1 Automatische Verlängerung
 
-Abonnements verlängern sich automatisch am Ende jedes Abrechnungszeitraums, sofern sie nicht vor dem Verlängerungsdatum gekündigt werden. Sie können jederzeit über Ihr Dashboard kündigen. Die Kündigung wird zum Ende des laufenden Abrechnungszeitraums wirksam; für Teilzeiträume werden keine Rückerstattungen gewährt.
+Abonnements verlängern sich automatisch am Ende jedes Abrechnungszeitraums, sofern sie nicht vor dem Verlängerungsdatum gekündigt werden. Selbstbedienungsänderungen und Kündigungen erfolgen über das Stripe-Billing-Portal. Die Kündigung wird gemäß dem bestätigten Stripe-Abrechnungsereignis wirksam; für Teilzeiträume werden keine Rückerstattungen gewährt.
 
 ### 7.2 Preisänderungen
 

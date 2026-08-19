@@ -71,11 +71,15 @@ pub enum TransportType {
 }
 
 impl TransportType {
-    /// Parse from env var string:"smtp" | "ses" (case-insensitive).
+    /// Parse the shared deployment-wide transport setting.
+    ///
+    /// Only an explicit `smtp` value selects SMTP. All other values select
+    /// SES, matching API readiness enforcement.
     pub fn from_env(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
-            "smtp" | "self-hosted" | "direct" => Self::Smtp,
-            _ => Self::Ses,
+        if apexmail_lib::transport::email_transport_is_ses(Some(s)) {
+            Self::Ses
+        } else {
+            Self::Smtp
         }
     }
 }
@@ -151,7 +155,12 @@ impl Default for SmtpConfig {
 /// DKIM configuration.
 #[derive(Debug, Clone)]
 pub struct DkimConfig {
+    /// Enables required local signing for direct SMTP transport. The selector
+    /// and key themselves always come from the verified customer-domain row.
     pub enabled: bool,
+    /// Legacy compatibility fields. They are intentionally not used as a
+    /// fallback by the email processor: one global key must never sign an
+    /// arbitrary customer domain.
     pub selector: String,
     pub key_path: Option<String>,
     /// Domain the `key_path` key belongs to; the fallback key is only used

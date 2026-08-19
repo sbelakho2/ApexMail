@@ -6,26 +6,27 @@ This document describes where data is stored and processed by **{{LEGAL_NAME}}**
 
 ## Data Residency Commitment
 
-ApexMail stores and processes all customer data within the European Economic Area (EEA) by default. Primary data processing occurs in data centers located in the European Union.
+This document describes the supplied EU/EEA-oriented deployment configuration; it is not a universal location guarantee. Core email-service data and telemetry defaults target EEA regions. The active locations, configured providers, and transfer safeguards must be confirmed for the deployed environment and applicable agreement.
 
 ## Primary Processing Locations
 
 ### Shared EU Cloud
 
-| Service | Location | Provider |
+| Service | Default Location | Provider |
 |---|---|---|
 | Primary infrastructure (compute, storage, networking) | Helsinki, Finland & Nuremberg, Germany | Hetzner Online GmbH |
 | Email delivery (primary MTA) | Helsinki, Finland & Nuremberg, Germany | Own MTA on Hetzner infrastructure |
-| Email delivery (secondary SES) | Frankfurt, Germany & Dublin, Ireland | AWS SES (EU regions only) |
+| Email delivery (AWS SES, when enabled) | Configured SES region | AWS SES |
 | Database storage | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner |
 | Analytics (ClickHouse) | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner |
 | Caching (Redis) | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner |
 | Backups | Helsinki, Finland & Nuremberg, Germany | Self-managed on Hetzner block/object storage |
-| Log storage | Helsinki, Finland & Nuremberg, Germany | Self-managed |
+| Log storage (Loki) | Configurable object-store region (default: `eu-central-1`) | Self-managed Loki with S3-compatible object storage |
+| Trace storage (Tempo) | Configurable object-store region (default: `eu-central-1`) | Self-managed Tempo with S3-compatible object storage |
 
 ### Dedicated Tenant
 
-Dedicated Tenant infrastructure is deployed in a single EU region as agreed with the Customer. The default region is Finland or Germany (Hetzner). Alternative EU regions are available upon request.
+Dedicated Tenant infrastructure is deployed in the region agreed with the Customer. Its region, storage providers, and any data-residency commitments are defined in the applicable agreement.
 
 ### BYOC (Bring Your Own Cloud)
 
@@ -34,6 +35,9 @@ In the BYOC model, the Customer chooses the cloud provider and region. ApexMail 
 ## Data Types and Storage
 
 ### Account and Billing Data
+
+The locations in the following tables describe default deployment targets. Confirm
+the active deployment before relying on a location for compliance purposes.
 
 | Data Category | Storage Location |
 |---|---|
@@ -65,7 +69,8 @@ In the BYOC model, the Customer chooses the cloud provider and region. ApexMail 
 
 | Data Category | Storage Location |
 |---|---|
-| Application logs | Log storage, EU/EEA (Hetzner) |
+| Application logs | Loki object storage in the configured region (default: `eu-central-1`) |
+| Distributed traces | Tempo object storage in the configured region (default: `eu-central-1`) |
 | Metrics | Prometheus time-series database, EU/EEA (Hetzner) |
 | Monitoring data | Prometheus, EU/EEA (Hetzner) |
 | Session data | Redis cache, EU/EEA (Hetzner) |
@@ -86,7 +91,7 @@ Data transfers outside the EEA are limited to:
 | United States | Payment processing (tokenized card data and transaction metadata) | Stripe, Inc. | EU Standard Contractual Clauses (SCCs) |
 | United States | CRM (prospect and customer communications) | HubSpot, Inc. | EU Standard Contractual Clauses (SCCs) |
 
-Email content, recipient data, and event data are **never transferred outside the EEA** through ApexMail's own infrastructure. The only non-EEA transfers are for payment processing and CRM, both covered by SCCs.
+Email content, recipient data, and event data use the active deployment's configured providers and regions. The supplied configuration defaults core service and telemetry storage to EEA regions, but a deployment override or enabled provider can change that result. Confirm active locations and apply the appropriate transfer safeguard, including SCCs where required.
 
 ## Geographic Redundancy
 

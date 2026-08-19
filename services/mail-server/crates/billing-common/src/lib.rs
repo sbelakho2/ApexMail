@@ -7,9 +7,12 @@
 //! - **Proration** — plan-change proration calculations ([`proration`])
 //! - **Audit** — audit log ID generation and hashing ([`audit`])
 //! - **CSV** — CSV value sanitisation ([`csv`])
+//! - **Cost throttles** — safe cross-service rate-limit overrides
+//!   ([`cost_throttle`])
 
 #![deny(unsafe_code)]
 pub mod audit;
+pub mod cost_throttle;
 pub mod csv;
 pub mod proration;
 pub mod vat_rates;

@@ -3,10 +3,9 @@
 use observability_service::otlp_exporter::{
     init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
 };
-use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
-use ai_service::{config::AiConfig, routes};
+use ai_service::routes;
 
 fn init_tracing() -> Option<TracingGuard> {
     if is_otlp_enabled() {
@@ -33,23 +32,12 @@ fn init_tracing() -> Option<TracingGuard> {
 async fn main() {
     let _guard = init_tracing();
 
-    let config = match AiConfig::from_env() {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            tracing::error!(error = %err, "invalid AI configuration");
-            return;
-        }
-    };
-    tracing::info!(
-        endpoint = %config.model_endpoint,
-        embedding_dim = config.embedding_dim,
-        "starting AI service"
-    );
+    tracing::info!("starting AI intelligence service");
 
-    let state = match routes::AppState::new(config) {
-        Ok(state) => Arc::new(state),
-        Err(err) => {
-            tracing::error!(error = %err, "failed to initialize AI service state");
+    let state = match routes::default_app_state() {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::error!(%error, "invalid AI service configuration");
             return;
         }
     };

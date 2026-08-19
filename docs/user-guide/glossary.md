@@ -12,7 +12,7 @@ A DNS-based email authentication method that specifies which mail servers are au
 
 ### DKIM (DomainKeys Identified Mail)
 
-A cryptographic email authentication method that attaches a digital signature to outgoing messages. The sending server signs the email with a private key, and the receiving server verifies the signature using a public key published in DNS (as a CNAME or TXT record). DKIM proves the email was not altered in transit.
+A cryptographic email authentication method that attaches a digital signature to outgoing messages. ApexMail generates a private key per sending domain and publishes its matching public key as a TXT record at `<selector>._domainkey.<domain>`. Receiving servers use that record to verify the signature and detect alteration in transit.
 
 ### DMARC (Domain-based Message Authentication, Reporting and Conformance)
 

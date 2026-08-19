@@ -1,6 +1,6 @@
 +++
 title = "Enterprise E-Mail-Lösungen | Dedizierte Tenancy und private Bereitstellung"
-description = "Enterprise-E-Mail-Infrastruktur mit SOC-2-Kontrollen, dedizierter Tenancy, BYOC, SSO, SCIM, RBAC, Audit-Protokollen, vertraglicher SLA und Migration von SendGrid, Mailgun und Postmark."
+description = "Enterprise-E-Mail-Infrastruktur mit Vertragsprüfung, Optionen für dedizierte Tenancy und BYOC, SSO, RBAC, Audit-Protokollen, verhandelter SLA und Migration. Eine SOC-2-Zertifizierung wird derzeit nicht angeboten."
 template = "prose.html"
 
 [extra]

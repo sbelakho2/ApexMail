@@ -4,6 +4,7 @@
 pub mod cache;
 pub mod config;
 pub mod crypto;
+pub mod dkim;
 pub mod error_codes;
 pub mod http_client;
 pub mod http_error;
@@ -13,6 +14,7 @@ pub mod pii;
 pub mod result;
 pub mod secret_at_rest;
 pub mod time;
+pub mod transport;
 pub mod validation;
 
 pub use crypto::{

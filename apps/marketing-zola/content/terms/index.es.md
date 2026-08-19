@@ -45,11 +45,11 @@ Tratamos los datos de acuerdo con nuestra [Política de privacidad](/privacy/) y
 
 ## 7. Condiciones de pago
 
-Las tarifas se facturan mensual o anualmente según su elección. Todos los precios están en EUR. Se aplica el IVA estonio (24 %) cuando corresponda.
+Las tarifas se facturan mensual o anualmente según su elección. Los precios publicados están en USD. Los impuestos aplicables se determinan conforme a las reglas aplicables a la factura y al país de facturación.
 
 ### 7.1 Renovación automática
 
-Las suscripciones se renuevan automáticamente al final de cada período de facturación, a menos que se cancelen antes de la fecha de renovación. Puede cancelar en cualquier momento desde su panel. La cancelación surte efecto al final del período de facturación en curso; no se emiten reembolsos por períodos parciales.
+Las suscripciones se renuevan automáticamente al final de cada período de facturación, a menos que se cancelen antes de la fecha de renovación. Los cambios y las cancelaciones de autoservicio se realizan mediante el portal de facturación de Stripe. La cancelación surte efecto conforme al evento de facturación de Stripe confirmado; no se emiten reembolsos por períodos parciales.
 
 ### 7.2 Cambios de precio
 

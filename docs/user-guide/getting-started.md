@@ -22,11 +22,12 @@ Before sending emails, you need to verify your domain:
 
 | Record Type | Host | Value |
 |-------------|------|-------|
-| TXT | `@` | `v=spf1 include:amazonses.com include:_spf.apexmail.ee ~all` |
-| TXT | `apexmail._domainkey` | `v=DKIM1; k=rsa; p=...` |
+| TXT | `bounce` | `v=spf1 include:amazonses.com ~all` |
+| MX | `bounce` | `10 feedback-smtp.<aws-region>.amazonses.com` |
+| TXT | `<selector>._domainkey` | `v=DKIM1; k=rsa; p=<domain-specific-public-key>` |
 | TXT | `_dmarc` | `v=DMARC1; p=quarantine; ...` |
 
-> **Delivery note:** ApexMail delivers emails via AWS SES by default. The `include:amazonses.com` in the SPF record authorises SES to send on your behalf. DKIM is configured automatically via SES Easy DKIM (2048-bit).
+> **Copy the exact records:** After creating the domain, retrieve `GET /v1/domains/:id/dns-records` and use its hostnames, DKIM selector/key, and region-specific MX target exactly. ApexMail generates a unique 2048-bit RSA DKIM key pair for each domain. For SES delivery, SES uses that same key through BYODKIM; it does not provide Easy-DKIM CNAME records.
 
 5. Click **Verify** once DNS records are propagated (usually 15-60 minutes)
 

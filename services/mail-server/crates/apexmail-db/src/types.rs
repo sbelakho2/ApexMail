@@ -54,7 +54,9 @@ pub struct ApiKey {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Domain {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// Tenant identifiers are canonical `VARCHAR(26)` IDs in the active
+    /// migration chain, not UUIDs.
+    pub tenant_id: String,
     pub name: String,
     pub status: String,
     pub spf_verified: bool,
@@ -68,6 +70,8 @@ pub struct Domain {
     pub dkim_public_key: Option<String>,
     #[serde(skip_serializing)]
     pub dkim_private_key: Option<String>,
+    pub dkim_enabled: bool,
+    pub ses_verified: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -310,7 +314,7 @@ mod tests {
     fn test_domain_status() {
         let d = Domain {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: "tenant_test_00000000000001".into(),
             name: "example.com".into(),
             status: "verified".into(),
             spf_verified: true,
@@ -321,8 +325,10 @@ mod tests {
             bimi_verified: false,
             tlsrpt_verified: false,
             dkim_selector: Some("apexmail".into()),
-            dkim_public_key: None,
-            dkim_private_key: None,
+            dkim_public_key: Some("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A".into()),
+            dkim_private_key: Some("dkim:v1:encrypted-test-envelope".into()),
+            dkim_enabled: true,
+            ses_verified: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

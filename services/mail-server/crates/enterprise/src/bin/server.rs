@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::signal;
 use tracing::info;
 
@@ -34,8 +35,17 @@ async fn main() -> anyhow::Result<()> {
         .connect_lazy(&config.db.url())
         .map_err(|e| anyhow::anyhow!("Database pool: {e}"))?;
 
+    // Install an in-process Prometheus recorder. The router renders the
+    // resulting handle at `/metrics` on the existing enterprise HTTP port.
+    let metrics_recorder = PrometheusBuilder::new().build_recorder();
+    let metrics_handle = metrics_recorder.handle();
+    if let Err(error) = metrics::set_global_recorder(Box::new(metrics_recorder)) {
+        tracing::warn!(error = %error, "Prometheus recorder already installed");
+    }
+    metrics::gauge!("apexmail_enterprise_info").set(1.0);
+
     // Build app state
-    let state = Arc::new(AppState::new(db.clone(), config));
+    let state = Arc::new(AppState::new(db.clone(), config, metrics_handle));
 
     // Build router
     let app = router(state.clone());

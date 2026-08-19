@@ -1,230 +1,112 @@
 # Tool Contract: Stripe
 
-> Internal engineering document — specifies the interface contract between ApexMail and Stripe for billing and subscription management.
+This document describes the implementation boundary between ApexMail and
+Stripe. Stripe remains the payment authority; ApexMail's local billing rows are
+read-optimized records reconciled from verified Stripe webhooks.
 
-| Field | Value |
-|-------|-------|
-| **API Version** | `2026-04-22.dahlia` (pinned via `Stripe-Version`, overridable with `STRIPE_API_VERSION`) |
-| **SDK** | Raw Stripe REST requests via `reqwest` in `api-server`; webhook verification is implemented manually in `billing-service` |
-| **Role** | Subscription billing, payment processing, invoicing |
-| **Data Residency** | EU (Stripe account region) |
-| **Environments** | Test mode (dev/staging), Live mode (production) |
+## Catalog boundary
 
----
+The active ApexMail catalog is defined by
+[the billing plan seeds](../../services/mail-server/crates/billing-service/src/plans.rs)
+and persisted in the `plans` table. Each active plan may have a monthly and/or
+annual Stripe price ID.
 
-## 1. Products & Pricing
+All prices are USD:
 
-### Plans
+| Plan | Monthly | Annual | Public generic Checkout |
+|---|---:|---:|---|
+| Free | $0 | $0 | No — initial entitlement |
+| Starter | $25 | $250/year | Yes |
+| Pro | $65 | $650/year | Yes |
+| Growth | $150 | $1,500/year | Yes |
+| Scale | $350 | $3,500/year | Yes |
+| Enterprise | $3,000 | $30,000/year | No — sales and contract flow |
+| PAYG | Usage priced | Usage priced | No — approved billing setup |
 
-| Plan | Stripe Product ID | Price (Monthly) | Email Limit | Contacts |
-|------|--------------------|----------------|-------------|----------|
-| Free | `prod_free` | $0 | 30,000/mo | 500 |
-| Starter | `prod_starter` | $25/mo | 50,000/mo | 10,000 |
-| Pro | `prod_pro` | $65/mo | 150,000/mo | 50,000 |
-| Growth | `prod_growth` | $150/mo | 500,000/mo | 200,000 |
-| Scale | `prod_scale` | $350/mo | 2,000,000/mo | 500,000 |
-| Enterprise | `prod_enterprise` | $3,000/mo | 5,000,000/mo | Unlimited |
+The public Checkout endpoint accepts a submitted Stripe price only when it
+maps to an **active** Starter, Pro, Growth, or Scale catalog row. It rejects
+unknown prices and cannot be used to purchase an arbitrary product in the
+Stripe account.
 
-### Add-ons
+## Checkout and portal flow
 
-| Add-on | Stripe Product ID | Price |
-|--------|-------------------|-------|
-| Dedicated IP | `prod_dedicated_ip` | $30/mo |
+1. An authenticated tenant with `billing:write` selects a supported catalog
+   price.
+2. ApexMail creates a Stripe Checkout Session in subscription mode.
+3. The Session and `subscription_data` include immutable `tenant_id` and
+   server-resolved `plan_name` metadata.
+4. Stripe redirects the customer to the approved return URL.
+5. A signed `customer.subscription.created` or
+   `customer.subscription.updated` webhook resolves the Stripe price back to
+   an active ApexMail plan and updates local subscription state.
 
-### Price Configuration
+A `checkout.session.completed` event is informational only. It does not grant
+an entitlement or reactivate a suspended tenant because a Checkout Session can
+complete before a subscription reaches an entitled payment state.
 
-- All prices are in **USD** (single currency).
-- Billing cycle: monthly, with annual option (2 months free) for Starter through Scale and Enterprise annual contracts at $30,000/year.
-- Metered usage (overage emails) is tracked via Stripe Usage Records and billed at invoice time.
-- Overage rate: $0.40 per 1,000 emails, reported via the Stripe usage records API.
+Existing subscription changes and cancellations use a Stripe billing portal
+session. The legacy direct `/switch-plan` and `/cancel` endpoints return a
+conflict response and never mutate local entitlement rows.
 
----
+## Entitlement reconciliation
 
-## 2. Subscription Lifecycle
+For a verified Stripe subscription event, ApexMail validates all of the
+following before updating the tenant:
 
-### Creation Flow
+- the event signature and timestamp tolerance;
+- the Stripe subscription is bound to the metadata tenant, not another tenant;
+- the primary recurring price maps to an **active** ApexMail plan and matches
+  its monthly or annual interval;
+- the Stripe status transition is valid.
 
-```
-User selects plan
-  → API creates Stripe Checkout Session (mode: 'subscription')
-  → User redirected to Stripe Checkout
-  → Payment succeeds
-  → Stripe fires `checkout.session.completed` webhook
-  → API activates subscription in PostgreSQL
-  → User redirected to app with success state
-```
+Only `active` and `trialing` statuses grant the mapped paid plan. `incomplete`,
+`incomplete_expired`, `past_due`, `unpaid`, `paused`, and `canceled` statuses
+remain stored for reconciliation but resolve the tenant to Free access. A
+`customer.subscription.deleted` event downgrades only if the deleted
+subscription is already associated with that tenant.
 
-### State Machine
+Enterprise contract signature handling is the separate audited entitlement
+path. It is not a generic Checkout purchase path.
 
-```
-trial → active → past_due → canceled
-                ↘ active (payment recovered)
-trial → canceled (no conversion)
-```
+An Enterprise contract cancellation is also separate from Stripe self-service
+cancellation. The current API supports immediate termination only; a future
+effective date is rejected instead of being stored as a non-executing schedule.
+On an immediate termination, the tenant returns to Free only if no other
+current active signed Enterprise contract authorizes Enterprise access.
 
-| State | Description | App Behavior |
-|-------|-------------|-------------|
-| `trialing` | 14-day free trial (Starter+ only) | Full access, trial banner shown |
-| `active` | Paying customer | Full access |
-| `past_due` | Payment failed, retrying | Full access for 7 d grace period, then read-only |
-| `canceled` | Subscription ended | Downgrade to Free plan limits |
-| `unpaid` | All retry attempts exhausted | Read-only access, data retained 90 d |
+## Webhooks
 
-### Upgrade / Downgrade
+- **Endpoint:** `/webhooks/stripe` mounted by `billing-service`.
+- **Signing secret:** `STRIPE_WEBHOOK_SECRET`.
+- **Verification:** Stripe signature HMAC plus timestamp tolerance before event
+  processing.
+- **Idempotency:** `stripe_webhook_events` records the Stripe event ID and
+  prevents duplicate processing.
+- **Failure handling:** processing failures are returned to Stripe and stored
+  in the Redis-backed dead-letter flow for controlled retry.
 
-- Plan changes use `stripe.subscriptions.update()` with `proration_behavior: 'create_prorations'`.
-- Downgrades take effect at end of current billing period (`cancel_at_period_end` for old plan items is NOT used; we swap the price immediately with proration).
-- Upgrades are immediate with prorated charges.
+Consumed event families include:
 
----
+| Event | Effect |
+|---|---|
+| `checkout.session.completed` | Log checkout completion; wait for subscription state webhook |
+| `customer.subscription.created` | Validate and persist subscription state; reconcile entitlement |
+| `customer.subscription.updated` | Validate and reconcile price/status changes |
+| `customer.subscription.deleted` | Mark known subscription canceled and downgrade to Free |
+| `invoice.paid` | Reconcile invoice/payment state |
+| `invoice.payment_failed` | Record payment failure and dunning state |
+| `customer.subscription.trial_will_end` | Trigger trial-ending handling when applicable |
 
-## 3. Webhook Events
+## Operational rules
 
-### Endpoint
+- Do not call local plan, subscription, or tenant-plan mutation helpers to
+  simulate a payment event.
+- Do not create a Stripe subscription from a public plan ID without first
+  resolving an active catalog price on the server.
+- Do not expose Enterprise or PAYG through generic public Checkout.
+- If local billing state diverges from Stripe, reconcile from a verified Stripe
+  event or an audited operational process; Stripe wins for subscription state.
 
-- Route path: `/webhooks/stripe` (mounted directly by `billing-service`)
-- Signing secret: stored as `STRIPE_WEBHOOK_SECRET` env var.
-- All events are verified by checking the `stripe-signature` HMAC and timestamp tolerance before processing.
-
-### Consumed Events
-
-| Event | Handler | Action |
-|-------|---------|--------|
-| `checkout.session.completed` | `handle_checkout_completed` | Activate the tenant after successful checkout |
-| `customer.subscription.created` | `handle_subscription_change` | Persist subscription state from Stripe |
-| `customer.subscription.updated` | `handle_subscription_change` | Sync plan/status changes to local DB |
-| `customer.subscription.deleted` | `handle_subscription_deleted` | Downgrade tenant state after cancellation |
-| `invoice.paid` | `handle_invoice_paid` | Mark the invoice/subscription state as recovered or paid |
-| `invoice.payment_failed` | `handle_payment_failed` | Mark subscription `past_due` and track dunning state |
-| `customer.subscription.trial_will_end` | `handle_trial_ending` | Trigger trial-ending handling |
-
-### Event Processing Rules
-
-1. Every webhook handler is **idempotent**. Events may be delivered more than once.
-2. Events are logged to the `stripe_webhook_events` table with the Stripe event ID as a unique key — duplicates are detected and skipped.
-3. Event processing failures return non-2xx so Stripe retries, and the payload is also recorded in the Redis-backed dead-letter store.
-4. Unrecognized event types are logged and acknowledged with 200 (no action).
-5. Webhook processing MUST complete in < **10 seconds**. Heavy work is deferred to the job queue.
-
----
-
-## 4. Idempotency
-
-### Idempotency Keys
-
-All **mutating** Stripe API calls MUST include an idempotency key.
-
-```python
-stripe.subscriptions.update(
-    subscription_id,
-    items=[{"id": item_id, "price": new_price_id}],
-    idempotency_key=f"upgrade_{tenant_id}_{new_price_id}_{timestamp}",
-)
-```
-
-### Key Construction
-
-Pattern: `<action>_<tenant_id>_<resource_id>_<timestamp_or_hash>`
-
-- Keys are stored in Redis (`apx:stripe:idem:<key>`) with a 24 h TTL to prevent accidental reuse.
-- Stripe retains idempotency keys for 24 h on their side.
-
----
-
-## 5. Retry & Error Handling
-
-### Stripe API Errors
-
-| Error Type | Retry? | Action |
-|-----------|--------|--------|
-| `rate_limit_error` | Yes (exponential backoff, max 3) | Wait and retry |
-| `api_connection_error` | Yes (max 3) | Wait and retry |
-| `api_error` (500) | Yes (max 2) | Wait and retry |
-| `card_error` | No | Surface to user |
-| `invalid_request_error` | No | Log, alert engineering |
-| `authentication_error` | No | Alert ops immediately |
-
-### Webhook Retry
-
-- If ApexMail returns non-2xx, Stripe retries with exponential backoff for up to 3 days.
-- After 3 days of failures, the webhook endpoint is disabled by Stripe and ops is alerted.
-
----
-
-## 6. Customer & Metadata Mapping
-
-### Customer Object
-
-```python
-customer = stripe.customers.create(
-    email=tenant.billing_email,
-    name=tenant.company_name,
-    metadata={
-        "tenant_id": tenant.id,
-        "plan": "growth",
-        "environment": "production",
-    },
-)
-```
-
-### Metadata Conventions
-
-| Object | Metadata Keys |
-|--------|---------------|
-| Customer | `tenant_id`, `plan`, `environment` |
-| Subscription | `tenant_id`, `plan_name` |
-| Invoice | `tenant_id` |
-| Checkout Session | `tenant_id`, `plan_name`, `source` |
-
-- `tenant_id` is present on **every** Stripe object for traceability.
-- Metadata values are strings, max 500 characters each.
-
----
-
-## 7. Test vs. Live Mode
-
-| Aspect | Test Mode | Live Mode |
-|--------|-----------|-----------|
-| API Key prefix | `sk_test_` / `pk_test_` | `sk_live_` / `pk_live_` |
-| Webhook secret | Separate per environment | Production secret |
-| Used in | Development, staging, CI | Production only |
-| Test cards | `4242424242424242` etc. | Real payment methods |
-| Clock | Stripe Test Clocks for subscription testing | Real time |
-
-### Rules
-
-1. Live keys are NEVER stored in code or config files — injected via environment variables.
-2. Test mode uses Stripe Test Clocks to simulate subscription lifecycle in CI.
-3. All Stripe interactions in development hit test mode — there is no local mock.
-
----
-
-## 8. EU Data Residency
-
-- ApexMail's Stripe account is registered in the EU.
-- Customer payment data is processed and stored by Stripe within the EU.
-- No PCI-scoped cardholder data is stored in ApexMail's systems — Stripe Checkout handles card collection.
-- The `stripe.Customer` object stores only non-sensitive data (email, name, metadata).
-- Stripe's EU data processing addendum (DPA) is executed and on file.
-
----
-
-## 9. Local Database Sync
-
-### Synced Tables
-
-| Table | Synced Fields | Source of Truth |
-|-------|--------------|----------------|
-| `subscriptions` | `stripe_subscription_id`, `status`, `plan`, `current_period_end` | Stripe (via webhooks) |
-| `tenants` | `stripe_customer_id`, `plan` | Stripe (via webhooks) |
-| `invoices` | `stripe_invoice_id`, `amount`, `status`, `paid_at` | Stripe (via webhooks) |
-
-### Rules
-
-1. Stripe is the **source of truth** for billing state. Local DB is a read-optimized cache.
-2. If local state and Stripe diverge, Stripe wins. A daily reconciliation job in the billing service detects and fixes drift.
-3. Never modify subscription state locally without a corresponding Stripe API call.
-
----
-
-*Last updated: 2026-02-09*
+See [the pricing reference](../pricing.md) and
+[the billing lifecycle](../architecture/billing-lifecycle.md) for related
+product behavior.

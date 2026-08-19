@@ -27,7 +27,9 @@ use crate::auth::{
 };
 use crate::config::{InboundConfig, RateLimitConfig};
 use mail_proto::mailstore_service_client::MailstoreServiceClient;
-use mail_proto::{GetAccountRequest, MessageFlags, StoreMessageRequest};
+use mail_proto::{
+    GetAccountRequest, InternalServiceAuthInterceptor, MessageFlags, StoreMessageRequest,
+};
 use tonic::transport::Channel;
 
 use super::util::{read_line_capped, LineRead, MAX_COMMAND_LINE, MAX_DATA_LINE};
@@ -44,6 +46,10 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// never stall the SMTP session task indefinitely.
 const MAILSTORE_CHANNEL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAILSTORE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
+type MailstoreClient = MailstoreServiceClient<
+    tonic::service::interceptor::InterceptedService<Channel, InternalServiceAuthInterceptor>,
+>;
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -86,7 +92,7 @@ pub struct InboundServer {
     auth_fail_tracker: AuthFailTracker,
     shutdown: Arc<Notify>,
     /// gRPC client for mailbox delivery to the mailstore service.
-    mailstore: MailstoreServiceClient<Channel>,
+    mailstore: MailstoreClient,
 }
 
 impl InboundServer {
@@ -98,17 +104,15 @@ impl InboundServer {
         authenticator: Arc<EmailAuthenticator>,
         hostname: String,
         mailstore_addr: String,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let channel = Channel::from_shared(mailstore_addr)
-            .map(|c| c.timeout(MAILSTORE_CHANNEL_TIMEOUT).connect_lazy())
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "Invalid MAILSTORE_GRPC_ADDR; mailbox delivery disabled");
-                Channel::from_shared("http://127.0.0.1:50051")
-                    .expect("static address")
-                    .timeout(MAILSTORE_CHANNEL_TIMEOUT)
-                    .connect_lazy()
-            });
-        Self {
+            .map_err(|error| anyhow::anyhow!("invalid MAILSTORE_GRPC_ADDR: {error}"))?
+            .timeout(MAILSTORE_CHANNEL_TIMEOUT)
+            .connect_lazy();
+        let interceptor = InternalServiceAuthInterceptor::from_env()
+            .map_err(|error| anyhow::anyhow!("invalid internal mailstore authentication: {error}"))?;
+
+        Ok(Self {
             config,
             rate_limit_config,
             pool,
@@ -122,8 +126,8 @@ impl InboundServer {
                 .build(),
             auth_fail_tracker: AuthFailTracker::new(),
             shutdown: Arc::new(Notify::new()),
-            mailstore: MailstoreServiceClient::new(channel),
-        }
+            mailstore: MailstoreServiceClient::with_interceptor(channel, interceptor),
+        })
     }
 
     /// Start listening on both plain (STARTTLS) and implicit‑TLS ports.
@@ -1398,7 +1402,8 @@ mod tests {
             authenticator,
             "mail.test".into(),
             "http://127.0.0.1:1".into(),
-        );
+        )
+        .expect("test mailstore configuration must be valid");
         (server, ctx)
     }
 

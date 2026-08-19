@@ -1,9 +1,9 @@
-//! Content optimisation — subject-line scoring, improvement suggestions, A/B test
-//! winner selection, HTML sanitisation (O-10.2) and HTML-to-text preview generation.
+//! Deterministic content utilities: subject-line heuristics, A/B result
+//! selection, HTML sanitisation, and HTML-to-text preview generation.
 
 use crate::types::{ContentSuggestion, ImprovementType};
 
-/// Content scoring and optimisation engine.
+/// Deterministic content utility collection.
 pub struct ContentOptimizer;
 
 impl Default for ContentOptimizer {
@@ -17,8 +17,9 @@ impl ContentOptimizer {
         Self
     }
 
-    /// Score a subject line from 0 to 100 based on heuristics:/// length (25 pts), word count (20 pts), urgency keywords (20 pts),
-    /// personalisation tokens (20 pts), emoji presence (15 pts).
+    /// Score a subject line from 0 to 100 using fixed rules for length, word
+    /// count, urgency words, personalisation tokens, and emoji presence.
+    /// The score is not a calibrated deliverability or engagement prediction.
     pub fn score_subject_line(&self, text: &str) -> u32 {
         let mut score: u32 = 0;
         let len = text.len();
@@ -141,7 +142,7 @@ impl ContentOptimizer {
             .map(|(name, val)| (name.as_str(), *val))
     }
 
-    /// Sanitize AI-generated HTML content using ammonia (O-10.2).
+    /// Sanitize untrusted HTML content using ammonia.
     ///
     /// Strips dangerous tags (`<script>`, `<iframe>`, event handlers, etc.)
     /// while preserving safe structural elements like `<p>`, `<a>`, `<b>`,

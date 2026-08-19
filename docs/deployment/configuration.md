@@ -123,36 +123,44 @@ The tracking service exposes metrics on port 9092 (configured via `METRICS_PORT`
 
 ### Email Delivery Transport
 
-ApexMail uses a **hybrid per-message routing** architecture. Both AWS SES (shared pool) and self-hosted SMTP (dedicated IPs via Hetzner) are always available — the `TransportRouter` decides per-message which path to use based on tenant dedicated IP ownership.
+ApexMail uses one deployment-selected outbound transport. Set
+`EMAIL_TRANSPORT_TYPE=ses` for AWS SES (the production default) or `smtp` for
+the configured SMTP relay. API and worker processes must use the same value;
+there is no automatic per-message, tenant, plan, or dedicated-IP routing.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DEFAULT_FROM_EMAIL` | | - | Default sender address |
 | `DEFAULT_FROM_NAME` | | - | Default sender name |
 
-> **Note:** The hybrid routing uses automatic per-message transport selection based on tenant dedicated IP ownership. The `EMAIL_TRANSPORT_TYPE` variable listed below is a legacy/advanced override for operators who want to bypass the hybrid model and force all traffic via a specific transport — it is **not** part of the standard routing configuration.
+> **Note:** `EMAIL_TRANSPORT_TYPE` is an active safety setting, not a legacy
+> override. SES domains are not sendable until SES reports identity, BYODKIM,
+> and custom MAIL FROM readiness. SMTP domains are not sendable unless their
+> local per-domain DKIM material is valid.
 
-#### AWS SES Configuration (Shared Pool)
+#### AWS SES Configuration
 
-SES is used for tenants without dedicated IPs (the default path).
+SES is selected for all delivery when `EMAIL_TRANSPORT_TYPE=ses`.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `AWS_ACCESS_KEY_ID` | ✓ | - | AWS IAM access key for SES |
 | `AWS_SECRET_ACCESS_KEY` | ✓ | - | AWS IAM secret key for SES |
-| `AWS_DEFAULT_REGION` | | `eu-west-1` | AWS region for SES |
+| `AWS_REGION` | ✓ | `eu-west-1` | AWS region for SES; must match API and worker |
 | `SES_CONFIGURATION_SET` | | - | SES configuration set for event tracking |
 
 ```env
 AWS_ACCESS_KEY_ID=AKIAxxxxxxxxxxxx
 AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-AWS_DEFAULT_REGION=eu-west-1
+AWS_REGION=eu-west-1
 SES_CONFIGURATION_SET=apexmail-production
 DEFAULT_FROM_EMAIL=noreply@example.com
 DEFAULT_FROM_NAME="ApexMail"
 ```
 
-SES handles DKIM signing automatically via Easy DKIM (2048-bit RSA). Domain identities are auto-provisioned when tenants verify domains.
+Domain verification configures SES with the generated per-domain key using
+BYODKIM and configures a custom MAIL FROM domain. It does not use SES Easy
+DKIM or customer-facing CNAME records.
 
 #### Hetzner Cloud Configuration (Dedicated IPs)
 
@@ -172,9 +180,9 @@ HETZNER_MTA_SERVER_ID=12345678
 
 Dedicated IPs are auto-provisioned when tenants upgrade to plans with dedicated IP access. See [Hetzner Tool Contract](../tool-contracts/hetzner.md) for details.
 
-#### Self-Hosted SMTP Configuration (Legacy/Advanced)
+#### SMTP Relay Configuration
 
-For advanced deployments that bypass the hybrid routing and use direct SMTP relay:
+For deployments explicitly configured with `EMAIL_TRANSPORT_TYPE=smtp`:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -187,20 +195,20 @@ For advanced deployments that bypass the hybrid routing and use direct SMTP rela
 | `OUTBOUND_IPS` | | - | Comma-separated outbound IPs for source binding |
 | `MTA_HOSTNAME` | ✓ | - | HELO/EHLO hostname |
 
-> **Note:** This configuration is for operators who want to run a full self-hosted MTA without using the hybrid model. Most deployments should use the hybrid model with Hetzner dedicated IPs.
+> **Note:** SMTP is a deployment-wide choice. It locally signs every message
+> with the generated per-domain DKIM key; it is not a fallback or overflow
+> path for SES.
 
 ### DKIM Configuration
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DKIM_SELECTOR` | | `apexmail` | DKIM selector |
-| `DKIM_PRIVATE_KEY` | | - | DKIM private key (PEM or base64) |
-| `DKIM_DOMAIN` | | - | Signing domain |
+| `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | ✓ | — | 64 hexadecimal characters (32 bytes) used to encrypt generated per-domain private keys |
+| `DKIM_ENABLED` | SMTP only | `true` | Enables local SMTP signing; must remain enabled in SMTP mode |
 
 ```env
-DKIM_SELECTOR=apexmail
-DKIM_DOMAIN=example.com
-DKIM_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+DKIM_PRIVATE_KEY_ENCRYPTION_KEY=<64-hex-characters>
+DKIM_ENABLED=true
 ```
 
 ### Rate Limiting
@@ -277,23 +285,31 @@ To send emails from your domain, configure these DNS records:
 
 ```dns
 Type: TXT
-Host: @
-Value: v=spf1 include:_spf.apexmail.ee ~all
+Host: bounce
+Value: v=spf1 include:amazonses.com ~all
+```
+
+#### Custom MAIL FROM MX Record
+
+```dns
+Type: MX
+Host: bounce
+Priority: 10
+Value: feedback-smtp.<aws-region>.amazonses.com
 ```
 
 #### DKIM Record
 
 ```dns
 Type: TXT
-Host: apexmail._domainkey
-Value: v=DKIM1; k=rsa; p=MIIBIjAN...
+Host: <selector>._domainkey
+Value: v=DKIM1; k=rsa; p=<generated-domain-public-key>
 ```
 
-Generate DKIM keys:
-```bash
-openssl genrsa -out dkim.private 2048
-openssl rsa -in dkim.private -pubout -out dkim.public
-```
+The API generates the selector and key pair. Retrieve the exact direct TXT
+record and the required `bounce` MX record from
+`GET /v1/domains/:id/dns-records`; do not generate or configure a global
+customer DKIM key.
 
 #### DMARC Record
 
@@ -426,38 +442,16 @@ QUEUE_BACKOFF_DELAY=3000
 
 ## AI Configuration
 
-### Model Settings
+The deployed mail-server does not configure or operate an ONNX runtime, a
+remote LLM provider, a model registry, or a model-training pipeline. Do not
+set `AI_MODEL_PATH`, `AI_EMBEDDING_MODEL`, `AI_INFERENCE_THREADS`,
+`AI_MAX_BATCH_SIZE`, `AI_CACHE_ENABLED`, `AI_CACHE_TTL`, `OPENAI_API_KEY`, or
+`ANTHROPIC_API_KEY` as though they enable product functionality.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AI_MODEL_PATH` | `/models` | Path to ONNX models |
-| `AI_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Embedding model |
-| `AI_INFERENCE_THREADS` | `4` | Inference threads |
-| `AI_MAX_BATCH_SIZE` | `32` | Max batch size |
-| `AI_CACHE_ENABLED` | `true` | Cache embeddings |
-| `AI_CACHE_TTL` | `86400` | Cache TTL (seconds) |
-
-```env
-AI_MODEL_PATH=/opt/apexmail/models
-AI_EMBEDDING_MODEL=all-MiniLM-L6-v2
-AI_INFERENCE_THREADS=8
-AI_MAX_BATCH_SIZE=64
-AI_CACHE_ENABLED=true
-AI_CACHE_TTL=604800
-```
-
-### External AI (Optional)
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | OpenAI API key (optional enhancement) |
-| `ANTHROPIC_API_KEY` | Anthropic API key (optional) |
-
-```env
-# Optional - for enhanced capabilities
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-```
+The internal `ai-service` helper, where separately run for development, offers
+only deterministic subject templates, fixed-rule subject scoring, and highest
+supplied engagement-score selection. It is not a supported production model
+serving target. See [Deterministic Email Assistance](../architecture/ai-pipeline.md).
 
 ---
 

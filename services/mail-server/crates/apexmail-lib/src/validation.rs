@@ -132,6 +132,20 @@ fn is_valid_local_part(local: &str) -> bool {
             .unwrap_or(false);
     }
 
+    // RFC 6531 SMTPUTF8 permits UTF-8 in an unquoted local part. Retain the
+    // RFC 5322 atom exclusions for ASCII controls, whitespace, and specials;
+    // Unicode letters and symbols are otherwise accepted as UTF-8 bytes.
+    if !local.is_ascii() {
+        if local.chars().any(|ch| {
+            ch.is_control()
+                || ch.is_whitespace()
+                || matches!(ch, '(' | ')' | '<' | '>' | '[' | ']' | '\\' | '"' | ';' | ':' | ',' | '@')
+        }) {
+            return false;
+        }
+        return !local.contains("..") && !local.starts_with('.') && !local.ends_with('.');
+    }
+
     // Standard local-part validation
     let matched = STANDARD_LOCAL_RE
         .as_ref()
@@ -262,9 +276,16 @@ mod tests {
         assert!(long_email.len() > 254);
         assert!(!is_valid_email(&long_email));
 
-        // Exactly 254 characters (max per RFC 5321)
-        let exact_local = "a".repeat(249);
-        let exact_email = format!("{}@b.cc", exact_local);
+        // Exactly 254 characters (max per RFC 5321) while preserving the
+        // RFC 5321 local-part limit of 64 octets.
+        let exact_local = "a".repeat(64);
+        let exact_domain = format!(
+            "{}.{}.{}.cc",
+            "b".repeat(63),
+            "b".repeat(63),
+            "b".repeat(58),
+        );
+        let exact_email = format!("{}@{}", exact_local, exact_domain);
         assert_eq!(exact_email.len(), 254);
         assert!(is_valid_email(&exact_email));
     }
@@ -309,7 +330,7 @@ mod tests {
     fn test_find_unquoted_at() {
         assert_eq!(find_unquoted_at("user@domain"), Some(4));
         assert_eq!(find_unquoted_at("no-at"), None);
-        assert_eq!(find_unquoted_at(r#""test@user"@domain"#), Some(12));
+        assert_eq!(find_unquoted_at(r#""test@user"@domain"#), Some(11));
         assert_eq!(find_unquoted_at("@start"), Some(0));
         assert_eq!(find_unquoted_at("end@"), Some(3));
     }

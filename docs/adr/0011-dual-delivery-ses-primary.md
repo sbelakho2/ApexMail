@@ -1,9 +1,13 @@
 # ADR 0011: Dual Delivery — SES Primary, Self-Hosted SMTP Opt-In
 
 ## Status
-Accepted (supersedes operational aspects of ADR 0002)
+Superseded by the deployment-wide transport configuration and per-domain
+BYODKIM implementation.
 
-**Amendment (2026-03-02):** Updated to reflect hybrid per-message routing architecture with Hetzner-based dedicated IPs.
+**Historical amendment (2026-03-02):** This ADR previously described hybrid
+per-message routing. That behavior is not active. The current implementation
+uses `EMAIL_TRANSPORT_TYPE=ses` (default) or `smtp` for the whole deployment,
+and uses generated direct DKIM TXT records with SES BYODKIM/custom MAIL FROM.
 
 ## Date
 2026-02-27 (Amended: 2026-03-02)

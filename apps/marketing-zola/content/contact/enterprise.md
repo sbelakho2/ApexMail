@@ -56,11 +56,11 @@ After you submit the form, our enterprise team reviews your requirements and res
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="radio" name="deployment_model" value="dedicated" class="accent-brand-500" />
-        <span><strong>Dedicated Tenant</strong> — Single-tenant isolated infrastructure (from €4,000/mo)</span>
+        <span><strong>Dedicated Tenant</strong> — Single-tenant isolated infrastructure, subject to architecture and contract review</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="radio" name="deployment_model" value="byoc" class="accent-brand-500" />
-        <span><strong>BYOC / Private Deployment</strong> — Managed deployment in your cloud account (from €6,500/mo)</span>
+        <span><strong>BYOC / Private Deployment</strong> — Managed deployment in your cloud account, subject to architecture and contract review</span>
       </label>
     </div>
   </fieldset>

@@ -28,33 +28,17 @@
 
 ## Architecture Overview
 
-ApexMail uses a **hybrid dual-transport architecture**:
+ApexMail uses one explicit outbound transport in each deployment:
 
-| Transport | Role | Provider | Cost |
-|-----------|------|----------|------|
-| **SES (shared pool)** | Default transport for free-tier tenants | AWS SES (eu-west-1) | Pay-per-email (~$0.0001/email) |
-| **SMTP (dedicated IPs)** | Dedicated IPs for paid tenants | Hetzner Floating IPs → self-hosted MTA | ~€4/mo per IP + server costs |
+| Transport | Environment value | Signing behavior |
+|-----------|-------------------|------------------|
+| **AWS SES** (default) | `EMAIL_TRANSPORT_TYPE=ses` | SES signs with the generated per-domain BYODKIM key |
+| **SMTP relay** | `EMAIL_TRANSPORT_TYPE=smtp` | Worker locally signs with the same per-domain key |
 
-**Core components involved in the automation pipeline:**
-
-| Component | File / Module | Role |
-|-----------|---------------|------|
-| [`TransportRouter`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:134) | `worker-processors::email::transport_router` | Per-message routing: SES vs SMTP with `bind_ip` |
-| [`DedicatedIpProvider`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:134) | API server | Hetzner Floating IP lifecycle management |
-| [`EmailProcessor`](services/mail-server/crates/worker-processors/src/email/processor.rs:42) | `worker-processors::email::processor` | Polls `email_queue`, applies warmup limits, sends |
-| [`trg_update_transport_routing`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:18) | DB trigger | Auto-syncs `dedicated_ips` changes → `transport_routing_cache` |
-| `auto_provision_dedicated_ips_background()` | API server (Stripe webhook handler) | Provisions Hetzner Floating IPs on plan upgrade |
-
-**Routing decision (pseudocode):**
-
-```
-if tenant.has_dedicated_ips():
-    use SmtpTransport( bind_ip = tenant.preferred_ip )
-else:
-    use SesTransport()  # default shared pool
-```
-
-> See [`hybrid-email-infrastructure.md`](docs/architecture/hybrid-email-infrastructure.md) for the full architecture diagram.
+The API and worker use the same deployment configuration. ApexMail does not
+automatically choose a transport by tenant, plan, dedicated IP, or message.
+The `EmailProcessor` polls `email_queue`, validates current domain readiness,
+and sends through the selected transport.
 
 ---
 
@@ -86,6 +70,7 @@ Create a programmatic IAM user with the following least-privilege policy:
                 "ses:DeleteEmailIdentity",
                 "ses:GetEmailIdentity",
                 "ses:PutEmailIdentityDkimSigningAttributes",
+                "ses:PutEmailIdentityMailFromAttributes",
                 "ses:PutEmailIdentityConfigurationSetAttributes",
                 "sns:Subscribe",
                 "sns:ConfirmSubscription",
@@ -164,9 +149,14 @@ Add these records to apexmail.ee's DNS zone:
 
 | Type | Name | Value |
 |------|------|-------|
-| TXT | `apexmail.ee` | `"v=spf1 include:amazonses.com ~all"` |
-| TXT | `_amazonses.apexmail.ee` | `"v=DKIM1; p=<DKIM_PUBLIC_KEY>"` (Easy DKIM) |
+| TXT | `bounce.apexmail.ee` | `"v=spf1 include:amazonses.com ~all"` |
+| MX | `bounce.apexmail.ee` | `10 feedback-smtp.<aws-region>.amazonses.com` |
+| TXT | `<selector>._domainkey.apexmail.ee` | `"v=DKIM1; k=rsa; p=<generated-public-key>"` |
 | TXT | `_dmarc.apexmail.ee` | `"v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee"` |
+
+Register the operator domain through the normal domain API and copy the exact
+selector and key from its DNS-records endpoint. Do not configure Easy-DKIM
+CNAME records.
 
 ---
 
@@ -307,8 +297,8 @@ Set these environment variables on the API server (`apx-api-1`) and the worker s
 | [`STRIPE_WEBHOOK_SECRET`](.env.production.example:85) | **Yes** | — | Stripe webhook signing secret |
 | [`JWT_SECRET`](.env.production.example:55) | **Yes** | — | Secret for JWT token signing |
 | [`JWT_PUBLIC_KEY`](.env.production.example:59) | **Yes** | — | RSA public key for JWT verification |
-| [`DKIM_SELECTOR`](.env.production.example:162) | No | `mailo` | DKIM selector for domain identities |
-| [`DKIM_PRIVATE_KEY`](.env.production.example:163) | **Yes** | — | DKIM private key for signing (SES Easy DKIM for shared; SMTP signing for dedicated) |
+| `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | **Yes** | — | 64 hexadecimal characters used to encrypt generated per-domain private keys |
+| `DKIM_ENABLED` | SMTP only | `true` | Enables local signing when SMTP transport is selected |
 | [`TRACKING_DOMAIN`](.env.production.example:178) | No | — | Custom tracking domain for open/click tracking |
 | [`APP_ENCRYPTION_KEY`](.env.production.example:97) | **Yes** | — | 32-byte base64 key for encrypting sensitive data |
 
@@ -354,8 +344,8 @@ STRIPE_WEBHOOK_SECRET=whsec_****
 # =============================================================================
 # DKIM
 # =============================================================================
-DKIM_SELECTOR=mailo
-DKIM_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+DKIM_PRIVATE_KEY_ENCRYPTION_KEY=<64-hex-characters>
+DKIM_ENABLED=true
 
 # =============================================================================
 # Tracking
@@ -546,96 +536,38 @@ async fn check_warmup_limit(&self, job: &EmailJob) -> ProcessorResult<bool> {
 
 ### C. Customer Adds a Sending Domain
 
-1. Customer adds a domain via the UI or API (`POST /api/v1/domains`).
-2. A `Domain` record is created with `status = 'pending'`.
-3. The system creates an SES **email identity** for the domain:
-
-```rust
-// ses_client.create_email_identity()
-ses_client
-    .create_email_identity()
-    .email_identity(domain.name)
-    .configuration_set_name("apexmail-ses-events")
-    .send()
-    .await?;
-```
-
-4. Easy DKIM is enabled automatically:
-
-```rust
-ses_client
-    .put_email_identity_dkim_signing_attributes()
-    .email_identity(domain.name)
-    .signing_enabled(true)
-    .send()
-    .await?;
-```
-
-5. DNS records are returned to the customer (DKIM CNAME records from AWS).
-6. Once the customer adds the DNS records and the system verifies them, `domain.status` is set to `active`.
-
-> **Important**: SES domain identity creation happens for **all** domains regardless of the customer's plan. For dedicated-IP tenants, the DKIM setup is used for SMTP signing as well. For shared-pool tenants, SES uses Easy DKIM automatically.
+1. Customer creates a domain with `POST /v1/domains` using `{ "name": "example.com" }`.
+2. ApexMail generates a unique DNS-valid selector and 2048-bit RSA key pair,
+    encrypts the private key, and creates a pending domain row.
+3. The customer retrieves `GET /v1/domains/:id/dns-records` and publishes:
+    - `bounce.<domain>` SPF TXT containing `include:amazonses.com`;
+    - `bounce.<domain>` MX priority `10` to the selected regional SES host;
+    - the generated direct DKIM TXT record; and
+    - a DMARC TXT record.
+4. `POST /v1/domains/:id/verify` validates the exact DKIM public key, not just
+    a syntactically valid record.
+5. In SES mode, ApexMail creates or migrates the SES identity to BYODKIM and
+    configures custom MAIL FROM. The domain remains pending until SES reports
+    successful verification, external DKIM signing, and MAIL FROM status.
+6. In SMTP mode, the same DNS and key-pair checks are sufficient; the worker
+    signs locally with that key.
 
 ---
 
 ### D. Customer Sends an Email
 
-1. The API enqueues the email with `status = 'pending'` in the [`email_queue`](services/mail-server/crates/worker-processors/src/email/processor.rs:236) table.
-2. The [`EmailProcessor`](services/mail-server/crates/worker-processors/src/email/processor.rs:155) polls the queue:
-
-```sql
-UPDATE email_queue
-SET status = 'processing', locked_at = NOW(), locked_by = '<worker_id>'
-WHERE id = (
-    SELECT id FROM email_queue
-    WHERE status = 'pending'
-    ORDER BY priority ASC, created_at ASC
-    LIMIT 1
-    FOR UPDATE SKIP LOCKED
-)
-RETURNING *;
-```
-
-3. The processor calls [`TransportRouter::send()`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:171):
-
-```rust
-pub async fn send(
-    &self,
-    tenant_id: Uuid,
-    email: PreparedEmail,
-) -> Result<SendResult, TransportError> {
-    let transport = self.resolve(tenant_id).await?;
-    transport.send(&email).await
-}
-```
-
-4. Inside [`resolve()`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:225):
-
-```rust
-async fn resolve(&self, tenant_id: Uuid) -> Result<&dyn EmailTransport, TransportError> {
-    self.ensure_cache_fresh().await?;
-    let cache = self.cache.read().await;
-
-    match cache.entries.get(&tenant_id) {
-        Some(entry) if entry.has_dedicated_ips => {
-            // Use SmtpTransport with the preferred IP as bind_ip
-            Ok(&*self.smtp)
-        }
-        _ => {
-            // Use SesTransport (shared pool)
-            Ok(&*self.ses)
-        }
-    }
-}
-```
-
-5. **If SES (shared pool)**: [`SesTransport::send()`](services/mail-server/crates/worker-processors/src/email/transport.rs:358) builds raw MIME via `mail-builder`, calls `ses_client.send_email()` with `RawMessage`, and includes `configuration_set_name` for event tracking.
-
-6. **If SMTP (dedicated IP)**: [`SmtpTransport::send()`](services/mail-server/crates/worker-processors/src/email/transport.rs:215) builds the message, signs it with DKIM via `mail-send`, and connects via `SmtpClientBuilder` with the `bind_ip` set to the customer's dedicated Floating IP.
-
-7. Delivery events flow back:
-   - **SES path**: SES publishes to SNS → SNS POSTs to `https://api.apexmail.ee/v1/ses/notifications`
-   - **SMTP path**: The self-hosted MTA logs delivery status; bounce handling via standard SMTP feedback mechanisms
+1. The API accepts a sender only when its domain is owned by the tenant,
+   verified, has complete encrypted DKIM material, and (in SES mode) has
+   observed SES sender readiness.
+2. It persists a queue job with the verified `domain_id`; jobs without a
+   ready domain are not accepted as unsigned fallbacks.
+3. The worker loads current domain state for every job. A revoked, mismatched,
+   or incomplete domain becomes a permanent local rejection and is sent to the
+   dead-letter queue rather than retried as a transport outage.
+4. SES sends raw MIME and SES applies the configured BYODKIM identity
+   signature. SMTP locally validates and applies the matching DKIM signature.
+5. SES event destinations can publish bounce, complaint, delivery, and reject
+   events to the configured SNS webhook.
 
 ---
 

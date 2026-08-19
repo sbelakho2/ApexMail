@@ -13,4 +13,3 @@ Archived frontend endpoint evidence for the Rust-owned UI foundation.
 /v1/analytics/ai/insights
 /api/v1/operator/*
 /api/v1/discovery/run
-/api/v1/campaigns/create

@@ -1,70 +1,33 @@
 //! Subscription management – create, get, update plan, cancel.
 //!
-//! The actual Stripe subscription lifecycle (checkout, webhooks) stays in
-//! the billing integration boundary. This module manages the local DB record
-//! and plan transitions.
+//! The actual Stripe subscription lifecycle (checkout, portal, and verified
+//! webhooks) stays in the billing integration boundary. Public helpers in
+//! this module deliberately cannot create, change, or cancel local records
+//! because doing so would bypass Stripe as the payment authority.
+
+#[cfg(test)]
+use crate::types::UsageSummary;
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::types::UsageSummary;
 use crate::types::{BillingInterval, Subscription, SubscriptionStatus};
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Create a new subscription record.
+/// Direct local subscription creation is disabled.
+///
+/// Verified Stripe webhook handling owns subscription persistence. Retaining
+/// this public helper as a safe failure prevents future callers from creating
+/// an `active` local record without a matching Stripe event.
 pub async fn create_subscription(
-    pool: &PgPool,
-    input: CreateSubscriptionInput,
+    _pool: &PgPool,
+    _input: CreateSubscriptionInput,
 ) -> Result<Subscription, SubscriptionError> {
-    let id = Uuid::new_v4();
-    let now = Utc::now();
-
-    sqlx::query(
-        r#"
-        INSERT INTO subscriptions (
-            id, tenant_id, plan_name, status, billing_interval,
-            current_period_start, current_period_end,
-            stripe_subscription_id, stripe_customer_id,
-            cancel_at_period_end, created_at, updated_at
-        ) VALUES (
-            $1, $2, $3, 'active', $4,
-            $5, $6,
-            $7, $8,
-            false, $9, $9
-        )
-        "#,
-    )
-    .bind(id)
-    .bind(&input.tenant_id)
-    .bind(&input.plan_name)
-    .bind(interval_to_str(input.billing_interval))
-    .bind(input.period_start)
-    .bind(input.period_end)
-    .bind(&input.stripe_subscription_id)
-    .bind(&input.stripe_customer_id)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(SubscriptionError::Db)?;
-
-    Ok(Subscription {
-        id,
-        tenant_id: input.tenant_id,
-        plan_name: input.plan_name,
-        status: SubscriptionStatus::Active,
-        billing_interval: input.billing_interval,
-        current_period_start: input.period_start,
-        current_period_end: input.period_end,
-        stripe_subscription_id: input.stripe_subscription_id,
-        stripe_customer_id: input.stripe_customer_id,
-        cancel_at_period_end: false,
-        created_at: now,
-        updated_at: now,
-    })
+    Err(SubscriptionError::PaymentConfirmationRequired)
 }
 
 /// Get the active subscription for a tenant.
@@ -95,153 +58,24 @@ pub async fn get_subscription(
     row.map(|r| r.into_subscription()).transpose()
 }
 
-/// Change the plan on an existing subscription (upgrade / downgrade).
-/// Also updates the tenant's `plan` column.
+/// Direct subscription changes are deliberately blocked. Stripe is the source
+/// of payment confirmation, and only verified Stripe webhook processing may
+/// update an entitlement-bearing tenant plan.
 pub async fn update_plan(
-    pool: &PgPool,
-    tenant_id: &str,
-    new_plan: &str,
+    _pool: &PgPool,
+    _tenant_id: &str,
+    _new_plan: &str,
 ) -> Result<(), SubscriptionError> {
-    // Verify the plan exists and capture its quota limits.
-    let new_plan_limits: Option<PlanLimitRow> = sqlx::query_as(
-        "SELECT name, email_limit, api_call_limit FROM plans WHERE name = $1 AND is_active = true",
-    )
-    .bind(new_plan)
-    .fetch_optional(pool)
-    .await
-    .map_err(SubscriptionError::Db)?;
-
-    let Some(new_plan_limits) = new_plan_limits else {
-        return Err(SubscriptionError::PlanNotFound(new_plan.to_string()));
-    };
-
-    let current_subscription: Option<ActiveSubscriptionRow> = sqlx::query_as(
-        r#"
-                SELECT status, current_period_start, current_period_end
-        FROM subscriptions
-        WHERE tenant_id = $1
-          AND status IN ('active', 'trialing', 'past_due')
-        ORDER BY created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(SubscriptionError::Db)?;
-
-    let Some(current_subscription) = current_subscription else {
-        return Err(SubscriptionError::NotFound);
-    };
-
-    // Validate the subscription status allows a plan switch (BS-006).
-    // Past-due subscriptions cannot be switched until the outstanding
-    // balance is resolved.
-    match current_subscription.status.as_str() {
-        "active" | "trialing" => { /* allowed */ }
-        "past_due" => {
-            return Err(SubscriptionError::InvalidStatus(
-                "Cannot switch plan: subscription is past due. \
-                 Outstanding payments must be resolved first."
-                    .to_string(),
-            ));
-        }
-        other => {
-            return Err(SubscriptionError::InvalidStatus(format!(
-                "Cannot switch plan: subscription has status '{other}'.",
-            )));
-        }
-    }
-
-    let usage = crate::usage::get_usage(
-        pool,
-        tenant_id,
-        current_subscription.current_period_start,
-        current_subscription.current_period_end,
-    )
-    .await
-    .map_err(SubscriptionError::Usage)?;
-
-    let limit_errors = usage_limit_errors(&usage, &new_plan_limits);
-    if !limit_errors.is_empty() {
-        return Err(SubscriptionError::UsageExceedsPlan {
-            plan_name: new_plan_limits.name,
-            reasons: limit_errors,
-        });
-    }
-
-    let now = Utc::now();
-
-    // Wrap both writes in a transaction for atomicity.
-    let mut tx = pool.begin().await.map_err(SubscriptionError::Db)?;
-
-    // Update only the current visible subscription record.
-    let updated_subscription_id: Option<Uuid> = sqlx::query_scalar(
-        r#"
-        WITH target AS (
-            SELECT id
-            FROM subscriptions
-            WHERE tenant_id = $3
-              AND status IN ('active', 'trialing', 'past_due')
-            ORDER BY created_at DESC
-            LIMIT 1
-        )
-        UPDATE subscriptions s
-        SET plan_name = $1, updated_at = $2
-        FROM target
-        WHERE s.id = target.id
-        RETURNING s.id
-        "#,
-    )
-    .bind(new_plan)
-    .bind(now)
-    .bind(tenant_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(SubscriptionError::Db)?;
-
-    let updated_subscription_id = updated_subscription_id.ok_or(SubscriptionError::NotFound)?;
-
-    // Update tenant plan column.
-    sqlx::query("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3")
-        .bind(new_plan)
-        .bind(now)
-        .bind(tenant_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(SubscriptionError::Db)?;
-
-    let _ = updated_subscription_id;
-
-    tx.commit().await.map_err(SubscriptionError::Db)?;
-
-    Ok(())
+    Err(SubscriptionError::PaymentConfirmationRequired)
 }
 
-/// Cancel the subscription (at period end).
-pub async fn cancel_subscription(pool: &PgPool, tenant_id: &str) -> Result<(), SubscriptionError> {
-    let now = Utc::now();
-
-    let affected = sqlx::query(
-        r#"
-        UPDATE subscriptions
-        SET cancel_at_period_end = true, updated_at = $1
-        WHERE tenant_id = $2
-          AND status IN ('active', 'trialing')
-        "#,
-    )
-    .bind(now)
-    .bind(tenant_id)
-    .execute(pool)
-    .await
-    .map_err(SubscriptionError::Db)?
-    .rows_affected();
-
-    if affected == 0 {
-        return Err(SubscriptionError::NotFound);
-    }
-
-    Ok(())
+/// Direct local cancellation is disabled; use Stripe’s billing portal and
+/// reconcile the verified webhook event instead.
+pub async fn cancel_subscription(
+    _pool: &PgPool,
+    _tenant_id: &str,
+) -> Result<(), SubscriptionError> {
+    Err(SubscriptionError::PaymentConfirmationRequired)
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +96,7 @@ pub struct CreateSubscriptionInput {
 // Internal
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn interval_to_str(i: BillingInterval) -> &'static str {
     match i {
         BillingInterval::Monthly => "monthly",
@@ -288,6 +123,7 @@ fn parse_interval(s: &str) -> BillingInterval {
     }
 }
 
+#[cfg(test)]
 fn usage_limit_errors(usage: &UsageSummary, limits: &PlanLimitRow) -> Vec<String> {
     let mut errors = Vec::new();
 
@@ -324,18 +160,12 @@ struct SubRow {
     updated_at: DateTime<Utc>,
 }
 
+#[cfg(test)]
 #[derive(sqlx::FromRow)]
 struct PlanLimitRow {
     name: String,
     email_limit: i64,
     api_call_limit: i64,
-}
-
-#[derive(sqlx::FromRow)]
-struct ActiveSubscriptionRow {
-    status: String,
-    current_period_start: DateTime<Utc>,
-    current_period_end: DateTime<Utc>,
 }
 
 impl SubRow {
@@ -376,6 +206,8 @@ pub enum SubscriptionError {
         plan_name: String,
         reasons: Vec<String>,
     },
+    #[error("direct plan changes require verified payment confirmation")]
+    PaymentConfirmationRequired,
     #[error("invalid subscription status: {0}")]
     InvalidStatus(String),
 }
@@ -388,6 +220,7 @@ pub enum SubscriptionError {
 mod tests {
     use super::*;
     use serde_json::json;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn parse_status_variants() {
@@ -480,6 +313,47 @@ mod tests {
     fn subscription_error_display() {
         let err = SubscriptionError::PlanNotFound("gold".into());
         assert!(err.to_string().contains("gold"));
+    }
+
+    #[test]
+    fn direct_plan_update_error_requires_payment_confirmation() {
+        assert_eq!(
+            SubscriptionError::PaymentConfirmationRequired.to_string(),
+            "direct plan changes require verified payment confirmation"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_subscription_mutations_never_touch_the_database() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("a lazy pool should not connect during construction");
+        let now = Utc::now();
+
+        assert!(matches!(
+            create_subscription(
+                &pool,
+                CreateSubscriptionInput {
+                    tenant_id: "tenant_123".into(),
+                    plan_name: "pro".into(),
+                    billing_interval: BillingInterval::Monthly,
+                    period_start: now,
+                    period_end: now,
+                    stripe_subscription_id: Some("sub_123".into()),
+                    stripe_customer_id: Some("cus_123".into()),
+                },
+            )
+            .await,
+            Err(SubscriptionError::PaymentConfirmationRequired)
+        ));
+        assert!(matches!(
+            update_plan(&pool, "tenant_123", "growth").await,
+            Err(SubscriptionError::PaymentConfirmationRequired)
+        ));
+        assert!(matches!(
+            cancel_subscription(&pool, "tenant_123").await,
+            Err(SubscriptionError::PaymentConfirmationRequired)
+        ));
     }
 
     #[test]

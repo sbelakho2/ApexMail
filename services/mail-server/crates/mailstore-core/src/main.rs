@@ -7,6 +7,7 @@ use clap::Parser;
 use observability_service::otlp_exporter::{
     init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
 };
+use mail_proto::{InternalServiceToken, MailstoreServiceServer};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,7 +15,6 @@ use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use mail_proto::MailstoreServiceServer;
 use mailstore_core::{MailstoreServiceImpl, MessageStorage};
 
 #[derive(Parser)]
@@ -45,24 +45,32 @@ struct Cli {
 ///
 /// When `INTERNAL_SERVICE_TOKEN` is set, every request must present
 /// `authorization: Bearer <INTERNAL_SERVICE_TOKEN>` or it is rejected with
-/// UNAUTHENTICATED. When the variable is unset the server fails open (local
-/// development), but a startup warning is emitted for non-loopback binds.
+/// UNAUTHENTICATED. The token may only be omitted for loopback local
+/// development; startup rejects an externally reachable tokenless server.
 #[derive(Clone)]
 struct SharedTokenInterceptor {
-    expected: Arc<str>,
+    expected: Option<InternalServiceToken>,
 }
 
 impl SharedTokenInterceptor {
-    fn from_env() -> Self {
-        Self {
-            expected: std::env::var("INTERNAL_SERVICE_TOKEN")
-                .unwrap_or_default()
-                .into(),
-        }
+    fn from_env() -> Result<Self> {
+        Ok(Self {
+            expected: InternalServiceToken::from_env().map_err(|error| anyhow!(error))?,
+        })
     }
 
     fn is_enabled(&self) -> bool {
-        !self.expected.is_empty()
+        self.expected.is_some()
+    }
+
+    #[cfg(test)]
+    fn with_token(token: &str) -> Self {
+        Self {
+            expected: Some(
+                InternalServiceToken::new(token.to_owned())
+                    .expect("test token must satisfy production validation"),
+            ),
+        }
     }
 }
 
@@ -79,7 +87,10 @@ impl tonic::service::Interceptor for SharedTokenInterceptor {
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim().strip_prefix("Bearer "))
-            .is_some_and(|provided| constant_time_eq(provided.as_bytes(), self.expected.as_bytes()));
+            .zip(self.expected.as_ref())
+            .is_some_and(|(provided, expected)| {
+                constant_time_eq(provided.as_bytes(), expected.as_str().as_bytes())
+            });
         if authorized {
             Ok(request)
         } else {
@@ -100,6 +111,21 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .zip(b)
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+/// Only loopback binds may opt out of internal service authentication. Docker
+/// bridge and wildcard addresses are network-reachable and must always carry
+/// a validated token.
+fn validate_bind_security(
+    address: std::net::SocketAddr,
+    interceptor: &SharedTokenInterceptor,
+) -> Result<()> {
+    if !address.ip().is_loopback() && !interceptor.is_enabled() {
+        bail!(
+            "INTERNAL_SERVICE_TOKEN is required when MAILSTORE_BIND_ADDR ({address}) is not loopback"
+        );
+    }
+    Ok(())
 }
 
 fn init_tracing(log_level: &str) -> Option<TracingGuard> {
@@ -130,8 +156,12 @@ async fn main() -> Result<()> {
 
     let _guard = init_tracing(&cli.log_level);
 
+    let addr: std::net::SocketAddr = cli.listen.parse()?;
+    let interceptor = SharedTokenInterceptor::from_env()?;
+    validate_bind_security(addr, &interceptor)?;
+
     info!("Starting Mailstore Service");
-    info!("Listen address: {}", cli.listen);
+    info!("Listen address: {addr}");
 
     // Connect to database
     let pool = sqlx::PgPool::connect(&cli.database_url).await?;
@@ -151,18 +181,10 @@ async fn main() -> Result<()> {
     let service = MailstoreServiceImpl::new(storage);
 
     // Start gRPC server
-    let addr: std::net::SocketAddr = cli.listen.parse()?;
     info!("Starting gRPC server on {}", addr);
 
-    let interceptor = SharedTokenInterceptor::from_env();
     if interceptor.is_enabled() {
         info!("gRPC shared-token authentication enabled (INTERNAL_SERVICE_TOKEN)");
-    } else if !addr.ip().is_loopback() {
-        tracing::warn!(
-            "gRPC server listening on {} without INTERNAL_SERVICE_TOKEN; requests are unauthenticated. \
-             Set INTERNAL_SERVICE_TOKEN to require a shared bearer token.",
-            addr
-        );
     }
 
     // Message limits raised to 64 MiB so large messages (e.g. 5 MB APPENDs or
@@ -227,6 +249,7 @@ fn trim_trailing_line_endings(bytes: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tonic::service::Interceptor;
 
     #[test]
     fn constant_time_eq_compares_bytes() {
@@ -235,6 +258,42 @@ mod tests {
         assert!(!constant_time_eq(b"token", b"token2"));
         assert!(!constant_time_eq(b"", b"a"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn shared_token_interceptor_accepts_only_the_configured_bearer_token() {
+        let token = "a".repeat(mail_proto::MIN_INTERNAL_SERVICE_TOKEN_LENGTH);
+        let mut interceptor = SharedTokenInterceptor::with_token(&token);
+
+        let mut authorized_request = tonic::Request::new(());
+        authorized_request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        assert!(interceptor.call(authorized_request).is_ok());
+
+        assert!(interceptor.call(tonic::Request::new(())).is_err());
+
+        let mut invalid_request = tonic::Request::new(());
+        invalid_request
+            .metadata_mut()
+            .insert("authorization", "Bearer wrong-token".parse().unwrap());
+        assert!(interceptor.call(invalid_request).is_err());
+    }
+
+    #[test]
+    fn tokenless_mailstore_is_limited_to_loopback() {
+        let no_token = SharedTokenInterceptor { expected: None };
+        assert!(validate_bind_security("127.0.0.1:50051".parse().unwrap(), &no_token).is_ok());
+        assert!(validate_bind_security("[::1]:50051".parse().unwrap(), &no_token).is_ok());
+        assert!(validate_bind_security("0.0.0.0:50051".parse().unwrap(), &no_token).is_err());
+        assert!(validate_bind_security("10.0.0.7:50051".parse().unwrap(), &no_token).is_err());
+    }
+
+    #[test]
+    fn configured_token_allows_non_loopback_mailstore_bind() {
+        let token = "a".repeat(mail_proto::MIN_INTERNAL_SERVICE_TOKEN_LENGTH);
+        let interceptor = SharedTokenInterceptor::with_token(&token);
+        assert!(validate_bind_security("0.0.0.0:50051".parse().unwrap(), &interceptor).is_ok());
     }
 
     #[test]

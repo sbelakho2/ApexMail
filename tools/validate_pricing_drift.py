@@ -1,267 +1,661 @@
 #!/usr/bin/env python3
-"""Validate pricing, limits, billing gates, and training facts against docs/pricing.md."""
+"""Validate public pricing artifacts against the executable billing catalog.
+
+The runtime plan seeds are the primary catalog. This checker parses the Rust
+seed records structurally and compares their values with the public JSON,
+pricing reference, marketing source, lifecycle gates, and built Zola output.
+It intentionally does not treat a marketing document or a currency-substitution
+rule as authoritative.
+"""
 
 from __future__ import annotations
 
+import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS_PRICING = ROOT / "docs" / "pricing.md"
-MARKETING_PLANS = ROOT / "apps" / "marketing-zola" / "templates" / "partials" / "pricing" / "plans.html"
-MARKETING_CALCULATOR = ROOT / "apps" / "marketing-zola" / "templates" / "partials" / "generated" / "pricing-calculator-island.html"
-MARKETING_FAQ = ROOT / "apps" / "marketing-zola" / "templates" / "partials" / "generated" / "pricing-faq-island.html"
-BILLING_PLANS = ROOT / "services" / "mail-server" / "crates" / "billing-service" / "src" / "plans.rs"
-BILLING_LIFECYCLE = ROOT / "docs" / "architecture" / "billing-lifecycle.md"
-STRIPE_CONTRACT = ROOT / "docs" / "tool-contracts" / "stripe.md"
-AI_TRAINING_FILES = [
-    ROOT / "apps" / "ai" / "training" / "prompts_v2.py",
-    ROOT / "apps" / "ai" / "training" / "generate_gap_training.py",
-    ROOT / "apps" / "ai" / "training" / "generate_recovered_training.py",
-    ROOT / "apps" / "ai" / "training" / "test_agent.py",
-    ROOT / "data" / "system_prompts.json",
-    ROOT / "data" / "train_agent.jsonl",
-    ROOT / "data" / "train.jsonl",
-    ROOT / "data" / "val.jsonl",
-    ROOT / "data" / "test.jsonl",
-    ROOT / "data" / "golden_qa.jsonl",
-    ROOT / "data" / "recovered_training.jsonl",
-]
+BILLING_PLANS = ROOT / "services/mail-server/crates/billing-service/src/plans.rs"
+AUTH_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/auth.rs"
+API_BILLING_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/billing.rs"
+UI_ROUTER = ROOT / "services/mail-server/crates/ui-foundation/src/axum_router.rs"
+UI_VIEWS = ROOT / "services/mail-server/crates/ui-foundation/src/leptos_views.rs"
+STRIPE_WEBHOOKS = ROOT / "services/mail-server/crates/billing-service/src/stripe_webhooks.rs"
+ROOT_CANONICAL_RUST = ROOT / "compliance/src/legal_entity.rs"
+ROOT_CANONICAL_JSON = ROOT / "apps/marketing-zola/data/canonical.json"
+MARKETING_PRICING_JSON = ROOT / "apps/marketing-zola/data/pricing.json"
+MARKETING_PLANS = ROOT / "apps/marketing-zola/templates/partials/pricing/plans.html"
+MARKETING_CALCULATOR = ROOT / "apps/marketing-zola/templates/partials/pricing/calculator.html"
+MARKETING_CALCULATOR_ISLAND = (
+    ROOT / "apps/marketing-zola/templates/partials/generated/pricing-calculator-island.html"
+)
+MARKETING_FAQ = ROOT / "apps/marketing-zola/templates/partials/generated/pricing-faq-island.html"
+DOCS_PRICING = ROOT / "docs/pricing.md"
+BILLING_LIFECYCLE = ROOT / "docs/architecture/billing-lifecycle.md"
+STRIPE_CONTRACT = ROOT / "docs/tool-contracts/stripe.md"
+PRICING_AUTHORITY = ROOT / "docs/pricing-authority.md"
+GENERATED_MARKETING = ROOT / "apps/marketing-zola/public"
 
-EXPECTED_PLANS = ["Free", "Starter", "Pro", "Growth", "Scale", "Enterprise"]
-EXPECTED_DEDICATED_IP_COUNTS = {"pro": 0, "growth": 1, "scale": 3, "enterprise": 10}
-CANONICAL_LIFECYCLE_ROW_PREFIXES = {
-    "Free": "| Free | `0` | `0` | `30,000` | `300,000` |",
-    "Starter": "| Starter | `2,500` cents | `25,000` cents | `50,000` | `500,000` |",
-    "Pro": "| Pro | `6,500` cents | `65,000` cents | `150,000` | `2,000,000` |",
-    "Growth": "| Growth | `15,000` cents | `150,000` cents | `500,000` | `5,000,000` |",
-    "Scale": "| Scale | `35,000` cents | `350,000` cents | `2,000,000` | `20,000,000` |",
-    "Enterprise": "| Enterprise | `300,000` cents | `3,000,000` cents | `5,000,000` | unlimited (`-1`) |",
+RUNTIME_PLAN_IDS = [
+    "free",
+    "starter",
+    "pro",
+    "growth",
+    "scale",
+    "enterprise",
+    "payg",
+]
+MARKETING_PLAN_IDS = RUNTIME_PLAN_IDS[:-1]
+PUBLIC_SIGNUP_PLAN_IDS = ["free", "starter", "pro", "growth", "scale"]
+SELF_SERVE_CHECKOUT_PLAN_IDS = ["starter", "pro", "growth", "scale"]
+
+
+@dataclass(frozen=True)
+class PlanExpectation:
+    display_name: str
+    monthly_cents: int
+    yearly_cents: int
+    email_limit: int
+    api_call_limit: int
+    domains: int
+    team_members: int
+    retention_days: int
+    dedicated_ips: int
+    support: str
+    feature_flags: dict[str, bool]
+
+
+EXPECTED_CATALOG: dict[str, PlanExpectation] = {
+    "free": PlanExpectation(
+        "Free", 0, 0, 30_000, 300_000, 1, 1, 7, 0, "Community",
+        {"api_access": True, "webhooks_enabled": False, "dedicated_ip": False},
+    ),
+    "starter": PlanExpectation(
+        "Starter", 2_500, 25_000, 50_000, 500_000, 5, 5, 30, 0, "Email",
+        {
+            "api_access": True,
+            "webhooks_enabled": True,
+            "advanced_analytics": True,
+            "data_export": True,
+            "custom_templates": True,
+        },
+    ),
+    "pro": PlanExpectation(
+        "Pro", 6_500, 65_000, 150_000, 2_000_000, 25, 10, 60, 0, "Email",
+        {
+            "dedicated_ip": True,
+            "custom_tracking_domain": True,
+            "send_time_optimization": True,
+            "priority_onboarding": True,
+        },
+    ),
+    "growth": PlanExpectation(
+        "Growth", 15_000, 150_000, 500_000, 5_000_000, 100, 25, 90, 1, "Email",
+        {
+            "dedicated_ip": True,
+            "audit_logs": True,
+            "ab_testing": True,
+            "time_travel_debugging": True,
+            "custom_retention": True,
+        },
+    ),
+    "scale": PlanExpectation(
+        "Scale", 35_000, 350_000, 2_000_000, 20_000_000, -1, 50, 365, 3, "Priority",
+        {
+            "dedicated_ip": True,
+            "sso_enabled": True,
+            "inbound_email": True,
+            "subaccounts": True,
+            "sla_guarantee": True,
+        },
+    ),
+    "enterprise": PlanExpectation(
+        "Enterprise", 300_000, 3_000_000, 5_000_000, -1, -1, -1, 730, 10, "Dedicated",
+        {
+            "dedicated_ip": True,
+            "sso_enabled": True,
+            "white_label": True,
+            "private_cloud": True,
+            "byoip": True,
+            "hipaa_compliance": False,
+            "soc2_compliance": False,
+        },
+    ),
+    "payg": PlanExpectation(
+        "Pay As You Go", 0, 0, -1, -1, 5, 5, 30, 0, "Email",
+        {
+            "api_access": True,
+            "webhooks_enabled": True,
+            "advanced_analytics": True,
+            "data_export": True,
+            "custom_templates": True,
+        },
+    ),
 }
 
-PLAN_ROW = re.compile(r"^\|\s*(Free|Starter|Pro|Growth|Scale|Enterprise)\s*\|\s*([^|]+?)\s*\|")
-PLAN_FULL_ROW = re.compile(
-    r"^\|\s*(Free|Starter|Pro|Growth|Scale|Enterprise)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|"
-)
-DEDICATED_IP_ROW = re.compile(r"^\|\s*Dedicated IP add-on\s*\|\s*(\$\d+/mo)\s*\|")
-BILLING_PLAN_BLOCK = re.compile(r"PlanSeed\s*\{(?P<body>.*?)\n\s*\}", re.DOTALL)
-BILLING_FIELD = re.compile(
-    r"(?m)^\s*(?P<field>name|price_monthly|price_yearly):\s*(?P<value>\"[^\"]+\"|[\d_]+)"
-)
-DEDICATED_COUNT_FIELD = re.compile(r"dedicated_ip_count:\s*(?P<count>\d+)")
 
-AI_FORBIDDEN_PATTERNS = [
-    (re.compile(r"Enterprise[^\n]{0,160}\$8,000", re.IGNORECASE), "stale Enterprise annual price $8,000"),
-    (re.compile(r"Enterprise[^\n]{0,160}\$12,990", re.IGNORECASE), "stale Enterprise annual price $12,990"),
-    (re.compile(r"Enterprise[^\n]{0,160}\$15,588", re.IGNORECASE), "stale Enterprise annual monthly-math price $15,588"),
-    (re.compile(r"Scale[^\n]{0,180}phone support", re.IGNORECASE), "Scale phone support gate"),
-    (re.compile(r"plus phone support", re.IGNORECASE), "phone support as Scale feature"),
-    (re.compile(r"phone support \+ priority email", re.IGNORECASE), "phone support support-policy drift"),
-    (re.compile(r"We don't offer a self-service annual billing option", re.IGNORECASE), "stale annual-billing denial"),
-    (re.compile(r"Free\s*[:|]\s*50,000"), "stale Free API limit"),
-    (re.compile(r"Scale:\s*5,000,000"), "stale Scale API limit"),
-    (re.compile(r"Enterprise\s*[:|]\s*20,000,000", re.IGNORECASE), "stale Enterprise API limit"),
-    (re.compile(r"Enterprise\s*[:|]\s*2,000,000", re.IGNORECASE), "stale Enterprise email limit"),
-    (re.compile(r"(?:have|with) 20,000 emails remaining"), "stale Scale remaining-email math"),
-    (re.compile(r"Pro also includes:\\n- A/B testing"), "stale Pro A/B feature gate"),
-    (re.compile(r"Pro[^\n]{0,180}includes A/B testing", re.IGNORECASE), "stale Pro A/B feature gate"),
-    (re.compile(r"Pro[^\n]{0,180}A/B testing, send-time optimization", re.IGNORECASE), "stale Pro A/B feature gate"),
-]
+@dataclass(frozen=True)
+class ParsedPlan:
+    name: str
+    display_name: str
+    monthly_cents: int
+    yearly_cents: int
+    email_limit: int
+    api_call_limit: int
+    domains: int
+    team_members: int
+    retention_days: int
+    dedicated_ips: int
+    support: str
+    feature_flags: dict[str, bool]
 
 
-def extract_plan_prices(markdown: str) -> dict[str, str]:
-    in_new_pricing = False
-    prices: dict[str, str] = {}
-    for line in markdown.splitlines():
-        if line.startswith("## New ApexMail Pricing"):
-            in_new_pricing = True
+def read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise RuntimeError(f"cannot read {path.relative_to(ROOT)}: {error}") from error
+
+
+def extract_balanced_block(text: str, opening_brace: int) -> str:
+    """Return a balanced Rust brace block, including the opening/closing braces."""
+    if opening_brace < 0 or text[opening_brace] != "{":
+        raise ValueError("opening brace not found")
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(opening_brace, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
             continue
-        if in_new_pricing and line.startswith("## "):
-            break
-        if not in_new_pricing:
-            continue
-        match = PLAN_ROW.match(line)
-        if match:
-            plan, price = match.groups()
-            prices[plan] = price.strip()
-    return prices
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[opening_brace : index + 1]
+    raise ValueError("unclosed brace block")
 
 
-def extract_plan_billing(markdown: str) -> dict[str, tuple[int, int]]:
-    in_new_pricing = False
-    prices: dict[str, tuple[int, int]] = {}
-    for line in markdown.splitlines():
-        if line.startswith("## New ApexMail Pricing"):
-            in_new_pricing = True
-            continue
-        if in_new_pricing and line.startswith("## "):
-            break
-        if not in_new_pricing:
-            continue
-        match = PLAN_FULL_ROW.match(line)
-        if not match:
-            continue
-        plan, monthly, annual = match.groups()
-        monthly_cents = int(monthly.split()[0].replace("$", "").replace(",", "")) * 100
-        annual_cents = int(annual.split()[0].replace("$", "").replace(",", "").replace("/yr", "")) * 100
-        prices[plan.lower()] = (monthly_cents, annual_cents)
-    return prices
+def parse_string_field(block: str, field: str) -> str | None:
+    match = re.search(rf"(?m)^\s*{re.escape(field)}:\s*\"([^\"]+)\"\s*,", block)
+    return match.group(1) if match else None
 
 
-def extract_rust_plan_billing(text: str) -> dict[str, tuple[int, int]]:
-    plans: dict[str, tuple[int, int]] = {}
-    for block in BILLING_PLAN_BLOCK.finditer(text):
-        values = {
-            field_match.group("field"): field_match.group("value")
-            for field_match in BILLING_FIELD.finditer(block.group("body"))
+def parse_int_field(block: str, field: str, default: int | None = None) -> int | None:
+    match = re.search(rf"(?m)^\s*{re.escape(field)}:\s*(-?\d[\d_]*)\s*,", block)
+    if not match:
+        return default
+    return int(match.group(1).replace("_", ""))
+
+
+def parse_bool_field(block: str, field: str) -> bool:
+    match = re.search(rf"(?m)^\s*{re.escape(field)}:\s*(true|false)\s*,", block)
+    return match.group(1) == "true" if match else False
+
+
+def parse_support_level(feature_block: str) -> str:
+    match = re.search(r"support_level:\s*SupportLevel::(\w+)", feature_block)
+    if not match:
+        raise ValueError("missing support_level in PlanFeatures")
+    return match.group(1)
+
+
+def extract_runtime_catalog(source: str) -> dict[str, ParsedPlan]:
+    plans: dict[str, ParsedPlan] = {}
+    # Match initializer literals only. A substring search also matches function
+    # signatures such as `fn free_plan_seed() -> PlanSeed {`, causing the
+    # function body and its nested initializer to be parsed twice.
+    for match in re.finditer(r"(?m)^\s*PlanSeed\s*\{", source):
+        marker = match.start()
+        brace = source.find("{", marker)
+        block = extract_balanced_block(source, brace)
+        name = parse_string_field(block, "name")
+        if name is None:
+            continue  # The PlanSeed struct declaration, not an instance.
+        display_name = parse_string_field(block, "display_name")
+        if display_name is None:
+            raise ValueError(f"missing display_name for {name}")
+        feature_marker = block.find("features: PlanFeatures {")
+        if feature_marker < 0:
+            raise ValueError(f"missing PlanFeatures for {name}")
+        feature_block = extract_balanced_block(block, block.find("{", feature_marker))
+        numeric_values = {
+            key: parse_int_field(block, key)
+            for key in ("price_monthly", "price_yearly", "email_limit", "api_call_limit")
         }
-        if {"name", "price_monthly", "price_yearly"}.issubset(values):
-            name = values["name"].strip('"')
-            plans[name] = (
-                int(values["price_monthly"].replace("_", "")),
-                int(values["price_yearly"].replace("_", "")),
-            )
+        if any(value is None for value in numeric_values.values()):
+            raise ValueError(f"missing numeric plan value for {name}")
+        plan = ParsedPlan(
+            name=name,
+            display_name=display_name,
+            monthly_cents=numeric_values["price_monthly"],  # type: ignore[arg-type]
+            yearly_cents=numeric_values["price_yearly"],  # type: ignore[arg-type]
+            email_limit=numeric_values["email_limit"],  # type: ignore[arg-type]
+            api_call_limit=numeric_values["api_call_limit"],  # type: ignore[arg-type]
+            domains=parse_int_field(feature_block, "max_sending_domains", 0) or 0,
+            team_members=parse_int_field(feature_block, "max_team_members", 0) or 0,
+            retention_days=parse_int_field(feature_block, "max_retention_days", 0) or 0,
+            dedicated_ips=parse_int_field(feature_block, "dedicated_ip_count", 0) or 0,
+            support=parse_support_level(feature_block),
+            feature_flags={
+                field: parse_bool_field(feature_block, field)
+                for field in (
+                    "api_access",
+                    "webhooks_enabled",
+                    "advanced_analytics",
+                    "data_export",
+                    "custom_templates",
+                    "dedicated_ip",
+                    "custom_tracking_domain",
+                    "send_time_optimization",
+                    "priority_onboarding",
+                    "audit_logs",
+                    "ab_testing",
+                    "time_travel_debugging",
+                    "custom_retention",
+                    "sso_enabled",
+                    "inbound_email",
+                    "subaccounts",
+                    "sla_guarantee",
+                    "white_label",
+                    "private_cloud",
+                    "byoip",
+                    "hipaa_compliance",
+                    "soc2_compliance",
+                )
+            },
+        )
+        if name in plans:
+            raise ValueError(f"duplicate runtime PlanSeed {name}")
+        plans[name] = plan
     return plans
 
 
-def extract_rust_dedicated_ip_counts(text: str) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for block in BILLING_PLAN_BLOCK.finditer(text):
-        name_match = re.search(r'name:\s*"(pro|growth|scale|enterprise)"', block.group("body"))
-        count_match = DEDICATED_COUNT_FIELD.search(block.group("body"))
-        if name_match and count_match:
-            counts[name_match.group(1)] = int(count_match.group("count"))
-    return counts
+def extract_string_array(source: str, constant: str) -> list[str] | None:
+    match = re.search(
+        rf"{re.escape(constant)}[^=]*=\s*&?\[([^\]]*)\]", source, re.DOTALL
+    )
+    if not match:
+        return None
+    return re.findall(r'"([^\"]+)"', match.group(1))
 
 
-def extract_dedicated_ip_price(markdown: str) -> str | None:
-    for line in markdown.splitlines():
-        match = DEDICATED_IP_ROW.match(line)
-        if match:
-            return match.group(1)
-    return None
+def check(condition: bool, message: str, errors: list[str]) -> None:
+    if not condition:
+        errors.append(message)
 
 
-def require_contains(errors: list[str], path: Path, needle: str) -> None:
-    text = path.read_text()
-    if needle not in text:
-        errors.append(f"{path.relative_to(ROOT)} is missing {needle!r}")
+def check_contains(path: Path, needle: str, errors: list[str]) -> None:
+    check(needle in read(path), f"{path.relative_to(ROOT)} is missing {needle!r}", errors)
 
 
-def _currency_variants(needle: str) -> list[str]:
-    """Return currency-symbol variants of a price token.
-
-    The canonical pricing source (`docs/pricing.md`) lists prices in USD
-    (e.g. `$25`), while the marketing-zola surface localizes to EUR
-    (`€25`). The numeric magnitudes are intentionally identical, so for
-    drift checks against marketing files we accept either currency
-    prefix.
-    """
-    variants = {needle}
-    if needle.startswith("$"):
-        variants.add("€" + needle[1:])
-    elif needle.startswith("€"):
-        variants.add("$" + needle[1:])
-    return list(variants)
+def check_absent(path: Path, needle: str, errors: list[str]) -> None:
+    check(needle not in read(path), f"{path.relative_to(ROOT)} still contains {needle!r}", errors)
 
 
-def require_contains_currency_agnostic(
-    errors: list[str], path: Path, needle: str
-) -> None:
-    text = path.read_text()
-    if not any(v in text for v in _currency_variants(needle)):
-        errors.append(f"{path.relative_to(ROOT)} is missing {needle!r}")
+def validate_runtime_catalog(errors: list[str]) -> dict[str, ParsedPlan]:
+    try:
+        catalog = extract_runtime_catalog(read(BILLING_PLANS))
+    except (ValueError, RuntimeError) as error:
+        errors.append(f"cannot parse runtime billing catalog: {error}")
+        return {}
 
-
-def require_not_contains(errors: list[str], path: Path, needle: str) -> None:
-    text = path.read_text()
-    if needle in text:
-        errors.append(f"{path.relative_to(ROOT)} still contains stale value {needle!r}")
-
-
-def validate_billing_lifecycle(errors: list[str]) -> None:
-    lifecycle = BILLING_LIFECYCLE.read_text()
-    for plan, expected_row_prefix in CANONICAL_LIFECYCLE_ROW_PREFIXES.items():
-        if expected_row_prefix not in lifecycle:
-            errors.append(f"docs/architecture/billing-lifecycle.md has stale catalog row for {plan}")
-    require_contains(errors, BILLING_LIFECYCLE, "live `plans` table does not persist Stripe price columns")
-
-
-def validate_ai_training(errors: list[str]) -> None:
-    for path in AI_TRAINING_FILES:
-        if not path.exists():
-            errors.append(f"{path.relative_to(ROOT)} is missing")
+    check(
+        list(catalog) == RUNTIME_PLAN_IDS,
+        f"runtime plan IDs drift: expected {RUNTIME_PLAN_IDS}, got {list(catalog)}",
+        errors,
+    )
+    for plan_id, expected in EXPECTED_CATALOG.items():
+        actual = catalog.get(plan_id)
+        if actual is None:
             continue
-        text = path.read_text()
-        for pattern, description in AI_FORBIDDEN_PATTERNS:
-            if pattern.search(text):
-                errors.append(f"{path.relative_to(ROOT)} contains {description}")
+        fields = (
+            ("display_name", actual.display_name, expected.display_name),
+            ("price_monthly", actual.monthly_cents, expected.monthly_cents),
+            ("price_yearly", actual.yearly_cents, expected.yearly_cents),
+            ("email_limit", actual.email_limit, expected.email_limit),
+            ("api_call_limit", actual.api_call_limit, expected.api_call_limit),
+            ("max_sending_domains", actual.domains, expected.domains),
+            ("max_team_members", actual.team_members, expected.team_members),
+            ("max_retention_days", actual.retention_days, expected.retention_days),
+            ("dedicated_ip_count", actual.dedicated_ips, expected.dedicated_ips),
+            ("support_level", actual.support, expected.support),
+        )
+        for field, value, expected_value in fields:
+            check(
+                value == expected_value,
+                f"runtime {plan_id}.{field} drift: expected {expected_value!r}, got {value!r}",
+                errors,
+            )
+        for feature, expected_value in expected.feature_flags.items():
+            check(
+                actual.feature_flags[feature] == expected_value,
+                f"runtime {plan_id}.{feature} drift: expected {expected_value}, got {actual.feature_flags[feature]}",
+                errors,
+            )
+    return catalog
+
+
+def display_money(cents: int, annual: bool = False) -> str:
+    value = cents / 100
+    formatted = f"{value:,.0f}" if value == int(value) else f"{value:,.2f}"
+    return f"${formatted}{'/year' if annual else ''}"
+
+
+def display_limit(value: int) -> str:
+    return "Unlimited" if value < 0 else f"{value:,}"
+
+
+def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
+    text = read(DOCS_PRICING)
+    check_contains(DOCS_PRICING, "the active `plans` records, and verified Stripe webhooks", errors)
+    check_contains(DOCS_PRICING, "HIPAA availability and SOC 2 certification are **not currently offered**", errors)
+    check_contains(DOCS_PRICING, "Only `active` or `trialing`", errors)
+    for plan_id in MARKETING_PLAN_IDS:
+        plan = catalog.get(plan_id)
+        if plan is None:
+            continue
+        expected_row = "| `{id}` | {name} | {monthly} | {yearly} | {emails} | {api} |".format(
+            id=plan_id,
+            name=plan.display_name,
+            monthly=display_money(plan.monthly_cents),
+            yearly=("$0" if plan.yearly_cents == 0 else display_money(plan.yearly_cents, annual=True)),
+            emails=display_limit(plan.email_limit),
+            api=display_limit(plan.api_call_limit),
+        )
+        check(
+            expected_row in text,
+            f"docs/pricing.md catalog row drift for {plan_id}: missing {expected_row!r}",
+            errors,
+        )
+    for stale in ("Developer", "Business", "€", "10% on every self-serve"):
+        check(stale not in text, f"docs/pricing.md contains stale pricing token {stale!r}", errors)
+
+
+def validate_marketing_data(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
+    try:
+        data: dict[str, Any] = json.loads(read(MARKETING_PRICING_JSON))
+    except json.JSONDecodeError as error:
+        errors.append(f"apps/marketing-zola/data/pricing.json is invalid JSON: {error}")
+        return
+
+    check(data.get("currency_symbol") == "$", "marketing pricing data must use USD '$'", errors)
+    check(data.get("currency_code") == "USD", "marketing pricing data must declare USD", errors)
+    check(data.get("ip_cost") == 30, "marketing dedicated-IP add-on must be $30/month", errors)
+    plans = data.get("plans")
+    if not isinstance(plans, list):
+        errors.append("marketing pricing data has no plans array")
+        return
+    by_id = {plan.get("id"): plan for plan in plans if isinstance(plan, dict)}
+    check(
+        [plan.get("id") for plan in plans if isinstance(plan, dict)] == MARKETING_PLAN_IDS,
+        f"marketing pricing plan IDs drift: expected {MARKETING_PLAN_IDS}",
+        errors,
+    )
+    for plan_id in MARKETING_PLAN_IDS:
+        runtime = catalog.get(plan_id)
+        data_plan = by_id.get(plan_id)
+        if runtime is None or not isinstance(data_plan, dict):
+            continue
+        expected = EXPECTED_CATALOG[plan_id]
+        fields = (
+            ("name", data_plan.get("name"), runtime.display_name),
+            ("monthly_price", data_plan.get("monthly_price"), runtime.monthly_cents / 100),
+            ("included_volume", data_plan.get("included_volume"), runtime.email_limit),
+            ("included_domains", data_plan.get("included_domains"), runtime.domains),
+            ("included_users", data_plan.get("included_users"), runtime.team_members),
+            ("included_ips", data_plan.get("included_ips"), runtime.dedicated_ips),
+            ("support", data_plan.get("support"), runtime.support.lower()),
+        )
+        for field, value, expected_value in fields:
+            check(
+                value == expected_value,
+                f"marketing pricing data {plan_id}.{field} drift: expected {expected_value!r}, got {value!r}",
+                errors,
+            )
+        annual_expected = runtime.yearly_cents / 100 / 12
+        value = data_plan.get("annual_price_per_month")
+        check(
+            isinstance(value, (int, float)) and abs(value - annual_expected) < 0.0001,
+            f"marketing pricing data {plan_id}.annual_price_per_month drift: expected {annual_expected}",
+            errors,
+        )
+        check(
+            data_plan.get("overage_per_1k") == (None if plan_id == "free" else 0.40),
+            f"marketing pricing data {plan_id}.overage_per_1k is not the runtime public rate",
+            errors,
+        )
+        check(
+            data_plan.get("dedicated_ip_addon_available") == expected.feature_flags.get("dedicated_ip", False),
+            f"marketing pricing data {plan_id}.dedicated_ip_addon_available drift",
+            errors,
+        )
+
+
+def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
+    cards = read(MARKETING_PLANS)
+    calculator = read(MARKETING_CALCULATOR)
+    island = read(MARKETING_CALCULATOR_ISLAND)
+    faq = read(MARKETING_FAQ)
+
+    for plan_id in MARKETING_PLAN_IDS:
+        runtime = catalog.get(plan_id)
+        if runtime is None:
+            continue
+        price = display_money(runtime.monthly_cents)
+        check(
+            f'plan_name = "{runtime.display_name}"' in cards and f'plan_price = "{price}"' in cards,
+            f"pricing card does not contain the runtime {runtime.display_name} price",
+            errors,
+        )
+        if plan_id in PUBLIC_SIGNUP_PLAN_IDS:
+            query = "/signup" if plan_id == "free" else f"/signup?plan={plan_id}"
+            check(query in cards, f"pricing card for {plan_id} has no vetted signup URL", errors)
+
+    for stale in ("Developer", "Business", "€", "plan=developer", "plan=business"):
+        check(stale not in cards, f"pricing cards contain stale token {stale!r}", errors)
+    check("Pay-as-you-go usage pricing is available" in cards, "pricing cards omit PAYG managed-flow disclosure", errors)
+    check("HIPAA availability is not currently offered" in cards, "pricing cards omit current HIPAA availability status", errors)
+
+    for needle in (
+        "Starter (50K/mo)",
+        "Scale (2M/mo)",
+        "Annual subscriptions are billed at 10&times; the monthly price",
+        "Dedicated IPs are available as an add-on from {{ pricing_data.currency_symbol }}30/month on Pro and above",
+    ):
+        check(needle in calculator, f"calculator source is missing {needle!r}", errors)
+    for stale in ("Developer", "Business", "€", "Private Cloud (dedicated tenant)", "BYOC from", "&minus;10%"):
+        check(stale not in calculator, f"calculator source contains stale token {stale!r}", errors)
+
+    for needle in ("$25", "$65", "$150", "$350", "$3,000", "$30,000/yr", "$0.40 per additional 1,000 emails"):
+        check(needle in island, f"generated pricing island source is missing {needle!r}", errors)
+    for stale in ("Developer", "Business", "€", "SendGrid", "Mailchimp", "You Save"):
+        check(stale not in island, f"generated pricing island contains stale token {stale!r}", errors)
+
+    for needle in (
+        "$0.40 per 1,000 emails",
+        "roughly a 17% discount",
+        "HIPAA availability is not currently offered",
+        "Stripe billing portal",
+        "verified Stripe webhook",
+    ):
+        check(needle in faq, f"pricing FAQ is missing {needle!r}", errors)
+    for stale in ("€0.35", "€0.80", "saves 10%", "upgraded or downgraded from the dashboard"):
+        check(stale not in faq, f"pricing FAQ contains stale token {stale!r}", errors)
+
+
+def validate_canonical_artifacts(errors: list[str]) -> None:
+    try:
+        canonical = json.loads(read(ROOT_CANONICAL_JSON))
+    except json.JSONDecodeError as error:
+        errors.append(f"apps/marketing-zola/data/canonical.json is invalid JSON: {error}")
+        return
+    check("pricing_plans" not in canonical, "canonical.json must not contain a duplicate pricing catalog", errors)
+    check(
+        canonical.get("_pricing_authority") == "services/mail-server/crates/billing-service/src/plans.rs (plus active plans table and verified Stripe webhooks)",
+        "canonical.json must point to the runtime pricing authority",
+        errors,
+    )
+    company = canonical.get("company", {})
+    check(company.get("legal_name") == "Bel Consulting OÜ", "canonical company legal name drift", errors)
+    check(company.get("registry_code") == "16588745", "canonical registry code drift", errors)
+    check(
+        canonical.get("claims", {}).get("compliance_status_wording", "").find("HIPAA not currently available") >= 0,
+        "canonical claims must retain the current HIPAA availability status",
+        errors,
+    )
+
+    rust = read(ROOT_CANONICAL_RUST)
+    check("RUNTIME_PRICING_AUTHORITY" in rust, "legal-entity module must name the runtime pricing authority", errors)
+    check("pub plans:" not in rust and "PlanConfig" not in rust, "legal-entity module must not define a duplicate pricing catalog", errors)
+    check("SINGLE SOURCE OF TRUTH" not in rust, "legal-entity module still makes a false global-authority claim", errors)
+
+
+def validate_entitlement_boundaries(errors: list[str]) -> None:
+    auth = read(AUTH_ROUTE)
+    router = read(UI_ROUTER)
+    views = read(UI_VIEWS)
+    # Test fixtures intentionally pass invalid values (for example, enterprise)
+    # to prove that the production helper falls back to Free. Validate only the
+    # implementation section so those safety tests do not look like accepted
+    # public signup options.
+    signup_view_implementation = views.split("\n#[cfg(test)]", 1)[0]
+    billing = read(API_BILLING_ROUTE)
+    webhooks = read(STRIPE_WEBHOOKS)
+
+    for source_name, source in (("auth", auth), ("UI router", router)):
+        allowed = extract_string_array(source, "PUBLIC_SIGNUP_PLAN_IDS")
+        check(
+            allowed == PUBLIC_SIGNUP_PLAN_IDS,
+            f"{source_name} public signup allow-list drift: expected {PUBLIC_SIGNUP_PLAN_IDS}, got {allowed}",
+            errors,
+        )
+    for plan_id in PUBLIC_SIGNUP_PLAN_IDS[1:]:
+        check(
+            f'Some("{plan_id}")' in signup_view_implementation,
+            f"signup view does not independently vet {plan_id}",
+            errors,
+        )
+    for forbidden in ("enterprise", "payg", "developer", "business"):
+        check(
+            f'Some("{forbidden}")' not in signup_view_implementation,
+            f"signup view accepts forbidden public plan {forbidden}",
+            errors,
+        )
+    check('"free"' in auth and "INSERT INTO tenants" in auth, "signup route must retain the Free initial entitlement", errors)
+
+    checkout_allowed = extract_string_array(billing, "SELF_SERVE_CHECKOUT_PLAN_IDS")
+    check(
+        checkout_allowed == SELF_SERVE_CHECKOUT_PLAN_IDS,
+        f"Checkout allow-list drift: expected {SELF_SERVE_CHECKOUT_PLAN_IDS}, got {checkout_allowed}",
+        errors,
+    )
+    for needle in (
+        "active_plan_name_for_stripe_price",
+        "is_active = true",
+        "SELF_SERVE_CHECKOUT_PLAN_IDS.contains",
+        '"metadata[tenant_id]"',
+        '"metadata[plan_name]"',
+        '"subscription_data[metadata][tenant_id]"',
+        '"subscription_data[metadata][plan_name]"',
+        '"code": "CHECKOUT_REQUIRED"',
+        '"code": "BILLING_PORTAL_REQUIRED"',
+    ):
+        check(needle in billing, f"billing route is missing safety boundary {needle!r}", errors)
+    for unsafe in ("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3", "Subscription cancelled immediately"):
+        check(unsafe not in billing, f"billing route contains direct local mutation {unsafe!r}", errors)
+
+    for needle in (
+        "fn entitlement_plan_name",
+        "Self::Active | Self::Trialing => paid_plan_name",
+        "Self::PastDue",
+        "WHERE is_active = true",
+        "$2 = 'monthly'",
+        "$2 = 'yearly'",
+        "Stripe subscription {} is already bound to a different tenant",
+        "checkout completed; awaiting subscription state webhook",
+    ):
+        check(needle in webhooks, f"Stripe webhook reconciliation is missing {needle!r}", errors)
+
+
+def validate_lifecycle_docs(errors: list[str]) -> None:
+    lifecycle = read(BILLING_LIFECYCLE)
+    stripe = read(STRIPE_CONTRACT)
+    authority = read(PRICING_AUTHORITY)
+    for needle in (
+        "does not change tenant status or grant an entitlement",
+        "Only verified `active` and `trialing` Stripe subscriptions grant",
+        "`409 BILLING_PORTAL_REQUIRED`",
+        "persists monthly and yearly Stripe price IDs",
+    ):
+        check(needle in lifecycle, f"billing lifecycle doc is missing {needle!r}", errors)
+    check("does not persist Stripe price columns" not in lifecycle, "billing lifecycle retains false plans-table claim", errors)
+    for needle in (
+        "The public Checkout endpoint accepts",
+        "A `checkout.session.completed` event is informational only",
+        "Only `active` and `trialing` statuses grant",
+    ):
+        check(needle in stripe, f"Stripe contract is missing {needle!r}", errors)
+    check(
+        re.search(
+            r"direct\s+`/switch-plan`\s+and\s+`/cancel`\s+endpoints\s+return\s+a\s+conflict",
+            stripe,
+        ) is not None,
+        "Stripe contract is missing the direct switch/cancel conflict boundary",
+        errors,
+    )
+    for stale in ("14-day free trial", "stripe.subscriptions.update", "Full access for 7 d grace period"):
+        check(stale not in stripe, f"Stripe contract contains unsupported claim {stale!r}", errors)
+    check("Operational authority" in authority, "pricing authority map is missing operational authority section", errors)
+
+
+def validate_built_output(errors: list[str]) -> None:
+    if not GENERATED_MARKETING.is_dir():
+        errors.append("apps/marketing-zola/public is missing; run zola build before pricing validation")
+        return
+    pages = [
+        path
+        for path in (GENERATED_MARKETING / "index.html", GENERATED_MARKETING / "pricing" / "index.html")
+        if path.is_file()
+    ]
+    if not pages:
+        errors.append("no generated home/pricing HTML found; run zola build before pricing validation")
+        return
+    output = "\n".join(read(path) for path in pages)
+    for needle in ("Starter", "Scale", "$25", "$350", "$30,000", "$0.40 per 1,000 emails"):
+        check(needle in output, f"generated marketing output is missing {needle!r}", errors)
+    for stale in ("Start Developer", "Start Business", "€29", "€699", "plan=developer", "plan=business"):
+        check(stale not in output, f"generated marketing output contains stale token {stale!r}", errors)
 
 
 def main() -> int:
-    docs = DOCS_PRICING.read_text()
-    prices = extract_plan_prices(docs)
-    billing_prices = extract_plan_billing(docs)
-    rust_text = BILLING_PLANS.read_text()
-    rust_prices = extract_rust_plan_billing(rust_text)
-    rust_dedicated_counts = extract_rust_dedicated_ip_counts(rust_text)
-    dedicated_ip_price = extract_dedicated_ip_price(docs)
     errors: list[str] = []
-
-    missing = [plan for plan in EXPECTED_PLANS if plan not in prices]
-    if missing:
-        errors.append(f"docs/pricing.md missing pricing rows for: {', '.join(missing)}")
-
-    for plan in EXPECTED_PLANS:
-        if plan not in prices:
-            continue
-        require_contains(errors, MARKETING_PLANS, plan)
-        require_contains_currency_agnostic(
-            errors, MARKETING_PLANS, prices[plan].split()[0]
-        )
-        plan_key = plan.lower()
-        if rust_prices.get(plan_key) != billing_prices.get(plan_key):
-            errors.append(
-                "billing-service plan constants drift for "
-                f"{plan}: docs={billing_prices.get(plan_key)} rust={rust_prices.get(plan_key)}"
-            )
-
-    if dedicated_ip_price is None:
-        errors.append("docs/pricing.md missing Dedicated IP add-on row")
-    else:
-        require_contains_currency_agnostic(errors, MARKETING_PLANS, dedicated_ip_price)
-        require_contains_currency_agnostic(errors, MARKETING_CALCULATOR, dedicated_ip_price)
-
-    if rust_dedicated_counts != EXPECTED_DEDICATED_IP_COUNTS:
-        errors.append(
-            "billing-service dedicated IP included counts drift: "
-            f"expected={EXPECTED_DEDICATED_IP_COUNTS} rust={rust_dedicated_counts}"
-        )
-
-    validate_billing_lifecycle(errors)
-
-    require_not_contains(errors, MARKETING_CALCULATOR, "$149")
-    require_not_contains(errors, MARKETING_CALCULATOR, "$249")
-    require_not_contains(errors, MARKETING_CALCULATOR, "$99/mo")
-    require_not_contains(errors, MARKETING_CALCULATOR, "Custom pricing")
-    require_contains(errors, MARKETING_CALCULATOR, "Starter + overage")
-    require_contains(errors, MARKETING_CALCULATOR, "Scale+ included")
-    require_contains(errors, MARKETING_CALCULATOR, "Enterprise annual contract")
-
-    require_contains(errors, MARKETING_FAQ, "$0.40 per 1,000 extra emails")
-    require_contains(errors, MARKETING_FAQ, "roughly a 17% discount")
-    require_contains(errors, MARKETING_FAQ, "Enterprise includes a HIPAA BAA workflow")
-    require_contains(errors, MARKETING_FAQ, "Enterprise annual contracts follow the signed order form")
-
-    require_contains(errors, STRIPE_CONTRACT, "Enterprise annual contracts at $30,000/year")
-    validate_ai_training(errors)
+    catalog = validate_runtime_catalog(errors)
+    if catalog:
+        validate_pricing_reference(catalog, errors)
+        validate_marketing_data(catalog, errors)
+        validate_marketing_source(catalog, errors)
+    validate_canonical_artifacts(errors)
+    validate_entitlement_boundaries(errors)
+    validate_lifecycle_docs(errors)
+    validate_built_output(errors)
 
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
         return 1
-
     print("pricing drift validation passed")
     return 0
 

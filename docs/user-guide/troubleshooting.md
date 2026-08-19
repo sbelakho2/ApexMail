@@ -114,28 +114,29 @@ If your emails are landing in spam folders, work through the following checklist
 Verify that your sending domain has all three authentication records configured:
 
 ```bash
-GET /v1/domains/:id/auth-score
+GET /v1/domains/:id/auth-status
 ```
 
 Response:
 ```json
 {
-  "score": 85,
-  "checks": {
-    "spf": "pass",
-    "dkim": "pass",
-    "dmarc": "pass"
-  }
+  "overall_status": "authenticated",
+  "spf": { "status": "pass" },
+  "dkim": { "status": "pass" },
+  "dmarc": { "status": "pass" },
+  "return_path": { "status": "pass" }
 }
 ```
 
-All three checks must show `pass`. An auth score of 100 is ideal.
+All four checks must show `pass`. The response's `expected` and `fix` fields
+contain the exact per-domain DNS values.
 
 | Record   | Purpose                                      | Fix if Missing                                     |
 | -------- | -------------------------------------------- | -------------------------------------------------- |
-| **SPF**  | Declares authorized sending IPs              | Add `v=spf1 include:_spf.apexmail.ee ~all` as TXT  |
-| **DKIM** | Cryptographic email signature                | Add the CNAME record from your domain settings     |
+| **SPF**  | Authorizes SES for the custom MAIL FROM domain | Add `v=spf1 include:amazonses.com ~all` at `bounce` |
+| **DKIM** | Cryptographic email signature                | Add the generated TXT record at `<selector>._domainkey` |
 | **DMARC**| Policy for handling auth failures             | Add `v=DMARC1; p=quarantine; rua=mailto:...` as TXT |
+| **MAIL FROM** | Aligns the return path for SPF             | Add the generated `bounce` MX record with priority `10` |
 
 ### Step 2: Check Complaint Rate
 
@@ -189,10 +190,10 @@ When you add a sending domain, ApexMail checks for the required DNS records.
 | Cause                     | Solution                                                  |
 | ------------------------- | --------------------------------------------------------- |
 | DNS propagation delay     | Wait up to 48 hours for records to propagate globally.    |
-| Wrong record type         | SPF and DMARC must be **TXT** records. DKIM must be a **CNAME**. |
+| Wrong record type         | SPF, DKIM, and DMARC must be **TXT** records; the custom MAIL FROM record is **MX**. |
 | Typo in record value      | Copy-paste the exact values from your domain settings.    |
 | Conflicting SPF records   | You can only have **one** SPF TXT record per domain. Merge them. |
-| DNS provider doesn't support CNAME at apex | Use a subdomain for DKIM, or a provider that supports CNAME flattening. |
+| Stale generated value | Retrieve `GET /v1/domains/:id/dns-records` again; DKIM records are unique to each domain. |
 
 ### Required DNS Records
 
@@ -205,24 +206,31 @@ GET /v1/domains/:id/dns-records
 Response:
 ```json
 {
+  "domain": "example.com",
   "records": [
     {
-      "type": "TXT",
-      "host": "@",
-      "value": "v=spf1 include:_spf.apexmail.ee ~all",
-      "purpose": "SPF"
+      "record_type": "TXT",
+      "hostname": "bounce.example.com",
+      "value": "v=spf1 include:amazonses.com ~all",
+      "priority": null
     },
     {
-      "type": "CNAME",
-      "host": "apexmail._domainkey",
-      "value": "dkim.apexmail.ee",
-      "purpose": "DKIM"
+      "record_type": "TXT",
+      "hostname": "am-<domain-id>._domainkey.example.com",
+      "value": "v=DKIM1; k=rsa; p=<domain-specific-public-key>",
+      "priority": null
     },
     {
-      "type": "TXT",
-      "host": "_dmarc",
-      "value": "v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee",
-      "purpose": "DMARC"
+      "record_type": "MX",
+      "hostname": "bounce.example.com",
+      "value": "feedback-smtp.<aws-region>.amazonses.com",
+      "priority": 10
+    },
+    {
+      "record_type": "TXT",
+      "hostname": "_dmarc.example.com",
+      "value": "v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io",
+      "priority": null
     }
   ]
 }
@@ -240,8 +248,9 @@ This re-checks all DNS records and updates the verification status.
 
 ### Verification Checklist
 
-- [ ] SPF TXT record added at the domain apex (`@`)
-- [ ] DKIM CNAME record added at `apexmail._domainkey`
+- [ ] SPF TXT record added at `bounce.<domain>`
+- [ ] DKIM TXT record added at the exact generated `<selector>._domainkey.<domain>` hostname
+- [ ] Custom MAIL FROM MX added at `bounce.<domain>` with priority `10`
 - [ ] DMARC TXT record added at `_dmarc`
 - [ ] No conflicting/duplicate SPF records
 - [ ] Waited at least 15 minutes for propagation (can take up to 48h)

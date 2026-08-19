@@ -1,7 +1,6 @@
 //! Fuzz tests for AI service functions.
 
 use ai_service::analytics::AnalyticsPredictor;
-use ai_service::bandits::BanditOptimizer;
 use ai_service::content::ContentOptimizer;
 use fuzz_tests::*;
 use rand::Rng;
@@ -76,36 +75,3 @@ fn fuzz_subject_score_bounded() {
     assert!(optimizer.score_subject_line(&"x".repeat(10_000)) <= 100);
 }
 
-#[tokio::test]
-async fn fuzz_bandit_selection_valid() {
-    // Selected arm must always exist in the registered arms.
-    let optimizer = BanditOptimizer::new(0.1);
-    let mut arm_ids: Vec<String> = Vec::with_capacity(10);
-    for i in 0..10 {
-        arm_ids.push(
-            optimizer
-                .add_arm(&format!("arm_{i}"))
-                .await
-                .expect("add_arm should not fail"),
-        );
-    }
-
-    for _ in 0..1_000 {
-        let selected = optimizer.select_arm().expect("should select an arm");
-        assert!(
-            arm_ids.contains(&selected),
-            "Selected arm {selected} not in registered arms"
-        );
-    }
-
-    // Record some rewards and keep selecting
-    for id in &arm_ids {
-        let _ = optimizer
-            .record_reward(id, rand::rng().random_range(0.0..1.0))
-            .await;
-    }
-    for _ in 0..1_000 {
-        let selected = optimizer.select_arm().expect("should select an arm");
-        assert!(arm_ids.contains(&selected));
-    }
-}

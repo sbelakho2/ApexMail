@@ -27,16 +27,16 @@ Tratamos los datos según el RGPD Artículo 6(1)(b) (ejecución del contrato), A
 
 ## 4. Almacenamiento de datos
 
-Los datos de infraestructura principal se almacenan en centros de datos Hetzner en Alemania y Finlandia. Los datos de cuenta y facturación también pueden almacenarse en estas ubicaciones. Para un desglose completo de todas las categorías de datos y sus ubicaciones, consulte nuestra página [Ubicaciones de datos](/data-locations/).
+La configuración proporcionada apunta a regiones del EEE para los datos principales de correo y el almacenamiento de telemetría. Las ubicaciones activas, los subprocesadores habilitados y las garantías de transferencia dependen del entorno implementado y del acuerdo aplicable. Para un desglose completo y el proceso de confirmación, consulte nuestra página [Ubicaciones de datos](/data-locations/).
 
 ### Matriz resumen de ubicaciones
 
 | Categoría de datos | Ubicación principal | Copia de seguridad / Réplica | Procesamiento |
 |---|---|---|---|
-| Infraestructura de correo principal (mensajes, metadatos de entrega, datos de cuenta) | Hetzner, Alemania (Falkenstein/Núremberg) | Hetzner, Finlandia (Tuusula) | Solo EEE |
+| Infraestructura de correo principal (mensajes, metadatos de entrega, datos de cuenta) | Hetzner, Alemania (Falkenstein/Núremberg) | Hetzner, Finlandia (Tuusula) | EEE predeterminado; confirmar la implementación activa |
 | Tokens de autenticación OAuth | Google LLC / GitHub, Inc. (entidades estadounidenses, CCT) | Gestionado por el proveedor | EE. UU. (CCT) |
 | Datos de pago y facturación | Stripe, Inc. (EE. UU., CCT) | Gestionado por el proveedor (India para soporte) | EE. UU./India (CCT) |
-| Tickets de soporte | Hetzner, Alemania | Hetzner, Finlandia | Solo EEE |
+| Tickets de soporte | Hetzner, Alemania | Hetzner, Finlandia | EEE predeterminado; confirmar la implementación activa |
 
 No transferimos datos personales fuera del EEE sin garantías adecuadas (Cláusulas Contractuales Tipo o una decisión de adecuación en virtud del Artículo 45).
 

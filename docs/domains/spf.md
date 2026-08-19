@@ -1,6 +1,7 @@
 # SPF Configuration
 
-Sender Policy Framework (SPF) authorizes ApexMail to send email on behalf of your domain.
+Sender Policy Framework (SPF) authorizes Amazon SES to send using the custom
+MAIL FROM domain created for each ApexMail sending domain.
 
 ## What SPF Does
 
@@ -8,23 +9,29 @@ SPF is a DNS TXT record that lists the IP addresses and hostnames authorized to 
 
 ## Required SPF Record
 
-Add a TXT record to your domain's DNS:
+Add the TXT record returned by `GET /v1/domains/:id/dns-records`. For a domain
+named `example.com`, the required custom MAIL FROM record is:
 
 | Type | Host | Value |
 |---|---|---|
-| TXT | `@` | `v=spf1 include:spf.apexmail.ee ~all` |
+| TXT | `bounce` | `v=spf1 include:amazonses.com ~all` |
 
-If you already have an SPF record (e.g., for Google Workspace or Office 365), add ApexMail's include:
+This creates `bounce.example.com`. Do not replace an existing SPF policy at
+the domain apex solely for ApexMail. If other systems also use
+`bounce.example.com`, merge their mechanisms into its single SPF TXT record
+without exceeding the SPF DNS-lookup limit.
 
-```
-v=spf1 include:spf.apexmail.ee include:_spf.google.com ~all
-```
+The custom MAIL FROM MX record is also required:
+
+| Type | Host | Value |
+|---|---|---|
+| MX | `bounce` | `10 feedback-smtp.<aws-region>.amazonses.com` |
 
 ## SPF Mechanisms
 
 | Mechanism | Meaning |
 |---|---|
-| `include:spf.apexmail.ee` | ApexMail's sending infrastructure is authorized |
+| `include:amazonses.com` | Amazon SES is authorized for the custom MAIL FROM domain |
 | `~all` (softfail) | Email from unauthorized IPs is accepted but marked |
 | `-all` (fail) | Email from unauthorized IPs should be rejected |
 
@@ -42,7 +49,7 @@ Authentication-Results: mx.google.com;
 
 ## SPF Alignment
 
-For DMARC to pass, the domain in the `Return-Path` (MAIL FROM) must align with the `From` header domain. ApexMail handles this automatically when you configure a custom return-path domain.
+For DMARC to pass, the domain in the `Return-Path` (MAIL FROM) must align with the `From` header domain. ApexMail uses `bounce.<your-domain>` as the custom MAIL FROM domain, which aligns with the sending domain for DMARC's relaxed alignment mode.
 
 ## Limits
 

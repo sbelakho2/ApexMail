@@ -45,11 +45,11 @@ We process data in accordance with our [Privacy Policy](/privacy/) and [Data Pro
 
 ## 7. Payment Terms
 
-Fees are billed monthly or annually as selected. All prices are in EUR (displayed as equivalent USD amounts on the pricing page for convenience). Estonian VAT (24%) applies where required.
+Fees are billed monthly or annually as selected. Published prices are in USD. Applicable taxes are determined under the rules that apply to the invoice and billing location.
 
 ### 7.1 Automatic Renewal
 
-Subscriptions auto-renew at the end of each billing period unless cancelled before the renewal date. You may cancel at any time from your dashboard. Cancellation takes effect at the end of the current billing period; no refunds are issued for partial periods.
+Subscriptions auto-renew at the end of each billing period unless cancelled before the renewal date. Self-service changes and cancellations are made through the Stripe billing portal. Cancellation takes effect only as confirmed by the applicable Stripe billing event; no refunds are issued for partial periods.
 
 ### 7.2 Price Changes
 
@@ -80,7 +80,7 @@ In accordance with Article 16(m) of Directive 2011/83/EU, the right of withdrawa
 
 ## 9. SLA
 
-Business and Enterprise plan customers are covered by our [Service Level Agreement](/sla/). Other plans are provided on a best-effort basis with no guaranteed uptime commitment unless otherwise agreed in writing.
+Scale and Enterprise plan customers are covered by our [Service Level Agreement](/sla/). Other plans are provided on a best-effort basis with no guaranteed uptime commitment unless otherwise agreed in writing.
 
 ## 10. Limitation of Liability
 

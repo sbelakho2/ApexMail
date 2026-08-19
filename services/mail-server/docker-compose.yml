@@ -6,55 +6,6 @@
 # native Rust MTA.
 
 services:
-  # Outbound Queue Service
-  # Handles email sending with retry logic
-  outbound-queue:
-    build:
-      context: ../..
-      dockerfile: services/mail-server/Dockerfile
-      target: outbound-queue
-    ports:
-      - "127.0.0.1:50052:50052"  # gRPC
-    environment:
-      - RUST_LOG=info
-      - FROM_DOMAIN=${MAIL_FROM_DOMAIN:-apexmail.ee}
-      - DKIM_SELECTOR=${MAIL_DKIM_SELECTOR:-apexmail2026}
-      - DKIM_KEY_PATH=/etc/apexmail/dkim/private.pem
-    entrypoint:
-      - /bin/sh
-      - -c
-      - >
-        export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
-        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
-        exec /usr/bin/tini -- outbound-queue --listen 0.0.0.0:50052
-    volumes:
-      - ./config/dkim:/etc/apexmail/dkim:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - apexmail
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "50052"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 128M
-    secrets:
-      - postgres_password
-
   # SMTP Edge Server (Inbound)
   # Receives incoming emails on port 25
   smtp-edge:
@@ -118,7 +69,6 @@ services:
     environment:
       - RUST_LOG=info
       - HOSTNAME=${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
-      - OUTBOUND_URL=http://outbound-queue:50052
       - REQUIRE_AUTH=true
       - ENABLE_STARTTLS=true
     entrypoint:
@@ -133,8 +83,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      outbound-queue:
-        condition: service_started
     networks:
       - apexmail
     restart: unless-stopped
@@ -288,6 +236,9 @@ services:
       - HEALTH_PORT=9090
       - WORKER_CONCURRENCY=10
       - WORKER_POLL_INTERVAL=5
+      - EMAIL_TRANSPORT_TYPE=${EMAIL_TRANSPORT_TYPE:-ses}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - DKIM_PRIVATE_KEY_ENCRYPTION_KEY=${DKIM_PRIVATE_KEY_ENCRYPTION_KEY:?DKIM_PRIVATE_KEY_ENCRYPTION_KEY is required}
     entrypoint:
       - /bin/sh
       - -c

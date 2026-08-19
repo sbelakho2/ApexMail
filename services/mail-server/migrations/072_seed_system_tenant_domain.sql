@@ -8,13 +8,15 @@ VALUES ('system_internal_tenant01', 'ApexMail System', 'system', 'enterprise', '
 ON CONFLICT (id) DO NOTHING;
 
 -- domains.id is UUID (052/056); a non-UUID literal aborts the insert.
--- Seed with a stable derived UUID and conflict on the (tenant_id, name) shape.
+-- The row is intentionally pending. Runtime bootstrap generates encrypted
+-- per-domain DKIM material and an operator must publish its exact DNS records
+-- before verification can authorize system email delivery.
 INSERT INTO domains (id, tenant_id, name, status, created_at, updated_at)
 VALUES (
     '00000000-0000-0000-0000-0000000000d1'::uuid,
     'system_internal_tenant01',
     'apexmail.ee',
-    'verified',
+    'pending',
     NOW(),
     NOW()
 )

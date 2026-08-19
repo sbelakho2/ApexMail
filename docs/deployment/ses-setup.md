@@ -2,9 +2,9 @@
 
 > Last updated: 2026-03-02
 
-Step-by-step guide to configuring AWS SES for **shared-pool email delivery** in ApexMail.
-
-> **Note:** Dedicated IPs are provisioned via Hetzner Cloud, not SES. See [Hetzner Tool Contract](../tool-contracts/hetzner.md) for dedicated IP setup.
+Step-by-step guide to configuring AWS SES delivery in ApexMail. The deployed
+worker uses the explicit `EMAIL_TRANSPORT_TYPE=ses` mode; it does not make
+per-message transport decisions.
 
 ---
 
@@ -37,6 +37,7 @@ Create a dedicated IAM user (e.g. `apexmail-ses`) with the following policy:
         "ses:DeleteEmailIdentity",
         "ses:GetEmailIdentity",
         "ses:PutEmailIdentityDkimSigningAttributes",
+        "ses:PutEmailIdentityMailFromAttributes",
         "ses:PutEmailIdentityConfigurationSetAttributes"
       ],
       "Resource": "*"
@@ -78,7 +79,11 @@ ApexMail automatically creates SES domain identities when users add domains via 
 aws sesv2 create-email-identity --identity-type DOMAIN --identity yourdomain.com
 ```
 
-This returns DKIM CNAME records to add to your DNS. SES uses Easy DKIM with 2048-bit RSA keys.
+Do not create an Easy-DKIM identity for an ApexMail-managed customer domain.
+When the customer calls domain verification, ApexMail creates or updates the
+identity with its generated 2048-bit RSA key using SES BYODKIM and configures
+the custom MAIL FROM domain. The key is encrypted at rest and must never be
+copied into a CLI command or a DNS CNAME workflow.
 
 ---
 
@@ -132,7 +137,7 @@ Add these to your `.env` file:
 EMAIL_TRANSPORT_TYPE=ses
 AWS_ACCESS_KEY_ID=AKIA...
 AWS_SECRET_ACCESS_KEY=...
-AWS_DEFAULT_REGION=eu-west-1
+AWS_REGION=eu-west-1
 SES_CONFIGURATION_SET=apexmail-production
 ```
 
@@ -144,9 +149,15 @@ For each sending domain, add:
 
 | Type | Name | Value | Purpose |
 |------|------|-------|---------|
-| CNAME | `*._domainkey` | (provided by SES) | DKIM |
-| TXT | `@` | `v=spf1 include:amazonses.com ~all` | SPF |
+| TXT | `bounce.<domain>` | `v=spf1 include:amazonses.com ~all` | Custom MAIL FROM SPF |
+| MX | `bounce.<domain>` | `10 feedback-smtp.<aws-region>.amazonses.com` | Custom MAIL FROM MX |
+| TXT | `<selector>._domainkey.<domain>` | `v=DKIM1; k=rsa; p=<generated-public-key>` | Direct BYODKIM public key |
 | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com` | DMARC |
+
+Retrieve the complete values from `GET /v1/domains/:id/dns-records`. The
+selector and key are unique per domain. The API reports the domain as ready
+only after `GetEmailIdentity` shows a verified identity, external DKIM signing
+enabled and successful, and a successful custom MAIL FROM domain.
 
 ---
 

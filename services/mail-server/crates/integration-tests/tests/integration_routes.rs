@@ -383,22 +383,12 @@ mod sales {
 mod ai {
     use super::*;
     use ai_service::routes::{build_router, default_app_state};
-    use ai_service::types::{Model, ModelStatus, ModelType};
 
     fn app() -> axum::Router {
         let mut state = default_app_state();
         Arc::get_mut(&mut state)
             .expect("exclusive app state")
             .service_token = "test-key".into();
-        state.inference.register_model(Model {
-            id: "test-model".into(),
-            name: "integration-test".into(),
-            version: "1.0".into(),
-            model_type: ModelType::Classification,
-            accuracy: 0.92,
-            trained_at: chrono::Utc::now(),
-            status: ModelStatus::Ready,
-        });
         build_router(state)
     }
 
@@ -432,28 +422,21 @@ mod ai {
     }
 
     #[tokio::test]
-    async fn predict_with_registered_model() {
-        let body = serde_json::json!({
-            "model_id": "test-model",
-            "input": { "features": [1, 2, 3] }
-        });
+    async fn retired_predict_route_is_not_exposed() {
         let resp = app()
             .oneshot(
                 Request::post("/predict")
                     .header("x-api-key", "test-key")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        assert!(json["success"].as_bool().unwrap());
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn list_models_returns_registered_model() {
+    async fn retired_models_route_is_not_exposed() {
         let resp = app()
             .oneshot(
                 Request::get("/models")
@@ -463,11 +446,7 @@ mod ai {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        assert!(json["success"].as_bool().unwrap());
-        let models = json["data"].as_array().unwrap();
-        assert!(models.iter().any(|m| m["id"] == "test-model"));
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
 

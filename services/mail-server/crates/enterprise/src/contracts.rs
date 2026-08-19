@@ -11,6 +11,16 @@ pub struct ContractService {
     db: PgPool,
 }
 
+const FREE_TENANT_PLAN: &str = "free";
+
+fn is_immediate_contract_termination(effective_date: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    effective_date <= now
+}
+
+fn should_downgrade_after_contract_termination(has_active_replacement: bool) -> bool {
+    !has_active_replacement
+}
+
 pub struct CreateContractInput {
     pub tenant_id: String,
     pub name: String,
@@ -343,7 +353,7 @@ impl ContractService {
             r#"
             UPDATE enterprise_contracts
             SET status = 'pending_signature', updated_at = NOW()
-            WHERE id = $1 AND tenant_id = $2
+            WHERE id = $1 AND tenant_id = $2 AND status = 'draft'
             RETURNING
                 id, tenant_id, contract_number, name, status, start_date, end_date, auto_renew,
                 base_price, committed_volume, overage_rate, annual_prepay_discount,
@@ -370,6 +380,14 @@ impl ContractService {
         contract_id: Uuid,
         input: SignContractInput,
     ) -> Result<ApiResult<EnterpriseContract>, String> {
+        let now = Utc::now();
+        if input.signed_at > now {
+            return Ok(ApiResult::err(
+                "Contract signature time cannot be in the future",
+                "INVALID_SIGNATURE_TIME",
+            ));
+        }
+
         let mut tx = self
             .db
             .begin()
@@ -401,7 +419,11 @@ impl ContractService {
                 signed_at = $2,
                 signed_by = $3,
                 updated_at = NOW()
-            WHERE id = $1 AND tenant_id = $4
+                        WHERE id = $1
+                            AND tenant_id = $4
+                            AND status = 'pending_signature'
+                            AND start_date <= $5
+                            AND end_date > $5
             RETURNING
                 id, tenant_id, contract_number, name, status, start_date, end_date, auto_renew,
                 base_price, committed_volume, overage_rate, annual_prepay_discount,
@@ -414,6 +436,7 @@ impl ContractService {
         .bind(input.signed_at)
         .bind(format!("{} ({})", input.signer_name, input.signer_title))
         .bind(tenant_id)
+        .bind(now)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|error| format!("Activate contract: {error}"))?;
@@ -476,11 +499,28 @@ impl ContractService {
         input: CancelContractInput,
     ) -> Result<ApiResult<EnterpriseContract>, String> {
         let effective_date = input.effective_date.unwrap_or_else(Utc::now);
+        let now = Utc::now();
+        if !is_immediate_contract_termination(effective_date, now) {
+            return Ok(ApiResult::err(
+                "Scheduled Enterprise contract cancellation is not supported; use an immediate effective date",
+                "SCHEDULED_CANCELLATION_UNSUPPORTED",
+            ));
+        }
+
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| format!("Begin cancellation transaction: {error}"))?;
         let row = sqlx::query_as::<_, ContractRow>(
             r#"
             UPDATE enterprise_contracts
             SET status = 'terminated', end_date = $2, updated_at = NOW()
-            WHERE id = $1 AND tenant_id = $3
+            WHERE id = $1
+              AND tenant_id = $3
+              AND status = 'active'
+              AND start_date <= $2
+              AND end_date > $2
             RETURNING
                 id, tenant_id, contract_number, name, status, start_date, end_date, auto_renew,
                 base_price, committed_volume, overage_rate, annual_prepay_discount,
@@ -492,7 +532,7 @@ impl ContractService {
         .bind(contract_id)
         .bind(effective_date)
         .bind(tenant_id)
-        .fetch_optional(&self.db)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|error| format!("Cancel contract: {error}"))?;
 
@@ -500,13 +540,41 @@ impl ContractService {
             return Ok(ApiResult::err("Contract not found", "NOT_FOUND"));
         };
 
-        if effective_date <= Utc::now() {
-            sqlx::query("UPDATE tenants SET plan = 'scale', updated_at = NOW() WHERE id = $1")
+        let has_active_replacement: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM enterprise_contracts
+                WHERE tenant_id = $1
+                  AND id <> $2
+                  AND status = 'active'
+                  AND start_date <= $3
+                  AND end_date > $3
+            )
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(contract_id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("Check replacement contract: {error}"))?;
+
+        if should_downgrade_after_contract_termination(has_active_replacement) {
+            // Never mint another paid plan locally. A verified Stripe event
+            // or separately active signed contract is required for paid
+            // access after this Enterprise authority ends.
+            sqlx::query("UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id = $2")
+                .bind(FREE_TENANT_PLAN)
                 .bind(tenant_id)
-                .execute(&self.db)
+                .execute(&mut *tx)
                 .await
                 .map_err(|error| format!("Downgrade tenant plan: {error}"))?;
         }
+
+        tx.commit()
+            .await
+            .map_err(|error| format!("Commit cancellation transaction: {error}"))?;
 
         let _ = input.reason;
 
@@ -953,5 +1021,24 @@ mod tests {
         let pdf = generate_contract_pdf(&contract);
         assert!(pdf.contains("Acme &lt;script&gt;"));
         assert!(pdf.contains("&lt;b&gt;unsafe&lt;/b&gt;"));
+    }
+
+    #[test]
+    fn future_contract_termination_is_not_treated_as_immediate() {
+        let now = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(is_immediate_contract_termination(now, now));
+        assert!(!is_immediate_contract_termination(
+            now + chrono::Duration::seconds(1),
+            now
+        ));
+    }
+
+    #[test]
+    fn only_termination_without_active_replacement_downgrades_to_free() {
+        assert!(should_downgrade_after_contract_termination(false));
+        assert!(!should_downgrade_after_contract_termination(true));
+        assert_eq!(FREE_TENANT_PLAN, "free");
     }
 }

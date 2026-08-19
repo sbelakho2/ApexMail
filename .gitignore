@@ -83,11 +83,13 @@ secrets/
 .vscode/
 *.orig
 
-# ─── AI / ML model artefacts (large binaries — use external storage / LFS) ────
+# ─── Retired AI / ML artefacts (never a deployable product surface) ──────────
 apps/ai/training/onnx_model/
 apps/ai/training/output/
 apps/ai/training/output_agent/
 apps/ai/training/output-merged/
+apps/ai/training/output_*/
+apps/ai/training/merged_*/
 apps/ai/training/gguf_model/
 apps/ai/training/checkpoints/
 apps/ai/training/wandb/
@@ -102,7 +104,7 @@ apps/ai/training/artifacts_*/
 *.pt
 *.pth
 
-# ─── Training data (generated / large) ───────────────────────────────────────
+# ─── Retired model-training data (generated / large) ─────────────────────────
 data/train_agent.jsonl
 apps/ai/training/data/train.jsonl
 apps/ai/training/data/train.jsonl.gz

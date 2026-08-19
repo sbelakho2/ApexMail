@@ -12,6 +12,13 @@ struct UiQueryParams {
     email: Option<String>,
     status: Option<String>,
     message: Option<String>,
+    signup_plan: Option<String>,
+}
+
+const PUBLIC_SIGNUP_PLAN_IDS: &[&str] = &["free", "starter", "pro", "growth", "scale"];
+
+fn is_public_signup_plan(plan: &str) -> bool {
+    PUBLIC_SIGNUP_PLAN_IDS.contains(&plan)
 }
 
 fn parse_query_params(query: Option<&str>) -> UiQueryParams {
@@ -35,6 +42,7 @@ fn parse_query_params(query: Option<&str>) -> UiQueryParams {
             "email" if !value.is_empty() => params.email = Some(value),
             "status" if !value.is_empty() => params.status = Some(value),
             "message" if !value.is_empty() => params.message = Some(value),
+            "plan" if is_public_signup_plan(&value) => params.signup_plan = Some(value),
             _ => {}
         }
     }
@@ -455,7 +463,7 @@ fn render_web(
         }
         "/signup" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
-            leptos_views::web_signup_page(&token)
+            leptos_views::web_signup_page_with_plan(&token, params.signup_plan.as_deref())
         }
         "/forgot-password" => {
             let token = csrf_secret.map_or_else(String::new, csrf_token);
@@ -823,6 +831,24 @@ mod tests {
         .expect("verify-email route should render with query state");
         assert!(verify.contains("Email verified successfully"));
         assert!(verify.contains("Continue to sign in"));
+    }
+
+    #[test]
+    fn signup_preserves_only_known_public_plan_selections() {
+        let selected = render_route_with_query("web", "/signup", Some("plan=starter"), None)
+            .expect("signup route should render with a valid plan selection");
+        assert!(selected.contains("name=\"plan\" value=\"starter\""));
+        assert!(selected.contains("data-signup-plan-intent=\"starter\""));
+
+        let invalid = render_route_with_query(
+            "web",
+            "/signup",
+            Some("plan=developer"),
+            None,
+        )
+        .expect("signup route should render with an invalid plan selection");
+        assert!(invalid.contains("name=\"plan\" value=\"free\""));
+        assert!(!invalid.contains("data-signup-plan-intent"));
     }
 
     #[test]

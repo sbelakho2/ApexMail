@@ -216,6 +216,7 @@ jobs:
           render_secret SESSION_SECRET         PROD_SESSION_SECRET_FILE
           render_secret IMPERSONATION_SECRET   PROD_IMPERSONATION_SECRET_FILE
           render_secret CSRF_SECRET            PROD_CSRF_SECRET_FILE
+          render_secret DKIM_PRIVATE_KEY_ENCRYPTION_KEY PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE
           render_secret KIWI_SECRET_KEY        PROD_KIWI_SECRET_KEY_FILE
           ls -l secrets/
           REMOTE_SH

@@ -1,74 +1,41 @@
 #!/bin/bash
 #
-# Test the ApexMail mail server
+# Test the deployed ApexMail mail-server edges.
 #
 # Prerequisites:
 # - Mail server running (docker-compose up)
-# - DKIM keys generated
-# - DNS records configured
+# - A verified sender domain with encrypted DKIM material
 
 set -e
 
-MAIL_SERVER_URL=${MAIL_SERVER_URL:-http://localhost:50052}
-FROM_EMAIL=${FROM_EMAIL:-test@apexmail.ee}
-TO_EMAIL=${TO_EMAIL:-test@example.com}
+WORKER_HEALTH_URL=${WORKER_HEALTH_URL:-http://localhost:9090/health}
 
 echo "==================================="
 echo "ApexMail Mail Server Test"
 echo "==================================="
 echo ""
-echo "Server URL: $MAIL_SERVER_URL"
-echo "From: $FROM_EMAIL"
-echo "To: $TO_EMAIL"
+echo "Worker health URL: $WORKER_HEALTH_URL"
 echo ""
 
-# Test 1: Send a test email using the CLI tool
-echo "Test 1: Sending test email..."
-if command -v send-email &> /dev/null; then
-    send-email send \
-        --server "$MAIL_SERVER_URL" \
-        --from "$FROM_EMAIL" \
-        --to "$TO_EMAIL" \
-        --subject "ApexMail Test Email" \
-        --text "This is a test email from ApexMail's purpose-built mail infrastructure.
-
-Features:
-- Direct SMTP delivery with enterprise-grade infrastructure
-- DKIM signing enabled
-- Full delivery tracking
-
-Sent at: $(date)"
-    echo "✓ Test email sent"
-else
-    echo "⚠ send-email CLI not found. Install with: cargo install --path crates/outbound-queue"
-fi
-
-# Test 2: Check queue stats
+# Test 1: Test SMTP connectivity
 echo ""
-echo "Test 2: Checking queue stats..."
-if command -v send-email &> /dev/null; then
-    send-email stats --server "$MAIL_SERVER_URL"
-else
-    echo "⚠ Skipped (CLI not available)"
-fi
-
-# Test 3: Test SMTP connectivity
-echo ""
-echo "Test 3: Testing SMTP connectivity..."
+echo "Test 1: Testing SMTP connectivity..."
 if command -v nc &> /dev/null; then
     echo "QUIT" | nc -w 5 localhost 25 2>/dev/null || true
     echo "Port 25 (SMTP): $(nc -zv localhost 25 2>&1 | grep -q 'succeeded' && echo '✓ Open' || echo '✗ Closed')"
     echo "Port 587 (Submission): $(nc -zv localhost 587 2>&1 | grep -q 'succeeded' && echo '✓ Open' || echo '✗ Closed')"
 fi
 
-# Test 4: Test gRPC endpoint
+# Test 2: Confirm the sole outbound sender is healthy. This script never uses
+# the retired global-DKIM gRPC queue or its `send-email` client.
 echo ""
-echo "Test 4: Testing gRPC endpoint..."
-if command -v grpc_health_probe &> /dev/null; then
-    grpc_health_probe -addr=localhost:50052 && echo "✓ gRPC endpoint healthy" || echo "✗ gRPC endpoint unhealthy"
+echo "Test 2: Checking unified worker health..."
+if command -v curl &> /dev/null; then
+    curl --fail --silent --show-error "$WORKER_HEALTH_URL" >/dev/null \
+        && echo "✓ Worker healthy" \
+        || echo "✗ Worker health endpoint unavailable"
 else
-    # Simple HTTP check as fallback
-    curl -s -o /dev/null -w "%{http_code}" "$MAIL_SERVER_URL/health" 2>/dev/null | grep -q "200" && echo "✓ HTTP endpoint accessible" || echo "⚠ HTTP check inconclusive"
+    echo "⚠ curl not available; skipped worker health check"
 fi
 
 echo ""

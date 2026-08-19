@@ -2,7 +2,7 @@
 //!
 //! Persists raw daily snapshots, computes a normalised reputation score band
 //! per (scope, identity), and emits events when a domain or IP transitions
-//! between bands so downstream alerting and outbound-queue throttling can
+//! between bands so downstream alerting and worker-processors throttling can
 //! respond.
 //!
 //! ## Modules

@@ -20,24 +20,25 @@
 
 ## 1. Architecture Overview
 
-### Hybrid Dual-Transport Model
+### Explicit Transport Model
 
-ApexMail uses a **per-message routing** architecture with two always-available transport backends:
+ApexMail selects one outbound transport for a deployment with
+`EMAIL_TRANSPORT_TYPE`. Production defaults to AWS SES (`ses`); operators may
+select the configured SMTP relay with `smtp`. This is not a per-message,
+tenant, plan, or dedicated-IP decision.
 
-| Transport | Provider | Used When |
-|-----------|----------|-----------|
-| **AWS SES Shared Pool** (default) | AWS SES v2 | Tenants without dedicated IPs |
-| **Self-hosted SMTP** | Hetzner floating IPs | Tenants with dedicated IPs |
-
-The [`TransportRouter`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:146) makes the routing decision per-message by checking a PostgreSQL trigger-maintained cache ([`transport_routing_cache`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:265)) refreshed every 30 seconds.
+| Transport | Provider | Readiness requirement |
+|-----------|----------|-----------------------|
+| **AWS SES** (default) | AWS SES v2 | SES identity, BYODKIM, and custom MAIL FROM are all successful |
+| **SMTP relay** | Operator-configured SMTP | Valid per-domain DKIM material and local DKIM enabled |
 
 ```mermaid
 flowchart LR
-    Msg[Message to send] --> Lookup{Check<br/>transport_routing_cache}
-    Lookup -->|Has dedicated IP| SMTP[Self-hosted SMTP<br/>via Hetzner Floating IP]
-    Lookup -->|No dedicated IP| SES[AWS SES<br/>Shared Pool]
-    SMTP --> Delivered[Delivered to Recipient]
-    SES --> Delivered
+  Msg[Queued message] --> Mode{EMAIL_TRANSPORT_TYPE}
+  Mode -->|ses| SES[SES with BYODKIM]
+  Mode -->|smtp| SMTP[SMTP relay with local DKIM]
+  SES --> Delivered[Delivered to Recipient]
+  SMTP --> Delivered
 ```
 
 ### Server Fleet
@@ -65,11 +66,9 @@ All servers are attached to a private network (`10.0.1.0/24`). Inter-server traf
 
 ---
 
-## 2. AWS SES Setup (Shared Pool)
+## 2. AWS SES Setup
 
-This section covers configuring AWS SES for **shared-pool email delivery** — the default transport path for all tenants without dedicated IPs.
-
-> **Note:** Dedicated IPs are provisioned via Hetzner Cloud, **not** SES. See [Section 3](#3-hetzner-cloud-setup-dedicated-ips).
+This section covers configuring AWS SES for the explicit SES transport mode.
 
 ### 2.1 Prerequisites
 
@@ -98,6 +97,7 @@ Create a dedicated IAM user (e.g. `apexmail-ses`) with the following policy. Thi
         "ses:DeleteEmailIdentity",
         "ses:GetEmailIdentity",
         "ses:PutEmailIdentityDkimSigningAttributes",
+        "ses:PutEmailIdentityMailFromAttributes",
         "ses:PutEmailIdentityConfigurationSetAttributes"
       ],
       "Resource": "*"
@@ -139,7 +139,9 @@ aws sesv2 create-email-identity \
   --identity yourdomain.com
 ```
 
-This returns DKIM CNAME records to add to your DNS. SES uses **Easy DKIM with 2048-bit RSA keys**.
+Do not use this manual command for ApexMail-managed customer domains because
+it creates an Easy-DKIM identity. Domain verification configures the identity
+with the generated per-domain BYODKIM key and custom MAIL FROM domain.
 
 ### 2.5 Create a Configuration Set
 
@@ -192,11 +194,13 @@ For each sending domain, add the following DNS records:
 
 | Type | Name | Value | Purpose |
 |------|------|-------|---------|
-| CNAME | `*._domainkey.<domain>` | (provided by SES) | DKIM — SES Easy DKIM signing |
-| TXT | `@` | `v=spf1 include:amazonses.com ~all` | SPF — authorizes SES to send |
+| TXT | `bounce.<domain>` | `v=spf1 include:amazonses.com ~all` | Custom MAIL FROM SPF |
+| MX | `bounce.<domain>` | `10 feedback-smtp.<aws-region>.amazonses.com` | Custom MAIL FROM MX |
+| TXT | `<selector>._domainkey.<domain>` | `v=DKIM1; k=rsa; p=<generated-public-key>` | Direct BYODKIM public key |
 | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@<domain>` | DMARC — policy for receivers |
 
-ApexMail provides the exact DNS record values per domain in the **Add Domain** API response ([`POST /v1/domains/:id/dns-records`](../api/endpoints/domains.md:14)).
+ApexMail provides the exact DNS record values per domain from
+`GET /v1/domains/:id/dns-records`.
 
 ### 2.9 Rate Limits
 
@@ -438,6 +442,7 @@ AWS_ACCESS_KEY_ID=AKIAxxxxxxxxxxxx
 AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 AWS_REGION=eu-west-1
 SES_CONFIGURATION_SET=apexmail-production
+DKIM_PRIVATE_KEY_ENCRYPTION_KEY=<64-hex-characters>
 SES_IP_POOL_PREFIX=apexmail
 ```
 
@@ -458,7 +463,7 @@ HETZNER_MTA_SERVER_ID=12345678
 
 ### 4.3 SMTP Configuration (Self-Hosted Relay)
 
-Only needed if you bypass the hybrid routing or run a standalone MTA.
+Needed only when this deployment explicitly uses `EMAIL_TRANSPORT_TYPE=smtp`.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -471,24 +476,25 @@ Only needed if you bypass the hybrid routing or run a standalone MTA.
 | `OUTBOUND_IPS` | Conditional | — | Comma-separated outbound IPs for source binding |
 | `MTA_HOSTNAME` | Conditional | — | HELO/EHLO hostname |
 
-> **Note:** The hybrid routing model uses automatic per-message transport selection. `EMAIL_TRANSPORT_TYPE` is a **legacy override** — most deployments should keep it as `ses` (the default).
+> **Note:** `EMAIL_TRANSPORT_TYPE` selects the active transport for all
+> messages in the deployment. It is not a legacy override or fallback policy.
 
 ### 4.4 DKIM Configuration
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DKIM_SELECTOR` | No | `apexmail` | DKIM selector for DNS lookup |
-| `DKIM_PRIVATE_KEY` | Conditional | — | DKIM private key (PEM or base64) |
-| `DKIM_DOMAIN` | Conditional | — | Signing domain |
+| `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | **Yes** | — | 64 hexadecimal characters (32 bytes) used to encrypt generated domain keys |
+| `DKIM_ENABLED` | SMTP only | `true` | Required to enable local per-domain SMTP signing |
 
 **Example block:**
 ```env
-DKIM_SELECTOR=apexmail
-DKIM_DOMAIN=example.com
-DKIM_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+DKIM_PRIVATE_KEY_ENCRYPTION_KEY=<64-hex-characters>
+DKIM_ENABLED=true
 ```
 
-> **Note:** When using SES (`EMAIL_TRANSPORT_TYPE=ses`), DKIM is handled by SES **Easy DKIM** automatically — no manual DKIM key needed. Manual DKIM configuration applies to the self-hosted SMTP path.
+> **Note:** ApexMail generates a unique selector and key pair for every
+> customer domain. SES uses the same protected key through BYODKIM; SMTP uses
+> it for local signing. Operators must not configure a global customer key.
 
 ### 4.5 Complete `.env` Template
 
@@ -511,7 +517,7 @@ HETZNER_DEFAULT_LOCATION=fsn1
 HETZNER_MTA_SERVER_ID=12345678
 
 # =============================================================================
-# Email Transport (Leave as "ses" for hybrid routing)
+# Email Transport (SES is the deployment default)
 # =============================================================================
 EMAIL_TRANSPORT_TYPE=ses
 ```
@@ -531,7 +537,7 @@ sequenceDiagram
     participant User
     participant API as ApexMail API
     participant Worker as Worker Processor
-    participant Router as TransportRouter
+    participant Transport as Configured Transport
     participant SES as AWS SES
     participant SNS as AWS SNS
     participant Recipient as Recipient Inbox
@@ -540,18 +546,13 @@ sequenceDiagram
     API->>API: Generate verification token
     API->>API: Store token in DB (pending)
     API->>Worker: Enqueue verification email job
-    Worker->>Router: resolve_transport_kind(tenant_id)
-    Router->>Router: Check transport_routing_cache
-    alt No dedicated IP (default)
-        Router-->>Worker: TransportKind::Ses
+    alt EMAIL_TRANSPORT_TYPE=ses
         Worker->>Worker: Build RFC 5322 MIME message
         Worker->>SES: SendEmail (RawMessage) with configuration_set_name
         SES-->>Recipient: Verification email delivered
-    else Has dedicated IP
-        Router-->>Worker: TransportKind::Smtp
-        Worker->>Worker: Bind to dedicated floating IP
-        Worker->>Worker: SMTP delivery via self-hosted MTA
-        Worker-->>Recipient: Verification email delivered
+    else EMAIL_TRANSPORT_TYPE=smtp
+      Worker->>Transport: SMTP relay delivery with local DKIM
+      Transport-->>Recipient: Verification email delivered
     end
     User->>API: GET /v1/auth/verify?token=xyz
     API->>API: Validate token, mark account verified
@@ -564,8 +565,8 @@ sequenceDiagram
 ```
 
 **Key details:**
-- All verification emails are sent via the **standard transport routing** — they are not special-cased
-- For new users without dedicated IPs, verification emails go through the **SES shared pool**
+- All verification emails use the configured deployment transport and are not special-cased.
+- `EMAIL_TRANSPORT_TYPE=ses` sends them through SES; `smtp` sends them through the configured relay.
 - The SES [`configuration_set_name`](#25-create-a-configuration-set) tags the email for bounce/complaint tracking
 - If the email bounces (invalid address), the SNS → webhook pipeline [suppresses the recipient](#525-bouncecomplaint-feedback-loop)
 
@@ -575,45 +576,21 @@ When a tenant adds a sending domain, ApexMail guides them through DNS verificati
 
 #### 5.2.1 Add Domain
 
-```
+```http
 POST /v1/domains
 Content-Type: application/json
 
 {
-  "domain": "example.com",
-  "verificationMethod": "dns_txt"
+  "name": "example.com"
 }
 ```
 
-Response (simplified):
+The response contains the pending domain identifier and verification booleans.
+It never exposes a private key. The operator or client then retrieves the
+generated public DNS values:
 
-```json
-{
-  "domain": {
-    "id": "dom_abc123",
-    "domain": "example.com",
-    "status": "pending",
-    "verificationToken": "apexmail-verify-abc123xyz",
-    "verificationMethod": "dns_txt",
-    "dnsRecords": {
-      "spf": { "value": "v=spf1 include:_spf.apexmail.ee ~all", "verified": false },
-      "dkim": { "selector": "apexmail2024", "value": "p=MIIBIjAN...", "verified": false },
-      "dmarc": { "value": "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com", "verified": false },
-      "returnPath": { "value": "bounce.example.com", "verified": false }
-    }
-  },
-  "instructions": {
-    "type": "DNS TXT Record",
-    "name": "_apexmail.example.com",
-    "value": "apexmail-verify-abc123xyz",
-    "instructions": [
-      "Add a TXT record to your DNS",
-      "Name/Host: _apexmail",
-      "Value: apexmail-verify-abc123xyz",
-      "TTL: 3600 (or your provider's default)"
-    ]
-  }
-}
+```http
+GET /v1/domains/:id/dns-records
 ```
 
 #### 5.2.2 Configure DNS (User Action)
@@ -622,11 +599,14 @@ The user adds the following DNS records at their DNS provider:
 
 | Type | Name | Value |
 |------|------|-------|
-| TXT | `_apexmail` | `apexmail-verify-abc123xyz` |
-| TXT | `@` | `v=spf1 include:_spf.apexmail.ee ~all` |
-| TXT | `apexmail2024._domainkey` | `v=DKIM1; p=MIIBIjAN...` |
+| TXT | `bounce` | `v=spf1 include:amazonses.com ~all` |
+| MX | `bounce` | `10 feedback-smtp.<aws-region>.amazonses.com` |
+| TXT | `<generated-selector>._domainkey` | `v=DKIM1; k=rsa; p=<generated-public-key>` |
 | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com` |
-| CNAME | `bounce` | `bounce.apexmail.ee` |
+
+The selector, public key, and MX region are domain- and deployment-specific;
+the DNS-records response is authoritative. No ApexMail service-host CNAME or
+SES Easy-DKIM CNAME is part of this flow.
 
 #### 5.2.3 Verify Domain
 
@@ -634,9 +614,9 @@ The user adds the following DNS records at their DNS provider:
 POST /v1/domains/:id/verify
 ```
 
-The system **checks DNS propagation** for each record:
-- **TXT record** at `_apexmail.<domain>` must contain the verification token
-- **SPF**, **DKIM**, **DMARC**, and **return-path** records are checked for presence (not correctness at verification time)
+The system verifies the exact SPF include, direct DKIM public key, DMARC
+presence, and custom MAIL FROM MX target. It then configures SES BYODKIM and
+checks the SES identity's real sender-readiness state.
 
 Verification statuses:
 
@@ -644,16 +624,15 @@ Verification statuses:
 |--------|---------|
 | ⏳ **Pending** | DNS records not yet found (waiting for propagation) |
 | ✅ **Verified** | All records valid and verified |
-| ⚠️ **Partial** | Some records missing |
-| ❌ **Failed** | Invalid records |
+| ⚠️ **Pending** | DNS or SES is still propagating / incomplete |
 
 #### 5.2.4 On Verify: SES Identity Creation
 
-Once the domain is verified in ApexMail, the system automatically:
-1. Calls `ses:CreateEmailIdentity` to register the domain in SES
-2. SES returns DKIM CNAME records
-3. DNS records are updated with DKIM values
-4. Easy DKIM handles automatic signing for SES-sent emails from this domain
+Once the DNS records pass, the system creates or updates the SES identity with
+the generated selector and protected private key using BYODKIM, configures
+`bounce.<domain>` with `REJECT_MESSAGE` on MX failure, and reads back SES
+status. The domain becomes verified only when SES reports the identity,
+external DKIM signing, and custom MAIL FROM domain as successful.
 
 ### 5.3 Bounce/Complaint Feedback Loop
 
